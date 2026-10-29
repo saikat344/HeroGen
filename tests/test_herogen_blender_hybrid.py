@@ -1,5 +1,6 @@
 """The hybrid body (herogen/blender): the numpy rasteriser, orienting a SAM 3D Objects source mesh from the front
-view, SAM 3D Body joint mapping, stage 3 from replayed remote results and the fallback to the local sources.
+view, SAM 3D Body joint mapping, stage 3 from replayed remote results and the fallback to the local sources, the
+source-texture fallback and stage 4 on the hybrid mesh.
 
 Remote models are never called: replay entries are written by the tests themselves from synthetic data. Tests
 that need Blender skip cleanly without it; tests that need scipy (the hybrid mesh path) skip without it.
@@ -23,7 +24,8 @@ try:
 except ImportError:  # pragma: no cover
     HAVE_SCIPY = False
 
-from herogen.blender import bl, body_joints, carve, glb, joints, raster, synth, views
+from herogen.blender import bl, body_joints, carve, glb, joints, raster, synth, texture, views
+from herogen.blender.split import Section
 from herogen.blender.remote import client as rclient
 
 if HAVE_SCIPY:
@@ -213,6 +215,77 @@ class TestBodyJoints(HybridBase):
             body_joints.apply_to_skeleton(joints.estimate(self.vs, 5.5), {"joints": {"Neck": [0, 0, 4]}})
 
 
+def cell_box():
+    """A closed box (centre (0, 0, 1.5), half size 0.5) with each side in its own atlas cell of a 3 x 2 grid.
+    Returns (verts, faces, corner_uv [M, 3, 2], side of each face as (axis, sign))."""
+    verts, faces, corner, side = [], [], [], []
+    k = 0
+    for axis in range(3):
+        for sign in (-1.0, 1.0):
+            a, b = [i for i in range(3) if i != axis]
+            quad = []
+            for (p, q) in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                v = np.zeros(3)
+                v[axis], v[a], v[b] = sign * 0.5, p * 0.5, q * 0.5
+                quad.append(v + [0, 0, 1.5])
+            n = np.cross(quad[1] - quad[0], quad[2] - quad[0])
+            order = [0, 1, 2, 3] if n[axis] * sign > 0 else [0, 3, 2, 1]
+            base = len(verts)
+            verts += [quad[i] for i in order]
+            cu, cv = (k % 3) / 3, (k // 3) / 2
+            cuv = [np.array([cu + 0.02 + (0.29 if i in (1, 2) else 0), cv + 0.02 + (0.46 if i in (2, 3) else 0)])
+                   for i in order]
+            for tri in ((0, 1, 2), (0, 2, 3)):
+                faces.append([base + t for t in tri])
+                corner.append([cuv[t] for t in tri])
+                side.append((axis, sign))
+            k += 1
+    return np.array(verts), np.array(faces), np.array(corner), side
+
+
+@unittest.skipUnless(HAVE_SCIPY, "scipy is required for the texture fallback")
+class TestTextureFallback(unittest.TestCase):
+    def test_source_colour_lookup(self):
+        v, f, corner, side = cell_box()
+        tex = np.zeros((8, 8, 3))
+        tex[:, :4] = (255, 0, 0)
+        tex[:, 4:] = (0, 0, 255)
+        corner = np.where(np.array([s == (0, -1.0) for s in side])[:, None, None], [0.2, 0.5], [0.8, 0.5])
+        corner = np.broadcast_to(corner, (len(f), 3, 2)).copy()
+        sc = texture.SourceColour(v, f, corner, tex)
+        col, dist = sc(np.array([[-0.6, 0.0, 1.5], [0.6, 0.0, 1.5]]))
+        self.assertGreater(col[0, 0], 200)          # nearest the -X side: red
+        self.assertGreater(col[1, 2], 200)          # nearest the +X side: blue
+        np.testing.assert_allclose(dist, [0.1, 0.1], atol=0.05)
+
+    def test_unseen_surfaces_take_the_source_texture(self):
+        v, f, corner, side = cell_box()
+        sec = {"Box": Section("Box", v, f, np.zeros(3), [], 0)}
+        front = views.View("front", np.ones((64, 64), bool), 20.0, 32.0, 64.0)
+        red = np.zeros((64, 64, 3))
+        red[:] = (230, 20, 20)
+        vw = {"front": (front, red)}
+        blue = np.zeros((8, 8, 3))
+        blue[:] = (20, 20, 230)
+        src = texture.SourceColour(v, f, corner, blue)
+        back_cell = [k for k, s in enumerate(side) if s == (1, 1.0)][0] // 2   # the +Y side faces away
+        cu, cv = (back_cell % 3) / 3 + 0.16, (back_cell // 3) / 2 + 0.25
+        size = 64
+        at = (int((1 - cv) * size), int(cu * size))       # atlas row 0 is v = 1
+        plain, stats, zbuf = texture.bake(sec, {"Box": corner}, vw, size)
+        mixed, mstats, _ = texture.bake(sec, {"Box": corner}, vw, size, zbuf, source=src)
+        self.assertGreater(plain[at][0], 150)               # no source: the front view's colour smears round
+        self.assertGreater(mixed[at][2], 150)               # with a source: the source's own colour
+        self.assertGreater(mstats["texels_source_only"], 0.0)
+        self.assertIn("texels_best_facing_below_fallback", stats)
+        front_cell = [k for k, s in enumerate(side) if s == (1, -1.0)][0] // 2
+        fu, fv = (front_cell % 3) / 3 + 0.16, (front_cell // 3) / 2 + 0.25
+        fat = (int((1 - fv) * size), int(fu * size))
+        self.assertGreater(mixed[fat][0], 150)              # the face the view sees keeps the view's colour
+        trusted, _, _ = texture.bake(sec, {"Box": corner}, vw, size, zbuf, source=src, trust={"front": 0.3})
+        self.assertGreater(trusted[fat][0], 150)            # one view: its weight normalises out
+
+
 @unittest.skipUnless(HAVE_SCIPY, "scipy is required for the hybrid mesh path")
 class TestStage3SourcesWithoutBlender(HybridBase):
     """The two remote sources of stage 3 from replay, up to (not including) the Blender silhouette renders."""
@@ -387,6 +460,42 @@ class TestStage3HybridBlender(HybridBase):
         self.assertFalse((stage3.work_dir(run) / "03-source-texture.png").exists())
         self.assertEqual(json.loads((run / "03-joints.json").read_text())["source"], "silhouette")
         self.assertEqual(json.loads((run / "stage-3.json").read_text())["mesh_source"], "carve")
+
+
+@unittest.skipUnless(HAVE_SCIPY and HAVE_BLENDER, "Blender and scipy are required")
+class TestStage4HybridBlender(HybridBase):
+    def test_stage4_cuts_and_textures_the_hybrid_mesh(self):
+        from herogen.blender.stage3 import run_stage3
+        from herogen.blender.stage4 import run_stage4
+
+        run = self.tmp / "e2e4"
+        synth.write_run(run, synth.humanoid(), size=384, ppu=60.0)
+        cache = self.tmp / "e2e4-cache"
+        self.replay_entries(run, cache)
+        rec3 = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
+                          remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
+        self.assertFalse(rec3["ok"])                                  # the side views fail (stage 3 test)
+        rec4 = run_stage4(run, timeout=600)
+        chk = {c["name"]: c for c in rec4["checks"]}
+        self.assertEqual((rec4["mesh_source"], rec4["joints_source"]), ("sam3d-objects", "sam3d-body"))
+        self.assertEqual(chk["open_edges"]["value"], 0)
+        self.assertEqual(chk["sections_non_empty"]["value"], 15)
+        self.assertTrue(chk["rest_iou_with_covers_front"]["gate"])
+        for v in ("back", "left", "right"):
+            self.assertTrue(chk[f"rest_iou_with_covers_{v}"]["gate"], v)      # observed: gated
+            self.assertTrue(chk[f"texture_colour_error_{v}"]["gate"], v)      # colour seen: still gated
+        self.assertTrue(chk["triangles_high"]["gate"])
+        self.assertLessEqual(chk["triangles_high"]["value"], 24000)
+        sections = json.loads((run / "04-body" / "sections.json").read_text())
+        self.assertEqual(sections["mesh_source"], "sam3d-objects")
+        self.assertEqual(sections["joints_source"], "sam3d-body")
+        self.assertEqual(sections["shape_views"], ["front"])
+        self.assertIn("silhouette_joints", sections)
+        for suffix in ("", "-no-source-fallback", "-side-trust"):
+            self.assertTrue((run / "04-body" / f"atlas-high{suffix}.png").exists(), suffix)
+        bake = sections["texture"]["bake"]
+        self.assertIn("texels_source_blend", bake["high"])
+        self.assertEqual(set(bake["high_side_trust"]["trust"]), {"left", "right"})
 
 
 if __name__ == "__main__":
