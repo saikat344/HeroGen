@@ -45,8 +45,6 @@ from herogen.bench import rig as RIG  # noqa: E402
 
 IMAGE_EXTS = (".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".exr")
 FACING_TOLERANCE_DEG = 45.0  # a given yaw must put the rig's left side within this of +X
-POSE_STEPS = 8
-POSE_CONVERGED_DEG = 0.01
 DISTAL_FRACTION = 0.85
 
 
@@ -311,47 +309,59 @@ def resolve_yaw(arms, given):
     return yaw, record
 
 
-def a_pose(arms, meshes, yaw, report):
-    """Pose every limb that can be found; returns the per-limb record (angles measured after posing)."""
-    yaw3 = np.array(yaw)[:3, :3]
-    limbs = []
+LIMBS = (("arm", "L"), ("arm", "R"), ("leg", "L"), ("leg", "R"))
+
+
+def find_limbs(arms):
+    """{(limb, side): (rig, root bone)} for every limb a rig names (the first rig that has it)."""
+    found = {}
     for arm in arms:
         deform = [b.name for b in arm.data.bones if b.use_deform] or [b.name for b in arm.data.bones]
-        for limb in ("arm", "leg"):
-            for side in ("L", "R"):
-                root = RIG.find_limb_root(deform, limb, side)
-                if root is None:
-                    continue
-                group = limb_group(arm, limb, side, root)
-                roots = group_roots(arm, group)
-                end, how = limb_end_point(arm, limb, side, root, group, meshes)
-                if end is None:
-                    report.append(f"{arm.name} {limb} {side}: {how}; not posed")
-                    continue
-                pivot = bone_world_head(arm, root)
-                cur = yaw3 @ (end - pivot)        # in the contract orientation
-                tgt = RIG.target_direction(limb, side)
-                aim = RIG.pose_aim(limb)
-                # One turn is exact when every bone below inherits its parent's rotation; repeat the
-                # correction for rigs where some do not, or where the far-end vertices change.
-                after, steps = cur, 0
-                while steps < POSE_STEPS and RIG.angle_between(aim(after), tgt) > POSE_CONVERGED_DEG:
-                    rot_world = yaw3.T @ RIG.rotation_between(aim(after), tgt) @ yaw3
-                    rotate_bones_world(arm, roots, rot_world, bone_world_head(arm, root))
-                    end2, _ = limb_end_point(arm, limb, side, root, group, meshes)
-                    after = yaw3 @ (end2 - bone_world_head(arm, root))
-                    steps += 1
-                limbs.append({
-                    "rig": arm.name, "limb": limb, "side": side, "root_bone": root, "end": how,
-                    "bones_turned": roots,
-                    "before_deg_below_horizontal": round(RIG.angle_below_horizontal(cur), 2),
-                    "after_deg_below_horizontal": round(RIG.angle_below_horizontal(after), 2),
-                    "after_deg_from_vertical": round(RIG.angle_from_vertical(after), 2),
-                    "after_frontal_deg_from_vertical": round(RIG.angle_from_vertical(RIG.frontal(after)), 2),
-                    "after_sagittal_lean_deg": round(RIG.sagittal_lean(after), 2),
-                    "after_outward": bool(after[0] * (1 if side == "L" else -1) > 0),
-                    "steps": steps,
-                })
+        for limb, side in LIMBS:
+            root = RIG.find_limb_root(deform, limb, side)
+            if root is not None and (limb, side) not in found:
+                found[(limb, side)] = (arm, root)
+    return found
+
+
+def a_pose(found, meshes, yaw, report):
+    """Pose the four limbs; returns the per-limb record (measured after posing)."""
+    yaw3 = np.array(yaw)[:3, :3]
+    limbs = []
+    for (limb, side), (arm, root) in found.items():
+        group = limb_group(arm, limb, side, root)
+        roots = group_roots(arm, group)
+        end, how = limb_end_point(arm, limb, side, root, group, meshes)
+        if end is None:
+            report.append(f"{arm.name} {limb} {side}: {how}; not posed")
+            continue
+        pivot = bone_world_head(arm, root)
+        cur = yaw3 @ (end - pivot)        # in the contract orientation
+        tgt = RIG.target_direction(limb, side)
+        aim = RIG.pose_aim(limb)
+        # One turn is exact when every bone below inherits its parent's rotation; repeat the
+        # correction for rigs where some do not, or where the far-end vertices change.
+        after, steps = cur, 0
+        while steps < RIG.POSE_STEPS and RIG.angle_between(aim(after), tgt) > RIG.POSE_CONVERGED_DEG:
+            rot_world = yaw3.T @ RIG.rotation_between(aim(after), tgt) @ yaw3
+            rotate_bones_world(arm, roots, rot_world, bone_world_head(arm, root))
+            end2, _ = limb_end_point(arm, limb, side, root, group, meshes)
+            after = yaw3 @ (end2 - bone_world_head(arm, root))
+            steps += 1
+        limbs.append({
+            "rig": arm.name, "limb": limb, "side": side, "root_bone": root, "end": how,
+            "bones_turned": roots,
+            "before_deg_below_horizontal": round(RIG.angle_below_horizontal(cur), 2),
+            "after_deg_below_horizontal": round(RIG.angle_below_horizontal(after), 2),
+            "after_deg_from_vertical": round(RIG.angle_from_vertical(after), 2),
+            "after_frontal_deg_from_vertical": round(RIG.angle_from_vertical(RIG.frontal(after)), 2),
+            "after_sagittal_lean_deg": round(RIG.sagittal_lean(after), 2),
+            "after_outward": bool(after[0] * (1 if side == "L" else -1) > 0),
+            "error_deg": round(RIG.angle_between(aim(after), tgt), 4),
+            "error_basis": "3D direction" if limb == "arm" else "direction seen from the front",
+            "converged": bool(RIG.angle_between(aim(after), tgt) <= RIG.POSE_CONVERGED_DEG),
+            "steps": steps,
+        })
     return limbs
 
 
@@ -687,19 +697,20 @@ def main():
     yaw = CAM.yaw_matrix(yaw_deg)
     if JOB.get("bind_unrigged") and rigs:
         bind_unrigged(meshes, report)
-    if pose_mode in ("auto", "a-pose") and rigs:
-        limbs = a_pose(rigs, meshes, yaw, report)
-    arms_posed = sum(1 for x in limbs if x["limb"] == "arm")
-    if pose_mode == "a-pose" and arms_posed < 2:
-        raise ValueError(f"a-pose asked for but only {arms_posed} arms were found and posed")
-    if arms_posed == 2:
+    found = find_limbs(rigs)
+    missing_limbs = [f"{limb} {side}" for limb, side in LIMBS if (limb, side) not in found]
+    if pose_mode == "a-pose" and missing_limbs:
+        raise ValueError(f"--pose a-pose needs both arms and both legs in the rig; not found: "
+                         f"{', '.join(missing_limbs)}")
+    if pose_mode in ("auto", "a-pose") and rigs and not missing_limbs:
+        limbs = a_pose(found, meshes, yaw, report)
         pose_used = "a-pose"
     elif rigs and pose_mode in ("auto", "rest"):
         pose_used = "rest"
+        if pose_mode == "auto":
+            report.append(f"rigged, but not found: {', '.join(missing_limbs)}; kept the rest pose")
     else:
         pose_used = "as-shipped"
-    if pose_mode == "auto" and rigs and arms_posed < 2:
-        report.append(f"rigged, but {arms_posed} arms found; kept the rest pose")
     timings["load_pose"] = round(time.time() - t0, 2)
 
     normalise_materials(meshes, JOB.get("material_images", {}), JOB.get("material_vcols", {}), mat_report)
