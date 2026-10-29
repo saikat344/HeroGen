@@ -235,9 +235,12 @@ def build_body(path, colors, image=None):
 
 
 def task_uv(t):
-    """Smart-project every section of each LOD together into one UV atlas; save per-corner UVs."""
+    """Smart-project every section of each LOD together into one UV atlas; save per-corner UVs. Islands are
+    unwrapped without margin and packed by their concave shapes with a gutter of `margin[lod]` (a fraction of the
+    atlas side)."""
     out = {}
     for lod, path in t["lods"].items():
+        margin = t["margin"][lod] if isinstance(t.get("margin"), dict) else t.get("margin", 0.002)
         reset_scene()
         objs = build_body(path, {})
         bpy.ops.object.select_all(action="DESELECT")
@@ -246,10 +249,10 @@ def task_uv(t):
         bpy.context.view_layer.objects.active = next(iter(objs.values()))
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=t.get("margin", 0.004),
+        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.0,
                                  area_weight=0.0, correct_aspect=True, scale_to_bounds=False)
         bpy.ops.uv.select_all(action="SELECT")
-        bpy.ops.uv.pack_islands(rotate=True, margin=t.get("margin", 0.004))
+        bpy.ops.uv.pack_islands(rotate=True, margin=margin, shape_method="CONCAVE", margin_method="FRACTION")
         bpy.ops.object.mode_set(mode="OBJECT")
         arrs = {}
         for name, o in objs.items():
@@ -258,7 +261,7 @@ def task_uv(t):
             me.uv_layers.active.data.foreach_get("uv", uv)
             arrs[name + "__uv"] = uv.reshape(-1, 3, 2)
         np.savez(t["out"][lod], **arrs)
-        out[lod] = {"sections": len(objs)}
+        out[lod] = {"sections": len(objs), "margin": margin}
     return out
 
 
