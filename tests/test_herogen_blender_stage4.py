@@ -115,6 +115,28 @@ class TestSections(SyntheticBase):
                     sanity = mesh_sanity(secs[name].verts, secs[name].faces, 1e-6 * 5.5)
                     self.assertTrue(sanity["watertight"], (int(i), eps, name, sanity))
 
+    def test_a_cover_patch_that_pinches_still_closes_into_a_manifold_shell(self):
+        from herogen.blender import covers
+        from herogen.blender.score import mesh_sanity
+
+        # two squares of a surface that meet at one corner only, plus a third square on the bigger side
+        v = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [2, 1, 0], [2, 2, 0], [1, 2, 0],
+                      [3, 1, 0], [3, 2, 0]], float)
+        f = np.array([[0, 1, 2], [0, 2, 3], [2, 4, 5], [2, 5, 6], [4, 7, 8], [4, 8, 5]])
+        patch = covers.manifold_patch(f)
+        self.assertEqual(sorted(map(tuple, patch.tolist())), sorted(map(tuple, f[2:].tolist())))
+        sv, sf = covers.shell(v, patch, 0.05, 0.02)
+        self.assertTrue(mesh_sanity(sv, sf, 1e-9)["watertight"])
+        sv, sf = covers.shell(v, f, 0.05, 0.02)              # the pinched patch itself does not close cleanly
+        self.assertGreater(mesh_sanity(sv, sf, 1e-9)["nonmanifold_edges"], 0)
+        passes, largest = covers.MAX_PINCH_PASSES, covers._largest
+        covers.MAX_PINCH_PASSES, covers._largest = 0, lambda p: p    # keep the pinch, allow no pass: an error
+        try:
+            with self.assertRaises(ValueError):
+                covers.manifold_patch(f)
+        finally:
+            covers.MAX_PINCH_PASSES, covers._largest = passes, largest
+
     def test_a_cover_never_welds_into_its_owner(self):
         """Covers shaped from the very mesh that was cut, held at zero outset by the masks: every outer vertex
         would sit on a vertex of the owner. The owner must still be closed and manifold after welding."""

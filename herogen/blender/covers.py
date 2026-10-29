@@ -11,7 +11,6 @@ from dataclasses import replace
 
 import numpy as np
 
-from .carve import components
 
 COVER_RADIUS = 1.8     # in shoulder cut radii (see stage4 for the measurements behind the defaults)
 COVER_OUTSET = 0.03    # studs outside the carved surface
@@ -22,6 +21,7 @@ COVER_INSET = 0.02     # studs inside it (the shell's inner face)
 # sketch's carve under roblox-avatar: UpperTorso with 3 non-manifold edges). 0.001 studs is a fifth of a pixel
 # at the views' pixel scale and far above the 1e-6-height weld tolerance.
 COVER_MIN_OUTSET = 0.001
+MAX_PINCH_PASSES = 64  # each pass drops at least one fan; a patch still pinched after this many is an error
 
 
 def vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -70,12 +70,89 @@ def build_cover(body_v: np.ndarray, body_f: np.ndarray, centre: np.ndarray, radi
     sel = (d[body_f] < radius).all(axis=1)
     if not sel.any():
         return None
-    patch = body_f[sel]
-    lab = components(len(body_v), patch)
-    flab = lab[patch[:, 0]]
-    ids, counts = np.unique(flab, return_counts=True)
-    patch = patch[flab == ids[np.argmax(counts)]]
+    patch = manifold_patch(body_f[sel])
+    if len(patch) == 0:
+        return None
     return shell(body_v, patch, outset, inset, inside)
+
+
+def _largest(patch: np.ndarray) -> np.ndarray:
+    """The largest piece of a face set whose faces are joined through shared edges (a shared vertex alone does
+    not join them)."""
+    parent = np.arange(len(patch))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first: dict[tuple, int] = {}
+    for i, t in enumerate(patch.tolist()):
+        for a, b in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            e = (a, b) if a < b else (b, a)
+            if e in first:
+                ra, rb = root(first[e]), root(i)
+                if ra != rb:
+                    parent[ra] = rb
+            else:
+                first[e] = i
+    roots = np.array([root(i) for i in range(len(patch))])
+    ids, counts = np.unique(roots, return_counts=True)
+    return patch[roots == ids[np.argmax(counts)]]
+
+
+def manifold_patch(patch: np.ndarray) -> np.ndarray:
+    """The largest edge-connected piece of a face set whose boundary never touches itself.
+
+    Faces within a radius can meet the rest of the patch at a single vertex (a pinch: two fans around one vertex
+    that share no edge). Closing such a patch into a shell puts four wall triangles on that vertex's wall edge,
+    so the cover is not manifold. Pieces joined only at a vertex are separated (the largest is kept), and at a
+    pinch inside one piece the fans other than the largest are dropped, until none is left; a patch still pinched
+    after `MAX_PINCH_PASSES` passes is an error, never returned.
+    """
+    if len(patch) == 0:
+        return patch
+    patch = _largest(patch)
+    for npass in range(MAX_PINCH_PASSES + 1):
+        directed = np.concatenate([patch[:, [0, 1]], patch[:, [1, 2]], patch[:, [2, 0]]])
+        present = set(map(tuple, directed.tolist()))
+        starts: dict[int, int] = {}
+        for a, b in directed.tolist():
+            if (b, a) not in present:
+                starts[a] = starts.get(a, 0) + 1
+        pinched = [v for v, k in starts.items() if k > 1]
+        if not pinched:
+            return patch
+        if npass == MAX_PINCH_PASSES:
+            break
+        drop = np.zeros(len(patch), dtype=bool)
+        for v in pinched:
+            around = np.nonzero((patch == v).any(axis=1))[0]
+            # fans: faces around v joined through an edge that contains v
+            fan = {int(i): int(i) for i in around}
+
+            def root(i):
+                while fan[i] != i:
+                    i = fan[i]
+                return i
+
+            for x in around:
+                for y in around:
+                    if x < y and len((set(patch[x]) & set(patch[y])) - {v}) == 1:
+                        fan[root(int(x))] = root(int(y))
+            groups: dict[int, list] = {}
+            for i in around:
+                groups.setdefault(root(int(i)), []).append(int(i))
+            keep = max(groups.values(), key=len)
+            for g in groups.values():
+                if g is not keep:
+                    drop[g] = True
+        patch = patch[~drop]
+        if len(patch) == 0:
+            return patch
+        patch = _largest(patch)
+    raise ValueError(f"cover patch still pinched after {MAX_PINCH_PASSES} passes")
 
 
 def add_covers(sections: dict, body_v: np.ndarray, body_f: np.ndarray, owner: str = "UpperArm",
