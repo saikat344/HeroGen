@@ -30,7 +30,8 @@ except ImportError:  # numpy or Pillow missing
 # Builds a box figure in Blender, facing -Y, arms straight out along X (a T-pose), 2 units tall, with a rig
 # (KayKit-style bone names) whose arm and leg bones carry the boxes, and one colour per part: the character's
 # left arm red, its right arm blue. With "cuff", a yellow box around the left forearm that the rig does not
-# deform. With "turned", the whole figure faces +Y instead (a model exported the other way round).
+# deform. With "turned", the whole figure faces +Y instead (a model exported the other way round). With
+# "nolegs", the leg bones have names that are not limbs, so the rig has arms only.
 # Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none|turned>`.
 BUILD = textwrap.dedent('''
     import sys
@@ -39,6 +40,8 @@ BUILD = textwrap.dedent('''
 
     out, rigged, extra = sys.argv[-3], sys.argv[-2] == "1", sys.argv[-1]
     cuff, turned = extra == "cuff", extra == "turned"
+    rename = {"upperleg.l": "post.l", "upperleg.r": "post.r", "foot.l": "base.l", "foot.r": "base.r"}
+    name = (lambda n: rename.get(n, n)) if extra == "nolegs" else (lambda n: n)
     bpy.ops.wm.read_factory_settings(use_empty=True)
     # (name, centre, size, colour, bone)
     PARTS = [
@@ -73,28 +76,28 @@ BUILD = textwrap.dedent('''
         bpy.context.scene.collection.objects.link(arm)
         bpy.context.view_layer.objects.active = arm
         bpy.ops.object.mode_set(mode="EDIT")
-        for name, head, tail, parent in BONES:
-            b = data.edit_bones.new(name)
+        for bone_name, head, tail, parent in BONES:
+            b = data.edit_bones.new(name(bone_name))
             b.head, b.tail = head, tail
             if parent:
-                b.parent = data.edit_bones[parent]
+                b.parent = data.edit_bones[name(parent)]
         bpy.ops.object.mode_set(mode="OBJECT")
-    for name, c, s, col, bone in PARTS:
-        me = bpy.data.meshes.new(name)
+    for part, c, s, col, bone in PARTS:
+        me = bpy.data.meshes.new(part)
         bm = bmesh.new()
         bmesh.ops.create_cube(bm, size=1.0)
         for v in bm.verts:
             v.co = (c[0] + v.co.x * s[0], c[1] + v.co.y * s[1], c[2] + v.co.z * s[2])
         bm.to_mesh(me)
         bm.free()
-        mat = bpy.data.materials.new(name + "Mat")
+        mat = bpy.data.materials.new(part + "Mat")
         mat.use_nodes = True
         mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*col, 1.0)
         me.materials.append(mat)
-        o = bpy.data.objects.new(name, me)
+        o = bpy.data.objects.new(part, me)
         bpy.context.scene.collection.objects.link(o)
         if arm is not None and bone is not None:
-            g = o.vertex_groups.new(name=bone)
+            g = o.vertex_groups.new(name=name(bone))
             g.add(list(range(len(me.vertices))), 1.0, "REPLACE")
             o.modifiers.new("Armature", "ARMATURE").object = arm
             o.parent = arm
@@ -159,6 +162,70 @@ class BlendFileTest(unittest.TestCase):
             np.testing.assert_allclose(img[48, 48], [255, 128, 0], atol=2)
 
 
+def limb(limb, side, error, converged=True):
+    return {"limb": limb, "side": side, "error_deg": error, "converged": converged, "steps": 1,
+            "error_basis": "3D direction"}
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class PoseCheckTest(unittest.TestCase):
+    def setUp(self):
+        from herogen.bench.render import pose_checks
+
+        self.pose_checks = pose_checks
+
+    def _failed(self, limbs):
+        return [c["name"] for c in self.pose_checks("a-pose", limbs) if not c["pass"]]
+
+    def test_four_converged_limbs_pass(self):
+        limbs = [limb("arm", "L", 0.0), limb("arm", "R", 0.004), limb("leg", "L", 0.0), limb("leg", "R", 0.0)]
+        self.assertEqual(self._failed(limbs), [])
+
+    def test_missing_legs_fail(self):
+        self.assertEqual(self._failed([limb("arm", "L", 0.0), limb("arm", "R", 0.0)]), ["pose_limbs_posed"])
+
+    def test_an_arm_at_the_right_height_but_pointing_forward_fails(self):
+        # 45 degrees down but swung 30 degrees forward: the elevation alone would read 45
+        limbs = [limb("arm", "L", 30.0, converged=False), limb("arm", "R", 0.0), limb("leg", "L", 0.0),
+                 limb("leg", "R", 0.0)]
+        self.assertEqual(self._failed(limbs), ["pose_arm_L_error_deg"])
+
+    def test_a_limb_that_did_not_converge_fails(self):
+        limbs = [limb("arm", "L", 0.0), limb("arm", "R", 0.0), limb("leg", "L", 0.005, converged=False),
+                 limb("leg", "R", 0.0)]
+        self.assertEqual(self._failed(limbs), ["pose_leg_L_error_deg"])
+
+    def test_no_pose_checks_for_other_poses(self):
+        self.assertEqual(self.pose_checks("rest", []), [])
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class RenderMaskAgreementTest(unittest.TestCase):
+    def setUp(self):
+        from herogen.bench.render import near_edge, off_edge_disagreement
+
+        self.near_edge, self.off_edge = near_edge, off_edge_disagreement
+        self.mask = np.zeros((40, 40), dtype=bool)
+        self.mask[10:30, 12:20] = True       # a thin bar, 8 px wide
+
+    def test_edge_band_is_one_pixel_each_side(self):
+        band = self.near_edge(self.mask)
+        self.assertTrue(band[10, 15] and band[9, 15])      # first inside and first outside row
+        self.assertFalse(band[12, 15] or band[8, 15])
+
+    def test_coverage_differing_only_on_the_edge_passes(self):
+        cover = self.mask.copy()
+        cover[10, 12:20] = False                            # a half-covered top row
+        cover[9, 14] = True                                 # a pixel just outside, more than half covered
+        self.assertEqual(self.off_edge(cover, self.mask), 0)
+
+    def test_a_shifted_camera_is_caught_at_any_size(self):
+        shifted = np.roll(self.mask, 3, axis=1)
+        self.assertGreater(self.off_edge(shifted, self.mask), 0)
+        big = np.kron(self.mask, np.ones((8, 8), dtype=bool))
+        self.assertGreater(self.off_edge(np.roll(big, 3, axis=1), big), 0)
+
+
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class CliTest(unittest.TestCase):
     def _main(self, *args):
@@ -221,6 +288,21 @@ class FacingErrorTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("disagrees with the rig", err)
         self.assertNotIn("Traceback", err)
+
+    def test_a_pose_needs_legs_as_well_as_arms(self):
+        armless_legs = Path(self.tmp.name) / "nolegs.glb"
+        build_figure(armless_legs, True, "nolegs")
+        code, err = self._main(armless_legs, "--pose", "a-pose")
+        self.assertEqual(code, 2)
+        self.assertIn("not found: leg L, leg R", err)
+        run = Path(self.tmp.name) / "auto"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main(["render", "--asset", str(armless_legs), "--out", str(run), "--size", "64",
+                         "--samples-flat", "2", "--samples-lit", "2"])
+        rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(rec["details"]["pose"], "rest")
+        self.assertEqual(rec["details"]["limbs"], [])
 
     def test_an_unrigged_figure_needs_a_yaw(self):
         code, err = self._main(self.unrigged)
@@ -290,6 +372,9 @@ class RenderTest(unittest.TestCase):
         for x in arms.values():
             self.assertAlmostEqual(x["before_deg_below_horizontal"], 0.0, places=3)
             self.assertAlmostEqual(x["after_deg_below_horizontal"], 45.0, places=3)
+            self.assertTrue(x["converged"])
+            self.assertLessEqual(x["error_deg"], 0.01)
+        self.assertEqual(len(rec["details"]["limbs"]), 4)
 
     def test_unrigged_figure_keeps_its_shipped_pose(self):
         rec, run = self._record(False)

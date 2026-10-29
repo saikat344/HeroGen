@@ -18,7 +18,7 @@ the true mesh and the evaluation views:
 
 No building stage reads `heldout/`, `gt/` or `depth/`. Masks and depth come from casting one orthographic ray
 through each pixel centre against the mesh written to `gt/body.glb`, so they describe that mesh exactly; the
-colour renders use the same cameras, and the `render_mask_iou_min` check confirms the two line up.
+colour renders use the same cameras, and the `render_mask_off_edge_px` check confirms the two line up.
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from herogen.blender import bl
 from herogen.blender.record import StageRecord, check
 
 from . import BACKGROUND, DEFAULT_SIZE, HEIGHT_STUDS
+from .rig import POSE_CONVERGED_DEG
 
 JOB_SCRIPT = Path(__file__).with_name("bench_job.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,10 +44,8 @@ ASSET_TYPES = (".glb", ".gltf", ".fbx", ".blend")
 POSES = ("auto", "a-pose", "rest", "as-shipped")
 
 # Gates. The mask comes from rays through pixel centres and the colour render's coverage from area sampling,
-# so they differ only on edge pixels a surface half-covers.
-RENDER_MASK_IOU_MIN = 0.97
+# so they may differ only on pixels at the mask's edge (render_mask_off_edge_px counts the others: zero).
 HEIGHT_TOLERANCE_PX = 1.0       # front mask height vs height_units * pixels_per_unit
-POSE_TOLERANCE_DEG = 1.0        # achieved limb angle vs the A-pose target
 FACING_MIN_X = 0.999            # cos of the right-to-left axis's angle from +X (about 2.6 degrees)
 
 
@@ -101,6 +100,23 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.logical_and(a, b).sum() / union) if union else 1.0
 
 
+def near_edge(mask: np.ndarray) -> np.ndarray:
+    """Pixels within one pixel (8-neighbourhood) of the mask's boundary, on either side."""
+    pad = np.pad(mask, 1)
+    shifts = [pad[1 + dr: 1 + dr + mask.shape[0], 1 + dc: 1 + dc + mask.shape[1]]
+              for dr in (-1, 0, 1) for dc in (-1, 0, 1)]
+    grown = np.logical_or.reduce(shifts)
+    shrunk = np.logical_and.reduce(shifts)
+    return grown & ~shrunk
+
+
+def off_edge_disagreement(coverage: np.ndarray, mask: np.ndarray) -> int:
+    """Pixels where the colour render's coverage and the ray-cast mask disagree away from the mask's edge.
+    Edge pixels can differ (area coverage against a ray through the pixel centre); no other pixel can when
+    the render camera and the mask camera are the same."""
+    return int(((coverage != mask) & ~near_edge(mask)).sum())
+
+
 def border_pixels(mask: np.ndarray) -> int:
     return int(mask[0].sum() + mask[-1].sum() + mask[1:-1, 0].sum() + mask[1:-1, -1].sum())
 
@@ -127,20 +143,18 @@ def facing_check(facing: dict) -> dict:
 
 
 def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
-    out = []
+    """An A-pose has all four limbs, each converged on its target: the angle between the achieved and the
+    target direction (3D for an arm, seen from the front for a leg) under `POSE_CONVERGED_DEG`."""
     if pose != "a-pose":
-        return out
-    from .rig import A_POSE_ARM_DEG, A_POSE_LEG_DEG
-
-    for limb in limbs:
-        if limb["limb"] == "arm":
-            value, target = limb["after_deg_below_horizontal"], A_POSE_ARM_DEG
-        else:
-            value, target = limb["after_frontal_deg_from_vertical"], A_POSE_LEG_DEG
-        err = abs(value - target)
-        out.append(check(f"pose_{limb['limb']}_{limb['side']}_deg", value, target,
-                         passed=err <= POSE_TOLERANCE_DEG and limb["after_outward"],
-                         tolerance=POSE_TOLERANCE_DEG))
+        return []
+    have = {(x["limb"], x["side"]) for x in limbs}
+    want = [("arm", "L"), ("arm", "R"), ("leg", "L"), ("leg", "R")]
+    missing = [f"{limb} {side}" for limb, side in want if (limb, side) not in have]
+    out = [check("pose_limbs_posed", len(want) - len(missing), len(want), missing=missing)]
+    for x in limbs:
+        out.append(check(f"pose_{x['limb']}_{x['side']}_error_deg", x["error_deg"], POSE_CONVERGED_DEG,
+                         passed=x["error_deg"] <= POSE_CONVERGED_DEG and x["converged"],
+                         converged=x["converged"], steps=x["steps"], basis=x["error_basis"]))
     return out
 
 
@@ -175,7 +189,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
         }
         res = run_blender(job, work, out / "logs" / "bench-render.log", timeout)
         cams = res["cameras"]
-        outputs, ious, borders = ["gt/body.glb", "cameras.json", "views/meta.json"], {}, {}
+        outputs, ious, borders, off_edge = ["gt/body.glb", "cameras.json", "views/meta.json"], {}, {}, {}
         for cam in cams:
             paths = view_paths(cam)
             cam["files"] = paths
@@ -191,6 +205,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             np.save(out / paths["depth"], depth.astype(np.float32))
             outputs += list(paths.values())
             ious[cam["view"]] = round(iou(alpha >= 0.5, mask), 5)
+            off_edge[cam["view"]] = off_edge_disagreement(alpha >= 0.5, mask)
             borders[cam["view"]] = border_pixels(mask)
 
     ppu, size = res["pixels_per_unit"], int(size)
@@ -233,7 +248,10 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     rec.add(check("front_height_px_error", round(abs(front_h - expect_h), 3), HEIGHT_TOLERANCE_PX,
                   passed=abs(front_h - expect_h) <= HEIGHT_TOLERANCE_PX, measured_px=front_h,
                   expected_px=round(expect_h, 3)))
-    rec.add(check("render_mask_iou_min", min(ious.values()), RENDER_MASK_IOU_MIN, per_view=ious))
+    rec.add(check("render_mask_off_edge_px", max(off_edge.values()), 0, passed=max(off_edge.values()) == 0,
+                  per_view=off_edge))
+    rec.add(check("render_mask_iou_min", min(ious.values()), None, gate=False, per_view=ious,
+                  note="edge pixels weigh more at small sizes; render_mask_off_edge_px is the gate"))
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
                   names=res["missing_images"]))
     rec.add(facing_check(res["facing"]))

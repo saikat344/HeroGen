@@ -13,6 +13,8 @@ import re
 import numpy as np
 
 A_POSE_ARM_DEG = 45.0   # arms straight out and 45 degrees down
+POSE_CONVERGED_DEG = 0.01  # a limb counts as posed when its direction is this close to the target
+POSE_STEPS = 8             # turns allowed to get there
 A_POSE_LEG_DEG = 5.0    # each leg 5 degrees out from vertical seen from the front ("slightly apart")
 
 _PREFIX = re.compile(r"^(?:[a-z0-9_]*:|def[-_.]|org[-_.]|mch[-_.]|bip0?1[ _]?|b_|bn_)+")
