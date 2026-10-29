@@ -690,7 +690,10 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(rec["stage"], "2h")
         self.assertTrue(rec["ok"])
         self.assertEqual(rec["reference"], "ground-truth")
-        views = {v["view"]: v["azimuth_deg"] for v in rec["details"]["views"]}
+        self.assertIsInstance(rec["details"]["views"], dict)   # keyed by view name, as the scorer reads it
+        views = {name: v["azimuth_deg"] for name, v in rec["details"]["views"].items()}
+        for v in rec["details"]["views"].values():
+            self.assertEqual(set(v["files"]), {"colour", "lit", "mask", "depth"})
         self.assertEqual(views, {"front-left-25": 25, "front-right-25": 335, "front-left-65": 65,
                                  "front-right-65": 295})
         for rel in rec["outputs"]:
