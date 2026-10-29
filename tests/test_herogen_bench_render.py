@@ -596,6 +596,36 @@ class RegistrationGateTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class FacingCheckTest(unittest.TestCase):
+    def _check(self, deg):
+        import math
+
+        from herogen.bench.render import facing_check
+
+        a = math.radians(deg)
+        return facing_check({"checked": True, "rig_axis": "Rig: R -> L",
+                             "left_axis_after_yaw": [math.cos(a), math.sin(a)]})
+
+    def test_hip_joints_a_little_off_square_pass(self):
+        for deg in (0.0, 2.58, 7.0):
+            c = self._check(deg)
+            self.assertTrue(c["pass"], deg)
+            self.assertAlmostEqual(c["residual_deg"], deg, places=2)
+
+    def test_a_figure_turned_the_wrong_way_fails(self):
+        for deg in (10.0, 45.0, 90.0, 180.0):
+            self.assertFalse(self._check(deg)["pass"], deg)
+
+    def test_the_threshold_comes_from_the_measured_runs(self):
+        import math
+
+        from herogen.bench import render
+
+        allowed = render.FACING_MEASURED_DEG * render.FACING_MARGIN
+        self.assertAlmostEqual(render.FACING_MIN_X, math.cos(math.radians(allowed)), places=4)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class CliTest(unittest.TestCase):
     def _main(self, *args):
         err = io.StringIO()
