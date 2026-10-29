@@ -58,6 +58,15 @@ POSES = ("auto", "a-pose", "rest", "as-shipped")
 # Gates. The mask comes from rays through pixel centres and the colour render's coverage from area sampling,
 # so they may differ only on pixels at the mask's edge (render_mask_off_edge_px counts the others: zero).
 HEIGHT_TOLERANCE_PX = 1.0       # front mask height vs height_units * pixels_per_unit
+MIN_SAMPLES_FLAT = 16           # coverage noise must stay well under the half-pixel the checks look for
+# Registration of the colour render on the mask. Measured over the 17 delivered runs at 1024 px and 16 samples
+# (largest per-view value: REGISTRATION_MEASURED), the gates allow REGISTRATION_MARGIN times that; a camera
+# 0.5 px off or 0.2% out of scale lands far beyond them.
+REGISTRATION_MEASURED = {"centroid_px": 0.1113, "area_ratio_dev": 0.00036}   # 2026-10-29, 17 runs x 12 views
+REGISTRATION_MARGIN = 3.0
+REGISTRATION_SIZE = 1024        # the image size the thresholds were measured at, and the smallest they gate
+CENTROID_MAX_PX = round(REGISTRATION_MEASURED["centroid_px"] * REGISTRATION_MARGIN, 4)        # 0.3339
+AREA_RATIO_MAX_DEV = round(REGISTRATION_MEASURED["area_ratio_dev"] * REGISTRATION_MARGIN, 5)  # 0.00108
 FACING_MIN_X = 0.999            # cos of the right-to-left axis's angle from +X (about 2.6 degrees)
 
 
@@ -147,8 +156,23 @@ def off_edge_disagreement(coverage: np.ndarray, mask: np.ndarray, margin: float 
 
 
 def coverage_margin(samples: int) -> float:
-    """Two samples' worth of the coverage a render with `samples` samples per pixel reports, at most 0.25."""
-    return min(0.25, 2.0 / max(1, samples))
+    """Two samples' worth of the coverage a render with `samples` samples per pixel reports (0.125 at the
+    minimum of `MIN_SAMPLES_FLAT`)."""
+    return 2.0 / max(MIN_SAMPLES_FLAT, samples)
+
+
+def registration(coverage: np.ndarray, mask: np.ndarray) -> tuple[float, float]:
+    """How well the colour render sits on the ray-cast mask, below what the edge gate can see: the distance in
+    pixels between the centroid of the render's coverage (0..1 per pixel) and the centroid of the mask, and
+    |coverage area / mask area - 1|. A camera half a pixel off moves the first by about half a pixel; a scale
+    error of 0.2% changes the second by about 0.004."""
+    total, n = float(coverage.sum()), int(mask.sum())
+    if total == 0.0 or n == 0:
+        return (0.0, 0.0) if total == n == 0 else (float("inf"), float("inf"))
+    rows, cols = np.indices(mask.shape, dtype=np.float64)
+    c_cov = np.array([(coverage * rows).sum(), (coverage * cols).sum()]) / total
+    c_mask = np.array([rows[mask].sum(), cols[mask].sum()]) / n
+    return float(np.linalg.norm(c_cov - c_mask)), abs(total / n - 1.0)
 
 
 def glb_materials(path: Path) -> dict[str, dict]:
@@ -252,9 +276,10 @@ def check_inputs(asset: Path, out: Path, *, pose: str, include, exclude, size, h
         raise ValueError(f"--size must be a whole number of pixels from {SIZE_RANGE[0]} to {SIZE_RANGE[1]}")
     if not (isinstance(height, (int, float)) and math.isfinite(height) and height > 0):
         raise ValueError("--height must be a positive number of studs")
-    for flag, n in (("--samples-flat", samples_flat), ("--samples-lit", samples_lit)):
-        if not isinstance(n, int) or n < 1:
-            raise ValueError(f"{flag} must be at least 1")
+    for flag, n, least in (("--samples-flat", samples_flat, MIN_SAMPLES_FLAT),
+                           ("--samples-lit", samples_lit, 1)):
+        if not isinstance(n, int) or n < least:
+            raise ValueError(f"{flag} must be at least {least}")
     if out.exists() and not out.is_dir():
         raise ValueError(f"--out {out} is a file, not a folder")
     if out.is_dir() and any(out.iterdir()):
@@ -309,6 +334,27 @@ def heldout_record(out: Path, cams: list[dict], borders: dict, off_edge: dict, a
     })
 
 
+def registration_checks(centroid: dict, area: dict, size: int) -> list[dict]:
+    """The two registration checks. Their thresholds were measured at `REGISTRATION_SIZE` pixels, where edge
+    pixels are a small share of a figure; at a smaller size thin parts and pixel-aligned edges move both
+    numbers with no camera error, so there they are recorded but do not gate."""
+    gate = size >= REGISTRATION_SIZE
+    if gate:
+        note = f"{REGISTRATION_MARGIN:g} x the largest of the delivered runs at {REGISTRATION_SIZE} px"
+    else:
+        note = (f"recorded only: the threshold was measured at {REGISTRATION_SIZE} px and does not hold at "
+                f"{size} px")
+    spread = REGISTRATION_MEASURED
+    out = []
+    for name, values, limit, measured in (
+            ("render_mask_centroid_px", centroid, CENTROID_MAX_PX, spread["centroid_px"]),
+            ("render_mask_area_ratio_dev", area, AREA_RATIO_MAX_DEV, spread["area_ratio_dev"])):
+        worst = max(values.values())
+        out.append(check(name, worst, limit, passed=worst <= limit or not gate, gate=gate, per_view=values,
+                         measured=measured, note=note))
+    return out
+
+
 def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
                  yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
                  material_vcols: dict | None = None, material_alpha: dict | None = None,
@@ -345,7 +391,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
         res = run_blender(job, work, out / "logs" / "bench-render.log", timeout, places)
         cams = res["cameras"]
         outputs = ["gt/body.glb", "cameras.json", "views/meta.json"]
-        ious, borders, off_edge = {}, {}, {}
+        ious, borders, off_edge, centroid, area = {}, {}, {}, {}, {}
         front_geometry = None
         for cam in cams:
             paths = view_paths(cam)
@@ -365,6 +411,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             outputs += list(paths.values())
             ious[cam["view"]] = round(iou(alpha >= 0.5, mask), 5)
             off_edge[cam["view"]] = off_edge_disagreement(alpha, mask, coverage_margin(samples_flat))
+            centroid[cam["view"]], area[cam["view"]] = (round(x, 6) for x in registration(alpha, mask))
             borders[cam["view"]] = border_pixels(mask)
 
     ppu, size = res["pixels_per_unit"], int(size)
@@ -415,6 +462,8 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
                   visible_height_units=visible_h))
     rec.add(check("render_mask_off_edge_px", max(off_edge.values()), 0, passed=max(off_edge.values()) == 0,
                   per_view=off_edge))
+    for c in registration_checks(centroid, area, size):
+        rec.add(c)
     rec.add(check("render_mask_iou_min", min(ious.values()), None, gate=False, per_view=ious,
                   note="edge pixels weigh more at small sizes; render_mask_off_edge_px is the gate"))
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
