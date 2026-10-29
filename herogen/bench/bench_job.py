@@ -42,6 +42,7 @@ sys.path.insert(0, JOB["repo_root"])
 
 from herogen.bench import cameras as CAM  # noqa: E402
 from herogen.bench import rig as RIG  # noqa: E402
+from herogen.bench import texture as TEX  # noqa: E402
 
 IMAGE_EXTS = (".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".exr")
 FACING_TOLERANCE_DEG = 45.0  # a given yaw must put the rig's left side within this of +X
@@ -494,16 +495,128 @@ def base_colour_source(mat, image_override, vcol_override):
     return None, tuple(mat.diffuse_color), "viewport colour"
 
 
-def normalise_materials(meshes, images, vcols, report):
-    """Rebuild every used material around its base colour: a lit principled shader and an unlit emission
-    shader fed by the same source. `set_shading` switches the material output between them. Overrides must
-    name materials the chosen meshes use."""
+# --------------------------------------------------------------------------------------------- alpha
+
+ALPHA_CUTOFF = 0.5          # texture alpha below this is a hole, as a game engine clips alphaMode MASK
+ALPHA_LAYERS = 64           # transparent surfaces a ray (and Cycles) may pass through before it stops
+RAY_STEP = 1e-5             # studs a ray moves past a clipped texel before it looks again
+
+
+def _from(sock):
+    """(node, output socket) feeding an input socket, or (None, None)."""
+    if not sock.is_linked:
+        return None, None
+    link = sock.links[0]
+    return link.from_node, link.from_socket
+
+
+def _alpha_image_node(sock):
+    """The image node whose Alpha output feeds `sock` directly, else None."""
+    node, out = _from(sock)
+    if node is not None and node.type == "TEX_IMAGE" and out.name == "Alpha" and node.image is not None:
+        return node
+    return None
+
+
+def read_alpha(mat, bsdf, override_node, flag, legacy):
+    """How a material's alpha is decided: {"mode": "opaque"|"clip", "cutoff", "source", "node"}.
+
+    With --alpha (needed for an --image override or an old material without nodes, where nothing else
+    says), the flag decides and the alpha comes from the override image. Otherwise the material's own
+    Principled Alpha input decides, read the way the glTF importer writes alphaMode: unlinked is OPAQUE (a
+    constant alpha below the cutoff hides the whole material); `1 - (alpha < c)` is MASK with cutoff c;
+    `round(alpha)` is MASK at 0.5; a texture alpha linked straight in (BLEND) is clipped at 0.5 as well. Any
+    other alpha source cannot be sampled the same way in the masks, and is refused."""
+    name = mat.name
+    if flag is not None:
+        if flag == "opaque":
+            return {"mode": "opaque", "cutoff": None, "source": "--alpha opaque", "node": None}
+        if override_node is None:
+            raise ValueError(f"--alpha {name}=clip needs an --image for {name}: the alpha comes from that "
+                             f"image")
+        return {"mode": "clip", "cutoff": ALPHA_CUTOFF, "source": "--alpha clip on the --image override",
+                "node": override_node}
+    if override_node is not None or legacy:
+        why = "an --image override" if override_node is not None else "an old material without nodes"
+        return {"mode": "opaque", "cutoff": None, "source": f"{why}; opaque unless --alpha {name}=clip",
+                "node": None}
+    if bsdf is None:
+        return {"mode": "opaque", "cutoff": None, "source": "no principled shader", "node": None}
+    inp = bsdf.inputs["Alpha"]
+    if not inp.is_linked:
+        v = float(inp.default_value)
+        if v >= ALPHA_CUTOFF:
+            return {"mode": "opaque", "cutoff": None, "source": f"alpha {v:g} (glTF OPAQUE)", "node": None}
+        return {"mode": "clip", "cutoff": ALPHA_CUTOFF, "node": None, "constant": v,
+                "source": f"constant alpha {v:g}: the whole material is a hole"}
+    node, _ = _from(inp)
+    img = _alpha_image_node(inp)
+    if img is not None:
+        return {"mode": "clip", "cutoff": ALPHA_CUTOFF, "node": img,
+                "source": "texture alpha linked straight in (glTF BLEND), clipped at 0.5"}
+    if node.type == "MATH" and node.operation == "ROUND":
+        img = _alpha_image_node(node.inputs[0])
+        if img is not None:
+            return {"mode": "clip", "cutoff": ALPHA_CUTOFF, "source": "round(texture alpha) (glTF MASK)",
+                    "node": img}
+    if node.type == "MATH" and node.operation == "SUBTRACT" and not node.inputs[0].is_linked \
+            and abs(node.inputs[0].default_value - 1.0) < 1e-9:
+        lt, _ = _from(node.inputs[1])
+        if lt is not None and lt.type == "MATH" and lt.operation == "LESS_THAN" and \
+                not lt.inputs[1].is_linked:
+            img = _alpha_image_node(lt.inputs[0])
+            if img is not None:
+                c = float(lt.inputs[1].default_value)
+                return {"mode": "clip", "cutoff": c, "source": f"1 - (texture alpha < {c:g}) (glTF MASK)",
+                        "node": img}
+    raise ValueError(f"material {name}: its alpha comes from a {node.type.lower()} node the bench cannot "
+                     f"sample in the masks (only an image's alpha, glTF MASK/BLEND/OPAQUE, or --alpha); "
+                     f"pass --alpha {name}=opaque to ignore it")
+
+
+def check_alpha_node(name, node, colour_sock):
+    """The clipped alpha must be the base-colour texture's own alpha (glTF keeps alpha there), sampled the way
+    the bench's masks can reproduce."""
+    cnode = colour_sock.node if colour_sock is not None else None
+    if cnode is None or cnode.type != "TEX_IMAGE" or cnode.image != node.image:
+        raise ValueError(f"material {name}: the alpha comes from {node.image.name}, which is not its "
+                         f"base-colour texture; glTF keeps alpha in the base-colour texture, so pack it "
+                         f"there first")
+    if node.interpolation not in TEX.INTERPOLATIONS:
+        raise ValueError(f"material {name}: texture interpolation {node.interpolation} cannot be matched "
+                         f"in the masks (use Linear or Closest)")
+    if node.extension not in TEX.EXTENSIONS:
+        raise ValueError(f"material {name}: texture extension {node.extension} is not supported")
+    vec, _ = _from(node.inputs["Vector"])
+    if vec is not None and vec.type != "UVMAP":
+        raise ValueError(f"material {name}: the alpha texture's coordinates come from a "
+                         f"{vec.type.lower()} node; only a plain UV map can be matched in the masks")
+
+
+def alpha_sampler(node):
+    """What the masks need to read this texture's alpha as Cycles does."""
+    img = node.image
+    px = np.empty(len(img.pixels), dtype=np.float32)
+    img.pixels.foreach_get(px)
+    w, h = img.size
+    vec, _ = _from(node.inputs["Vector"])
+    return {"alpha": px[3::4].reshape(h, w), "interpolation": node.interpolation, "extension": node.extension,
+            "uv_map": (vec.uv_map or None) if vec is not None else None, "image": img.name}
+
+
+def normalise_materials(meshes, images, vcols, alphas, report):
+    """Rebuild every used material around its base colour and its alpha: a lit principled shader and an unlit
+    emission shader fed by the same colour, each cut by the same alpha step (1 where the texture alpha is at
+    least the cutoff, else 0) when the material clips. `set_shading` switches the output between them; the lit
+    one is what the GLB exporter reads, so a clipped material exports as alphaMode MASK. Overrides must name
+    materials the chosen meshes use. Returns {material: alpha record} and {material: sampler} for the
+    masks."""
     used = sorted({m.name for o in meshes for m in o.data.materials if m is not None})
-    unknown = sorted((set(images) | set(vcols)) - set(used))
+    unknown = sorted((set(images) | set(vcols) | set(alphas)) - set(used))
     if unknown:
-        raise ValueError(f"--image/--vcol name materials the chosen meshes do not use: {', '.join(unknown)} "
-                         f"(they use: {', '.join(used) or 'no materials'})")
-    done = {}
+        raise ValueError(f"--image/--vcol/--alpha name materials the chosen meshes do not use: "
+                         f"{', '.join(unknown)} (they use: {', '.join(used) or 'no materials'})")
+    done, records, samplers = {}, {}, {}
     for o in meshes:
         if not o.data.materials:
             mat = bpy.data.materials.new(o.name + "_bench")
@@ -516,9 +629,15 @@ def normalise_materials(meshes, images, vcols, report):
             legacy = None if mat.use_nodes else tuple(mat.diffuse_color)
             mat.use_nodes = True
             nt = mat.node_tree
+            bsdf = None if legacy is not None else \
+                next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
             sock, value, how = base_colour_source(mat, images.get(mat.name), vcols.get(mat.name))
             if legacy is not None and sock is None and not images.get(mat.name) and not vcols.get(mat.name):
                 value, how = legacy, "legacy diffuse colour"
+            override = sock.node if images.get(mat.name) else None
+            alpha = read_alpha(mat, bsdf, override, alphas.get(mat.name), legacy is not None)
+            if alpha["node"] is not None:
+                check_alpha_node(mat.name, alpha["node"], sock)
             out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
             if out is None:
                 out = nt.nodes.new("ShaderNodeOutputMaterial")
@@ -529,19 +648,49 @@ def normalise_materials(meshes, images, vcols, report):
             flat = nt.nodes.new("ShaderNodeEmission")
             flat.name = "BenchFlat"
             flat.inputs["Strength"].default_value = 1.0
+            hole = nt.nodes.new("ShaderNodeBsdfTransparent")
+            cut = nt.nodes.new("ShaderNodeMixShader")      # Fac 0: the hole, 1: the flat colour
+            cut.name = "BenchFlatCut"
+            nt.links.new(hole.outputs["BSDF"], cut.inputs[1])
+            nt.links.new(flat.outputs["Emission"], cut.inputs[2])
             if sock is not None:
                 nt.links.new(sock, lit.inputs["Base Color"])
                 nt.links.new(sock, flat.inputs["Color"])
             else:
                 lit.inputs["Base Color"].default_value = value
                 flat.inputs["Color"].default_value = value
+            if alpha["mode"] == "clip" and alpha["node"] is not None:
+                below = nt.nodes.new("ShaderNodeMath")
+                below.operation = "LESS_THAN"
+                below.inputs[1].default_value = alpha["cutoff"]
+                step = nt.nodes.new("ShaderNodeMath")
+                step.operation = "SUBTRACT"
+                step.inputs[0].default_value = 1.0
+                nt.links.new(alpha["node"].outputs["Alpha"], below.inputs[0])
+                nt.links.new(below.outputs["Value"], step.inputs[1])
+                nt.links.new(step.outputs["Value"], lit.inputs["Alpha"])
+                nt.links.new(step.outputs["Value"], cut.inputs["Fac"])
+                samplers[mat.name] = dict(alpha_sampler(alpha["node"]), cutoff=alpha["cutoff"])
+            else:
+                keep = 0.0 if alpha["mode"] == "clip" else 1.0   # a constant alpha below the cutoff: all hole
+                lit.inputs["Alpha"].default_value = keep
+                cut.inputs["Fac"].default_value = keep
+                if alpha["mode"] == "clip":
+                    samplers[mat.name] = {"constant": 0.0, "cutoff": alpha["cutoff"]}
             for link in list(out.inputs["Surface"].links):
                 nt.links.remove(link)
             for link in list(out.inputs["Displacement"].links):
                 nt.links.remove(link)
             nt.links.new(lit.outputs["BSDF"], out.inputs["Surface"])
+            records[mat.name] = {
+                "mode": alpha["mode"], "cutoff": alpha["cutoff"], "source": alpha["source"],
+                "image": alpha["node"].image.name if alpha["node"] is not None else None,
+                "clipped_texel_share": (round(image_alpha(alpha["node"].image, alpha["cutoff"]) or 0.0, 5)
+                                        if alpha["node"] is not None else None),
+            }
             done[mat.name] = how
     report.update(done)
+    return records, samplers
 
 
 def images_feeding_colour(meshes):
@@ -564,40 +713,13 @@ def images_feeding_colour(meshes):
     return found
 
 
-def image_alpha(img):
-    """Share of the image's texels with alpha below one half, or None when the image has no alpha."""
+def image_alpha(img, cutoff=0.5):
+    """Share of the image's texels with alpha below `cutoff`, or None when the image has no alpha."""
     if img.channels < 4 or img.alpha_mode == "NONE" or not has_pixels(img):
         return None
     px = np.empty(len(img.pixels), dtype=np.float32)
     img.pixels.foreach_get(px)
-    return float((px[3::4] < 0.5).mean())
-
-
-def add_alpha_shaders(meshes):
-    """Give every material a `BenchAlpha` emission shader showing, as grey, the alpha of the first image
-    upstream of its base colour (white when that image has no alpha or there is none)."""
-    seen = set()
-    for o in meshes:
-        for mat in o.data.materials:
-            if mat is None or mat.name in seen:
-                continue
-            seen.add(mat.name)
-            nt = mat.node_tree
-            em = nt.nodes.new("ShaderNodeEmission")
-            em.name = "BenchAlpha"
-            em.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-            stack, visited = [nt.nodes["BenchFlat"]], set()
-            while stack:
-                node = stack.pop(0)
-                if node.name in visited:
-                    continue
-                visited.add(node.name)
-                image = node.image if node.type == "TEX_IMAGE" else None
-                if image is not None and image_alpha(image) is not None:
-                    nt.links.new(node.outputs["Alpha"], em.inputs["Color"])
-                    break
-                for inp in node.inputs:
-                    stack.extend(link.from_node for link in inp.links)
+    return float((px[3::4] < cutoff).mean())
 
 
 def set_shading(meshes, mode):
@@ -610,9 +732,7 @@ def set_shading(meshes, mode):
             nt = mat.node_tree
             out = next(n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
             if mode == "flat":
-                src = nt.nodes["BenchFlat"].outputs["Emission"]
-            elif mode == "alpha":
-                src = nt.nodes["BenchAlpha"].outputs["Emission"]
+                src = nt.nodes["BenchFlatCut"].outputs["Shader"]
             else:
                 src = nt.nodes["BenchLit"].outputs["BSDF"]
             for link in list(out.inputs["Surface"].links):
@@ -671,7 +791,56 @@ def apply_matrix(objs, m):
 
 # --------------------------------------------------------------------------------------------- rendering
 
-def raycast_view(bvh, cam, verts):
+def triangle_alpha(objs, samplers):
+    """For every triangle (in `all_triangles` order): the index of its material's alpha sampler (-1 when the
+    material is opaque) and its three corners' UVs in the UV map that sampler reads."""
+    index = {name: i for i, name in enumerate(samplers)}
+    tri_s, tri_uv = [], []
+    for o in objs:
+        me = o.data
+        me.calc_loop_triangles()
+        n = len(me.loop_triangles)
+        mat_idx = np.empty(n, dtype=np.int64)
+        me.loop_triangles.foreach_get("material_index", mat_idx)
+        loops = np.empty(n * 3, dtype=np.int64)
+        me.loop_triangles.foreach_get("loops", loops)
+        names = [m.name if m is not None else None for m in me.materials]
+        s_of_slot = np.array([index.get(nm, -1) for nm in names] or [-1], dtype=np.int64)
+        s = s_of_slot[np.clip(mat_idx, 0, len(s_of_slot) - 1)]
+        uv = np.zeros((n, 3, 2), dtype=np.float64)
+        for si in sorted(set(s.tolist()) - {-1}):
+            sampler = list(samplers.values())[si]
+            if "constant" in sampler:
+                continue
+            layer = (me.uv_layers.get(sampler["uv_map"]) if sampler["uv_map"]
+                     else next((u for u in me.uv_layers if u.active_render), None))
+            if layer is None:
+                raise ValueError(f"{o.name}: no UV map {sampler['uv_map'] or '(render)'} for its alpha "
+                                 f"texture")
+            flat = np.empty(len(me.loops) * 2, dtype=np.float64)
+            layer.data.foreach_get("uv", flat)
+            per_loop = flat.reshape(-1, 2)
+            pick = s == si
+            uv[pick] = per_loop[loops.reshape(-1, 3)[pick]]
+        tri_s.append(s)
+        tri_uv.append(uv)
+    return np.concatenate(tri_s), np.concatenate(tri_uv), list(samplers.values())
+
+
+def hit_alpha(tri, point, verts, tris, tri_uv, sampler):
+    """Texture alpha at a point on triangle `tri`, sampled as Cycles samples the texture."""
+    if "constant" in sampler:
+        return sampler["constant"]
+    a, b, c = verts[tris[tri]]
+    uv = TEX.barycentric_uv(a, b, c, point, *tri_uv[tri])
+    return TEX.sample(sampler["alpha"], float(uv[0]), float(uv[1]), sampler["interpolation"],
+                      sampler["extension"])
+
+
+def raycast_view(bvh, cam, verts, tris, alpha, clip=True):
+    """Mask and depth from one orthographic ray per pixel centre. A ray that meets a clipped texel (alpha
+    below its material's cutoff) goes on through it; the first surface it does not pass is the hit."""
+    tri_s, tri_uv, samplers = alpha
     size = cam["resolution"]
     cr = CAM.project(verts, cam)
     c0 = max(0, int(math.floor(cr[:, 0].min())) - 2)
@@ -686,12 +855,25 @@ def raycast_view(bvh, cam, verts):
     d = Vector(fwd.tolist())
     far = 2.0 * cam["distance"]
     centre = np.asarray(cam["image_centre_world"])
+    clipping = clip and bool(samplers)
     for r, c, o in zip(rows.tolist(), cols.tolist(), origins.tolist()):
-        hit = bvh.ray_cast(Vector(o), d, far)[0]
-        if hit is not None:
-            mask[r, c] = True
-            depth[r, c] = float(np.dot(np.array(hit) - centre, fwd))
+        origin, left = Vector(o), far
+        for _ in range(ALPHA_LAYERS):
+            hit, _, tri, dist = bvh.ray_cast(origin, d, left)
+            if hit is None:
+                break
+            s = int(tri_s[tri]) if clipping else -1
+            if s < 0 or hit_alpha(tri, hit, verts, tris, tri_uv, samplers[s]) >= samplers_cutoff(samplers[s]):
+                mask[r, c] = True
+                depth[r, c] = float(np.dot(np.array(hit) - centre, fwd))
+                break
+            origin = hit + d * RAY_STEP          # past the clipped texel, on along the same ray
+            left -= dist + RAY_STEP
     return mask, depth
+
+
+def samplers_cutoff(sampler):
+    return sampler.get("cutoff", ALPHA_CUTOFF)
 
 
 def setup_cycles(scene, size, report):
@@ -720,6 +902,7 @@ def setup_cycles(scene, size, report):
     scene.cycles.pixel_filter_type = "BOX"
     scene.cycles.filter_width = 1.0
     scene.cycles.use_adaptive_sampling = False
+    scene.cycles.transparent_max_bounces = ALPHA_LAYERS   # layered alpha cards stay see-through
     scene.cycles.seed = 0
     device = "CPU"
     if JOB.get("device", "auto") != "cpu":
@@ -824,20 +1007,21 @@ def main():
         pose_used = "as-shipped"
     timings["load_pose"] = round(time.time() - t0, 2)
 
-    normalise_materials(meshes, JOB.get("material_images", {}), JOB.get("material_vcols", {}), mat_report)
+    alpha_records, samplers = normalise_materials(
+        meshes, JOB.get("material_images", {}), JOB.get("material_vcols", {}), JOB.get("material_alpha", {}),
+        mat_report)
     used = images_feeding_colour(meshes)
     unused_missing = sorted(set(missing_images) - {im.name for im in used})
     missing_images = sorted(im.name for im in used if not has_pixels(im))
     if unused_missing:
         report.append(f"missing images no rendered colour uses: {', '.join(unused_missing)}")
-    alpha_share = {im.name: image_alpha(im) for im in sorted(used, key=lambda im: im.name)}
-    add_alpha_shaders(meshes)
     object_names, rig_names = [o.name for o in meshes], [a.name for a in rigs]
     frozen = freeze(meshes, yaw, report)
     verts, tris = all_triangles(frozen)
     contract = CAM.contract_matrix(verts.min(0), verts.max(0), JOB["height"])
     apply_matrix(frozen, contract)
     verts, tris = all_triangles(frozen)
+    alpha = triangle_alpha(frozen, samplers)
 
     gt = JOB["gt_glb"]
     os.makedirs(os.path.dirname(gt), exist_ok=True)
@@ -858,8 +1042,13 @@ def main():
     bvh = BVHTree.FromPolygons([tuple(v) for v in verts.tolist()], [tuple(t) for t in tris.tolist()],
                                epsilon=0.0)
     for cam in cams:
-        mask, depth = raycast_view(bvh, cam, verts)
-        np.savez_compressed(os.path.join(work, cam["view"] + ".npz"), mask=mask, depth=depth)
+        mask, depth = raycast_view(bvh, cam, verts, tris, alpha)
+        extra = {}
+        if cam["view"] == "front":
+            # the camera-scale check measures the geometry, which alpha clipping can make look shorter
+            extra["geometry_mask"] = raycast_view(bvh, cam, verts, tris, alpha, clip=False)[0] \
+                if alpha[2] else mask
+        np.savez_compressed(os.path.join(work, cam["view"] + ".npz"), mask=mask, depth=depth, **extra)
     timings["raycast"] = round(time.time() - t1, 2)
 
     t2 = time.time()
@@ -874,11 +1063,6 @@ def main():
         scene.cycles.samples = int(JOB.get("samples_flat", 16))
         scene.cycles.use_denoising = False
         scene.render.filepath = os.path.join(work, cam["view"] + "-flat.png")
-        bpy.ops.render.render(write_still=True)
-        # alpha: each surface point's texture alpha as grey, to find transparent texels the render shows
-        set_shading(frozen, "alpha")
-        scene.cycles.samples = int(JOB.get("samples_flat", 16))
-        scene.render.filepath = os.path.join(work, cam["view"] + "-alpha.png")
         bpy.ops.render.render(write_still=True)
         # lit: principled base colour, camera-fixed suns, soft ambient world
         set_shading(frozen, "lit")
@@ -905,8 +1089,7 @@ def main():
         "yaw_deg": yaw_deg,
         "facing": facing,
         "skipped_geometry": skipped,
-        "image_alpha_transparent_share": {k: (None if v is None else round(v, 5))
-                                          for k, v in alpha_share.items()},
+        "alpha": alpha_records,
         "contract_scale": float(contract[0, 0]),
         "triangles": int(len(tris)),
         "vertices": int(len(verts)),

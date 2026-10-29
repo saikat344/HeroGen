@@ -147,6 +147,65 @@ BUILD_BLEND = textwrap.dedent('''
     bpy.ops.wm.save_as_mainfile(filepath=out)
 ''')
 
+# A card (a 1 x 2 plane facing -Y) textured red, whose left half has alpha 0.35 (clipped at 0.5, and above
+# it once sRGB-encoded, so it catches thresholding encoded bytes) and right half alpha 1, with a grey box
+# behind it filling the card's lower half. "mask" wires the alpha as the glTF importer writes alphaMode MASK;
+# "opaque" leaves it unwired (glTF OPAQUE) although the texture still carries it; "noise" takes the alpha from
+# a procedural texture and "otherimage" from an image that is not the base colour, both of which only a
+# .blend can carry. Saved as GLB, or as .blend when the output name ends so.
+BUILD_CARD = textwrap.dedent('''
+    import sys
+    import bpy
+
+    out, variant = sys.argv[-2], sys.argv[-1]
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 0.0, 1.0), rotation=(1.5707963267948966, 0, 0))
+    card = bpy.context.active_object
+    card.name = "Card"
+    card.scale = (1.0, 2.0, 1.0)
+    img = bpy.data.images.new("CardTex", 8, 8, alpha=True)
+    img.pixels = [px for i in range(64) for px in (0.8, 0.1, 0.1, 0.35 if i % 8 < 4 else 1.0)]
+    img.pack()
+    mat = bpy.data.materials.new("CardMat")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = nt.nodes["Principled BSDF"]
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = img
+    tex.interpolation = "Closest"
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if variant == "mask":
+        lt = nt.nodes.new("ShaderNodeMath"); lt.operation = "LESS_THAN"; lt.inputs[1].default_value = 0.5
+        sub = nt.nodes.new("ShaderNodeMath"); sub.operation = "SUBTRACT"; sub.inputs[0].default_value = 1.0
+        nt.links.new(tex.outputs["Alpha"], lt.inputs[0])
+        nt.links.new(lt.outputs[0], sub.inputs[1])
+        nt.links.new(sub.outputs[0], bsdf.inputs["Alpha"])
+    elif variant == "noise":
+        noise = nt.nodes.new("ShaderNodeTexNoise")
+        nt.links.new(noise.outputs["Fac"], bsdf.inputs["Alpha"])
+    elif variant == "otherimage":
+        other = bpy.data.images.new("OtherTex", 8, 8, alpha=True)
+        other.pixels = [0.5, 0.5, 0.5, 0.2] * 64
+        other.pack()
+        tex2 = nt.nodes.new("ShaderNodeTexImage")
+        tex2.image = other
+        nt.links.new(tex2.outputs["Alpha"], bsdf.inputs["Alpha"])
+    card.data.materials.append(mat)
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 0.5, 0.5))
+    box = bpy.context.active_object
+    box.name = "Box"
+    box.scale = (0.9, 0.2, 1.0)
+    grey = bpy.data.materials.new("BoxMat")
+    grey.use_nodes = True
+    grey.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.3, 0.3, 0.3, 1.0)
+    box.data.materials.append(grey)
+    if out.endswith(".blend"):
+        bpy.ops.wm.save_as_mainfile(filepath=out)
+    else:
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True)
+''')
+
 TORSO_DEPTH = 0.3
 TORSO_COLOUR = (0.2, 0.7, 0.2)  # linear, as built
 
@@ -165,16 +224,18 @@ class BlendFileTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.runs = {}
-        for mode in ("plain", "hostile", "holes"):
-            asset, run = Path(cls.tmp.name) / f"box-{mode}.blend", Path(cls.tmp.name) / f"run-{mode}"
-            cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_BLEND, "--",
-                   mode, str(asset)]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            assert asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:]
+        for mode, build, extra in (("plain", "plain", []), ("hostile", "hostile", []), ("holes", "holes", []),
+                                   ("holes-clip", "holes", ["--alpha", "Legacy=clip"])):
+            asset, run = Path(cls.tmp.name) / f"box-{build}.blend", Path(cls.tmp.name) / f"run-{mode}"
+            if not asset.exists():
+                cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_BLEND,
+                       "--", build, str(asset)]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                assert asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:]
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "96",
-                             "--samples-flat", "4", "--samples-lit", "16", "--image", "Legacy=Skin",
-                             "--yaw", "0"])
+                             "--samples-flat", "16", "--samples-lit", "16", "--image", "Legacy=Skin",
+                             "--yaw", "0", *extra])
             cls.runs[mode] = (code, run)
 
     @classmethod
@@ -187,17 +248,20 @@ class BlendFileTest(unittest.TestCase):
         self.assertEqual(code, expect, json.dumps(rec["checks"]))
         return rec, run
 
-    def test_visible_transparent_texels_are_measured_and_fail_the_run(self):
-        rec, _ = self._run("holes", expect=1)
-        c = next(c for c in rec["checks"] if c["name"] == "visible_transparent_texels_px")
-        self.assertFalse(c["pass"])
-        self.assertGreater(c["per_view"]["front"], 100)
-        self.assertEqual(c["image_alpha_transparent_share"], {"Skin": 0.5})
-        failed = [x["name"] for x in rec["checks"] if not x["pass"]]
-        self.assertEqual(failed, ["visible_transparent_texels_px"])
-        plain, _ = self._run("plain")
-        c = next(c for c in plain["checks"] if c["name"] == "visible_transparent_texels_px")
-        self.assertEqual((c["value"], c["image_alpha_transparent_share"]), (0, {"Skin": 0.0}))
+    def test_an_override_stays_opaque_unless_alpha_clip_is_asked_for(self):
+        opaque, run = self._run("holes")
+        self.assertEqual(opaque["details"]["alpha"]["Legacy"]["mode"], "opaque")
+        full = np.asarray(Image.open(run / "masks" / "front.png")) > 127
+        clipped, run = self._run("holes-clip")
+        rec = clipped["details"]["alpha"]["Legacy"]
+        self.assertEqual((rec["mode"], rec["cutoff"], rec["image"], rec["clipped_texel_share"]),
+                         ("clip", 0.5, "Skin", 0.5))
+        holed = np.asarray(Image.open(run / "masks" / "front.png")) > 127
+        self.assertLess(holed.sum(), 0.8 * full.sum())          # the transparent half of the texture is gone
+        self.assertGreater(holed.sum(), 0.2 * full.sum())
+        glb = next(c for c in clipped["checks"] if c["name"] == "gt_glb_alpha_modes")
+        self.assertTrue(glb["pass"])
+        self.assertEqual(glb["written"]["Legacy"], "MASK")
 
     def test_packed_image_named_by_override_is_the_base_colour(self):
         rec, run = self._run("plain")
@@ -312,6 +376,107 @@ class RenderMaskAgreementTest(unittest.TestCase):
         self.assertGreater(self.off_edge(np.roll(big, 3, axis=1).astype(float), big, coverage_margin(16)), 0)
 
 
+def build_card(path: Path, variant: str) -> None:
+    cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_CARD, "--",
+           str(path), variant]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if not path.exists():
+        raise RuntimeError(f"building the card failed:\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
+
+
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
+class AlphaClipTest(unittest.TestCase):
+    """Texture alpha below 0.5 is a hole in every output alike: flat and lit renders, masks, depth, GLB."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.runs = {}
+        for variant in ("mask", "opaque"):
+            asset, run = root / f"card-{variant}.glb", root / f"run-{variant}"
+            build_card(asset, variant)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "128",
+                             "--yaw", "0", "--samples-flat", "16", "--samples-lit", "16"])
+            cls.runs[variant] = (code, run)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _run(self, variant):
+        code, run = self.runs[variant]
+        rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0, json.dumps(rec["checks"]))
+        return rec, run
+
+    def _probe(self, run):
+        """Front view: mask, depth, flat and lit colour at the card's upper-left (alpha 0.35, nothing behind),
+        lower-left (alpha 0.35, the box behind) and upper-right (alpha 1)."""
+        m = np.asarray(Image.open(run / "masks" / "front.png")) > 127
+        d = np.load(run / "depth" / "front.npy")
+        flat = np.asarray(Image.open(run / "views" / "front.png").convert("RGB")).astype(int)
+        lit = np.asarray(Image.open(run / "views-lit" / "front.png").convert("RGB")).astype(int)
+        rows, cols = np.flatnonzero(m.any(1)), np.flatnonzero(m.any(0))
+        top, bot, left, right = rows[0], rows[-1], cols[0], cols[-1]
+        mid = (left + right) // 2
+        upper, lower = top + (bot - top) // 4, bot - (bot - top) // 4
+        lc, rc = left + (mid - left) // 2, mid + (right - mid) // 2
+        return {name: (bool(m[r, c]), float(d[r, c]), flat[r, c].tolist(), lit[r, c].tolist())
+                for name, (r, c) in {"upper_left": (upper, lc), "lower_left": (lower, lc),
+                                     "upper_right": (upper, rc), "lower_right": (lower, rc)}.items()}
+
+    def test_clipped_texels_are_holes_in_the_mask_and_both_renders(self):
+        rec, run = self._run("mask")
+        p = self._probe(run)
+        self.assertEqual(p["upper_left"], (False, p["upper_left"][1], [255, 255, 255], [255, 255, 255]))
+        self.assertTrue(np.isnan(p["upper_left"][1]))
+        self.assertTrue(p["upper_right"][0])
+        # the texture's stored bytes, unlit
+        np.testing.assert_allclose(p["upper_right"][2], [204, 26, 26], atol=3)
+        alpha = rec["details"]["alpha"]["CardMat"]
+        self.assertEqual((alpha["mode"], alpha["cutoff"], alpha["clipped_texel_share"]), ("clip", 0.5, 0.5))
+
+    def test_a_ray_through_a_clipped_texel_finds_the_surface_behind(self):
+        _, run = self._run("mask")
+        p = self._probe(run)
+        self.assertTrue(p["lower_left"][0])                    # the box, seen through the hole
+        self.assertGreater(p["lower_left"][1], p["lower_right"][1] + 0.3)   # deeper than the card
+        np.testing.assert_allclose(p["lower_left"][2], [149, 149, 149], atol=3)   # the box's grey
+
+    def test_the_glb_reads_back_as_mask(self):
+        from herogen.bench.render import glb_materials
+
+        rec, run = self._run("mask")
+        written = glb_materials(run / "gt" / "body.glb")
+        self.assertEqual(written["CardMat"], {"alphaMode": "MASK", "alphaCutoff": 0.5})
+        self.assertEqual(written["BoxMat"]["alphaMode"], "OPAQUE")
+        self.assertTrue(next(c for c in rec["checks"] if c["name"] == "gt_glb_alpha_modes")["pass"])
+
+    def test_a_gltf_opaque_material_is_not_clipped_although_its_texture_has_alpha(self):
+        from herogen.bench.render import glb_materials
+
+        rec, run = self._run("opaque")
+        p = self._probe(run)
+        self.assertTrue(p["upper_left"][0])
+        np.testing.assert_allclose(p["upper_left"][2], [204, 26, 26], atol=3)
+        self.assertEqual(rec["details"]["alpha"]["CardMat"]["mode"], "opaque")
+        self.assertEqual(glb_materials(run / "gt" / "body.glb")["CardMat"]["alphaMode"], "OPAQUE")
+
+    def test_alpha_the_masks_cannot_sample_is_refused(self):
+        for variant, words in (("noise", "cannot sample"), ("otherimage", "not its base-colour texture")):
+            asset = Path(self.tmp.name) / f"card-{variant}.blend"
+            build_card(asset, variant)
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                out = Path(self.tmp.name) / f"r-{variant}"
+                code = main(["render", "--asset", str(asset), "--out", str(out), "--size", "64",
+                             "--yaw", "0"])
+            self.assertEqual(code, 2, variant)
+            self.assertIn(words, err.getvalue(), variant)
+
+
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class CliTest(unittest.TestCase):
     def _main(self, *args):
@@ -413,6 +578,29 @@ class CliTest(unittest.TestCase):
             self.assertIsNone(not_a_bench_run(self._folder(tmp, partial)))
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(not_a_bench_run(self._folder(tmp, older)))
+
+    def test_alpha_mode_must_be_clip_or_opaque(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = self._dummy(tmp)
+            with self.assertRaises(SystemExit) as cm:
+                self._main("render", "--asset", str(asset), "--out", tmp, "--alpha", "Skin=blend")
+        self.assertIn("clip or MATERIAL=opaque", str(cm.exception.code))
+
+    def test_glb_materials_fills_in_the_gltf_defaults(self):
+        import struct
+
+        from herogen.bench.render import glb_materials
+
+        doc = json.dumps({"materials": [{"name": "A", "alphaMode": "MASK"}, {"name": "B"},
+                                        {"name": "C", "alphaMode": "MASK", "alphaCutoff": 0.3}]}).encode()
+        doc += b" " * (-len(doc) % 4)
+        blob = b"glTF" + struct.pack("<II", 2, 20 + len(doc)) + struct.pack("<I4s", len(doc), b"JSON") + doc
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.glb"
+            path.write_bytes(blob)
+            self.assertEqual(glb_materials(path), {"A": {"alphaMode": "MASK", "alphaCutoff": 0.5},
+                                                   "B": {"alphaMode": "OPAQUE", "alphaCutoff": None},
+                                                   "C": {"alphaMode": "MASK", "alphaCutoff": 0.3}})
 
     def test_material_override_needs_a_pair(self):
         with tempfile.TemporaryDirectory() as tmp:

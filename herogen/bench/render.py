@@ -31,6 +31,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -150,12 +151,44 @@ def coverage_margin(samples: int) -> float:
     return min(0.25, 2.0 / max(1, samples))
 
 
-def visible_transparent(alpha_render: Path, mask: np.ndarray) -> int:
-    """Figure pixels (away from the edge) where the texture under the pixel is transparent (alpha below one
-    half): surface the renders show as solid although its texture says it is see-through."""
-    with Image.open(alpha_render) as im:
-        grey = np.asarray(im.convert("RGBA"), dtype=np.float64)[..., 0] / 255.0
-    return int((mask & ~near_edge(mask) & (grey < 0.5)).sum())
+def glb_materials(path: Path) -> dict[str, dict]:
+    """{material name: {"alphaMode", "alphaCutoff"}} as written in a GLB's JSON chunk, with the glTF defaults
+    filled in (OPAQUE; a MASK cutoff of 0.5)."""
+    data = path.read_bytes()
+    if data[:4] != b"glTF":
+        raise ValueError(f"{path.name} is not a GLB file")
+    length, kind = struct.unpack_from("<I4s", data, 12)
+    if kind != b"JSON":
+        raise ValueError(f"{path.name} has no JSON chunk first")
+    doc = json.loads(data[20:20 + length])
+    out = {}
+    for m in doc.get("materials", []):
+        mode = m.get("alphaMode", "OPAQUE")
+        out[m.get("name", "")] = {"alphaMode": mode,
+                                  "alphaCutoff": m.get("alphaCutoff", 0.5) if mode == "MASK" else None}
+    return out
+
+
+def glb_alpha_check(path: Path, records: dict) -> dict:
+    """gt/body.glb must say what the renders and masks did: alphaMode MASK at the material's cutoff for every
+    clipped material, OPAQUE for the rest."""
+    written = glb_materials(path)
+    wrong = {}
+    for name, rec in records.items():
+        got = written.get(name)
+        if rec["mode"] == "clip":
+            want = {"alphaMode": "MASK", "alphaCutoff": rec["cutoff"]}
+            ok = got is not None and got["alphaMode"] == "MASK" and \
+                abs(got["alphaCutoff"] - rec["cutoff"]) < 1e-6
+            if rec["image"] is None:      # a constant alpha below the cutoff: any non-opaque mode hides it
+                ok = got is not None and got["alphaMode"] in ("MASK", "BLEND")
+        else:
+            want = {"alphaMode": "OPAQUE", "alphaCutoff": None}
+            ok = got is not None and got["alphaMode"] == "OPAQUE"
+        if not ok:
+            wrong[name] = {"want": want, "got": got}
+    return check("gt_glb_alpha_modes", len(wrong), 0, passed=not wrong, wrong=wrong,
+                 written={k: v["alphaMode"] for k, v in written.items()})
 
 
 def border_pixels(mask: np.ndarray) -> int:
@@ -278,7 +311,8 @@ def heldout_record(out: Path, cams: list[dict], borders: dict, off_edge: dict, a
 
 def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
                  yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
-                 material_vcols: dict | None = None, image_dirs: list | None = None,
+                 material_vcols: dict | None = None, material_alpha: dict | None = None,
+                 image_dirs: list | None = None,
                  bind_unrigged: bool = False,
                  size: int = DEFAULT_SIZE, height: float = HEIGHT_STUDS, samples_flat: int = 16,
                  samples_lit: int = 128, device: str = "auto", timeout: float = 3600.0,
@@ -300,7 +334,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             "repo_root": str(REPO_ROOT), "asset": str(asset.resolve()),
             "include": include, "exclude": exclude,
             "yaw_deg": yaw_deg, "pose": pose, "material_images": material_images or {},
-            "material_vcols": material_vcols or {},
+            "material_vcols": material_vcols or {}, "material_alpha": material_alpha or {},
             "image_dirs": [str(Path(d).resolve()) for d in image_dirs or []],
             "bind_unrigged": bind_unrigged, "height": height, "size": size, "samples_flat": samples_flat,
             "samples_lit": samples_lit, "device": device, "gt_glb": str((out / "gt" / "body.glb").resolve()),
@@ -311,12 +345,15 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
         res = run_blender(job, work, out / "logs" / "bench-render.log", timeout, places)
         cams = res["cameras"]
         outputs = ["gt/body.glb", "cameras.json", "views/meta.json"]
-        ious, borders, off_edge, see_through = {}, {}, {}, {}
+        ious, borders, off_edge = {}, {}, {}
+        front_geometry = None
         for cam in cams:
             paths = view_paths(cam)
             cam["files"] = paths
             with np.load(work / "views" / f"{cam['view']}.npz") as arr:
                 mask, depth = arr["mask"], arr["depth"]
+                if "geometry_mask" in arr.files:
+                    front_geometry = arr["geometry_mask"]
             flat, alpha = composite(work / "views" / f"{cam['view']}-flat.png")
             lit, _ = composite(work / "views" / f"{cam['view']}-lit.png")
             for key, img in (("colour", flat), ("lit", lit), ("mask", mask_image(mask))):
@@ -328,7 +365,6 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             outputs += list(paths.values())
             ious[cam["view"]] = round(iou(alpha >= 0.5, mask), 5)
             off_edge[cam["view"]] = off_edge_disagreement(alpha, mask, coverage_margin(samples_flat))
-            see_through[cam["view"]] = visible_transparent(work / "views" / f"{cam['view']}-alpha.png", mask)
             borders[cam["view"]] = border_pixels(mask)
 
     ppu, size = res["pixels_per_unit"], int(size)
@@ -346,6 +382,8 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
         "depth": "(p - image_centre_world).forward in studs; NaN where no surface",
         "building": building,
         "evaluation": evaluation,
+        "alpha": "texture alpha below a clipped material's cutoff is a hole in every view's colour, mask and "
+                 "depth, as in gt/body.glb (alphaMode MASK); see stage-2.json details.alpha",
         "cameras": cams,
     }, indent=2) + "\n")
     (out / "views").mkdir(parents=True, exist_ok=True)
@@ -361,26 +399,31 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
         "reference": "ground-truth",
     }, indent=2) + "\n")
 
-    front = np.asarray(Image.open(out / "masks" / "front.png")) > 127
-    rows = np.flatnonzero(front.any(axis=1))
+    # the camera scale is checked on the geometry (alpha clipping can hide the top or the feet); the visible
+    # height, after clipping, is recorded beside it
+    rows = np.flatnonzero(front_geometry.any(axis=1))
     front_h = int(rows[-1] - rows[0] + 1) if len(rows) else 0
+    seen = np.flatnonzero((np.asarray(Image.open(out / "masks" / "front.png")) > 127).any(axis=1))
+    visible_h = round((seen[-1] - seen[0] + 1) / ppu, 4) if len(seen) else 0.0
     expect_h = height * ppu
     rec.add(check("gt_triangles", res["triangles"], 1))
     rec.add(check("figure_in_frame_border_px", max(borders.values()), 0, passed=max(borders.values()) == 0,
                   per_view=borders))
     rec.add(check("front_height_px_error", round(abs(front_h - expect_h), 3), HEIGHT_TOLERANCE_PX,
                   passed=abs(front_h - expect_h) <= HEIGHT_TOLERANCE_PX, measured_px=front_h,
-                  expected_px=round(expect_h, 3)))
+                  expected_px=round(expect_h, 3), basis="front view of the geometry, before alpha clipping",
+                  visible_height_units=visible_h))
     rec.add(check("render_mask_off_edge_px", max(off_edge.values()), 0, passed=max(off_edge.values()) == 0,
                   per_view=off_edge))
     rec.add(check("render_mask_iou_min", min(ious.values()), None, gate=False, per_view=ious,
                   note="edge pixels weigh more at small sizes; render_mask_off_edge_px is the gate"))
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
                   names=res["missing_images"]))
-    rec.add(check("visible_transparent_texels_px", max(see_through.values()), 0,
-                  passed=max(see_through.values()) == 0, per_view=see_through,
-                  image_alpha_transparent_share=res["image_alpha_transparent_share"],
-                  note="figure pixels whose texture alpha is below 0.5 (edge pixels excluded)"))
+    rec.add(glb_alpha_check(out / "gt" / "body.glb", res["alpha"]))
+    clipped = sum(1 for r in res["alpha"].values() if r["mode"] == "clip")
+    rec.add(check("alpha_clipped_materials", clipped, None, gate=False, materials=res["alpha"],
+                  note="texture alpha below the cutoff is a hole in the renders, the masks, the depth and "
+                       "gt/body.glb alike"))
     rec.add(facing_check(res["facing"]))
     rec.add(check("skipped_visible_geometry", len(res["skipped_geometry"]), None, gate=False,
                   objects=res["skipped_geometry"],
@@ -407,6 +450,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             "limbs": res["limbs"],
             "yaw_deg": res["yaw_deg"],
             "facing": res["facing"],
+            "alpha": res["alpha"],
             "skipped_geometry": res["skipped_geometry"],
             "contract_scale": res["contract_scale"],
             "include": include, "exclude": exclude,
