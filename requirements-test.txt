@@ -6,6 +6,9 @@
 numpy==2.5.4              # BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
 pillow==12.3.0            # MIT-CMU
 
+# The hybrid mesh tests (outline conform, texture fallback).
+scipy==1.18.1             # BSD-3-Clause
+
 # The hosted service's web tests: Starlette, its form parser and its test client.
 starlette==1.8.0          # BSD-3-Clause
 python-multipart==0.0.32  # Apache-2.0

@@ -1,4 +1,5 @@
-"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,4]` and `... synth --run <folder>`."""
+"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,4] [--mesh-source ...] [--joints ...]` and
+`... synth --run <folder>`."""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +39,23 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--voxels", type=int, default=None, help="voxel grid resolution along the height")
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
     r.add_argument("--force", action="store_true", help="run even if the previous stage did not pass")
+    r.add_argument("--mesh-source", choices=("carve", "sam3d-objects"), default="carve",
+                   help="stage 3 mesh: silhouette carving (default) or SAM 3D Objects from the front view")
+    r.add_argument("--joints", choices=("silhouette", "sam3d-body"), default="silhouette",
+                   help="joints: silhouette finder (default) or SAM 3D Body on the front view")
+    r.add_argument("--y-method", choices=("mesh", "mhr3d"), default="mesh", help="sam3d-body joint depth")
+    r.add_argument("--limb-roots", choices=("silhouette", "sam3d-body"), default="silhouette",
+                   help="sam3d-body joints: where shoulders and hips are cut (see body_joints)")
+    r.add_argument("--body-detector", choices=("none", "vitdet"), default="none",
+                   help="sam3d-body joints: person box from the front mask (default) or SAM 3D Body's ViTDet "
+                        "detector (weights under CC BY-SA 3.0)")
+    r.add_argument("--remote", choices=("replay", "live"), default="replay",
+                   help="remote models: replay the cache only (default) or call Modal and record")
+    r.add_argument("--remote-cache", type=Path, default=None, help="default: <run parent>/_cache-remote")
+    r.add_argument("--remote-timeout", type=float, default=1800.0, help="seconds allowed per Modal call")
+    r.add_argument("--objects-gpu", default=None, help="Modal GPU for SAM 3D Objects (default A100-40GB)")
+    r.add_argument("--body-gpu", default=None, help="Modal GPU for SAM 3D Body (default A10G; none = CPU)")
+    r.add_argument("--no-fallback", action="store_true", help="fail instead of falling back to carve/silhouette")
     s = sub.add_parser("synth", help="write a synthetic A-pose humanoid's masks (stage-2 output) to a run folder")
     s.add_argument("--run", required=True, type=Path)
     s.add_argument("--size", type=int, default=512)
@@ -66,11 +84,25 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     ok = True
-    if 3 in stages:
-        from .stage3 import DEFAULT_NZ, run_stage3
+    from .bl import BlenderError
 
-        rec = run_stage3(a.run, a.height, a.voxels or DEFAULT_NZ, timeout=a.timeout)
+    if 3 in stages:
+        from .remote.client import DEFAULT_BODY_GPU, DEFAULT_OBJECTS_GPU, RemoteClient, RemoteError
+        from .stage3 import DEFAULT_NZ, error_text, run_stage3
+
+        remote = RemoteClient(a.remote_cache or a.run.parent / "_cache-remote", mode=a.remote,
+                              timeout=a.remote_timeout, body_gpu=a.body_gpu or DEFAULT_BODY_GPU,
+                              objects_gpu=a.objects_gpu or DEFAULT_OBJECTS_GPU)
+        try:
+            rec = run_stage3(a.run, a.height, a.voxels or DEFAULT_NZ, timeout=a.timeout,
+                             mesh_source=a.mesh_source, joints_source=a.joints, remote=remote,
+                             fallback=not a.no_fallback, y_method=a.y_method, limb_roots=a.limb_roots,
+                             body_detector=None if a.body_detector == "none" else a.body_detector)
+        except (RemoteError, BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
+            print(f"stage 3 stopped: {error_text(exc, a.run)}", file=sys.stderr)
+            return 1
         print(json.dumps({"stage": 3, "ok": rec["ok"], "seconds": rec["seconds"],
+                          "mesh_source": rec.get("mesh_source"), "joints_source": rec.get("joints_source"),
                           "checks": {c["name"]: c["value"] for c in rec["checks"]}}))
         ok &= rec["ok"]
         if not rec["ok"]:
