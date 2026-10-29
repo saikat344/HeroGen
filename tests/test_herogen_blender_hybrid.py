@@ -475,7 +475,7 @@ class TestStage4HybridBlender(HybridBase):
         rec3 = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
                           remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
         self.assertFalse(rec3["ok"])                                  # the side views fail (stage 3 test)
-        rec4 = run_stage4(run, timeout=600)
+        rec4 = run_stage4(run, timeout=600, profile="roblox-ingame")
         chk = {c["name"]: c for c in rec4["checks"]}
         self.assertEqual((rec4["mesh_source"], rec4["joints_source"]), ("sam3d-objects", "sam3d-body"))
         self.assertEqual(chk["open_edges"]["value"], 0)
@@ -512,7 +512,7 @@ class TestStage4HybridBlender(HybridBase):
         # stage 4 again on the carve: the hybrid's comparison atlases must not survive as stale variants
         rec3 = run_stage3(run, nz=96, timeout=300)
         self.assertEqual(rec3["mesh_source"], "carve")
-        run_stage4(run, timeout=600)
+        run_stage4(run, timeout=600, profile="roblox-ingame")
         self.assertEqual(sorted(p.name for p in (run / "04-body").glob("atlas-high*.png")), ["atlas-high.png"])
         self.assertEqual(json.loads((run / "04-body" / "sections.json").read_text())["mesh_source"], "carve")
 

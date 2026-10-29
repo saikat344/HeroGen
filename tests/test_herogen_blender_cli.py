@@ -102,6 +102,16 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertNotIn(self.tmp.name, err)
 
+    def test_stage4_without_a_mesh_is_a_clear_error(self):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        (self.run / "stage-4.json").write_text(json.dumps({"stage": 4, "ok": True}))   # an earlier, passed run
+        code, err = self._main("--stages", "4")
+        self.assertEqual(code, 1)
+        self.assertIn("stage 4 stopped: FileNotFoundError", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertFalse((self.run / "stage-4.json").exists())      # no stale pass left for later stages
+
     def test_a_bad_input_is_a_clear_error(self):
         (self.run / "stage-2.json").write_text(json.dumps({"stage": 2, "ok": True}))
         code, err = self._main("--stages", "3")            # no views or masks in the run folder
