@@ -27,7 +27,8 @@ round; `--yaw-range VIEW=LO,HI` overrides one view's range. A named view is also
 (`at_fixed_yaw`). When `stage-2h.json` says the held-out views are generated images (`"reference":
 "generated"`), scores against them are labelled `"measures": "consistency"`, with the reference kind and stage
 2h's own status and found yaw for the view, since a generated view can invent detail and so measures
-consistency with the generated character, not accuracy; without that field both are null.
+consistency with the generated character, not accuracy; a `"reference": "ground-truth"` view (a render of a known
+body) is labelled `"measures": "accuracy"`; without the field both are null.
 
 Silhouettes. A body is projected orthographically at a yaw about +Z: u = cos(yaw) X + sin(yaw) Y, v = Z, so
 yaw 0 is the front view, 90 left, 180 back, 270 right (docs/ARCHITECTURE.md). The turnaround views use stage 3's
@@ -49,6 +50,12 @@ coordinate (filtered in linear light, as a GPU samples an sRGB texture), times t
 `COLOR_0` (multiplied in linear light). Mean absolute colour error (0-255) and grey SSIM are measured inside both
 silhouettes, a few pixels in from their edges, with the same metric as stage 4's texture gates
 (`texture.compare`). A body with no material, texture or vertex colour gets no colour scores.
+
+Alpha. A face whose material has glTF `alphaMode: MASK` counts, in the silhouette and the colour render alike,
+only where its alpha (base-colour factor, texture and `COLOR_0` alphas multiplied, the texture sampled
+bilinearly) is at least the material's `alphaCutoff`: the body's shape is its alpha-clipped surface, as an
+alpha-card hair strand or hem renders. OPAQUE faces are never clipped, whatever alpha their texture carries;
+BLEND faces are scored as opaque and the body's notes say so.
 
 Seen / unseen, per view. `seen_shape`: the body's shape was built from the view; `seen_colour`: its colours
 were; `seen`: either. Discovered bodies take both from `sections.json` (`shape_views`, `texture.colour_views`;
@@ -105,6 +112,13 @@ LEGACY_THREE_QUARTER = {"34": ((15.0, 75.0), 45.0)}
 TARGET_MARGIN = 25.0           # degrees searched each side of a named target yaw (kept inside 1-89)
 OTHER_YAW_RANGE = (-180.0, 180.0)
 COARSE_STEP, FINE_STEP = 2.0, 0.5
+# Barycentric subdivisions per edge when sampling alphaMode MASK faces for the visible surface's extent (45 points
+# per face): the extent is exact for opaque faces and within a ninth of a face's size for clipped ones.
+CLIP_EXTENT_SUBDIV = 8
+# What a score against a held-out view measures, by the view's reference kind in stage-2h.json: a generated image
+# can invent detail, so a score against it is consistency with the generated character; a ground-truth view (a
+# render of a known body) measures accuracy.
+MEASURES = {"generated": "consistency", "ground-truth": "accuracy"}
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")   # the results page's rule: names become paths
 WELD_REL = 1e-6        # weld tolerance, relative to the body's bounding-box diagonal
 MAX_PIXELS_PER_BATCH = 1 << 22
@@ -297,40 +311,83 @@ def mask_box(mask: np.ndarray) -> tuple[int, int, int, int] | None:
     return int(rows[0]), int(rows[-1]), int(cols[0]), int(cols[-1])
 
 
-def fitted_xy(verts: np.ndarray, yaw_deg: float, mask: np.ndarray) -> tuple[np.ndarray, float] | None:
-    """Pixel (column, row) of each vertex at ``yaw_deg``, fitted to ``mask``'s bounding box, and px/unit."""
+def visible_points(verts: np.ndarray, faces: np.ndarray, clip: "AlphaClip | None" = None) -> np.ndarray:
+    """Points spanning the surface that renders: every vertex of a face, or with ``clip`` the vertices of the
+    unclipped faces and the samples of alphaMode MASK faces that are kept (`CLIP_EXTENT_SUBDIV`). A transparent
+    card therefore never widens the extent a body is placed by."""
+    if clip is None:
+        return verts[np.unique(faces)] if len(faces) else verts[:0]
+    pts = [verts[np.unique(faces[~clip.mask_faces])]] if (~clip.mask_faces).any() else []
+    idx = np.nonzero(clip.mask_faces)[0]
+    if len(idx):
+        n = CLIP_EXTENT_SUBDIV
+        ij = np.array([(i, j) for i in range(n + 1) for j in range(n + 1 - i)], dtype=np.float64)
+        bary = np.column_stack([ij[:, 0], ij[:, 1], n - ij[:, 0] - ij[:, 1]]) / n          # [S, 3]
+        face = np.repeat(idx, len(bary))
+        b = np.tile(bary, (len(idx), 1))
+        keep = clip.keep(face, b)
+        p = np.einsum("nk,nkj->nj", b[keep], verts[faces[face[keep]]])
+        pts.append(p)
+    return np.concatenate(pts) if pts else verts[:0]
+
+
+def fitted_xy(verts: np.ndarray, yaw_deg: float, mask: np.ndarray,
+              extent: np.ndarray | None = None) -> tuple[np.ndarray, float] | None:
+    """Pixel (column, row) of each vertex at ``yaw_deg``, fitted to ``mask``'s bounding box, and px/unit. The
+    fit uses the extent of ``extent`` (default: the vertices), the visible surface's points (`visible_points`)."""
     box = mask_box(mask)
     uv = project(verts, yaw_deg)
-    span = float(uv[:, 1].max() - uv[:, 1].min()) if len(uv) else 0.0
+    ext = uv if extent is None else project(extent, yaw_deg)
+    span = float(ext[:, 1].max() - ext[:, 1].min()) if len(ext) else 0.0
     if box is None or span <= 0:
         return None
     top, bottom, left, right = box
     pps = (bottom - top + 1) / span
-    col0 = (left + right + 1) / 2 - (uv[:, 0].min() + uv[:, 0].max()) / 2 * pps
-    row0 = bottom + 1 + uv[:, 1].min() * pps
+    col0 = (left + right + 1) / 2 - (ext[:, 0].min() + ext[:, 0].max()) / 2 * pps
+    row0 = bottom + 1 + ext[:, 1].min() * pps
     return np.stack([uv[:, 0] * pps + col0, row0 - uv[:, 1] * pps], axis=1), float(pps)
 
 
-def silhouette(verts: np.ndarray, faces: np.ndarray, yaw_deg: float, mask: np.ndarray) -> tuple[np.ndarray, float]:
-    """The body's silhouette at ``yaw_deg`` fitted to ``mask``'s bounding box; returns (silhouette, px/unit)."""
-    fit = fitted_xy(verts, yaw_deg, mask)
+def silhouette(verts: np.ndarray, faces: np.ndarray, yaw_deg: float, mask: np.ndarray,
+               clip: "AlphaClip | None" = None, extent: np.ndarray | None = None) -> tuple[np.ndarray, float]:
+    """The body's silhouette at ``yaw_deg`` fitted to ``mask``'s bounding box; returns (silhouette, px/unit).
+    With ``clip``, the alpha-clipped surface, placed by that surface's own extent."""
+    if extent is None:
+        extent = visible_points(verts, faces, clip)
+    fit = fitted_xy(verts, yaw_deg, mask, extent)
     if fit is None:
         return np.zeros(mask.shape, dtype=bool), 0.0
     xy, pps = fit
-    return rasterize(xy, faces, mask.shape), pps
+    return coverage(xy, faces, mask.shape, clip), pps
+
+
+def coverage(xy: np.ndarray, faces: np.ndarray, shape: tuple[int, int], clip: "AlphaClip | None" = None) -> np.ndarray:
+    """Pixels the body covers: every face, or with ``clip`` the opaque faces and the points of alphaMode MASK
+    faces whose alpha reaches the material's cutoff."""
+    if clip is None:
+        return rasterize(xy, faces, shape)
+    out = rasterize(xy, faces[~clip.mask_faces], shape)
+    idx = np.nonzero(clip.mask_faces)[0]
+    pix, _, t, bary = raster.fragments(xy[:, 1], xy[:, 0], np.zeros(len(xy)), faces[idx], shape)
+    keep = clip.keep(idx[t], bary)
+    out.reshape(-1)[pix[keep]] = True
+    return out
 
 
 FRAMES = ("contract", "fit")
 
 
-def registration(verts: np.ndarray, views: list[ScoreView], frame: str, height: float | None) -> dict:
+def registration(verts: np.ndarray, views: list[ScoreView], frame: str, height: float | None,
+                 extent: np.ndarray | None = None) -> dict:
     """Stage 3's mapping for the turnaround views (see the module notes): the pixel scale shared by every view
-    and the body-frame point that sits at u = 0 and on the feet."""
+    and the body-frame point that sits at u = 0 and on the feet. The extent is that of ``extent`` (default: the
+    vertices), the visible surface's points (`visible_points`) for an alpha-clipped body."""
     if frame not in FRAMES:
         raise ValueError(f"frame must be one of {FRAMES}, got {frame!r}")
     turn = {v.name: v for v in views if not v.heldout}
     ref = next((turn[v] for v in TURNAROUND if v in turn), None)
-    lo, hi = verts.min(axis=0), verts.max(axis=0)
+    pts = verts if extent is None or not len(extent) else extent
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
     if frame == "contract":
         origin = np.zeros(3)
         span = float(height) if height else float(hi[2])
@@ -359,13 +416,17 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def yaw_search(verts: np.ndarray, faces: np.ndarray, mask: np.ndarray,
-               yaw_range: tuple[float, float] = HELDOUT_YAW_RANGE) -> tuple[float, float, np.ndarray, float, list]:
+               yaw_range: tuple[float, float] = HELDOUT_YAW_RANGE,
+               clip: "AlphaClip | None" = None,
+               extent: np.ndarray | None = None) -> tuple[float, float, np.ndarray, float, list]:
     """Search yaw for the best IoU against ``mask``: a coarse sweep, then a fine one around the best (ties keep
     the first). Returns (yaw, iou, silhouette, px/unit, [[yaw, iou], ...] in search order)."""
     curve = []
+    if extent is None:
+        extent = visible_points(verts, faces, clip)
 
     def at(y: float):
-        sil, pps = silhouette(verts, faces, y, mask)
+        sil, pps = silhouette(verts, faces, y, mask, clip, extent)
         r = (iou(sil, mask), y, sil, pps)
         curve.append([round(y, 2), round(r[0], 4)])
         return r
@@ -418,6 +479,57 @@ class BodyColour:
     source: str                          # what the colours come from
 
 
+@dataclass
+class AlphaClip:
+    """The faces of alphaMode MASK materials and what decides which of their points are kept: alpha (the
+    base-colour factor's, times the base-colour texture's, times COLOR_0's) at or above the material's cutoff,
+    as glTF renders MASK. OPAQUE and BLEND faces are never clipped."""
+    mask_faces: np.ndarray               # [M] bool
+    face_material: np.ndarray            # [M]
+    corner_uv: np.ndarray | None         # [M, 3, 2]
+    corner_alpha: np.ndarray | None      # [M, 3] COLOR_0 alpha
+    factor_alpha: dict                   # material -> base-colour factor alpha
+    cutoff: dict                         # material -> alphaCutoff
+    alpha_textures: dict                 # material -> [H, W, 1] texture alpha 0-1
+
+    def keep(self, face: np.ndarray, bary: np.ndarray) -> np.ndarray:
+        mat = self.face_material[face]
+        alpha = np.array([self.factor_alpha[m] for m in mat], dtype=np.float64).reshape(-1)
+        cut = np.array([self.cutoff[m] for m in mat], dtype=np.float64).reshape(-1)
+        if self.corner_uv is not None:
+            uv = np.einsum("nk,nkj->nj", bary, self.corner_uv[face])
+            for mi, img in self.alpha_textures.items():
+                sel = mat == mi
+                if sel.any():
+                    alpha[sel] *= _sample(img, uv[sel])[:, 0]
+        if self.corner_alpha is not None:
+            alpha *= np.einsum("nk,nk->n", bary, self.corner_alpha[face])
+        return alpha >= cut
+
+
+def alpha_clip(glb: Glb, faces: np.ndarray) -> AlphaClip | None:
+    """The body's alpha clipping, or None when no face uses an alphaMode MASK material."""
+    fm = glb.merged_face_material()
+    mask_mats = {i for i, m in enumerate(glb.materials) if m.alpha_mode == "MASK"}
+    mask_faces = np.isin(fm, sorted(mask_mats)) if mask_mats else np.zeros(len(fm), dtype=bool)
+    if not mask_faces.any():
+        return None
+    uv = glb.merged_uv()
+    alpha_tex = {}
+    for i in mask_mats:
+        m = glb.materials[i]
+        img = glb.image(m.image) if m.image is not None else None
+        if img is not None:
+            alpha_tex[i] = img[..., 3:4] / 255.0
+    corner_alpha = None
+    if any(m.colors is not None for m in glb.meshes):
+        cols = np.concatenate([m.colors if m.colors is not None else np.ones((len(m.verts), 4)) for m in glb.meshes])
+        corner_alpha = cols[faces, 3]
+    return AlphaClip(mask_faces, fm, uv[faces] if uv is not None else None, corner_alpha,
+                     {i: float(glb.materials[i].base_color[3]) for i in mask_mats},
+                     {i: float(glb.materials[i].alpha_cutoff) for i in mask_mats}, alpha_tex)
+
+
 def body_colour(glb: Glb, faces: np.ndarray, atlas: np.ndarray | None = None) -> BodyColour | None:
     """The body's colours, or None when it has no material, texture or vertex colour. ``atlas`` replaces every
     material's base-colour texture (a variant of the same mesh)."""
@@ -457,13 +569,31 @@ def _sample(img: np.ndarray, uv: np.ndarray) -> np.ndarray:
 
 
 def colour_render(colour: BodyColour, xy: np.ndarray, depth: np.ndarray, faces: np.ndarray,
-                  shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
-    """Flat render (float RGB 0-255, black background) and its coverage, nearest surface per pixel centre."""
-    frame = raster.rasterize(xy[:, 1], xy[:, 0], depth, faces, shape)
+                  shape: tuple[int, int], clip: AlphaClip | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Flat render (float RGB 0-255, black background) and its coverage, nearest surface per pixel centre (with
+    ``clip``, the nearest point that alpha clipping keeps)."""
+    if clip is None:
+        frame = raster.rasterize(xy[:, 1], xy[:, 0], depth, faces, shape)
+        m = frame.mask
+        tri = frame.tri[m]
+        bary = frame.bary[m]
+    else:
+        opaque = np.nonzero(~clip.mask_faces)[0]
+        frame = raster.rasterize(xy[:, 1], xy[:, 0], depth, faces[opaque], shape)
+        best_t = (np.where(frame.tri >= 0, opaque[np.maximum(frame.tri, 0)], -1) if len(opaque)
+                  else np.full(frame.tri.shape, -1)).reshape(-1)
+        best_d = frame.depth.reshape(-1).copy()
+        best_b = frame.bary.reshape(-1, 3).copy()
+        idx = np.nonzero(clip.mask_faces)[0]
+        pix, z, t, b = raster.fragments(xy[:, 1], xy[:, 0], depth, faces[idx], shape)
+        kept = clip.keep(idx[t], b)
+        pix, z, t, b = raster.nearest(pix[kept], z[kept], idx[t][kept], b[kept])
+        nearer = z < best_d[pix]
+        best_t[pix[nearer]], best_d[pix[nearer]], best_b[pix[nearer]] = t[nearer], z[nearer], b[nearer]
+        m = (best_t >= 0).reshape(shape)
+        tri = best_t[m.reshape(-1)]
+        bary = best_b[m.reshape(-1)]
     out = np.zeros(shape + (3,))
-    m = frame.mask
-    tri = frame.tri[m]
-    bary = frame.bary[m]
     mat = colour.face_material[tri]
     lin = colour.factors[np.where(mat >= 0, mat, len(colour.factors) - 1)]
     if colour.corner_uv is not None:
@@ -757,11 +887,15 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         used = np.unique(faces)
         remap = np.full(len(verts), -1, dtype=np.int64)
         remap[used] = np.arange(len(used))
-        cached = {"glb": glb, "faces": faces, "pv": verts[used], "pf": remap[faces], "views": {},
-                  "sanity": body_sanity(glb), "reg": registration(verts[used], views, frame, height)}
+        clip = alpha_clip(glb, faces)
+        pv, pf = verts[used], remap[faces]
+        extent = visible_points(pv, pf, clip)       # an alpha-clipped body is placed by what renders
+        cached = {"glb": glb, "faces": faces, "pv": pv, "pf": pf, "views": {}, "extent": extent,
+                  "sanity": body_sanity(glb), "reg": registration(pv, views, frame, height, extent), "clip": clip}
         if geometry_cache is not None:
             geometry_cache[key] = cached
-    glb, pv, pf, reg = cached["glb"], cached["pv"], cached["pf"], cached["reg"]
+    glb, pv, pf, reg, clip = cached["glb"], cached["pv"], cached["pf"], cached["reg"], cached["clip"]
+    extent = cached["extent"]
     atlas_img = _load_rgb(atlas) if atlas is not None else None
     colour = body_colour(glb, cached["faces"], atlas_img)
     out_dir = run / "05-renders" / name
@@ -769,7 +903,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
 
     def placed(view: ScoreView, yaw: float) -> np.ndarray | None:
         if view.heldout:
-            fit = fitted_xy(pv, yaw, view.mask)
+            fit = fitted_xy(pv, yaw, view.mask, extent)
             return fit[0] if fit is not None else None
         return turnaround_xy(pv, view, reg)
 
@@ -778,7 +912,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         if xy is None:
             _save_png(out_dir / f"{view.name}{tag}.png", np.repeat(sil[..., None] * 255.0, 3, axis=2))
             return {"colour_error": None, "ssim": None, "pixels": None}
-        img, cover = colour_render(colour, xy, view_depth(pv, yaw), pf, view.mask.shape)
+        img, cover = colour_render(colour, xy, view_depth(pv, yaw), pf, view.mask.shape, clip)
         _save_png(out_dir / f"{view.name}{tag}.png", img)
         c = compare(img, cover, view.image, view.mask)
         return {"colour_error": c["mean_abs_error"], "ssim": c["ssim"], "pixels": c["pixels"]}
@@ -789,11 +923,11 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         if geo is None:
             if view.heldout:
                 rng = tuple(yaw_range) if yaw_range is not None else view.yaw_range
-                yaw, value, sil, pps, curve = yaw_search(pv, pf, view.mask, rng)
+                yaw, value, sil, pps, curve = yaw_search(pv, pf, view.mask, rng, clip, extent)
                 geo = {"yaw": yaw, "iou": value, "sil": sil, "pps": pps, "curve": curve, "range": rng}
             else:
                 xy = turnaround_xy(pv, view, reg)
-                sil = rasterize(xy, pf, view.mask.shape) if xy is not None else np.zeros(view.mask.shape, bool)
+                sil = coverage(xy, pf, view.mask.shape, clip) if xy is not None else np.zeros(view.mask.shape, bool)
                 geo = {"yaw": view.yaw, "iou": iou(sil, view.mask), "sil": sil, "pps": reg["pps"]}
             cached["views"][view.name] = geo
         if not view.heldout:
@@ -802,7 +936,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
                "yaw_deg": round(geo["yaw"], 2), **seen_flags(view, shape_seen, colour_seen)}
         if view.heldout:
             row["reference"] = view.reference
-            row["measures"] = "consistency" if view.reference == "generated" else None
+            row["measures"] = MEASURES.get(view.reference)
             if view.stage2h:
                 row["stage2h"] = view.stage2h
             lo, hi = geo["range"]
@@ -811,7 +945,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
             row["yaw_at_range_edge"] = bool(min(abs(geo["yaw"] - lo), abs(geo["yaw"] - hi)) < COARSE_STEP / 2)
             row["yaw_search"] = geo["curve"]
             if view.fixed_yaw is not None:
-                fsil, _ = silhouette(pv, pf, view.fixed_yaw, view.mask)
+                fsil, _ = silhouette(pv, pf, view.fixed_yaw, view.mask, clip, extent)
                 row["at_fixed_yaw"] = {f"{view.fixed_yaw:g}": {
                     "iou": round(iou(fsil, view.mask), 4),
                     **colour_scores(view, view.fixed_yaw, fsil, f"-yaw{view.fixed_yaw:g}")}}
@@ -847,7 +981,11 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         "colour_views": sorted(colour_seen),
         "sanity": sanity,
         "views": rows,
-        "notes": glb.notes,
+        "notes": glb.notes + [f"material {i}: alphaMode BLEND is scored as opaque" for i, m in enumerate(glb.materials)
+                              if m.alpha_mode == "BLEND"],
+        "alpha_clip": (None if clip is None else
+                       {"mask_faces": int(clip.mask_faces.sum()),
+                        "cutoff": {str(i): c for i, c in sorted(clip.cutoff.items())}}),
         "version": body_version(Path(glb_path)),
     }
     if atlas is not None:
@@ -922,13 +1060,16 @@ def write_scores(run: Path, bodies: list[dict], views: list[ScoreView] | None = 
             "heldout_yaw": f"searched in {COARSE_STEP:g} then {FINE_STEP:g} degree steps; best IoU kept",
             "heldout_scale": "held-out fitted pixel scale / front fitted pixel scale",
             "heldout_reference": "a held-out view stage-2h.json marks \"reference\": \"generated\" is a generated "
-                                 "image: its scores measure consistency with the generated character, not accuracy",
+                                 "image: its scores measure consistency with the generated character, not "
+                                 "accuracy; a \"ground-truth\" view's measure accuracy",
+            "alpha": "faces of alphaMode MASK materials count only where alpha >= alphaCutoff (silhouette and "
+                     "colour); OPAQUE faces are never clipped, BLEND faces are scored as opaque",
             "seen": "seen_shape: the shape was built from the view; seen_colour: the colours were; seen: either",
             "budget": "none unless --budget or --profile is given",
         },
         "views": [{"view": v.name, "mask": v.mask_path, "image": v.image_path, "heldout": v.heldout,
                    **({"yaw_range": list(v.yaw_range), "fixed_yaw": v.fixed_yaw, "reference": v.reference,
-                       "measures": "consistency" if v.reference == "generated" else None} if v.heldout else
+                       "measures": MEASURES.get(v.reference)} if v.heldout else
                       {"yaw_deg": v.yaw})} for v in views],
         "bodies": kept + bodies,
     }

@@ -5,10 +5,11 @@ read the same way. Node transforms are applied, and positions are converted from
 +Z) to the contract's Blender frame (+Z up, the character facing -Y): X = x, Y = -z, Z = y.
 
 Supported: triangle primitives (mode 4), indexed or not, float or normalised-integer attributes, buffer views
-with a stride; per vertex the base-colour texture coordinates and `COLOR_0`; per material the base-colour factor
-and texture (embedded PNG, JPEG or WebP). Compressed meshes (Draco, meshopt), sparse accessors and buffers
-outside the GLB are refused with a clear error rather than read wrongly. Skinned meshes are read in their bind
-pose (joints and morph targets are not applied) and say so in `notes`; `KHR_texture_transform` is not applied.
+with a stride; per vertex the base-colour texture coordinates and `COLOR_0`; per material the base-colour factor,
+the alpha mode and cutoff, and the texture (embedded PNG, JPEG or WebP). Compressed meshes (Draco, meshopt),
+sparse accessors and buffers outside the GLB are refused with a clear error rather than read wrongly. Skinned
+meshes are read in their bind pose (joints and morph targets are not applied) and say so in `notes`;
+`KHR_texture_transform` is not applied.
 """
 from __future__ import annotations
 
@@ -47,6 +48,8 @@ class Material:
     base_color: tuple[float, float, float, float]   # baseColorFactor, linear 0-1 as stored
     image: int | None                                # index into the GLB's images of the base-colour texture
     texcoord: int                                    # which TEXCOORD_n the texture reads
+    alpha_mode: str = "OPAQUE"                       # glTF alphaMode: OPAQUE, MASK or BLEND
+    alpha_cutoff: float = 0.5                        # glTF alphaCutoff (MASK only)
 
 
 @dataclass
@@ -238,7 +241,12 @@ def _materials(doc: dict, notes: list[str]) -> list[Material]:
             image = src
         elif "KHR_materials_pbrSpecularGlossiness" in mat.get("extensions", {}):
             notes.append(f"material {i}: KHR_materials_pbrSpecularGlossiness is not read; base colour only")
-        out.append(Material(factor[:4] + (1.0,) * (4 - len(factor[:4])), image, texcoord))
+        mode = str(mat.get("alphaMode", "OPAQUE")).upper()
+        if mode not in ("OPAQUE", "MASK", "BLEND"):
+            notes.append(f"material {i}: alphaMode {mode!r} is not glTF; read as OPAQUE")
+            mode = "OPAQUE"
+        out.append(Material(factor[:4] + (1.0,) * (4 - len(factor[:4])), image, texcoord, mode,
+                            float(mat.get("alphaCutoff", 0.5))))
     return out
 
 
@@ -328,11 +336,13 @@ def load_glb(path: Path | str) -> Glb:
     return Glb(meshes, sizes, notes, materials, raws)
 
 
-def write_glb(path: Path | str, meshes: list[tuple], texture_png: bytes | None = None) -> Path:
+def write_glb(path: Path | str, meshes: list[tuple], texture_png: bytes | None = None,
+              alpha_mode: str | None = None, alpha_cutoff: float | None = None) -> Path:
     """A minimal GLB of triangle meshes given in the contract frame (for tests and fixtures).
 
     Each mesh is `(name, verts, faces)` or `(name, verts, faces, uv)`; with `texture_png`, every mesh that has
-    texture coordinates uses that one embedded image as its base colour."""
+    texture coordinates uses that one embedded image as its base colour, in a material with `alpha_mode` and
+    `alpha_cutoff` when they are given."""
     binary = bytearray()
     doc: dict = {"asset": {"version": "2.0", "generator": "herogen.blender.glb"},
                  "scene": 0, "scenes": [{"nodes": []}], "nodes": [], "meshes": [],
@@ -362,6 +372,10 @@ def write_glb(path: Path | str, meshes: list[tuple], texture_png: bytes | None =
         doc["images"] = [{"bufferView": len(doc["bufferViews"]) - 1, "mimeType": "image/png"}]
         doc["textures"] = [{"source": 0}]
         doc["materials"] = [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]
+        if alpha_mode is not None:
+            doc["materials"][0]["alphaMode"] = alpha_mode
+        if alpha_cutoff is not None:
+            doc["materials"][0]["alphaCutoff"] = alpha_cutoff
         material = 0
     for item in meshes:
         name, verts, faces = item[:3]
