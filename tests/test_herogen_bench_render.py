@@ -155,7 +155,8 @@ BUILD_BLEND = textwrap.dedent('''
 # behind it filling the card's lower half. "mask" wires the alpha as the glTF importer writes alphaMode MASK;
 # "opaque" leaves it unwired (glTF OPAQUE) although the texture still carries it; "noise" takes the alpha from
 # a procedural texture and "otherimage" from an image that is not the base colour, both of which only a
-# .blend can carry. Saved as GLB, or as .blend when the output name ends so.
+# .blend can carry; "samefile" takes it from the base-colour PNG loaded a second time, as FBX import does.
+# Saved as GLB, or as .blend when the output name ends so.
 BUILD_CARD = textwrap.dedent('''
     import sys
     import bpy
@@ -186,6 +187,19 @@ BUILD_CARD = textwrap.dedent('''
     elif variant == "noise":
         noise = nt.nodes.new("ShaderNodeTexNoise")
         nt.links.new(noise.outputs["Fac"], bsdf.inputs["Alpha"])
+    elif variant == "samefile":
+        # the same PNG loaded twice, as FBX import does: colour from one datablock, alpha from the other
+        import os
+        path = os.path.join(os.path.dirname(out), "card-tex.png")
+        img.filepath_raw = path
+        img.file_format = "PNG"
+        img.save()
+        img.unpack(method="REMOVE") if img.packed_file else None
+        again = bpy.data.images.load(path, check_existing=False)
+        tex2 = nt.nodes.new("ShaderNodeTexImage")
+        tex2.image = again
+        tex2.interpolation = "Closest"
+        nt.links.new(tex2.outputs["Alpha"], bsdf.inputs["Alpha"])
     elif variant == "otherimage":
         other = bpy.data.images.new("OtherTex", 8, 8, alpha=True)
         other.pixels = [0.5, 0.5, 0.5, 0.2] * 64
@@ -465,6 +479,18 @@ class AlphaClipTest(unittest.TestCase):
         np.testing.assert_allclose(p["upper_left"][2], [204, 26, 26], atol=3)
         self.assertEqual(rec["details"]["alpha"]["CardMat"]["mode"], "opaque")
         self.assertEqual(glb_materials(run / "gt" / "body.glb")["CardMat"]["alphaMode"], "OPAQUE")
+
+    def test_the_same_texture_file_loaded_twice_counts_as_the_base_colour(self):
+        asset, run = Path(self.tmp.name) / "card-samefile.blend", Path(self.tmp.name) / "r-samefile"
+        build_card(asset, "samefile")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "128", "--yaw", "0",
+                         "--samples-flat", "16", "--samples-lit", "4"])
+        rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0, json.dumps([c for c in rec["checks"] if not c["pass"]]))
+        alpha = rec["details"]["alpha"]["CardMat"]
+        self.assertEqual((alpha["mode"], alpha["clipped_texel_share"]), ("clip", 0.5))
+        self.assertFalse(self._probe(run)["upper_left"][0])     # the alpha 0.35 half is a hole
 
     def test_alpha_the_masks_cannot_sample_is_refused(self):
         for variant, words in (("noise", "cannot sample"), ("otherimage", "not its base-colour texture")):
