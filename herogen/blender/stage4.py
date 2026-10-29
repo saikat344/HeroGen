@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (HEIGHT_STUDS, PARENT, PIVOT_JOINT, SECTIONS, TRIANGLES_HIGH_MAX, TRIANGLES_LOW_MAX, VIEWS, bl,
-               covers, joints, pose, split, texture)
+               body_joints, covers, joints, pose, split, texture)
 from .carve import winding_inside
 from .stage3 import IOU_GATE, iou
 from .views import load_mask
@@ -51,6 +51,10 @@ COVER_OUTSET = 0.06
 COVER_MASK_TOLERANCE_PX = 3
 # Atlas sizes: ZBurst's hero LODs use 1024 maps for High and 512 for Low.
 ATLAS = {"high": 1024, "low": 512}
+# Comparison variant only (atlas-high-side-trust.png): weight of a side view that did not shape the mesh. On the
+# pencil figure's hybrid (the pinned runners' results, in-game high body, numpy flat renders, colour error front /
+# left): 1.0 11.7 / 14.2, 0.3 10.4 / 16.4, 0.1 9.6 / 18.4, 0.03 9.0 / 20.6.
+SIDE_TRUST = 0.3
 TARGET_FRACTIONS = (0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85)
 
 
@@ -124,6 +128,25 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         raise FileNotFoundError("stage 4 needs stage 3's mesh (03-mesh.glb)")
     vs = load_views(run, height)
     sk = joints.estimate(vs, height)
+    silhouette_joints = sk.as_json()
+    jrec = body_joints.load_joints(run / "03-joints.json")
+    joints_source = "silhouette"
+    if jrec is not None and jrec.get("source") == "sam3d-body":
+        sk = body_joints.apply_to_skeleton(sk, jrec)
+        joints_source = "sam3d-body"
+    s3_path = run / "stage-3.json"
+    s3 = json.loads(s3_path.read_text()) if s3_path.exists() else {}
+    mesh_source = s3.get("mesh_source", "carve")
+    shape_views = set(s3.get("shape_views") or vs.views)
+    source = None
+    src_uv, src_tex = work / "03-source-uv.npz", work / "03-source-texture.png"
+    if mesh_source == "sam3d-objects" and src_uv.exists() and src_tex.exists():
+        from PIL import Image as _Image
+
+        d = np.load(src_uv)
+        with _Image.open(src_tex) as im:
+            source = texture.SourceColour(d["verts"], d["faces"], d["corner_uv"],
+                                          np.asarray(im.convert("RGB"), dtype=np.float64))
     for n in sk.notes:
         rec.note(n)
     budgets = {"high": TRIANGLES_HIGH_MAX, "low": TRIANGLES_LOW_MAX}
@@ -213,10 +236,23 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         uvs = {k.split("__")[0]: u[k] for k in u.files}
         _save_lod(lod_paths[lod], lod_secs[lod], uvs)
         if colour_views:
-            atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf)
+            atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf, source=source)
             atlas_paths[lod] = body / f"atlas-{lod}.png"
             Image.fromarray(atlas).save(atlas_paths[lod])
             tex_stats[lod] = stats
+            if source is not None and lod == "high":
+                # comparison atlases, scored by `score` as variants: no source fallback (its effect), and the
+                # side views down-weighted (they did not shape this mesh, so their colours land on oblique
+                # surfaces at the wrong depth)
+                plain, pstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf)
+                Image.fromarray(plain).save(body / f"atlas-{lod}-no-source-fallback.png")
+                tex_stats[lod + "_no_source_fallback"] = pstats
+                trust = {v: SIDE_TRUST for v in colour_views if v in ("left", "right") and v not in shape_views}
+                if trust:
+                    tr, tstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf, source=source,
+                                                 trust=trust)
+                    Image.fromarray(tr).save(body / f"atlas-{lod}-side-trust.png")
+                    tex_stats[lod + "_side_trust"] = {**tstats, "trust": trust}
 
     # Blender: textured GLBs, rest renders from the contract cameras, pose renders.
     rest_cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
@@ -279,7 +315,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     for v, path in bres["rest_silhouettes"].items():
         rest_iou[v] = round(iou(load_mask(Path(path)), vs.views[v].mask), 4)
         derived = "visual_hull" in str(method.get(v, ""))
-        rec.add(check(f"rest_iou_with_covers_{v}", rest_iou[v], IOU_GATE, gate=not derived))
+        unseen = v not in shape_views and not derived
+        rec.add(check(f"rest_iou_with_covers_{v}", rest_iou[v], IOU_GATE, gate=not derived,
+                      **({"note": f"shape not built from this view (mesh source {mesh_source})"} if unseen else {})))
     # Texture: the textured rest body rendered flat from each observed colour view against that view.
     tex_metrics = {}
     for v, path in bres["rest_textured"].items():
@@ -318,7 +356,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                       passed=joint_err["max"] <= JOINT_ERROR_GATE, rule="<=", mean=joint_err["mean"]))
 
     sections_json = {
-        "units": "studs", "height": height,
+        "units": "studs", "height": height, "mesh_source": mesh_source, "joints_source": joints_source,
+        "shape_views": sorted(shape_views),
         "frame": "Blender: +Z up, feet at z=0, faces -Y, x/y centred on the figure's bounding box; "
                  "GLBs are exported Y-up (glTF), front along +Z",
         "sections": [{
@@ -334,7 +373,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         "joints": sk.as_json(),
         "ends": {k: [round(float(c), 4) for c in v] for k, v in sk.ends.items()},
         "joint_evidence": sk.evidence,
-        "joint_method": joints.__doc__.strip(),
+        "joint_method": (body_joints.__doc__ if joints_source == "sam3d-body" else joints.__doc__).strip(),
+        "silhouette_joints": silhouette_joints,
         "split_method": split.__doc__.strip(),
         "budgets": {"triangles_high_max": TRIANGLES_HIGH_MAX, "triangles_low_max": TRIANGLES_LOW_MAX},
         "lods": lod_info,
@@ -361,6 +401,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                            + ([str(sheet.relative_to(run))] if sheet else [])
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["pose_renders"]]
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["rest_textured"].values()])
+    rec.data["mesh_source"] = mesh_source
+    rec.data["joints_source"] = joints_source
     rec.data["body"] = {"lods": lod_info, "decimation": dec["results"][0], "chosen_targets": chosen,
                         "max_gap_by_pose_high": {p: max(r.values()) for p, r in gaps["high"].items()},
                         "max_gap_by_pose_low": {p: max(r.values()) for p, r in gaps["low"].items()},

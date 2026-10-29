@@ -7,6 +7,11 @@ camera, raised to `FACING_POWER` so the view that faces the surface dominates wh
 zero where the point is hidden in that view (a depth map of the body splatted from the texels themselves) or
 falls outside the view's mask. Empty texels next to islands are filled outward so filtering never pulls in
 background.
+
+Surfaces no view faces: with a source texture (mesh source `sam3d-objects`, whose own baked texture covers every
+surface), a texel whose best facing cosine among the views that see it is below `FALLBACK_FACING` takes the
+source texture's colour at the nearest source-surface point instead, blended linearly in between. Without one,
+such texels average the views that contain them (facing-weighted, ignoring occlusion): a smear.
 """
 from __future__ import annotations
 
@@ -19,6 +24,30 @@ from .views import FORWARD, PROJ, ViewSet
 COLOUR_VIEWS = ("front", "back", "left", "right")
 FACING_POWER = 4.0
 DEPTH_TOL = 0.04          # studs: a texel within this of the view's nearest surface counts as visible
+FALLBACK_FACING = 0.3     # below this best facing cosine (about 72.5 degrees) the source texture takes over
+
+
+class SourceColour:
+    """Colour of the source mesh's own texture at the nearest point of its surface (dense surface samples)."""
+
+    def __init__(self, verts: np.ndarray, faces: np.ndarray, corner_uv: np.ndarray, texture: np.ndarray,
+                 samples_per_edge: int = 4):
+        from scipy.spatial import cKDTree
+
+        n = samples_per_edge
+        bary = np.array([(i, j, n - i - j) for i in range(n + 1) for j in range(n + 1 - i)], float) / n
+        tri = verts[faces]                                        # [M, 3, 3]
+        pts = np.einsum("bk,mkj->mbj", bary, tri).reshape(-1, 3)
+        uv = np.einsum("bk,mkj->mbj", bary, corner_uv).reshape(-1, 2)
+        self.tree = cKDTree(pts)
+        self.uv = uv
+        self.texture = texture
+
+    def __call__(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        dist, idx = self.tree.query(p, workers=-1)
+        uv = self.uv[idx]
+        t = self.texture
+        return _bilinear(t, uv[:, 1] * t.shape[0] - 0.5, uv[:, 0] * t.shape[1] - 0.5), dist
 
 
 def observed_colour_views(vs: ViewSet, run: Path) -> dict:
@@ -111,8 +140,10 @@ def _bilinear(img: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
             + (img[r0 + 1, c0] * (1 - fc) + img[r0 + 1, c0 + 1] * fc) * fr)
 
 
-def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = None):
-    """Bake one atlas for a LOD. `uvs[name]` is [faces, 3, 2] in [0, 1]. Returns (atlas uint8, stats, zbuf)."""
+def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = None,
+         source: SourceColour | None = None, fallback_facing: float = FALLBACK_FACING, trust: dict | None = None):
+    """Bake one atlas for a LOD. `uvs[name]` is [faces, 3, 2] in [0, 1]. Returns (atlas uint8, stats, zbuf).
+    `trust` scales a view's weight (default 1 for every view)."""
     pos, uv, nrm = [], [], []
     for name, s in sections.items():
         if name not in uvs or len(s.faces) == 0:
@@ -131,6 +162,7 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     wsum = np.zeros(len(p3))
     fallback = np.zeros((len(p3), 3))
     fb_w = np.zeros(len(p3))
+    best_facing = np.zeros(len(p3))
     for name, (view, img) in views.items():
         fwd = FORWARD[name]
         facing = np.clip(-(n3 @ fwd), 0, 1)
@@ -139,10 +171,11 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         r, c = np.round(row).astype(np.int64), np.round(col).astype(np.int64)
         ok = (r >= 0) & (r < nimg) & (c >= 0) & (c < nimg)
         rr, cc = np.clip(r, 0, nimg - 1), np.clip(c, 0, nimg - 1)
-        inmask = ok & view.mask[rr, cc]
         visible = (p3 @ fwd) <= zbuf[name][rr, cc] + DEPTH_TOL
+        inmask = ok & view.mask[rr, cc]
         colour = _bilinear(img, row, col)
-        w = facing ** FACING_POWER * (inmask & visible)
+        w = facing ** FACING_POWER * (inmask & visible) * (1.0 if trust is None else trust.get(name, 1.0))
+        best_facing = np.maximum(best_facing, facing * (inmask & visible))
         acc += w[:, None] * colour
         wsum += w
         fw = (facing + 1e-3) * inmask
@@ -150,6 +183,19 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         fb_w += fw
     col = np.where((wsum > 1e-6)[:, None], acc / np.maximum(wsum, 1e-12)[:, None],
                    fallback / np.maximum(fb_w, 1e-12)[:, None])
+    src_stats = {}
+    if source is not None:
+        alpha = np.clip(best_facing / fallback_facing, 0.0, 1.0)[:, None]
+        need = alpha[:, 0] < 1.0
+        src_col = np.zeros_like(col)
+        if need.any():
+            src_col[need], dist = source(p3[need])
+            src_stats = {"source_nearest_distance_mean": round(float(dist.mean()), 4),
+                         "source_nearest_distance_max": round(float(dist.max()), 4)}
+        col = alpha * col + (1 - alpha) * src_col
+        src_stats.update({"texels_source_blend": round(float(need.mean()), 4),
+                          "texels_source_only": round(float((alpha[:, 0] == 0).mean()), 4),
+                          "fallback_facing": fallback_facing})
     atlas = np.zeros((size * size, 3))
     filled = np.zeros(size * size, dtype=bool)
     cnt = np.zeros(size * size)
@@ -158,7 +204,8 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     filled[tidx] = True
     atlas[filled] /= cnt[filled][:, None]
     stats = {"texels_used": int(filled.sum()), "atlas_fill": round(float(filled.mean()), 4),
-             "texels_seen_by_a_view": round(float((wsum > 1e-6).mean()), 4)}
+             "texels_seen_by_a_view": round(float((wsum > 1e-6).mean()), 4),
+             "texels_best_facing_below_fallback": round(float((best_facing < fallback_facing).mean()), 4), **src_stats}
     atlas = atlas.reshape(size, size, 3)
     filled = filled.reshape(size, size)
     for _ in range(8):                      # pad islands outward
