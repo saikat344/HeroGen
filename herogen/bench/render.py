@@ -308,6 +308,9 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
                   names=res["missing_images"]))
     rec.add(facing_check(res["facing"]))
+    rec.add(check("skipped_visible_geometry", len(res["skipped_geometry"]), None, gate=False,
+                  objects=res["skipped_geometry"],
+                  note="visible in the file but not meshes the bench renders; not in gt/body.glb either"))
     for c in pose_checks(res["pose"], res["limbs"]):
         rec.add(c)
     rec.data["models"] = []
@@ -327,6 +330,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             "limbs": res["limbs"],
             "yaw_deg": res["yaw_deg"],
             "facing": res["facing"],
+            "skipped_geometry": res["skipped_geometry"],
             "contract_scale": res["contract_scale"],
             "include": include, "exclude": exclude,
             "material_sources": res["materials"],

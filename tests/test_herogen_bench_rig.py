@@ -72,7 +72,25 @@ class NameTest(unittest.TestCase):
                           "f_index.01.L", "thumb.02.L"])
         self.assertEqual(RIG.limb_bones(names, "leg", "L"), ["DEF-thigh.01.L"])
         kenney = ["root", "leg-left", "leg-right", "torso", "arm-left", "arm-right", "head"]
+        self.assertEqual(RIG.limb_bones(kenney, "leg", "L"), ["leg-left"])
         self.assertEqual(RIG.limb_bones(kenney, "arm", "R"), ["arm-right"])
+
+    def test_limb_words_are_whole_words(self):
+        names = ["earring.L", "sword_handle.L", "charm.L", "Armature.L", "mixamorig:LeftHandIndex1",
+                 "mixamorig:LeftForeArm", "LowerArm_L", "handslot.l", "toes.l", "hips.L"]
+        self.assertEqual(RIG.limb_bones(names, "arm", "L"),
+                         ["mixamorig:LeftHandIndex1", "mixamorig:LeftForeArm", "LowerArm_L", "handslot.l"])
+        self.assertEqual(RIG.limb_bones(names, "leg", "L"), ["toes.l"])
+        self.assertEqual(RIG.name_tokens("mixamorig:LeftHandIndex1"),
+                         {"mixamorig", "left", "hand", "index", "1"})
+
+    def test_a_root_below_another_root_is_not_turned_twice(self):
+        # an arm group whose roots are the upper arm and a forearm helper that hangs (through a bone outside
+        # the group) below it: only the upper arm is turned
+        parents = {"upper_arm.L": "shoulder.L", "MCH-elbow.L": "upper_arm.L",
+                   "forearm_helper.L": "MCH-elbow.L", "hand_ik.L": "root", "shoulder.L": "root", "root": None}
+        roots = ["upper_arm.L", "forearm_helper.L", "hand_ik.L"]
+        self.assertEqual(RIG.independent_roots(parents, roots), ["upper_arm.L", "hand_ik.L"])
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy is required")
