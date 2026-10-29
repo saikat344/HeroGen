@@ -55,6 +55,25 @@ class NameTest(unittest.TestCase):
         self.assertEqual(RIG.find_limb_root(rigify, "arm", "L"), "DEF-upper_arm.L")
         self.assertEqual(RIG.find_limb_end(rigify, "arm", "L"), "DEF-hand.L")
 
+    def test_old_rigify_segment_names(self):
+        self.assertEqual(RIG.split_name("DEF-upper_arm.01.L"), ("L", "upper_arm"))
+        self.assertEqual(RIG.split_name("MCH-forearm_smth.01.R"), ("R", "forearm_smth"))
+        deform = ["DEF-upper_arm.02.L", "DEF-upper_arm.01.L", "DEF-forearm.01.L", "DEF-hand.L",
+                  "DEF-thigh.01.L"]
+        self.assertEqual(RIG.find_limb_root(deform, "arm", "L"), "DEF-upper_arm.01.L")
+        self.assertEqual(RIG.find_limb_root(deform, "leg", "L"), "DEF-thigh.01.L")
+
+    def test_limb_bones_take_every_layer_but_leave_the_shoulder(self):
+        names = ["ORG-shoulder.L", "MCH-shoulder_rh_ns_ch.L", "DEF-upper_arm.01.L", "ORG-upper_arm.L",
+                 "MCH-forearm_smth.01.L", "DEF-hand.L", "f_index.01.L", "thumb.02.L", "upper_arm.R",
+                 "armor_plate.L", "spine", "DEF-thigh.01.L"]
+        self.assertEqual(RIG.limb_bones(names, "arm", "L"),
+                         ["DEF-upper_arm.01.L", "ORG-upper_arm.L", "MCH-forearm_smth.01.L", "DEF-hand.L",
+                          "f_index.01.L", "thumb.02.L"])
+        self.assertEqual(RIG.limb_bones(names, "leg", "L"), ["DEF-thigh.01.L"])
+        kenney = ["root", "leg-left", "leg-right", "torso", "arm-left", "arm-right", "head"]
+        self.assertEqual(RIG.limb_bones(kenney, "arm", "R"), ["arm-right"])
+
 
 @unittest.skipUnless(HAVE_DEPS, "numpy is required")
 class GeometryTest(unittest.TestCase):
@@ -84,6 +103,24 @@ class GeometryTest(unittest.TestCase):
         r = RIG.rotation_between([1, 0, 0], [-1, 0, 0])
         np.testing.assert_allclose(r @ [1, 0, 0], [-1, 0, 0], atol=1e-12)
         self.assertAlmostEqual(np.linalg.det(r), 1.0)
+
+    def test_legs_are_aimed_in_the_frontal_plane_only(self):
+        leaning = np.array([0.1, -0.4, -1.0])         # out a little, well forward (a big foot), down
+        np.testing.assert_allclose(RIG.pose_aim("leg")(leaning), [0.1, 0.0, -1.0])
+        np.testing.assert_allclose(RIG.pose_aim("arm")(leaning), leaning)
+        self.assertGreater(RIG.sagittal_lean(leaning), 0)  # forward is -Y
+        # turning the frontal part onto the target keeps the forward lean
+        r = RIG.rotation_between(RIG.pose_aim("leg")(leaning), RIG.target_direction("leg", "L"))
+        turned = r @ leaning
+        self.assertAlmostEqual(RIG.angle_from_vertical(RIG.frontal(turned)), RIG.A_POSE_LEG_DEG)
+        self.assertAlmostEqual(turned[1], leaning[1])
+
+    def test_angle_between(self):
+        self.assertAlmostEqual(RIG.angle_between([1, 0, 0], [0, 0, -2]), 90.0)
+        self.assertAlmostEqual(RIG.angle_between([1, 0, 0], [3, 0, 0]), 0.0)
+        horizontal_out = [1, 0, 0]
+        self.assertAlmostEqual(RIG.angle_between(RIG.target_direction("arm", "L"), horizontal_out),
+                               RIG.A_POSE_ARM_DEG)
 
     def test_t_pose_arm_is_horizontal(self):
         self.assertAlmostEqual(RIG.angle_below_horizontal([1.0, 0.0, 0.0]), 0.0)

@@ -8,9 +8,10 @@ One job renders one asset:
    names match `include`, minus those matching `exclude`.
 2. Rigs: clear actions, mute drivers and bone constraints, return every bone to its rest pose. With
    `bind_unrigged`, meshes the rig does not deform get the weights of the nearest deformed mesh.
-3. Pose: "a-pose" turns each arm so its root-to-end direction points out and 45 degrees down, and each leg 5
-   degrees out from vertical (the limb is turned as one piece about its root joint; elbows and knees keep
-   their rest bend). "rest" keeps the rest pose; "as-shipped" keeps the file's own pose and animation frame.
+3. Pose: "a-pose" turns each arm so its root-to-end direction points out and 45 degrees down, and each leg
+   about the forward axis so it points 5 degrees out from vertical seen from the front (its forward or
+   backward lean stays as modelled). Each limb turns as one piece about its root joint; elbows and knees keep
+   their rest bend. "rest" keeps the rest pose; "as-shipped" keeps the file's own pose and animation frame.
 4. Freeze the posed meshes into the contract frame (`yaw_deg` turns the figure to face -Y first), scale to
    `height`, and export `gt_glb`.
 5. For every camera: a mask and a depth map by casting one orthographic ray through each pixel centre against
@@ -39,6 +40,9 @@ from herogen.bench import cameras as CAM  # noqa: E402
 from herogen.bench import rig as RIG  # noqa: E402
 
 IMAGE_EXTS = (".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".exr")
+POSE_STEPS = 8
+POSE_CONVERGED_DEG = 0.01
+DISTAL_FRACTION = 0.85
 
 
 # --------------------------------------------------------------------------------------------- loading
@@ -121,16 +125,43 @@ def reset_rig(arm, report):
     arm.data.pose_position = "POSE"
 
 
+def weight_source(arm):
+    """One temporary mesh joining every mesh in the file that `arm` deforms (hidden ones too), at rest, with
+    their vertex groups: the skin to copy weights from."""
+    parts = [o for o in bpy.context.scene.objects
+             if o.type == "MESH" and o.data.polygons and o.vertex_groups and deforming_rig(o) is arm]
+    if not parts:
+        return None, []
+    copies = []
+    for o in parts:
+        c = o.copy()
+        c.data = o.data.copy()
+        c.modifiers.clear()
+        c.parent = None
+        c.matrix_world = o.matrix_world.copy()
+        bpy.context.scene.collection.objects.link(c)
+        copies.append(c)
+    with bpy.context.temp_override(active_object=copies[0], selected_editable_objects=copies,
+                                   selected_objects=copies):
+        bpy.ops.object.join()
+    return copies[0], [o.name for o in parts]
+
+
 def bind_unrigged(meshes, report):
-    """Give meshes no rig deforms the weights of the nearest deformed mesh (largest first), at rest."""
-    rigged = [o for o in meshes if deforming_rig(o) is not None and o.vertex_groups]
-    if not rigged:
+    """Bind meshes no rig deforms to the rig that deforms the others, with the weights of its nearest skin
+    (at rest)."""
+    rigs = [r for r in (deforming_rig(o) for o in meshes) if r is not None and r.type == "ARMATURE"]
+    if not rigs:
         return
-    source = max(rigged, key=lambda o: len(o.data.vertices))
-    arm = deforming_rig(source)
-    for o in meshes:
-        if deforming_rig(o) is not None or o.parent_type == "BONE":
-            continue
+    arm = max(set(rigs), key=rigs.count)
+    loose = [o for o in meshes if deforming_rig(o) is None and o.parent_type != "BONE"]
+    if not loose:
+        return
+    source, names = weight_source(arm)
+    if source is None:
+        report.append(f"bind_unrigged: {arm.name} deforms no mesh with vertex groups; nothing bound")
+        return
+    for o in loose:
         for g in source.vertex_groups:
             if o.vertex_groups.get(g.name) is None:
                 o.vertex_groups.new(name=g.name)
@@ -146,7 +177,8 @@ def bind_unrigged(meshes, report):
             bpy.ops.object.modifier_apply(modifier=dt.name)
         mod = o.modifiers.new("BenchArmature", "ARMATURE")
         mod.object = arm
-        report.append(f"{o.name}: weights copied from {source.name}, bound to {arm.name}")
+        report.append(f"{o.name}: bound to {arm.name} with weights from the nearest of {', '.join(names)}")
+    bpy.data.objects.remove(source, do_unlink=True)
 
 
 # --------------------------------------------------------------------------------------------- posing
@@ -155,27 +187,47 @@ def bone_world_head(arm, name):
     return np.array(arm.matrix_world @ arm.pose.bones[name].head)
 
 
-def limb_group(arm, root_name):
-    """The root bone and every bone below it."""
-    out = []
+def limb_group(arm, limb, side, root_name):
+    """The limb's bones: those named as its parts on its side, plus everything below its root bone."""
+    out = set(RIG.limb_bones([b.name for b in arm.data.bones], limb, side))
 
     def walk(b):
-        out.append(b.name)
+        out.add(b.name)
         for c in b.children:
             walk(c)
     walk(arm.data.bones[root_name])
-    return out
+    return sorted(out)
+
+
+def group_roots(arm, group):
+    """Bones of the group whose parent is outside it: turning these turns the whole group once."""
+    g = set(group)
+    return [n for n in group if arm.data.bones[n].parent is None or arm.data.bones[n].parent.name not in g]
+
+
+def chain_tail(arm, root):
+    """The tail of the last bone reached by following first children down from `root`, and that bone."""
+    b = arm.data.bones[root]
+    while b.children:
+        b = sorted(b.children, key=lambda c: c.name)[0]
+    return np.array(arm.matrix_world @ arm.pose.bones[b.name].tail), b.name
 
 
 def limb_end_point(arm, limb, side, root, group, meshes):
-    """Where the limb ends: its wrist/hand (ankle/foot) joint if the rig has one below the root, else the
-    deformed vertex furthest from the root joint among those the limb's bones weigh most."""
-    names = [b.name for b in arm.data.bones if b.name in group]
-    end = RIG.find_limb_end(names, limb, side)
+    """Where the limb ends: its wrist/hand (ankle/foot) joint if the rig has one below the root; else the tail
+    of the limb's bone chain when it has two or more bones; else (a one-bone limb, whose bone axis need not
+    follow the geometry) the centre of the limb's far end: the mean of its weighted vertices that lie at least
+    `DISTAL_FRACTION` of the furthest one's distance from the root joint (the hand or foot block, not a
+    single corner of it)."""
+    deform = [n for n in group if arm.data.bones[n].use_deform]
+    end = RIG.find_limb_end(deform, limb, side) or RIG.find_limb_end(group, limb, side)
     if end is not None:
         return bone_world_head(arm, end), f"joint {end}"
+    if len(group) >= 2:
+        tail, last = chain_tail(arm, root)
+        return tail, f"tail of {last}"
     pivot = bone_world_head(arm, root)
-    best, best_d = None, -1.0
+    pts = []
     gset = set(group)
     dg = bpy.context.evaluated_depsgraph_get()
     for o in meshes:
@@ -191,24 +243,26 @@ def limb_end_point(arm, limb, side, root, group, meshes):
             g = max(v_src.groups, key=lambda g: g.weight)
             if idx.get(g.group) not in gset:
                 continue
-            p = mw[:3, :3] @ np.array(v_ev.co) + mw[:3, 3]
-            d = float(np.linalg.norm(p - pivot))
-            if d > best_d:
-                best, best_d = p, d
+            pts.append(mw[:3, :3] @ np.array(v_ev.co) + mw[:3, 3])
         ev.to_mesh_clear()
-    if best is None:
+    if not pts:
         return None, "no vertices weighted to the limb"
-    return best, "furthest weighted vertex"
+    pts = np.array(pts)
+    d = np.linalg.norm(pts - pivot, axis=1)
+    far = pts[d >= DISTAL_FRACTION * d.max()]
+    return far.mean(axis=0), f"centre of the {len(far)} furthest weighted vertices"
 
 
-def rotate_bone_world(arm, name, rot3, pivot_world):
-    """Turn a pose bone (and with it everything parented below) by a world rotation about a world point."""
-    pb = arm.pose.bones[name]
+def rotate_bones_world(arm, names, rot3, pivot_world):
+    """Turn pose bones (and with them everything parented below) by one world rotation about a world point.
+    The bones must not be parents of one another."""
     mw = arm.matrix_world
     r = Matrix([list(row) for row in rot3]).to_4x4()
     t = Matrix.Translation(Vector(pivot_world))
-    world = mw @ pb.matrix
-    pb.matrix = mw.inverted() @ (t @ r @ t.inverted() @ world)
+    turn = mw.inverted() @ t @ r @ t.inverted() @ mw
+    targets = {n: turn @ arm.pose.bones[n].matrix for n in names}
+    for n, m in targets.items():
+        arm.pose.bones[n].matrix = m
     bpy.context.view_layer.update()
 
 
@@ -223,7 +277,8 @@ def a_pose(arms, meshes, yaw, report):
                 root = RIG.find_limb_root(deform, limb, side)
                 if root is None:
                     continue
-                group = limb_group(arm, root)
+                group = limb_group(arm, limb, side, root)
+                roots = group_roots(arm, group)
                 end, how = limb_end_point(arm, limb, side, root, group, meshes)
                 if end is None:
                     report.append(f"{arm.name} {limb} {side}: {how}; not posed")
@@ -231,32 +286,48 @@ def a_pose(arms, meshes, yaw, report):
                 pivot = bone_world_head(arm, root)
                 cur = yaw3 @ (end - pivot)        # in the contract orientation
                 tgt = RIG.target_direction(limb, side)
-                rot_contract = RIG.rotation_between(cur, tgt)
-                rot_world = yaw3.T @ rot_contract @ yaw3
-                rotate_bone_world(arm, root, rot_world, pivot)
-                end2, _ = limb_end_point(arm, limb, side, root, group, meshes)
-                after = yaw3 @ (end2 - bone_world_head(arm, root))
+                aim = RIG.pose_aim(limb)
+                # One turn is exact when every bone below inherits its parent's rotation; repeat the
+                # correction for rigs where some do not, or where the far-end vertices change.
+                after, steps = cur, 0
+                while steps < POSE_STEPS and RIG.angle_between(aim(after), tgt) > POSE_CONVERGED_DEG:
+                    rot_world = yaw3.T @ RIG.rotation_between(aim(after), tgt) @ yaw3
+                    rotate_bones_world(arm, roots, rot_world, bone_world_head(arm, root))
+                    end2, _ = limb_end_point(arm, limb, side, root, group, meshes)
+                    after = yaw3 @ (end2 - bone_world_head(arm, root))
+                    steps += 1
                 limbs.append({
                     "rig": arm.name, "limb": limb, "side": side, "root_bone": root, "end": how,
+                    "bones_turned": roots,
                     "before_deg_below_horizontal": round(RIG.angle_below_horizontal(cur), 2),
                     "after_deg_below_horizontal": round(RIG.angle_below_horizontal(after), 2),
                     "after_deg_from_vertical": round(RIG.angle_from_vertical(after), 2),
+                    "after_frontal_deg_from_vertical": round(RIG.angle_from_vertical(RIG.frontal(after)), 2),
+                    "after_sagittal_lean_deg": round(RIG.sagittal_lean(after), 2),
                     "after_outward": bool(after[0] * (1 if side == "L" else -1) > 0),
+                    "steps": steps,
                 })
     return limbs
 
 
 # --------------------------------------------------------------------------------------------- materials
 
-def resolve_images(dirs, report):
-    """Reload images whose data is missing from a file of the same name in one of `dirs`."""
-    index = {}
+IMAGE_INDEX = {}  # lower-case file name and file stem -> path, over the job's image_dirs
+
+
+def index_images(dirs):
     for d in dirs:
         for root, _, files in os.walk(d):
             for f in files:
                 if f.lower().endswith(IMAGE_EXTS):
-                    index.setdefault(f.lower(), os.path.join(root, f))
-                    index.setdefault(os.path.splitext(f)[0].lower(), os.path.join(root, f))
+                    IMAGE_INDEX.setdefault(f.lower(), os.path.join(root, f))
+                    IMAGE_INDEX.setdefault(os.path.splitext(f)[0].lower(), os.path.join(root, f))
+
+
+def resolve_images(dirs, report):
+    """Reload images whose data is missing from a file of the same name in one of `dirs`."""
+    index_images(dirs)
+    index = IMAGE_INDEX
     missing = []
     for img in bpy.data.images:
         if img.type != "IMAGE" or img.packed_file is not None:
@@ -276,18 +347,29 @@ def resolve_images(dirs, report):
 
 
 def _image(spec):
-    if spec in bpy.data.images:
+    """An image by datablock name, by file name or stem in the image folders, or by path."""
+    if spec in bpy.data.images and bpy.data.images[spec].has_data:
         return bpy.data.images[spec]
-    return bpy.data.images.load(spec, check_existing=True)
+    path = IMAGE_INDEX.get(spec.lower()) or IMAGE_INDEX.get(os.path.basename(spec).lower())
+    if path is None and not os.path.exists(spec):
+        raise ValueError(f"image {spec!r} is not in the file, the image folders or on disk")
+    return bpy.data.images.load(path or spec, check_existing=True)
 
 
 def base_colour_source(mat, image_override, vcol_override):
     """(socket or None, rgba default) giving the material's base colour, and how it was found."""
     nt = mat.node_tree
     if image_override:
+        spec, _, uv_name = image_override.partition("@")
         tex = nt.nodes.new("ShaderNodeTexImage")
-        tex.image = _image(image_override)
-        return tex.outputs["Color"], None, f"image {os.path.basename(image_override)} (override)"
+        tex.image = _image(spec)
+        how = f"image {os.path.basename(spec)} (override)"
+        if uv_name:
+            uv = nt.nodes.new("ShaderNodeUVMap")
+            uv.uv_map = uv_name
+            nt.links.new(uv.outputs["UV"], tex.inputs["Vector"])
+            how += f" on UV map {uv_name}"
+        return tex.outputs["Color"], None, how
     if vcol_override:
         attr = nt.nodes.new("ShaderNodeVertexColor")
         attr.layer_name = vcol_override
@@ -349,6 +431,26 @@ def normalise_materials(meshes, images, vcols, report):
             nt.links.new(lit.outputs["BSDF"], out.inputs["Surface"])
             done[mat.name] = how
     report.update(done)
+
+
+def images_feeding_colour(meshes):
+    """Images the base colour of the given meshes depends on (upstream of each material's flat shader)."""
+    found = set()
+    for o in meshes:
+        for mat in o.data.materials:
+            if mat is None or "BenchFlat" not in mat.node_tree.nodes:
+                continue
+            stack, seen = [mat.node_tree.nodes["BenchFlat"]], set()
+            while stack:
+                node = stack.pop()
+                if node.name in seen:
+                    continue
+                seen.add(node.name)
+                if node.type == "TEX_IMAGE" and node.image is not None:
+                    found.add(node.image)
+                for inp in node.inputs:
+                    stack.extend(link.from_node for link in inp.links)
+    return found
 
 
 def set_shading(meshes, mode):
@@ -550,6 +652,12 @@ def main():
     timings["load_pose"] = round(time.time() - t0, 2)
 
     normalise_materials(meshes, JOB.get("material_images", {}), JOB.get("material_vcols", {}), mat_report)
+    used = images_feeding_colour(meshes)
+    unused_missing = sorted(set(missing_images) - {im.name for im in used})
+    missing_images = sorted(im.name for im in used if not (im.has_data or im.packed_file is not None
+                                                          or os.path.exists(bpy.path.abspath(im.filepath))))
+    if unused_missing:
+        report.append(f"missing images no rendered colour uses: {', '.join(unused_missing)}")
     object_names, rig_names = [o.name for o in meshes], [a.name for a in rigs]
     frozen = freeze(meshes, yaw, report)
     verts, tris = all_triangles(frozen)

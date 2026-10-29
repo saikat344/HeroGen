@@ -29,13 +29,14 @@ except ImportError:  # numpy or Pillow missing
 
 # Builds a box figure in Blender, facing -Y, arms straight out along X (a T-pose), 2 units tall, with a rig
 # (KayKit-style bone names) whose arm and leg bones carry the boxes, and one colour per part: the character's
-# left arm red, its right arm blue. Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not>`.
+# left arm red, its right arm blue. With "cuff", a yellow box around the left forearm that the rig does not
+# deform. Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none>`.
 BUILD = textwrap.dedent('''
     import sys
     import bpy
     import bmesh
 
-    out, rigged = sys.argv[-2], sys.argv[-1] == "1"
+    out, rigged, cuff = sys.argv[-3], sys.argv[-2] == "1", sys.argv[-1] == "cuff"
     bpy.ops.wm.read_factory_settings(use_empty=True)
     # (name, centre, size, colour, bone)
     PARTS = [
@@ -48,6 +49,8 @@ BUILD = textwrap.dedent('''
         ("LegL", (0.15, 0, 0.45), (0.2, 0.22, 0.9), (0.3, 0.3, 0.3), "upperleg.l"),
         ("LegR", (-0.15, 0, 0.45), (0.2, 0.22, 0.9), (0.3, 0.3, 0.3), "upperleg.r"),
     ]
+    if cuff:
+        PARTS.append(("Cuff", (0.95, 0, 1.5), (0.1, 0.2, 0.2), (0.9, 0.8, 0.05), None))
     BONES = [  # name, head, tail, parent
         ("spine", (0, 0, 0.9), (0, 0, 1.6), None),
         ("upperarm.l", (0.45, 0, 1.5), (0.75, 0, 1.5), "spine"),
@@ -88,7 +91,7 @@ BUILD = textwrap.dedent('''
         me.materials.append(mat)
         o = bpy.data.objects.new(name, me)
         bpy.context.scene.collection.objects.link(o)
-        if arm is not None:
+        if arm is not None and bone is not None:
             g = o.vertex_groups.new(name=bone)
             g.add(list(range(len(me.vertices))), 1.0, "REPLACE")
             o.modifiers.new("Armature", "ARMATURE").object = arm
@@ -101,10 +104,10 @@ TORSO_DEPTH = 0.3
 TORSO_COLOUR = (0.2, 0.7, 0.2)  # linear, as built
 
 
-def build_figure(path: Path, rigged: bool) -> None:
+def build_figure(path: Path, rigged: bool, cuff: bool = False) -> None:
     proc = subprocess.run(
         [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD, "--", str(path),
-         "1" if rigged else "0"], capture_output=True, text=True, timeout=300)
+         "1" if rigged else "0", "cuff" if cuff else "none"], capture_output=True, text=True, timeout=300)
     if proc.returncode != 0 or not path.exists():
         raise RuntimeError(f"building the test figure failed:\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
 
@@ -152,14 +155,15 @@ class RenderTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name)
         cls.runs = {}
-        for rigged in (True, False):
-            asset = root / f"figure-{int(rigged)}.glb"
-            build_figure(asset, rigged)
-            run = root / f"run-{int(rigged)}"
+        for key, rigged, cuff in ((True, True, False), (False, False, False), ("cuff", True, True)):
+            asset = root / f"figure-{key}.glb"
+            build_figure(asset, rigged, cuff)
+            run = root / f"run-{key}"
+            extra = ["--bind-unrigged"] if cuff else []
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", str(cls.SIZE),
-                             "--samples-flat", "4", "--samples-lit", "4", "--timeout", "900"])
-            cls.runs[rigged] = (code, run)
+                             "--samples-flat", "4", "--samples-lit", "4", "--timeout", "900", *extra])
+            cls.runs[key] = (code, run)
 
     @classmethod
     def tearDownClass(cls):
@@ -251,6 +255,23 @@ class RenderTest(unittest.TestCase):
         head = np.flatnonzero(np.abs(depth[:, self.SIZE // 2] + 0.2 * scale) < 1e-4)
         self.assertAlmostEqual(len(head) / ppu, 0.4 * scale, delta=1.5 / ppu)
         self.assertLess(head.max(), torso.min())  # the head is above the torso
+
+    def test_an_unrigged_part_bound_to_the_rig_follows_the_arm(self):
+        rec, run = self._record("cuff")
+        self.assertEqual(rec["details"]["pose"], "a-pose")
+        self.assertTrue(any(r.startswith("Cuff: bound to") for r in rec["details"]["blender_report"]))
+        img = np.asarray(Image.open(run / "views" / "front.png").convert("RGB")).astype(int)
+        mask = np.asarray(Image.open(run / "masks" / "front.png")) > 127
+        yellow = mask & (img[..., 0] > 200) & (img[..., 1] > 180) & (img[..., 2] < 120)
+        red = mask & (img[..., 0] > 200) & (img[..., 1] < 120) & (img[..., 2] < 120)
+        self.assertGreater(yellow.sum(), 10)
+        # the cuff sits 83% of the way down the lowered arm; left behind at the T-pose it would sit on the
+        # shoulder line, at the top of the arm's rows
+        ry, cy = np.nonzero(yellow)
+        rr, _ = np.nonzero(red)
+        self.assertGreater(ry.mean() - rr.min(), 0.5 * (rr.max() - rr.min()))
+        self.assertLess(ry.mean(), rr.max())
+        self.assertGreater(cy.mean(), self.SIZE / 2)
 
     def test_heldout_views_are_not_building_views(self):
         _, run = self._record(True)
