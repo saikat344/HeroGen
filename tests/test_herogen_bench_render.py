@@ -195,7 +195,8 @@ class BlendFileTest(unittest.TestCase):
     def test_the_files_world_exposure_aspect_and_border_do_not_reach_the_renders(self):
         _, plain = self._run("plain")
         _, hostile = self._run("hostile")
-        for rel in ("views/front.png", "views-lit/front.png", "heldout/az025-lit.png", "masks/front.png"):
+        for rel in ("views/front.png", "views-lit/front.png", "heldout/front-left-25-lit.png",
+                    "masks/front.png"):
             a = np.asarray(Image.open(plain / rel).convert("RGB")).astype(int)
             b = np.asarray(Image.open(hostile / rel).convert("RGB")).astype(int)
             self.assertEqual(a.shape, b.shape, rel)
@@ -495,7 +496,8 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(set(meta["mask_method"].values()), {"render"})
         cams = json.loads((run / "cameras.json").read_text())
         self.assertEqual(len(cams["building"]), 8)
-        self.assertEqual(cams["evaluation"], ["az025", "az335", "az065", "az295"])
+        self.assertEqual(cams["evaluation"],
+                         ["front-left-25", "front-right-25", "front-left-65", "front-right-65"])
         for cam in cams["cameras"]:
             for rel in cam["files"].values():
                 self.assertTrue((run / rel).exists(), rel)
@@ -612,6 +614,19 @@ class RenderTest(unittest.TestCase):
             self.assertGreater(red.sum(), blue.sum(), (rigged, "left"))
             red, blue = self._side_of_red_and_blue(run, "views/right.png", "masks/right.png")
             self.assertGreater(blue.sum(), red.sum(), (rigged, "right"))
+
+    def test_stage_2h_marks_the_evaluation_views_as_ground_truth(self):
+        _, run = self._record(True)
+        rec = json.loads((run / "stage-2h.json").read_text())
+        self.assertEqual(rec["stage"], "2h")
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["reference"], "ground-truth")
+        views = {v["view"]: v["azimuth_deg"] for v in rec["details"]["views"]}
+        self.assertEqual(views, {"front-left-25": 25, "front-right-25": 335, "front-left-65": 65,
+                                 "front-right-65": 295})
+        for rel in rec["outputs"]:
+            self.assertTrue((run / rel).exists(), rel)
+            self.assertTrue(rel.startswith("heldout/"), rel)
 
     def test_heldout_views_are_not_building_views(self):
         _, run = self._record(True)

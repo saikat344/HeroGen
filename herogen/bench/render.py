@@ -5,14 +5,16 @@ the true mesh and the evaluation views:
 
     gt/body.glb                      the true mesh, posed, in the contract frame (feet at Z = 0, facing -Y)
     cameras.json                     every camera: azimuth, role (building / evaluation), axes, pixel mapping
-    views/{front,left,back,right}.png, views/az{045,135,225,315}.png
+    views/{front,left,back,right}.png, views/{front-left,back-left,back-right,front-right}-45.png
                                      building views: flat unlit base colour on a white background
     views-lit/<view>.png             the same views lit (camera-fixed key and fill light, soft ambient)
     masks/<view>.png                 white figure on black
     depth/<view>.npy                 float32 depth in studs from the plane through the image centre, NaN off
                                      the figure (see cameras.depth_of)
     views/meta.json                  pixels_per_unit, height_units, image_size, mask_method "render"
-    heldout/az{025,335,065,295}.png  evaluation views, with `-lit.png`, `-mask.png` and `-depth.npy`
+    heldout/front-{left,right}-{25,65}.png
+                                     evaluation views, with `-lit.png`, `-mask.png` and `-depth.npy`
+    stage-2h.json                    the evaluation views' record, also "reference": "ground-truth"
     stage-2.json                     the stage record: "reference": "ground-truth", checks, pose, asset hash
     logs/bench-render.log            Blender's output
 
@@ -210,6 +212,30 @@ def check_inputs(asset: Path, out: Path, *, pose: str, include, exclude, size, h
                              f"(no {' or '.join(RUN_MARKERS)}); refusing to clear it")
 
 
+def heldout_record(out: Path, cams: list[dict], borders: dict, off_edge: dict, asset_name: str) -> dict:
+    """`stage-2h.json`: the evaluation views, rendered from the true mesh with exact cameras. Only scoring
+    reads `heldout/`; the record says so and carries each view's azimuth and files."""
+    rec = StageRecord(out, "2h", "heldout")
+    views = [c for c in cams if c["role"] == "evaluation"]
+    for c in views:
+        v = c["view"]
+        rec.add(check(f"{v}_border_px", borders[v], 0, passed=borders[v] == 0))
+        rec.add(check(f"{v}_render_mask_off_edge_px", off_edge[v], 0, passed=off_edge[v] == 0))
+    rec.data["models"] = []
+    rec.data["outputs"] = [f for c in views for f in c["files"].values()]
+    rec.data["cost_basis"] = "local compute only (Blender); rendered with stage 2"
+    rec.note(f"ground-truth evaluation views of {asset_name}, exact cameras (see cameras.json)")
+    return rec.finish({
+        "reference": "ground-truth",
+        "details": {
+            "views": [{"view": c["view"], "azimuth_deg": c["azimuth_deg"],
+                       "elevation_deg": c["elevation_deg"], "files": c["files"]} for c in views],
+            "cameras": "cameras.json",
+            "read_by": "scoring only; no building stage reads heldout/",
+        },
+    })
+
+
 def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
                  yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
                  material_vcols: dict | None = None, image_dirs: list | None = None,
@@ -318,6 +344,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     rec.data["outputs"] = outputs
     rec.data["cost_basis"] = "local compute only (Blender); no paid generation"
     rec.note(f"ground-truth render of {asset.name}; pose {res['pose']}")
+    heldout_record(out, cams, borders, off_edge, asset.name)
     return rec.finish({
         "reference": "ground-truth",
         "details": {

@@ -24,5 +24,17 @@ BACKGROUND = (255, 255, 255)  # plain white, the background the turnaround promp
 
 
 def view_name(azimuth: int) -> str:
-    """`front`, `left`, `back`, `right` for the contract's four views, else `az<ddd>` (e.g. `az025`)."""
-    return CARDINAL.get(int(azimuth) % 360, f"az{int(azimuth) % 360:03d}")
+    """`front`, `left`, `back`, `right` for the contract's four views; any other view is named by the
+    nearest of front and back, the side it turns toward, and the degrees it turns away from that front or
+    back view, the scheme of the pipeline's `heldout/front-left-34.png`: 25 -> `front-left-25`,
+    335 -> `front-right-25`, 135 -> `back-left-45`, 225 -> `back-right-45`."""
+    a = int(azimuth) % 360
+    if a in CARDINAL:
+        return CARDINAL[a]
+    if a < 90:
+        return f"front-left-{a}"
+    if a < 180:
+        return f"back-left-{180 - a}"
+    if a < 270:
+        return f"back-right-{a - 180}"
+    return f"front-right-{360 - a}"
