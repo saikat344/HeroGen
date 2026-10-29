@@ -121,7 +121,7 @@ def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
         if limb["limb"] == "arm":
             value, target = limb["after_deg_below_horizontal"], A_POSE_ARM_DEG
         else:
-            value, target = limb["after_deg_from_vertical"], A_POSE_LEG_DEG
+            value, target = limb["after_frontal_deg_from_vertical"], A_POSE_LEG_DEG
         err = abs(value - target)
         out.append(check(f"pose_{limb['limb']}_{limb['side']}_deg", value, target,
                          passed=err <= POSE_TOLERANCE_DEG and limb["after_outward"],

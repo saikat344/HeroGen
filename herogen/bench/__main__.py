@@ -31,8 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--yaw", type=float, default=0.0, help="degrees about +Z that turn the figure to face -Y")
     r.add_argument("--include", help="regex: render the meshes whose names match (hidden ones too)")
     r.add_argument("--exclude", help="regex: leave out the meshes whose names match")
-    r.add_argument("--image", action="append", metavar="MATERIAL=IMAGE",
-                   help="use this image (file or image name) as the material's base colour")
+    r.add_argument("--image", action="append", metavar="MATERIAL=IMAGE[@UVMAP]",
+                   help="use this image (file or image name) as the material's base colour, "
+                        "optionally through the named UV map")
     r.add_argument("--vcol", action="append", metavar="MATERIAL=ATTRIBUTE",
                    help="use this colour attribute as the material's base colour")
     r.add_argument("--image-dir", action="append", type=Path, default=[],
