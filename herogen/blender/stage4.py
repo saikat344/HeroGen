@@ -433,14 +433,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                 rec.add(check(f"triangles_{group}", k, limit, passed=k <= limit, rule="<=", sections=list(secs)))
         else:
             rec.add(check(f"triangles_{lod}", n_tri, budget, passed=n_tri <= budget, rule="<="))
-    if PROFILES[profile].get("watertight_parts"):
-        from .score import mesh_sanity
+    # Every part of every LOD closed and manifold after welding, under every profile (the avatar specification
+    # requires it; an open part is a defect anywhere).
+    from .score import mesh_sanity
 
-        not_closed = [n for n in SECTIONS
-                      if not mesh_sanity(hi[n].verts, hi[n].faces, 1e-6 * height)["watertight"]]
-        rec.add(check("watertight_parts", len(not_closed), 0, passed=not not_closed, rule="==",
-                      note="parts with a boundary or non-manifold edge after welding: " + ", ".join(not_closed)
-                      if not_closed else "every part closed and manifold"))
+    not_closed = [f"{lod}:{n}" for lod, ss in lod_secs.items() for n in SECTIONS
+                  if not mesh_sanity(ss[n].verts, ss[n].faces, 1e-6 * height)["watertight"]]
+    rec.add(check("watertight_parts", len(not_closed), 0, passed=not not_closed, rule="==",
+                  note="parts with a boundary or non-manifold edge after welding: " + ", ".join(not_closed)
+                  if not_closed else "every part closed and manifold"))
     if PROFILES[profile].get("texture_max_px"):
         biggest = max(b["atlas"] for b in builds.values())
         rec.add(check("texture_max_px", biggest, PROFILES[profile]["texture_max_px"],
