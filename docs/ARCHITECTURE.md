@@ -119,7 +119,7 @@ A run recorded without them has no cache entries for those calls, so replaying i
 
 ## Stage 4 body format: `sections.json`
 
-Stage 4 builds the body in its current rigid form, R15-style rigid sections: `Head, UpperTorso, LowerTorso,
+Stage 4 builds the body as R15-style rigid sections: `Head, UpperTorso, LowerTorso,
 LeftUpperArm, LeftLowerArm, LeftHand, RightUpperArm, RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg,
 LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 
@@ -127,6 +127,7 @@ LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 {
   "units": "studs",
   "height": 5.5,
+  "form": "rigid",
   "sections": [
     {"name": "Head", "pivot": [0.0, 0.0, 4.6], "triangles_high": 1200, "triangles_low": 300,
      "bounds_min": [-0.5, -0.5, 4.5], "bounds_max": [0.5, 0.5, 5.5]}

@@ -185,6 +185,7 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertEqual(r4["profile"]["name"], "roblox-ingame")
         body = json.loads((self.rundir / "04-body" / "sections.json").read_text())
         self.assertEqual([s["name"] for s in body["sections"]], list(SECTIONS))
+        self.assertEqual(body["form"], "rigid")
         self.assertLessEqual(sum(s["triangles_high"] for s in body["sections"]), 24000)
         self.assertLessEqual(sum(s["triangles_low"] for s in body["sections"]), 6000)
         self.assertEqual(body["profile"], "roblox-ingame")

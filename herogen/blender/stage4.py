@@ -587,7 +587,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                       passed=joint_err["max"] <= JOINT_ERROR_GATE, rule="<=", mean=joint_err["mean"]))
 
     sections_json = {
-        "units": "studs", "height": height, "mesh_source": mesh_source, "joints_source": joints_source,
+        "units": "studs", "height": height, "form": "rigid",
+        "form_note": "15 R15 sections, each moved rigidly about its pivot",
+        "mesh_source": mesh_source, "joints_source": joints_source,
         "shape_views": sorted(shape_views),
         "frame": "Blender: +Z up, feet at z=0, faces -Y, x/y centred on the figure's bounding box; "
                  "GLBs are exported Y-up (glTF), front along +Z",
