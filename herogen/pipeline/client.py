@@ -50,6 +50,12 @@ class ReplayMiss(ClientError):
     """Replay mode found no cache entry for a request."""
 
 
+class ApiError(ClientError):
+    """The Model API itself failed: an HTTP or network error after the retries, or a response that can't be
+    read. The only failure a caller may treat as an unmeasured result (a SAM call falling back to the
+    threshold mask, say); a replay miss, a missing key or a corrupt cache entry is not one."""
+
+
 @dataclass
 class SamInstance:
     """One SAM 3.1 instance: a full-image boolean mask plus its box (left, top, right, bottom; exclusive)."""
@@ -162,7 +168,11 @@ class ModelClient:
         }
         key = request_key(summary)
         entry = self._load(key)
-        if entry is not None:
+        if entry is not None and "api_error" in entry and self.mode == "replay":
+            # A live call that failed is replayed as the same failure, so a fallback replays too.
+            self.log.add(SAM_MODEL, "segment", key, cached=True)
+            raise ApiError(entry["api_error"])
+        if entry is not None and "api_error" not in entry:
             self.log.add(SAM_MODEL, "segment", key, cached=True)
             if "instances" not in entry:  # a paid response saved before its masks were decoded
                 return self._decode_and_save(key, entry, rgb.size)
@@ -184,7 +194,11 @@ class ModelClient:
             "metadata": {"include_confidence": "true"},
         }
         started = time.monotonic()
-        resp = self._post("responses", body)
+        try:
+            resp = self._post("responses", body)
+        except ApiError as e:  # recorded so replay reproduces it; a live run asks again
+            self._save_entry(key, {"request": summary, "api_error": str(e)})
+            raise
         # The call is billed now, so log it and keep the raw response before decoding can fail.
         self.log.add(SAM_MODEL, "segment", key, cached=False)
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2),
@@ -217,10 +231,10 @@ class ModelClient:
         resp = self._post(endpoint, body)
         data = resp.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
-            raise ClientError(f"{endpoint}: response has no data[0]")
+            raise ApiError(f"{endpoint}: response has no data[0]")
         b64 = data[0].get("b64_json")
         if not isinstance(b64, str):
-            raise ClientError(f"{endpoint}: data[0] has no b64_json")
+            raise ApiError(f"{endpoint}: data[0] has no b64_json")
         img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
         self._save_png(f"{key}.png", img)
         entry = {
@@ -254,9 +268,13 @@ class ModelClient:
             )
             try:
                 with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
-                    parsed = json.loads(r.read().decode("utf-8"))
+                    raw = r.read().decode("utf-8", "replace")
+                try:
+                    parsed = json.loads(raw)
+                except ValueError as e:
+                    raise ApiError(f"{endpoint}: response is not JSON ({e})") from e
                 if not isinstance(parsed, dict):
-                    raise ClientError(f"{endpoint}: response is not a JSON object")
+                    raise ApiError(f"{endpoint}: response is not a JSON object")
                 return parsed
             except urllib.error.HTTPError as e:
                 detail = _scrub(e.read().decode("utf-8", "replace")[:400])
@@ -267,7 +285,7 @@ class ModelClient:
                 last_err = _scrub(f"{type(e).__name__}: {e}")[:300]
             if attempt < RETRIES:
                 time.sleep(2.0 * (attempt + 1))
-        raise ClientError(f"{endpoint} failed: {last_err}")
+        raise ApiError(f"{endpoint} failed: {last_err}")
 
     def _load(self, key: str) -> dict[str, Any] | None:
         path = self.cache_dir / f"{key}.json"
@@ -315,9 +333,12 @@ def decode_sam_output(text: str, size: tuple[int, int]) -> list[SamInstance]:
         import meta_sam_parser as msp  # noqa: PLC0415  (optional; only live runs decode)
     except ImportError as e:
         raise ClientError("decoding SAM masks needs meta_sam_parser on the path (live mode only)") from e
-    parser = msp.image_segmentation_format().create_parser()
-    parser.push(text if text.endswith("\n") else text + "\n")
-    result = parser.finish(msp.CompletedOutcome()).result
+    try:
+        parser = msp.image_segmentation_format().create_parser()
+        parser.push(text if text.endswith("\n") else text + "\n")
+        result = parser.finish(msp.CompletedOutcome()).result
+    except Exception as e:  # noqa: BLE001  (an unreadable response is the API's failure, kept in the cache)
+        raise ApiError(f"SAM output could not be decoded: {type(e).__name__}: {e}"[:300]) from e
     latest: dict[str, Any] = {}
     for rec in result.records:
         if rec.kind == "mask":

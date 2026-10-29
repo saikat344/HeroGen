@@ -13,7 +13,7 @@ from PIL import Image
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
 from herogen.pipeline.client import (
-    COST_BASIS, IMAGE_MODEL, PRICE_PER_IMAGE_USD, SAM_MODEL, ModelClient, SamInstance,
+    COST_BASIS, IMAGE_MODEL, PRICE_PER_IMAGE_USD, SAM_MODEL, ApiError, ModelClient, SamInstance,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
 
@@ -141,9 +141,11 @@ def _sam_or_threshold(client: ModelClient, img: Image.Image) -> tuple[np.ndarray
     for text in SAM_TEXTS:
         try:
             inst = client.segment(img, text)
-        except Exception as e:  # noqa: BLE001  (a SAM failure falls back to the threshold mask, recorded)
+        except ApiError as e:  # the Model API failed (cached, so a replay falls back the same way)
             errors.append(type(e).__name__)
             continue
+        # Anything else stops the stage: a replay miss, a corrupt cache entry or a bug must not quietly switch
+        # to the threshold mask.
         mask = _figure_mask(inst, shape)
         if mask.sum() > 0:
             return mask, f"{SAM_MODEL}:{text}", len(inst)
