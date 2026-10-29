@@ -6,6 +6,7 @@ Nothing here writes to disk or creates folders. Every path handed to the page is
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -54,16 +55,51 @@ SHORT_OPS = {"<", "<=", ">", ">=", "==", "!="}
 
 
 def _num(v: Any) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    """A finite number as a float, else None (bools, strings, NaN, infinities and ints too big for a float)."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _list(v: Any) -> list[Any]:
+    """`v` when it is a list, else an empty list: record fields are only iterated after this check."""
+    return v if isinstance(v, list) else []
+
+
+def _dict(v: Any) -> dict[str, Any]:
+    return v if isinstance(v, dict) else {}
+
+
+def _scalar(v: Any) -> Any:
+    """A value the page can print as it is: None, bool, finite number or string; anything else as JSON text."""
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, (int, float)):
+        return v if _num(v) is not None else None
+    return json.dumps(v, allow_nan=False, default=str)
+
+
+def _finite_float(text: str) -> float | None:
+    f = float(text)
+    return f if math.isfinite(f) else None
+
+
+def parse_json(text: str) -> Any:
+    """Strict-enough JSON for the page: NaN, Infinity and numbers that overflow a float become None."""
+    return json.loads(text, parse_constant=lambda _: None, parse_float=_finite_float)
 
 
 def _read_json(path: Path) -> tuple[Any, str | None]:
-    """(data, None) or (None, error text). A missing file is (None, None)."""
-    if not path.is_file():
-        return None, None
+    """(data, None) or (None, error text). A missing file (or a broken link) is (None, None)."""
     try:
-        return json.loads(path.read_text()), None
-    except (OSError, ValueError) as e:
+        if not path.is_file():
+            return None, None
+        return parse_json(path.read_text()), None
+    except (OSError, ValueError, RecursionError) as e:
         return None, f"{path.name} could not be read ({type(e).__name__})"
 
 
@@ -88,36 +124,55 @@ def run_dir(root: Path, run_id: str) -> Path | None:
     return p
 
 
+ASSUMED_CMP_NOTE = "no comparison recorded: shown as >=, the default for a check with a threshold"
+
+
 def normalise_check(c: dict[str, Any]) -> dict[str, Any]:
     """A check as the page shows it: value, comparison and threshold ("–" when there is no threshold).
 
-    Pipeline checks name the comparison `op`; Blender checks name it `rule`, which is sometimes a sentence
-    rather than an operator. With a threshold and no operator, the comparison is `>=` (as on results.html).
+    Pipeline checks name the comparison `op`; Blender checks name it `rule`. Older Blender records put a
+    sentence in `rule` instead of an operator: the sentence becomes a note and is never read as a comparison.
+    With a threshold and no recorded operator, the comparison is `>=` (the default of both pipelines' `check()`
+    and of results.html), flagged with `cmp_assumed` and a note saying so.
     """
-    threshold = c.get("threshold")
-    op = c.get("op") if isinstance(c.get("op"), str) else None
-    rule = c.get("rule") if isinstance(c.get("rule"), str) else None
-    cmp_text = op or rule
-    rule_text = None
-    if cmp_text is not None and cmp_text not in SHORT_OPS:
-        rule_text, cmp_text = cmp_text, None
+    threshold = _scalar(c.get("threshold"))
+    notes = [c["note"]] if isinstance(c.get("note"), str) and c["note"] else []
+    cmp_text = None
+    for key in ("op", "rule"):
+        text = c.get(key)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if text.strip() in SHORT_OPS:
+            cmp_text = cmp_text or text.strip()
+        else:
+            notes.append(f"{key}: {text}")
+    assumed = False
     if threshold is None:
         limit = "–"
         cmp_text = None
     else:
-        cmp_text = cmp_text or ">="
+        if cmp_text is None:
+            cmp_text, assumed = ">=", True
+            notes.append(ASSUMED_CMP_NOTE)
         limit = f"{cmp_text} {_fmt(threshold)}"
     return {
         "name": str(c.get("name", "")),
-        "value": c.get("value"),
+        "value": _scalar(c.get("value")),
         "threshold": threshold,
         "cmp": cmp_text,
+        "cmp_assumed": assumed,
         "limit": limit,
-        "rule_text": rule_text,
-        "pass": bool(c.get("pass")),
-        "gate": bool(c.get("gate", True)),
-        "note": c.get("note") if isinstance(c.get("note"), str) else None,
+        "pass": c.get("pass") is True,
+        "gate": c.get("gate", True) is not False,
+        "notes": notes,
     }
+
+
+def _text(v: Any) -> str:
+    """A record's free-text field: strings as they are, None as empty, anything else as JSON text."""
+    if v is None:
+        return ""
+    return v if isinstance(v, str) else str(_scalar(v))
 
 
 def _fmt(v: Any) -> str:
@@ -134,19 +189,20 @@ def stage_summary(run: Path, key: str, label: str) -> dict[str, Any]:
         return {"stage": key, "name": label, "status": "unreadable", "error": err}
     if not isinstance(rec, dict):
         return {"stage": key, "name": label, "status": "not run"}
-    checks = [normalise_check(c) for c in rec.get("checks", []) if isinstance(c, dict)]
+    checks = [normalise_check(c) for c in _list(rec.get("checks")) if isinstance(c, dict)]
+    details = _dict(rec.get("details"))
     return {
         "stage": key,
-        "name": str(rec.get("name", label)),
-        "status": "pass" if rec.get("ok") else "gate failed",
-        "ok": bool(rec.get("ok")),
+        "name": rec["name"] if isinstance(rec.get("name"), str) and rec["name"] else label,
+        "status": "pass" if rec.get("ok") is True else "gate failed",
+        "ok": rec.get("ok") is True,
         "seconds": _num(rec.get("seconds")),
         "cost_usd": _num(rec.get("cost_usd")),
-        "cost_basis": str(rec.get("cost_basis", "")),
-        "models": [str(m) for m in rec.get("models", []) if isinstance(m, str)],
-        "tools": [str(m) for m in rec.get("tools", []) if isinstance(m, str)],
-        "notes": str(rec.get("notes", "")),
-        "label": str((rec.get("details") or {}).get("label", "")) if isinstance(rec.get("details"), dict) else "",
+        "cost_basis": _text(rec.get("cost_basis")),
+        "models": [m for m in _list(rec.get("models")) if isinstance(m, str)],
+        "tools": [m for m in _list(rec.get("tools")) if isinstance(m, str)],
+        "notes": _text(rec.get("notes")),
+        "label": _text(details.get("label")),
         "checks": checks,
         "checks_passed": sum(1 for c in checks if c["pass"]),
         "checks_failed_gate": sum(1 for c in checks if c["gate"] and not c["pass"]),
@@ -160,27 +216,31 @@ def _sections_summary(body_dir: Path) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     sections = []
-    for s in data.get("sections", []):
+    for s in _list(data.get("sections")):
         if not isinstance(s, dict):
             continue
         pivot = s.get("pivot")
         sections.append({
-            "name": str(s.get("name", "")),
+            "name": _text(s.get("name")),
             "parent": s.get("parent") if isinstance(s.get("parent"), str) else None,
             "joint": s.get("joint") if isinstance(s.get("joint"), str) else None,
-            "pivot": [float(x) for x in pivot] if isinstance(pivot, list) and len(pivot) == 3
+            "pivot": [_num(x) for x in pivot] if isinstance(pivot, list) and len(pivot) == 3
             and all(_num(x) is not None for x in pivot) else None,
             "triangles_high": _num(s.get("triangles_high")),
             "triangles_low": _num(s.get("triangles_low")),
         })
-    budgets = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
+    # Triangle budgets belong to an opt-in profile (e.g. "roblox-ingame"); the default "best" profile has none,
+    # written as null or left out. No usable budget is None, never an empty dict that reads as "within budget".
+    budgets = {k: _num(v) for k, v in _dict(data.get("budgets")).items() if _num(v) is not None}
+    profile = data.get("profile")
     return {
-        "units": str(data.get("units", "")),
+        "profile": profile.strip() if isinstance(profile, str) and profile.strip() else None,
+        "units": _text(data.get("units")),
         "height": _num(data.get("height")),
         "mesh_source": data.get("mesh_source") if isinstance(data.get("mesh_source"), str) else None,
         "joints_source": data.get("joints_source") if isinstance(data.get("joints_source"), str) else None,
         "sections": sections,
-        "budgets": {k: _num(v) for k, v in budgets.items() if _num(v) is not None},
+        "budgets": budgets or None,
     }
 
 
@@ -199,9 +259,11 @@ def bodies(run: Path, score_bodies: list[dict[str, Any]] | None = None) -> list[
         if not b.get("variant_of") and b.get("glb") and b["glb"] not in names_by_glb:
             names_by_glb[b["glb"]] = b["name"]
     found = []
-    for d in sorted(p for p in run.iterdir() if p.is_dir() and BODY_DIR.match(p.name)):
-        if d.is_symlink():
-            continue
+    try:
+        dirs = sorted(p for p in run.iterdir() if BODY_DIR.match(p.name) and not p.is_symlink() and p.is_dir())
+    except OSError:
+        return []
+    for d in dirs:
         high = d / "high.glb"
         low = d / "low.glb"
         if not high.is_file() and not low.is_file():
@@ -215,7 +277,7 @@ def bodies(run: Path, score_bodies: list[dict[str, Any]] | None = None) -> list[
             "high": high_rel,
             "low": _rel(run, low) if low.is_file() else None,
             "sections": _sections_summary(d),
-            "stage4_ok": bool(rec.get("ok")) if isinstance(rec, dict) else None,
+            "stage4_ok": rec.get("ok") is True if isinstance(rec, dict) else None,
             "front_render": _rel(run, d / "rest-renders" / "textured-front.png")
             if (d / "rest-renders" / "textured-front.png").is_file() else None,
         })
@@ -237,8 +299,8 @@ def scores(run: Path) -> dict[str, Any] | None:
     for b in bodies_in:
         if not isinstance(b, dict):
             continue
-        name = str(b.get("name", ""))
-        views_in = b.get("views") if isinstance(b.get("views"), dict) else {}
+        name = _text(b.get("name"))
+        views_in = _dict(b.get("views"))
         views = {}
         for v in SCORE_VIEWS:
             sv = views_in.get(v)
@@ -250,7 +312,7 @@ def scores(run: Path) -> dict[str, Any] | None:
         render = f"05-renders/{name}/{HELDOUT_VIEW}.png"
         out.append({
             "name": name,
-            "glb": str(b.get("glb", "")),
+            "glb": _text(b.get("glb")),
             "variant_of": b.get("variant_of") if isinstance(b.get("variant_of"), str) else None,
             "mesh_source": b.get("mesh_source") if isinstance(b.get("mesh_source"), str) else None,
             "joints_source": b.get("joints_source") if isinstance(b.get("joints_source"), str) else None,
@@ -270,6 +332,14 @@ def scores(run: Path) -> dict[str, Any] | None:
     }
 
 
+def _total(values: Any) -> float | None:
+    """The sum of the finite numbers in `values` (None counts as 0), or None when the sum overflows."""
+    try:
+        return _num(math.fsum(v or 0.0 for v in values))
+    except OverflowError:
+        return None
+
+
 def run_detail(run: Path) -> dict[str, Any]:
     stages = {key: stage_summary(run, key, label) for key, label in STAGES}
     chain = []
@@ -280,38 +350,60 @@ def run_detail(run: Path) -> dict[str, Any]:
             card["sheet"] = step["sheet"] if (run / step["sheet"]).is_file() else None
         chain.append(card)
     sc = scores(run)
-    total_seconds = sum(s.get("seconds") or 0.0 for s in stages.values())
-    total_cost = sum(s.get("cost_usd") or 0.0 for s in stages.values())
+    total_seconds = _total(s.get("seconds") for s in stages.values())
+    total_cost = _total(s.get("cost_usd") for s in stages.values())
     return {
         "id": run.name,
         "stages": [stages[k] for k, _ in STAGES],
         "chain": chain,
         "bodies": bodies(run, (sc or {}).get("bodies")),
         "scores": sc,
-        "total_seconds": round(total_seconds, 2),
-        "total_cost_usd": round(total_cost, 6),
+        "total_seconds": None if total_seconds is None else round(total_seconds, 2),
+        "total_cost_usd": None if total_cost is None else round(total_cost, 6),
         "cost_is_estimate": True,
     }
 
 
+def _mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _run_entry(p: Path) -> dict[str, Any]:
+    status = {}
+    for key, _ in STAGES:
+        rec, err = _read_json(p / f"stage-{key}.json")
+        status[key] = "unreadable" if err else ("not run" if not isinstance(rec, dict)
+                                                else ("pass" if rec.get("ok") is True else "gate failed"))
+    # A stage file that cannot be stat()ed (a broken link, a permission error) is left out of the time.
+    times = [t for t in (_mtime(f) for f in p.glob("stage-*.json")) if t is not None]
+    return {
+        "id": p.name,
+        "stages": status,
+        "has_body": (p / "04-body" / "high.glb").is_file() or (p / "04-body" / "low.glb").is_file(),
+        "has_scores": (p / "05-scores.json").is_file(),
+        "modified": max(times, default=_mtime(p) or 0.0),
+    }
+
+
 def run_list(root: Path) -> list[dict[str, Any]]:
-    if not root.is_dir():
+    """Every run folder in `root`, newest first. A folder that cannot be listed is left out; one bad run
+    never hides the others."""
+    try:
+        if not root.is_dir():
+            return []
+        candidates = sorted(root.iterdir())
+    except OSError:
         return []
     out = []
-    for p in sorted(root.iterdir()):
-        if p.is_symlink() or not is_run_dir(p):
+    for p in candidates:
+        try:
+            if p.is_symlink() or not is_run_dir(p):
+                continue
+            out.append(_run_entry(p))
+        except OSError:
             continue
-        status = {}
-        for key, _ in STAGES:
-            rec, err = _read_json(p / f"stage-{key}.json")
-            status[key] = "unreadable" if err else ("not run" if not isinstance(rec, dict)
-                                                    else ("pass" if rec.get("ok") else "gate failed"))
-        out.append({
-            "id": p.name,
-            "stages": status,
-            "has_body": (p / "04-body" / "high.glb").is_file() or (p / "04-body" / "low.glb").is_file(),
-            "has_scores": (p / "05-scores.json").is_file(),
-            "modified": max((f.stat().st_mtime for f in p.glob("stage-*.json")), default=p.stat().st_mtime),
-        })
     out.sort(key=lambda r: -r["modified"])
     return out

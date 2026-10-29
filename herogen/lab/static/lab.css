@@ -188,6 +188,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .tri-totals b { color: var(--fg); }
 .tri-totals .ok { color: var(--pass); font-weight: 600; }
 .tri-totals .bad { color: var(--fail); font-weight: 600; }
+.tri-totals .nobudget { font-style: italic; }
 
 .side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
