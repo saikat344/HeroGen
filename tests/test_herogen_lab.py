@@ -229,7 +229,7 @@ class RunIndexTest(unittest.TestCase):
         self.assertIsNone(by["1"]["seconds"])
         self.assertEqual(by["2"]["checks"], [])
         self.assertEqual(by["3"]["checks"], [])
-        self.assertEqual(by["4"]["status"], "not run")
+        self.assertEqual((by["4"]["status"], by["4"]["error"]), ("unreadable", "stage-4.json is not a JSON object"))
         bodies = {b["dir"]: b for b in d["bodies"]}
         self.assertEqual(bodies["04-body"]["sections"]["sections"], [])
         self.assertIsNone(bodies["04-body"]["sections"]["budgets"])
@@ -358,6 +358,24 @@ class PathSafetyTest(unittest.TestCase):
         self.assertIsNone(safe_run_file(self.root, "linked-run/stage-0.json"))
         self.assertIsNotNone(safe_run_file(self.root, "full/link-in.png"))
 
+    def test_links_stay_inside_their_own_run(self):
+        # A link to a sibling run, to a folder of the root that is not a run, or a run folder that is itself a link
+        # to another run: all refused, though each target lies inside the root.
+        write(self.root / "sibling" / "stage-0.json", record(0, "input"))
+        write(self.root / "sibling" / "secret.png", tiny_png())
+        write(self.root / "not-a-run" / "secret.png", tiny_png())
+        try:
+            os.symlink(self.root / "sibling" / "secret.png", self.run / "sib.png")
+            os.symlink(self.root / "not-a-run" / "secret.png", self.run / "nar.png")
+            os.symlink(self.root / "sibling", self.run / "sibdir")
+            os.symlink(self.run, self.root / "alias")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        for rel in ["full/sib.png", "full/nar.png", "full/sibdir/secret.png", "alias/00-sketch.png"]:
+            self.assertIsNone(safe_run_file(self.root, rel), rel)
+        self.assertIsNone(runindex.run_dir(self.root, "alias"))
+        self.assertIsNotNone(safe_run_file(self.root, "sibling/secret.png"))
+
 
 class ServerTest(unittest.TestCase):
     @classmethod
@@ -427,6 +445,10 @@ class ServerTest(unittest.TestCase):
     def test_bound_to_loopback(self):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
 
+    def test_idle_connections_time_out(self):
+        from herogen.lab.server import LabHandler
+        self.assertEqual(LabHandler.timeout, 30)  # a half-sent request cannot hold a thread for ever
+
     def test_page_and_static(self):
         status, headers, body = self.get("/")
         self.assertEqual(status, 200)
@@ -444,35 +466,35 @@ class ServerTest(unittest.TestCase):
         status, headers, body = self.get("/api/runs")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json")
-        self.assertEqual({r["id"] for r in json.loads(body)["runs"]}, {"full", "typed", "nan", "broken"})
-        status, _, body = self.get("/api/runs/full")
+        self.assertEqual({r["id"] for r in json.loads(body)["runs"]}, {"r1/full", "r1/typed", "r1/nan", "r1/broken"})
+        status, _, body = self.get("/api/runs/r1/full")
         self.assertEqual(status, 200)
         d = json.loads(body)
-        self.assertEqual(d["id"], "full")
+        self.assertEqual((d["id"], d["root"], d["name"]), ("r1/full", "r1", "full"))
         self.assertEqual(len(d["bodies"]), 2)
-        for bad in ["/api/runs/..", "/api/runs/%2e%2e", "/api/runs/missing", "/api/runs/full/x"]:
+        for bad in ["/api/runs/..", "/api/runs/%2e%2e", "/api/runs/r1/missing", "/api/runs/r1/full/x", "/api/runs/full", "/api/runs/r2/full", "/api/runs/r1"]:
             self.assertEqual(self.get(bad)[0], 404, bad)
 
     def test_files_and_types(self):
-        status, headers, body = self.get("/runs/full/04-body/high.glb")
+        status, headers, body = self.get("/runs/r1/full/04-body/high.glb")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "model/gltf-binary")
         self.assertEqual(body[:4], b"glTF")
-        status, headers, body = self.get("/runs/full/00-sketch.png")
+        status, headers, body = self.get("/runs/r1/full/00-sketch.png")
         self.assertEqual((status, headers["Content-Type"]), (200, "image/png"))
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        status, headers, body = self.get("/runs/full/00-sketch.png", method="HEAD")
+        status, headers, body = self.get("/runs/r1/full/00-sketch.png", method="HEAD")
         self.assertEqual((status, body), (200, b""))
-        for bad in ["/runs/full/../full/00-sketch.png", "/runs/full/%2e%2e/full/00-sketch.png",
-                    "/runs/full/stage-0.py", "/runs/%2Fetc%2Fpasswd"]:
+        for bad in ["/runs/r1/full/../full/00-sketch.png", "/runs/r1/full/%2e%2e/full/00-sketch.png",
+                    "/runs/r1/full/stage-0.py", "/runs/%2Fetc%2Fpasswd"]:
             self.assertEqual(self.get(bad)[0], 404, bad)
-        self.assertEqual(self.get("/runs/full/00-sketch.png", method="POST")[0], 501)
+        self.assertEqual(self.get("/runs/r1/full/00-sketch.png", method="POST")[0], 501)
 
     def test_foreign_host_refused(self):
         port = self.server.server_address[1]
         for host in ["evil.example", f"evil.example:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}",
                      f"localhost.evil.example:{port}", f"127.0.0.1:{port}.evil.example", f"0.0.0.0:{port}"]:
-            for path in ["/", "/api/runs", "/api/runs/full", "/runs/full/00-sketch.png", "/static/lab.js"]:
+            for path in ["/", "/api/runs", "/api/runs/r1/full", "/runs/r1/full/00-sketch.png", "/static/lab.js"]:
                 status, headers, body = self.raw_response(path, host=host)
                 self.assertEqual(status, 421, (host, path))
                 self.assertEqual(self.strict_json(body), {"error": "421 Misdirected Request"})
@@ -483,7 +505,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, body), (421, b""))
 
     def test_security_headers(self):
-        for path in ["/", "/api/runs", "/runs/full/00-sketch.png", "/static/lab.js", "/nowhere"]:
+        for path in ["/", "/api/runs", "/runs/r1/full/00-sketch.png", "/static/lab.js", "/nowhere"]:
             headers = self.get(path)[1]
             self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin", path)
             self.assertEqual(headers["X-Content-Type-Options"], "nosniff", path)
@@ -538,46 +560,46 @@ class ServerTest(unittest.TestCase):
     def test_bad_runs_do_not_break_the_index(self):
         status, _, body = self.raw_response("/api/runs")
         self.assertEqual(status, 200)
-        runs = {r["id"]: r for r in self.strict_json(body)["runs"]}
+        runs = {r["name"]: r for r in self.strict_json(body)["runs"]}
         self.assertEqual(set(runs), {"full", "typed", "nan", "broken"})
         if self.symlinks:
             self.assertTrue(os.path.islink(self.root / "broken" / "stage-9.json"))
         self.assertEqual(runs["typed"]["stages"]["0"], "pass")
-        for run_id in ["full", "typed", "broken"]:
+        for run_id in ["r1/full", "r1/typed", "r1/broken", "r1%2Ftyped"]:
             status, _, body = self.raw_response(f"/api/runs/{run_id}")
             self.assertEqual(status, 200, run_id)
-            self.assertEqual(self.strict_json(body)["id"], run_id)
-        typed = self.strict_json(self.raw_response("/api/runs/typed")[2])
+            self.assertEqual(self.strict_json(body)["id"], run_id.replace("%2F", "/"))
+        typed = self.strict_json(self.raw_response("/api/runs/r1/typed")[2])
         self.assertEqual(typed["stages"][0]["checks"], [])
         self.assertEqual(typed["scores"]["error"], "05-scores.json has no list of bodies")
 
     def test_nan_is_valid_json(self):
-        status, headers, body = self.raw_response("/api/runs/nan")
+        status, headers, body = self.raw_response("/api/runs/r1/nan")
         self.assertEqual((status, headers["Content-Type"]), (200, "application/json"))
         d = self.strict_json(body)
         self.assertIsNone(d["stages"][0]["seconds"])
         self.assertIsNone(d["stages"][0]["checks"][0]["value"])
-        self.assertIn("nan", {r["id"] for r in self.strict_json(self.raw_response("/api/runs")[2])["runs"]})
+        self.assertIn("r1/nan", {r["id"] for r in self.strict_json(self.raw_response("/api/runs")[2])["runs"]})
 
     def test_traversal_over_http(self):
         # Sent byte for byte: backslashes, encoded slashes and dots, double encoding, NUL.
-        for path in ["/runs/full\\00-sketch.png", "/runs/full%5C00-sketch.png", "/runs/full%5c..%5c..%5coutside.png",
-                     "/runs/full/..%2F..%2Foutside.png", "/runs/full/%2e%2e/%2e%2e/outside.png",
-                     "/runs/full/%2E%2E%2F%2E%2E%2Foutside.png", "/runs/%2e%2e/outside.png", "/runs/../outside.png",
-                     "/runs/full/..\\..\\outside.png", "/runs/full/%252e%252e/%252e%252e/outside.png",
-                     "/runs/full/00-sketch.png%00", "/runs/full/00-sketch.png%00.json", "/runs/%2Fetc%2Fpasswd",
-                     "/runs/full/%2Fetc%2Fpasswd", "/api/runs/..%2Ffull", "/api/runs/%2e%2e", "/api/runs/full%5C..",
+        for path in ["/runs/r1/full\\00-sketch.png", "/runs/r1/full%5C00-sketch.png", "/runs/r1/full%5c..%5c..%5coutside.png",
+                     "/runs/r1/full/..%2F..%2Foutside.png", "/runs/r1/full/%2e%2e/%2e%2e/outside.png",
+                     "/runs/r1/full/%2E%2E%2F%2E%2E%2Foutside.png", "/runs/%2e%2e/outside.png", "/runs/../outside.png", "/runs/r1/%2e%2e/outside.png",
+                     "/runs/r1/full/..\\..\\outside.png", "/runs/r1/full/%252e%252e/%252e%252e/outside.png",
+                     "/runs/r1/full/00-sketch.png%00", "/runs/r1/full/00-sketch.png%00.json", "/runs/%2Fetc%2Fpasswd",
+                     "/runs/r1/full/%2Fetc%2Fpasswd", "/api/runs/..%2Ffull", "/api/runs/%2e%2e", "/api/runs/r1/full%5C..",
                      "/static/..%2Fserver.py", "/static/..%5Cserver.py", "/static/%2e%2e%2fserver.py",
-                     "/static/..\\server.py", "/../herogen/lab/server.py", "/runs/broken/stage-9.json"]:
+                     "/static/..\\server.py", "/../herogen/lab/server.py", "/runs/r1/broken/stage-9.json"]:
             status, _, body = self.raw_response(path)
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"PNG", body, path)
             self.assertNotIn(b"import", body, path)
-        self.assertEqual(self.raw_response("/runs/full/00-sketch.png")[0], 200)
+        self.assertEqual(self.raw_response("/runs/r1/full/00-sketch.png")[0], 200)
 
     def test_head_errors_have_no_body(self):
-        for path in ["/nowhere", "/api/runs/missing", "/runs/full/missing.png", "/static/missing.js",
-                     "/runs/full/..%2F..%2Foutside.png"]:
+        for path in ["/nowhere", "/api/runs/r1/missing", "/runs/r1/full/missing.png", "/static/missing.js",
+                     "/runs/r1/full/..%2F..%2Foutside.png"]:
             status, headers, body = self.raw_response(path, method="HEAD")
             self.assertEqual((status, body), (404, b""), path)
             self.assertEqual(headers["Content-Type"], "application/json")
@@ -590,16 +612,16 @@ class ServerTest(unittest.TestCase):
 
     def test_unexpected_error_is_a_500(self):
         from herogen.lab import server as server_mod
-        original = server_mod.runindex.run_list
+        original = server_mod.Workspace.runs
 
-        def boom(root):
+        def boom(ws):
             raise RuntimeError("index failed")
-        server_mod.runindex.run_list = boom
+        server_mod.Workspace.runs = boom
         try:
             status, headers, body = self.raw_response("/api/runs?token=secret")
             head_status, _, head_body = self.raw_response("/api/runs", method="HEAD")
         finally:
-            server_mod.runindex.run_list = original
+            server_mod.Workspace.runs = original
         self.assertEqual((status, headers["Content-Type"]), (500, "application/json"))
         self.assertEqual(self.strict_json(body), {"error": "500 Internal Server Error"})
         self.assertNotIn(b"index failed", body)
@@ -607,7 +629,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.get("/api/runs")[0], 200)  # the server is still up
 
     def test_zz_read_only(self):
-        for p in ["/", "/api/runs", "/api/runs/full", "/runs/full/05-scores.json", "/runs/full/04-body/low.glb"]:
+        for p in ["/", "/api/runs", "/api/runs/r1/full", "/runs/r1/full/05-scores.json", "/runs/r1/full/04-body/low.glb"]:
             self.get(p)
         after = sorted((p.relative_to(self.root).as_posix(), p.lstat().st_mtime_ns) for p in self.root.rglob("*"))
         self.assertEqual(after, self.before)
@@ -666,13 +688,13 @@ class ErrorLogTest(unittest.TestCase):
         srv = make_server(Path(tmp.name), port=0, quiet=False)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
-        original = server_mod.runindex.run_list
+        original = server_mod.Workspace.runs
         captured = io.StringIO()
         real_stderr = sys.stderr
 
-        def boom(root):
+        def boom(ws):
             raise RuntimeError("index failed")
-        server_mod.runindex.run_list = boom
+        server_mod.Workspace.runs = boom
         sys.stderr = captured
         try:
             port = srv.server_address[1]
@@ -684,7 +706,7 @@ class ErrorLogTest(unittest.TestCase):
             conn.close()
         finally:
             sys.stderr = real_stderr
-            server_mod.runindex.run_list = original
+            server_mod.Workspace.runs = original
             srv.shutdown()
             srv.server_close()
             thread.join(timeout=5)
