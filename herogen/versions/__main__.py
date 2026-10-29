@@ -1,11 +1,12 @@
-"""CLI: `python3 -m herogen.versions <freeze | list | verify>`.
+"""CLI: `python3 -m herogen.versions <freeze | list | verify | compare>`.
 
     freeze --run R --label L [--store DIR] [--body 04-body] [--sketch S] [--milestone M] [--note TEXT]
            [--by NAME] [--allow-dirty] [--allow-unknown-code]
     list [--store DIR] [--sketch S] [--json]
     verify --version V [--store DIR] [--json]
+    compare A B [--store DIR] [--json]
 
-The store is `--store` or `$HEROGEN_VERSIONS`. A version (`V`) is a version folder, `<sketch>/<label>`
+The store is `--store` or `$HEROGEN_VERSIONS`. A version (`V`, `A`, `B`) is a version folder, `<sketch>/<label>`
 in the store, or a label found in only one sketch folder. Exit status: 0 done, 1 `verify` found a problem,
 2 refused or failed (one line on stderr, never a traceback).
 """
@@ -15,6 +16,7 @@ import argparse
 import json
 import sys
 
+from .compare import compare, render_text, to_json
 from .store import VersionError, freeze, list_versions, resolve_version, verify
 
 PROG = "python3 -m herogen.versions"
@@ -26,7 +28,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    ap = _Parser(prog=PROG, description="Freeze, list and verify versioned bodies.")
+    ap = _Parser(prog=PROG, description="Freeze, list, verify and compare versioned bodies.")
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
     f = sub.add_parser("freeze", help="freeze a run's body as a new, write-once version")
     f.add_argument("--run", required=True, help="run folder")
@@ -49,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
     v.add_argument("--version", required=True, dest="ref")
     v.add_argument("--store")
     v.add_argument("--json", action="store_true")
+    c = sub.add_parser("compare", help="compare two versions (deltas are B - A)")
+    c.add_argument("a")
+    c.add_argument("b")
+    c.add_argument("--store")
+    c.add_argument("--json", action="store_true")
     return ap
 
 
@@ -122,6 +129,10 @@ def _run(a) -> int:
             print(f"{rep['version']}: " + (f"ok, {rep['checked']} files match their SHA-256" if rep["ok"]
                                            else "FAILED"))
         return 0 if rep["ok"] else 1
+    if a.cmd == "compare":
+        res = compare(resolve_version(a.a, a.store), resolve_version(a.b, a.store))
+        sys.stdout.write(to_json(res) if a.json else render_text(res))
+        return 0
     raise VersionError(f"unknown command {a.cmd}")
 
 
