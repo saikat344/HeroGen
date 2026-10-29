@@ -89,17 +89,18 @@ GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the ow
 ## Versions
 
 A version is one stage 4 body frozen with the records that built and measured it, so a later build can be
-compared with it on the same sketch. `herogen/versions` writes, lists and verifies them:
+compared with it on the same sketch. `herogen/versions` writes and reads them:
 
 ```bash
 python3 -m herogen.versions freeze --run runs/my-hero --label m1-change [--body 04-body] [--sketch S] \
     [--milestone M] [--note TEXT] [--by NAME] [--allow-dirty] [--allow-unknown-code] [--store DIR]
 python3 -m herogen.versions list [--sketch S] [--json] [--store DIR]
 python3 -m herogen.versions verify --version V [--json] [--store DIR]
+python3 -m herogen.versions compare A B [--json] [--store DIR]
 ```
 
 The store is `--store` or `$HEROGEN_VERSIONS`. There is no default, and the folder must already exist. A version
-(`V`) is given as a version folder, as `<sketch>/<label>` in the store, or as a label that only one
+(`V`, `A`, `B`) is given as a version folder, as `<sketch>/<label>` in the store, or as a label that only one
 sketch folder holds. A folder whose name starts with `.` (such as an unfinished `.partial-*` freeze) is never
 a version and is refused however it is given. Exit status: 0 done, 1 `verify` found a problem, 2 refused or
 failed. A refusal or failure prints one line on stderr and never a traceback.
@@ -108,7 +109,7 @@ failed. A refusal or failure prints one line on stderr and never a traceback.
 
 ```
 <store>/<sketch>/<label>/                      one version: flat files plus version.json, read-only
-<store>/<sketch>/05-scores-<series>.json       scores collected by hand for format 0 versions
+<store>/<sketch>/05-scores-<series>.json       scores collected by hand for format 0 versions (see compare)
 <store>/<sketch>/.partial-<label>-<random>/    an unfinished freeze: not a version, safe to delete
 <store>/<sketch>/<label>/ (empty)              an empty claim from an interrupted freeze: safe to remove
 ```
@@ -220,6 +221,39 @@ read and has its recorded hash, every listed name is a plain file name (unsafe n
 opened), the folder holds nothing beyond the listed files and `version.json`, and `version.json`'s `label` (when
 set) is the folder's name. Every problem is reported and none stops the check: a changed, missing, unreadable
 or irregular file, an unlisted file, an unsafe name or a label mismatch.
+
+**Compare** first verifies both versions as `verify` does and refuses one that fails. It then prints, or with
+`--json` writes, the two versions side by side. Every delta is B - A.
+
+- *Scores.* Scores come from the version's own `05-scores.json`. Only a format 0 version without one reads
+  `<sketch>/05-scores-<series>.json`, where `<series>` is the label up to its first hyphen (`v0-carve` reads
+  `05-scores-v0.json`). That file is not part of the version, so its SHA-256 is reported with the comparison
+  (`scores_file_sha256`); when it is a symbolic link it is not read and the scores are missing. A format 1
+  version without its own `05-scores.json` has no scores. The body's entry is the one `scores.body` names.
+  When `version.json` names no `scores.body`, it is the entry whose `glb` is `<source.body>/high.glb` with no
+  `variant_of`. When it names no `source.body` either (format 0), it is the one entry with the version's
+  `mesh_source` and no `variant_of`. With no unique match, the scores are reported missing, never guessed.
+- *Per view.* IoU, colour error and SSIM for each view either side scored: the views that are not held out
+  first (front, back, left, right, top, in that order), then the held-out views. A view counts as held out when
+  the scores file's `views` list marks it so. A scores file without that list (the hand-collected format) counts
+  every view other than those five as held out. The seen column says what was built from the view:
+  `shape+colour`, `shape`, `colour` or `unseen`. Each group gets a mean over the views that have the metric on
+  both sides. A held-out view's `measures` (consistency or accuracy) is shown when its scores record it.
+- *Triangles.* For the high and low LODs, from `stage-4.json` `body.lods`, else the scores entry's `triangles`
+  and `triangles_low`, else `sections.json` `lods`.
+- *Gates.* Stage 3's and stage 4's `ok`, and every check that is a gate (`gate` not false) on either side, with
+  its threshold, value and pass or fail on each side. A side where the check is not a gate is marked
+  "not gated". An operator (`<=`, `>=`, `==`, `<`, `>`) is shown only when the check records one.
+- *Joint gaps.* From `sections.json` `pose_test`: `gaps_high`, `gaps_low`, `gaps_high_heldout` and
+  `gaps_low_heldout`. Each joint's worst gap is taken over the poses both sides ran. For the gated keys, poses
+  listed in either side's `ungated_poses` are left out. The table names how many poses each side ran.
+- *Inputs.* The sketch, each view, mask and held-out view is `same`, `different` or `unknown`, by the hashes
+  in `inputs`. A format 0 version records none.
+- *Missing.* Every number present on one side and absent on the other is listed as missing in the side that
+  lacks it: a view or one of its metrics, a triangle count, a gate check, a joint's gap or a whole gap table. A
+  side without scores or without `stage-3.json`, `stage-4.json` or `sections.json` is listed too (its gate
+  checks then are not listed one by one). A low LOD number is "not built", not missing, when `stage-4.json`
+  `profile.lods` leaves out `low`.
 
 ## Rules
 
