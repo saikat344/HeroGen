@@ -1,15 +1,20 @@
 """The lab's HTTP server: standard library only, bound to 127.0.0.1, read-only.
 
 Routes:
-  /                      the page (static/index.html), with its Content-Security-Policy; also at /index.html
-  /static/<path>         the page's CSS, JS, SVG icons, JSON tokens and licence texts, subfolders included (HTML
-                         is never served from here, so the page never comes without its CSP)
-  /api/runs              JSON list of runs
-  /api/runs/<id>         JSON detail of one run (stage records, chain images, bodies, scores)
-  /runs/<id>/<path>      a PNG, JPEG, GLB or JSON file inside that run folder
+  /                          the page (static/index.html), with its Content-Security-Policy; also at /index.html
+  /static/<path>             the page's CSS, JS, SVG icons, JSON tokens and licence texts, subfolders included
+                             (HTML is never served from here, so the page never comes without its CSP)
+  /api/workspace             the runs roots, every run, the runs grouped into characters, and the versions
+  /api/runs                  JSON list of every run in every runs root
+  /api/runs/<root>/<run>     JSON detail of one run (records, images, bodies, scores, held-out views, quality)
+  /api/versions/<version>    JSON detail of one frozen version (`<group>/<version>` or `<version>`)
+  /runs/<root>/<run>/<path>  a PNG, JPEG, GLB or JSON file inside that run folder
+  /versions/<version>/<file> a PNG, GLB or JSON file directly inside that version folder
 
-File requests are refused (404) for `..` or `.` segments, hidden names, absolute or backslash paths, any type
-outside the list above, and anything that resolves outside the runs folder (symlinks included).
+`<root>` is a runs root's key: `r1`, `r2`, ... in the order the roots were given. File requests are refused (404)
+for `..` or `.` segments, hidden names, absolute or backslash paths, any type outside the lists above, run folders
+that are symlinks, and anything that resolves outside its own run or version folder (a link to a sibling run
+included).
 
 Every request must name the server as `127.0.0.1:<port>` or `localhost:<port>` in its Host header (and in an
 absolute-form request line, if one is used), else it is refused with 421, so a page on another site cannot
@@ -37,7 +42,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from herogen.lab import runindex
+from herogen.lab import runindex, versions
+from herogen.lab.workspace import Workspace
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -89,25 +95,31 @@ def content_security_policy(page_html: str) -> str:
 
 
 def safe_run_file(root: Path, url_path: str) -> tuple[Path, str] | None:
-    """(file, content type) for `/runs/<id>/<rel>` (already stripped to `<id>/<rel>`), or None if refused."""
-    rel = unquote(url_path)
+    """(file, content type) for `<run>/<rel>` in one runs folder (`url_path` still percent-encoded), or None if
+    refused."""
+    return run_file_in(root, unquote(url_path))
+
+
+def run_file_in(root: Path, rel: str) -> tuple[Path, str] | None:
+    """(file, content type) for the decoded path `<run>/<rel>` inside `root`, or None if refused."""
     if not rel or "\x00" in rel or "\\" in rel or rel.startswith("/"):
         return None
     parts = rel.split("/")
     if len(parts) < 2 or any(p in ("", ".", "..") or p.startswith(".") for p in parts):
         return None
-    if runindex.run_dir(root, parts[0]) is None:
+    run = runindex.run_dir(root, parts[0])
+    if run is None:
         return None
     ctype = RUN_FILE_TYPES.get(Path(parts[-1]).suffix.lower())
     if ctype is None:
         return None
-    candidate = root.joinpath(*parts)
     try:
-        resolved = candidate.resolve(strict=True)
+        resolved = root.joinpath(*parts).resolve(strict=True)
+        run_r = run.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
-    root_r = root.resolve()
-    if not resolved.is_relative_to(root_r) or not resolved.is_file():
+    # Inside this run's own folder: a link to a sibling run or to any other folder of the root is refused.
+    if not resolved.is_relative_to(run_r) or not resolved.is_file():
         return None
     if RUN_FILE_TYPES.get(resolved.suffix.lower()) != ctype:
         return None
@@ -143,9 +155,10 @@ def safe_static_file(name: str) -> tuple[Path, str] | None:
 class LabHandler(BaseHTTPRequestHandler):
     server_version = "HeroGenLab"
     sys_version = ""
+    timeout = 30  # seconds a connection may sit idle or half-sent before it is closed
 
-    def __init__(self, *args: Any, runs_root: Path, quiet: bool = False, **kwargs: Any) -> None:
-        self.runs_root = runs_root
+    def __init__(self, *args: Any, workspace: Workspace, quiet: bool = False, **kwargs: Any) -> None:
+        self.workspace = workspace
         self.quiet = quiet
         super().__init__(*args, **kwargs)
 
@@ -247,18 +260,34 @@ class LabHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             f = safe_static_file(path[len("/static/"):])
             return self._send_file(f, head)
+        if path == "/api/workspace":
+            return self._json(self.workspace.workspace(), head)
         if path == "/api/runs":
-            return self._json({"runs": runindex.run_list(self.runs_root),
-                               "runs_folder_exists": self.runs_root.is_dir()}, head)
+            return self._json({"runs": self.workspace.runs(),
+                               "roots": [{"key": k, "exists": r.is_dir()} for k, r in self.workspace.roots]}, head)
         if path.startswith("/api/runs/"):
-            run_id = unquote(path[len("/api/runs/"):])
-            run = runindex.run_dir(self.runs_root, run_id)
-            if run is None:
+            detail = self.workspace.run_detail(unquote(path[len("/api/runs/"):]))
+            if detail is None:
                 return self._error(HTTPStatus.NOT_FOUND, head)
-            return self._json(runindex.run_detail(run), head)
+            return self._json(detail, head)
+        if path.startswith("/api/versions/"):
+            detail = self.workspace.version_detail(unquote(path[len("/api/versions/"):]))
+            if detail is None:
+                return self._error(HTTPStatus.NOT_FOUND, head)
+            return self._json(detail, head)
         if path.startswith("/runs/"):
-            return self._send_file(safe_run_file(self.runs_root, path[len("/runs/"):]), head)
+            return self._send_file(self.run_file(path[len("/runs/"):]), head)
+        if path.startswith("/versions/"):
+            found = versions.safe_version_file(self.workspace.versions_root, unquote(path[len("/versions/"):]))
+            ctype = RUN_FILE_TYPES.get(found.suffix.lower()) if found else None
+            return self._send_file((found, ctype) if found and ctype else None, head)
         return self._error(HTTPStatus.NOT_FOUND, head)
+
+    def run_file(self, url_path: str) -> tuple[Path, str] | None:
+        """`<root>/<run>/<rel>` -> (file, content type) inside that run, or None."""
+        key, sep, rest = unquote(url_path).partition("/")
+        root = self.workspace.root(key) if sep else None
+        return run_file_in(root, rest) if root is not None else None
 
     def _json(self, data: Any, head: bool, status: HTTPStatus = HTTPStatus.OK) -> None:
         # allow_nan=False: NaN and Infinity are not JSON and would break the browser's parser.
@@ -294,8 +323,10 @@ class LabHandler(BaseHTTPRequestHandler):
         self._json({"error": f"{status.value} {status.phrase}"}, head, status=status)
 
 
-def make_server(runs_root: Path, port: int = 8790, quiet: bool = False) -> ThreadingHTTPServer:
-    handler = partial(LabHandler, runs_root=Path(runs_root), quiet=quiet)
+def make_server(workspace: Workspace | Path, port: int = 8790, quiet: bool = False) -> ThreadingHTTPServer:
+    """A server for `workspace` (or for one runs folder) on 127.0.0.1:`port`; port 0 picks a free one."""
+    ws = workspace if isinstance(workspace, Workspace) else Workspace([Path(workspace)])
+    handler = partial(LabHandler, workspace=ws, quiet=quiet)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     server.daemon_threads = True
     return server
