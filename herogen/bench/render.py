@@ -15,6 +15,7 @@ the true mesh and the evaluation views:
     heldout/front-{left,right}-{25,65}.png
                                      evaluation views, with `-lit.png`, `-mask.png` and `-depth.npy`
     stage-2h.json                    the evaluation views' record, also "reference": "ground-truth"
+    bench-run.json                   written first: marks the folder as the bench's (status started/finished)
     stage-2.json                     the stage record: "reference": "ground-truth", checks, pose, asset hash
     logs/bench-render.log            Blender's output
 
@@ -47,7 +48,10 @@ JOB_SCRIPT = Path(__file__).with_name("bench_job.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ASSET_TYPES = (".glb", ".gltf", ".fbx", ".blend")
 SIZE_RANGE = (32, 8192)         # square image size in pixels
-RUN_MARKERS = ("stage-2.json", "cameras.json")  # files that show a folder is a bench run folder
+MARKER = "bench-run.json"        # written first, so even a run that stopped part-way is recognised
+# Everything the bench writes at the top of a run folder; --overwrite clears a folder holding nothing else.
+BENCH_ENTRIES = frozenset(("gt", "views", "views-lit", "masks", "depth", "heldout", "logs", "cameras.json",
+                           "stage-2.json", "stage-2h.json", MARKER))
 POSES = ("auto", "a-pose", "rest", "as-shipped")
 
 # Gates. The mask comes from rays through pixel centres and the colour render's coverage from area sampling,
@@ -223,9 +227,29 @@ def check_inputs(asset: Path, out: Path, *, pose: str, include, exclude, size, h
     if out.is_dir() and any(out.iterdir()):
         if not overwrite:
             raise ValueError(f"run folder {out} is not empty; pass --overwrite to replace it")
-        if not any((out / m).exists() for m in RUN_MARKERS):
-            raise ValueError(f"run folder {out} is not empty and does not look like a bench run folder "
-                             f"(no {' or '.join(RUN_MARKERS)}); refusing to clear it")
+        problem = not_a_bench_run(out)
+        if problem:
+            raise ValueError(f"run folder {out} is not a ground-truth bench run ({problem}); "
+                             f"refusing to clear it")
+
+
+def not_a_bench_run(out: Path) -> str | None:
+    """Why `out` is not a folder this tool wrote (so --overwrite must leave it alone), or None. A pipeline run
+    also has stage-2.json, views/ and masks/; it is told apart by its other files and its stage record."""
+    foreign = sorted(p.name for p in out.iterdir() if p.name not in BENCH_ENTRIES)
+    if foreign:
+        return f"it holds files the bench does not write: {', '.join(foreign[:5])}"
+    try:
+        if (out / MARKER).exists():
+            if json.loads((out / MARKER).read_text()).get("tool") == "herogen.bench":
+                return None
+            return f"{MARKER} is not the bench's"
+        rec = json.loads((out / "stage-2.json").read_text()) if (out / "stage-2.json").exists() else {}
+    except (OSError, ValueError) as exc:
+        return f"its records cannot be read ({exc.__class__.__name__})"
+    if (out / "cameras.json").exists() and rec.get("reference") == "ground-truth":
+        return None
+    return f"no {MARKER}, and no cameras.json with a stage-2.json marked \"reference\": \"ground-truth\""
 
 
 def heldout_record(out: Path, cams: list[dict], borders: dict, off_edge: dict, asset_name: str) -> dict:
@@ -267,6 +291,8 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     if out.is_dir() and any(out.iterdir()):
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    marker = {"tool": "herogen.bench", "reference": "ground-truth", "asset": asset.name, "status": "started"}
+    (out / MARKER).write_text(json.dumps(marker, indent=2) + "\n")
     rec = StageRecord(out, 2, "turnaround")
     with tempfile.TemporaryDirectory(prefix="herogen-bench-") as tmp:
         work = Path(tmp)
@@ -367,6 +393,8 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     rec.data["cost_basis"] = "local compute only (Blender); no paid generation"
     rec.note(f"ground-truth render of {asset.name}; pose {res['pose']}")
     heldout_record(out, cams, borders, off_edge, asset.name)
+    marker["status"] = "finished"
+    (out / MARKER).write_text(json.dumps(marker, indent=2) + "\n")
     return rec.finish({
         "reference": "ground-truth",
         "details": {

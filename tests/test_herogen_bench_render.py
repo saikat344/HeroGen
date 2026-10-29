@@ -377,6 +377,43 @@ class CliTest(unittest.TestCase):
         self.assertIn("<work>", out)
         self.assertNotIn("pat", out)
 
+    def _folder(self, tmp, files):
+        out = Path(tmp) / "run"
+        for rel, text in files.items():
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out / rel).write_text(text)
+        return out
+
+    def test_overwrite_leaves_pipeline_and_mixed_folders_alone(self):
+        from herogen.bench.render import not_a_bench_run
+
+        pipeline = {"stage-2.json": json.dumps({"stage": 2, "ok": True}), "views/front.png": "x",
+                    "masks/front.png": "x", "00-sketch.png": "x", "01-cover.png": "x"}
+        bare_pipeline = {"stage-2.json": json.dumps({"stage": 2, "ok": True}), "views/meta.json": "{}",
+                         "masks/front.png": "x", "cameras.json": "{}"}
+        bench = {"bench-run.json": json.dumps({"tool": "herogen.bench"}), "stage-2.json": "{}",
+                 "cameras.json": "{}", "views/front.png": "x"}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn("00-sketch.png", not_a_bench_run(self._folder(tmp, pipeline)))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn("ground-truth", not_a_bench_run(self._folder(tmp, bare_pipeline)))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(not_a_bench_run(self._folder(tmp, bench)))
+        with tempfile.TemporaryDirectory() as tmp:
+            mixed = dict(bench, **{"notes.txt": "mine"})
+            self.assertIn("notes.txt", not_a_bench_run(self._folder(tmp, mixed)))
+
+    def test_a_run_that_stopped_part_way_can_be_overwritten(self):
+        from herogen.bench.render import not_a_bench_run
+
+        partial = {"bench-run.json": json.dumps({"tool": "herogen.bench", "status": "started"}),
+                   "logs/bench-render.log": "Blender failed"}
+        older = {"stage-2.json": json.dumps({"reference": "ground-truth"}), "cameras.json": "{}"}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(not_a_bench_run(self._folder(tmp, partial)))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(not_a_bench_run(self._folder(tmp, older)))
+
     def test_material_override_needs_a_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "figure.glb"
@@ -446,11 +483,15 @@ class FacingErrorTest(unittest.TestCase):
                 "--samples-flat", "2", "--samples-lit", "2"]
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(args), 0)
-            (run / "stale.txt").write_text("left from an older run")
+            stale = run / "heldout" / "front-left-34.png"   # a view an older version wrote
+            stale.write_text("left from an older run")
             self.assertEqual(main(args), 2)          # not empty: refused
             self.assertEqual(main(args + ["--overwrite"]), 0)
-        self.assertFalse((run / "stale.txt").exists())
-        self.assertTrue((run / "stage-2.json").exists())
+            self.assertFalse(stale.exists())
+            self.assertTrue((run / "stage-2.json").exists())
+            (run / "notes.txt").write_text("someone's notes")
+            self.assertEqual(main(args + ["--overwrite"]), 2)   # a file the bench never writes: refused
+        self.assertTrue((run / "notes.txt").exists())
 
     def test_a_yaw_that_contradicts_the_rig_is_refused(self):
         code, err = self._main(self.rigged, "--yaw", "180")
@@ -532,6 +573,7 @@ class RenderTest(unittest.TestCase):
             self.assertTrue((run / "views" / f"{v}.png").exists())
             self.assertTrue((run / "masks" / f"{v}.png").exists())
         self.assertTrue((run / "gt" / "body.glb").exists())
+        self.assertEqual(json.loads((run / "bench-run.json").read_text())["status"], "finished")
         self.assertEqual(rec["details"]["triangles"], 8 * 12)
 
     def test_rigged_figure_is_put_in_an_a_pose(self):
