@@ -287,16 +287,29 @@ class RenderMaskAgreementTest(unittest.TestCase):
         self.assertFalse(band[12, 15] or band[8, 15])
 
     def test_coverage_differing_only_on_the_edge_passes(self):
-        cover = self.mask.copy()
-        cover[10, 12:20] = False                            # a half-covered top row
-        cover[9, 14] = True                                 # a pixel just outside, more than half covered
+        cover = self.mask.astype(float)
+        cover[10, 12:20] = 0.4                              # a less-than-half-covered top row
+        cover[9, 14] = 0.8                                  # a pixel just outside, mostly covered
         self.assertEqual(self.off_edge(cover, self.mask), 0)
 
+    def test_a_sliver_between_pixel_centres_is_within_the_margin(self):
+        from herogen.bench.render import coverage_margin
+
+        cover = self.mask.astype(float)
+        cover[34, 5] = 0.502                                # 8 of 16 samples hit a sliver no centre ray hit
+        self.assertEqual(self.off_edge(cover, self.mask, coverage_margin(16)), 0)
+        cover[34, 5] = 0.9                                  # well covered: that is not a sliver
+        self.assertEqual(self.off_edge(cover, self.mask, coverage_margin(16)), 1)
+        self.assertEqual(coverage_margin(16), 0.125)
+        self.assertEqual(coverage_margin(4), 0.25)
+
     def test_a_shifted_camera_is_caught_at_any_size(self):
-        shifted = np.roll(self.mask, 3, axis=1)
-        self.assertGreater(self.off_edge(shifted, self.mask), 0)
+        from herogen.bench.render import coverage_margin
+
+        shifted = np.roll(self.mask, 3, axis=1).astype(float)
+        self.assertGreater(self.off_edge(shifted, self.mask, coverage_margin(16)), 0)
         big = np.kron(self.mask, np.ones((8, 8), dtype=bool))
-        self.assertGreater(self.off_edge(np.roll(big, 3, axis=1), big), 0)
+        self.assertGreater(self.off_edge(np.roll(big, 3, axis=1).astype(float), big, coverage_margin(16)), 0)
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")

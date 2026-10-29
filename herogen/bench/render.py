@@ -131,11 +131,19 @@ def near_edge(mask: np.ndarray) -> np.ndarray:
     return grown & ~shrunk
 
 
-def off_edge_disagreement(coverage: np.ndarray, mask: np.ndarray) -> int:
-    """Pixels where the colour render's coverage and the ray-cast mask disagree away from the mask's edge.
-    Edge pixels can differ (area coverage against a ray through the pixel centre); no other pixel can when
-    the render camera and the mask camera are the same."""
-    return int(((coverage != mask) & ~near_edge(mask)).sum())
+def off_edge_disagreement(coverage: np.ndarray, mask: np.ndarray, margin: float = 0.0) -> int:
+    """Pixels, away from the mask's edge, where the colour render's coverage (0..1) is on the other side of
+    one half from the ray-cast mask by more than `margin`. Edge pixels can differ (area coverage against a
+    ray through the pixel centre), and so can a sub-pixel sliver that slips between pixel centres while its
+    sampled coverage reads about one half; `margin` (see `coverage_margin`) leaves those out. A camera
+    offset puts whole pixels on the wrong side, far beyond it."""
+    wrong = np.where(mask, coverage < 0.5 - margin, coverage > 0.5 + margin)
+    return int((wrong & ~near_edge(mask)).sum())
+
+
+def coverage_margin(samples: int) -> float:
+    """Two samples' worth of the coverage a render with `samples` samples per pixel reports, at most 0.25."""
+    return min(0.25, 2.0 / max(1, samples))
 
 
 def visible_transparent(alpha_render: Path, mask: np.ndarray) -> int:
@@ -293,7 +301,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             np.save(out / paths["depth"], depth.astype(np.float32))
             outputs += list(paths.values())
             ious[cam["view"]] = round(iou(alpha >= 0.5, mask), 5)
-            off_edge[cam["view"]] = off_edge_disagreement(alpha >= 0.5, mask)
+            off_edge[cam["view"]] = off_edge_disagreement(alpha, mask, coverage_margin(samples_flat))
             see_through[cam["view"]] = visible_transparent(work / "views" / f"{cam['view']}-alpha.png", mask)
             borders[cam["view"]] = border_pixels(mask)
 
