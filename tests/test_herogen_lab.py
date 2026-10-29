@@ -734,6 +734,17 @@ class PageReferencesTest(unittest.TestCase):
         self.assertEqual(set(imports), {"three", "three/addons/"})
         for url in imports.values():
             self.assertTrue(url.startswith(CDN_PREFIX), url)
+        # Every module the page loads from the CDN is pinned by its SHA-384 (import-map integrity).
+        integrity = json.loads(importmap.group(1))["integrity"]
+        js = (STATIC_DIR / "lab.js").read_text()
+        needed = {imports["three"]} | {imports["three/addons/"] + spec[len("three/addons/"):] for spec in
+                                        re.findall(r"""from\s+['"](three/addons/[^'"]+)['"]""", js)}
+        self.assertTrue(needed <= set(integrity), needed - set(integrity))
+        for url, digest in integrity.items():
+            self.assertTrue(url.startswith(CDN_PREFIX), url)
+            self.assertRegex(digest, r"^sha384-[A-Za-z0-9+/]{64}$", url)
+        # The CSP hash covers the import map exactly as served, integrity included.
+        self.assertIn("'sha256-", content_security_policy(html))
         for url in self.URL.findall(html):
             self.assertTrue(url.startswith(CDN_PREFIX) or url.startswith("http://www.w3.org/"), url)
         for attr in re.findall(r"""(?:src|href)=["']([^"']+)["']""", html):
