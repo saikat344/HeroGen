@@ -268,8 +268,8 @@ def heldout_record(out: Path, cams: list[dict], borders: dict, off_edge: dict, a
     return rec.finish({
         "reference": "ground-truth",
         "details": {
-            "views": [{"view": c["view"], "azimuth_deg": c["azimuth_deg"],
-                       "elevation_deg": c["elevation_deg"], "files": c["files"]} for c in views],
+            "views": {c["view"]: {"azimuth_deg": c["azimuth_deg"], "elevation_deg": c["elevation_deg"],
+                                  "files": c["files"]} for c in views},
             "cameras": "cameras.json",
             "read_by": "scoring only; no building stage reads heldout/",
         },
