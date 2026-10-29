@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import HEIGHT_STUDS
+from . import DEFAULT_PROFILE, HEIGHT_STUDS, PROFILES
 
 
 def _upstream_problem(run: Path, stage: int) -> str | None:
@@ -46,6 +46,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--voxels", type=int, default=None, help="voxel grid resolution along the height")
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
     r.add_argument("--force", action="store_true", help="run even if the previous stage did not pass")
+    r.add_argument("--profile", choices=tuple(PROFILES), default=DEFAULT_PROFILE,
+                   help="stage 4 target: best (default; no triangle budget, full detail, no low LOD), "
+                        "roblox-ingame (24,000 / 6,000 high / low) or roblox-avatar (the triangle, "
+                        "watertight-part and texture limits of Roblox's character body specification; no rig, "
+                        "attachments, facial animation or cages)")
     r.add_argument("--mesh-source", choices=("carve", "sam3d-objects"), default="carve",
                    help="stage 3 mesh: silhouette carving (default) or SAM 3D Objects from the front view")
     r.add_argument("--joints", choices=("silhouette", "sam3d-body"), default="silhouette",
@@ -116,10 +121,15 @@ def main(argv: list[str] | None = None) -> int:
             print("stage 3 gate failed; stopping", file=sys.stderr)
             return 1
     if 4 in stages:
+        from .stage3 import error_text
         from .stage4 import run_stage4
 
-        rec = run_stage4(a.run, a.height, timeout=a.timeout)
-        print(json.dumps({"stage": 4, "ok": rec["ok"], "seconds": rec["seconds"],
+        try:
+            rec = run_stage4(a.run, a.height, timeout=a.timeout, profile=a.profile)
+        except (BlenderError, ModuleNotFoundError, ValueError, KeyError, OSError) as exc:
+            print(f"stage 4 stopped: {error_text(exc, a.run)}", file=sys.stderr)
+            return 1
+        print(json.dumps({"stage": 4, "ok": rec["ok"], "seconds": rec["seconds"], "profile": a.profile,
                           "checks": {c["name"]: c["value"] for c in rec["checks"]}}))
         ok &= rec["ok"]
     return 0 if ok else 1

@@ -152,12 +152,15 @@ class TestEndToEndBlender(SyntheticBase):
 
         r3 = run_stage3(self.rundir, nz=128, timeout=300)
         self.assertTrue(r3["ok"], r3["checks"])
-        r4 = run_stage4(self.rundir, timeout=600)
+        r4 = run_stage4(self.rundir, timeout=600, profile="roblox-ingame")
         self.assertTrue(r4["ok"], r4["checks"])
+        self.assertEqual(r4["profile"]["name"], "roblox-ingame")
         body = json.loads((self.rundir / "04-body" / "sections.json").read_text())
         self.assertEqual([s["name"] for s in body["sections"]], list(SECTIONS))
         self.assertLessEqual(sum(s["triangles_high"] for s in body["sections"]), 24000)
         self.assertLessEqual(sum(s["triangles_low"] for s in body["sections"]), 6000)
+        self.assertEqual(body["profile"], "roblox-ingame")
+        self.assertEqual(body["budgets"], {"triangles_high_max": 24000, "triangles_low_max": 6000})
         for lod in ("high", "low"):
             self.assertEqual((self.rundir / "04-body" / f"{lod}.glb").read_bytes()[:4], b"glTF")
         self.assertGreaterEqual(len(list((self.rundir / "04-body" / "pose-renders").glob("*.png"))), 7)
@@ -191,8 +194,8 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertTrue(run_stage3(run, nz=128, timeout=300)["ok"])
         (run / "blender-work" / "03-mesh.npz").unlink()
         root = Path(__file__).resolve().parents[1]
-        proc = subprocess.run([sys.executable, "-m", "herogen.blender", "run", "--run", str(run), "--stages", "4"],
-                              cwd=root, capture_output=True, text=True, timeout=900)
+        proc = subprocess.run([sys.executable, "-m", "herogen.blender", "run", "--run", str(run), "--stages", "4",
+                               "--profile", "roblox-ingame"], cwd=root, capture_output=True, text=True, timeout=900)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertTrue(json.loads((run / "stage-4.json").read_text())["ok"])
 
