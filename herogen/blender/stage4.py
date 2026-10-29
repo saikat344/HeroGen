@@ -260,7 +260,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         pivot_rows[n] = {"inside_section": inside, "offset_from_mask_joint": round(off, 4),
                          "rim_radius": None if rim_r is None else round(rim_r, 4), "ok": ok}
     rec.add(check("pivots_in_joint_region", int(sum(r["ok"] for r in pivot_rows.values())), 15,
-                  rule="pivot inside its section and within one cut radius of the mask joint",
+                  rule=">=", note="pivot inside its section and within one cut radius of the mask joint",
                   worst_offset_over_radius=round(worst_off, 3)))
     gated = {lod: max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
              for lod, g in gaps.items()}

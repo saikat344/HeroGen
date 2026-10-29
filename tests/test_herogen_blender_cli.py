@@ -43,6 +43,11 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("ok=False", err)
 
+    def test_empty_stages_is_a_usage_error(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main("--stages", ",")
+        self.assertEqual(cm.exception.code, 2)
+
     def test_failed_stage3_stops_stage4(self):
         (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": False}))
         code, err = self._main("--stages", "4")

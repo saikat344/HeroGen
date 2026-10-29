@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"synthetic masks written to {a.run}")
         return 0
     stages = {int(x) for x in a.stages.split(",") if x.strip()}
+    if not stages:
+        ap.error("--stages names no stage (use 3, 4 or 3,4)")
     if not stages <= {3, 4}:
         ap.error("this package runs stages 3 and 4 only")
     first = min(stages)

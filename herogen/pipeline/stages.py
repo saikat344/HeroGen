@@ -12,7 +12,9 @@ from PIL import Image
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
-from herogen.pipeline.client import COST_BASIS, IMAGE_MODEL, SAM_MODEL, ModelClient, SamInstance
+from herogen.pipeline.client import (
+    COST_BASIS, IMAGE_MODEL, PRICE_PER_IMAGE_USD, SAM_MODEL, ModelClient, SamInstance,
+)
 from herogen.pipeline.runfolder import RunFolder, now_iso
 
 SAM_TEXTS = ("character", "person")  # tried in order; "person" misses armoured heroes on some sheets
@@ -84,14 +86,13 @@ class _Stage:
     def finish(self) -> dict[str, Any]:
         calls = self.client.log.calls[self.calls0 :] if self.client else []
         live = [c for c in calls if not c["cached"]]
-        price = {IMAGE_MODEL: 0.01, SAM_MODEL: 0.0025}
         record = {
             "stage": self.n,
             "name": self.name,
             "ok": C.gate_ok(self.checks),
             "started": self.started,
             "seconds": round(time.monotonic() - self.t0, 2),
-            "cost_usd": round(sum(price.get(c["model"], 0.0) for c in live), 6),
+            "cost_usd": round(sum(PRICE_PER_IMAGE_USD.get(c["model"], 0.0) for c in live), 6),
             "cost_basis": COST_BASIS + "; replayed (cached) calls cost 0",
             "models": self.client.log.models(self.calls0) if self.client else [],
             "outputs": self.outputs,

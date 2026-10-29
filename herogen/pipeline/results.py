@@ -25,7 +25,7 @@ HELDOUT_STAGE = ("2h", "held-out view")
 # Images shown per stage beyond its record's `outputs` (stages 3-4 write folders of renders).
 EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
 
-# Scoring (05-scores.json, written by herogen/blender): rows in this order, the held-out view last.
+# Scoring (05-scores.json, shown when a run folder holds one): rows in this order, the held-out view last.
 SCORE_VIEWS = ["front", "back", "left", "right", "front-left-34"]
 HELDOUT_VIEW = "front-left-34"
 HELDOUT_IMAGE = "heldout/front-left-34.png"

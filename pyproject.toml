@@ -9,7 +9,6 @@ dependencies = ["numpy", "pillow"]
 
 [project.optional-dependencies]
 live = ["meta-sam-parser"]
-remote = ["modal"]
 
 [tool.setuptools.packages.find]
 include = ["herogen*"]
