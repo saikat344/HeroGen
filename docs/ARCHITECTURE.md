@@ -70,14 +70,23 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
 }
 ```
 
-## Held-out view, mask method and covers
+## Held-out views, mask method and covers
 
-**Held-out view (stage 2h).** After stage 2 passes, one extra image of the same character in the same A-pose
-seen from the front-left at about 45 degrees: `heldout/front-left-34.png` and `heldout/front-left-34-mask.png`,
-with its checks in `stage-2h.json`. No building stage reads `heldout/`; it exists so a body can be scored on a
-view it was not built from. The angle the image model actually drew is unknown, so a scorer has to search yaw
-and fit scale and offset from the mask's bounding box. When a run folder holds `05-scores.json`, the results
-page shows its per-body table (see `herogen/pipeline/results.py` for the format).
+**Held-out views (stage 2h).** After stage 2 passes, two extra images of the same character in the
+turnaround's A-pose, each its own edit of the cover with the front view as the pose and framing reference:
+`front-left-34` (seen from about 45 degrees front-left, facing image left) and `front-right-34` (front-right,
+facing image right). No building stage reads `heldout/`; the views exist so a body can be scored on views it
+was not built from. Each view is checked against the turnaround: silhouette landmarks are placed in 3D from the
+front and profile views and fitted over yaw, which gives the found yaw and the pose error; facing is three
+votes (the fit, the toes, SAM 3.1 face inside head); and a found yaw within `azimuth_clearance_deg` (10) of a
+building azimuth (`build_azimuths_deg`, the four turnaround views) is rejected. A view is generated up to three
+times and the best generation kept: accepted, needs human review (a check could not decide) or rejected (a
+gated check failed). Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png`
+when accepted, and to `heldout/review/` or `heldout/rejected/` otherwise, so `heldout/<view>.png` only ever
+holds an accepted view. `stage-2h.json` holds each view's status, found yaw and attempts (`details.views`) and
+`"reference": "generated"`: a score against a generated view measures consistency with the generated
+character, not accuracy. When a run folder holds `05-scores.json`, the results page shows its per-body table
+(see `herogen/pipeline/results.py` for the format).
 
 **Mask method.** `views/meta.json` records how each mask was made: `"mask_method": {"front": "sam-3.1", ...}`
 (`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`. A mask falls back to the threshold only
