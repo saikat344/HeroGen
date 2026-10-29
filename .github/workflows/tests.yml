@@ -14,8 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install numpy pillow
-      - name: Unit tests (Blender tests skip without Blender)
+      # scipy: the hybrid mesh tests (outline conform, texture fallback) need it
+      - run: pip install numpy pillow scipy
+      - name: Unit tests (Blender tests skip without Blender; they run locally)
         run: python3 -m unittest discover -s tests -v
       - name: Guard
         run: python3 tools/guard/guard.py tree
