@@ -168,10 +168,12 @@ function renderChecks() {
     const res = c.pass ? 'pass' : (c.gate ? 'fail' : 'info');
     return h('tr', {},
       h('td', {}, h('span', { class: 'mono', text: c.name }),
-        c.rule_text ? h('span', { class: 'small', text: `rule: ${c.rule_text}` }) : null,
-        c.note ? h('span', { class: 'small', text: c.note }) : null),
+        (c.notes || []).map((n) => h('span', { class: 'small', text: n }))),
       h('td', { class: 'num', text: fmtNum(c.value) }),
-      h('td', { class: 'num mono', text: c.threshold === null || c.threshold === undefined ? '–' : `${c.cmp} ${fmtNum(c.threshold)}` }),
+      h('td', {
+        class: 'num mono', title: c.cmp_assumed ? 'No comparison recorded; >= is the default for a check with a threshold' : null,
+        text: c.threshold === null || c.threshold === undefined ? '–' : `${c.cmp} ${fmtNum(c.threshold)}`,
+      }),
       h('td', { class: `res-${res}`, text: c.pass ? 'pass' : (c.gate ? 'fail' : 'fail (not gated)') }),
       h('td', { text: c.gate ? 'yes' : 'no' }));
   });
@@ -789,11 +791,14 @@ function renderTriTotals(entries) {
   for (const e of entries) {
     const parts = [];
     const sec = e.body.sections && !e.body.sections.error ? e.body.sections : null;
-    const budgets = sec ? sec.budgets : {};
+    // budgets is null when the body was built without a triangle budget (the default "best" profile).
+    const budgets = sec ? sec.budgets : null;
+    const noBudget = sec && !budgets
+      ? (!sec.profile || sec.profile === 'best' ? 'no budget (best quality)' : 'no budget recorded') : null;
     const sum = (k) => (sec ? sec.sections.reduce((a, s) => a + (s[k] || 0), 0) : null);
     const lodRow = (lod, key, budgetKey) => {
       const n = sum(key);
-      const budget = budgets[budgetKey];
+      const budget = budgets ? budgets[budgetKey] : undefined;
       if (n === null) return null;
       const ok = budget === undefined ? null : n <= budget;
       return h('span', {}, `${lod} `, h('b', { text: fmtInt(n) }),
@@ -801,8 +806,10 @@ function renderTriTotals(entries) {
         ok === null ? null : h('span', { class: ok ? 'ok' : 'bad', text: ok ? 'within budget' : 'over budget' }));
     };
     parts.push(h('span', {}, h('b', { text: e.body.name }), ':'));
+    if (sec && sec.profile) parts.push(h('span', {}, 'profile ', h('b', { class: 'mono', text: sec.profile })));
     if (sec) {
       parts.push(lodRow('high', 'triangles_high', 'triangles_high_max'), lodRow('low', 'triangles_low', 'triangles_low_max'));
+      if (noBudget) parts.push(h('span', { class: 'nobudget', text: noBudget }));
     } else {
       parts.push(h('span', { text: 'no sections.json' }));
     }
