@@ -105,6 +105,15 @@ class FrameTest(unittest.TestCase):
         self.assertAlmostEqual(p[:, 0].min() + p[:, 0].max(), 0.0)
         self.assertAlmostEqual(p[:, 1].min() + p[:, 1].max(), 0.0)
 
+    def test_camera_distance_clears_any_figure(self):
+        tall = np.array([[0.0, 0.0, 0.0], [0.5, 0.5, 120.0]])
+        self.assertGreater(CAM.camera_distance(tall, 120.0), 240.0)
+        wide = np.array([[-90.0, 0.0, 0.0], [90.0, 0.0, 5.5]])
+        self.assertGreater(CAM.camera_distance(wide, 5.5), 180.0)
+        cam = CAM.camera(25, "evaluation", 80.0, 512, 5.5, distance=CAM.camera_distance(wide, 5.5))
+        origins, fwd = CAM.pixel_rays(cam, np.array([256]), np.array([256]))
+        self.assertLess(float(origins[0] @ fwd), -90.0)   # the ray starts outside the figure
+
     def test_flat_figure_is_rejected(self):
         with self.assertRaises(ValueError):
             CAM.contract_matrix([0, 0, 1], [1, 1, 1])

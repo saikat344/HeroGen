@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -41,6 +44,8 @@ from .rig import POSE_CONVERGED_DEG
 JOB_SCRIPT = Path(__file__).with_name("bench_job.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ASSET_TYPES = (".glb", ".gltf", ".fbx", ".blend")
+SIZE_RANGE = (32, 8192)         # square image size in pixels
+RUN_MARKERS = ("stage-2.json", "cameras.json")  # files that show a folder is a bench run folder
 POSES = ("auto", "a-pose", "rest", "as-shipped")
 
 # Gates. The mask comes from rays through pixel centres and the colour render's coverage from area sampling,
@@ -158,21 +163,53 @@ def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
     return out
 
 
-def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
-                 yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
-                 material_vcols: dict | None = None, image_dirs: list | None = None,
-                 bind_unrigged: bool = False,
-                 size: int = DEFAULT_SIZE, height: float = HEIGHT_STUDS, samples_flat: int = 16,
-                 samples_lit: int = 128, device: str = "auto", timeout: float = 3600.0) -> dict:
-    """Render `asset` into the run folder `out` and return its stage-2 record (see the module docstring)."""
-    asset = Path(asset)
+def check_inputs(asset: Path, out: Path, *, pose: str, include, exclude, size, height, samples_flat,
+                 samples_lit, overwrite: bool) -> None:
+    """Every problem with the arguments that can be found before Blender starts, as a ValueError (or
+    FileNotFoundError) with a message that says what to change."""
     if not asset.is_file():
         raise FileNotFoundError(f"asset not found: {asset}")
     if asset.suffix.lower() not in ASSET_TYPES:
         raise ValueError(f"unsupported asset type {asset.suffix!r} (use {', '.join(ASSET_TYPES)})")
     if pose not in POSES:
         raise ValueError(f"pose must be one of {', '.join(POSES)}")
-    out = Path(out)
+    for flag, pattern in (("--include", include), ("--exclude", exclude)):
+        if pattern is not None:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"{flag} is not a valid regular expression: {exc}") from None
+    if not isinstance(size, int) or not SIZE_RANGE[0] <= size <= SIZE_RANGE[1]:
+        raise ValueError(f"--size must be a whole number of pixels from {SIZE_RANGE[0]} to {SIZE_RANGE[1]}")
+    if not (isinstance(height, (int, float)) and math.isfinite(height) and height > 0):
+        raise ValueError("--height must be a positive number of studs")
+    for flag, n in (("--samples-flat", samples_flat), ("--samples-lit", samples_lit)):
+        if not isinstance(n, int) or n < 1:
+            raise ValueError(f"{flag} must be at least 1")
+    if out.exists() and not out.is_dir():
+        raise ValueError(f"--out {out} is a file, not a folder")
+    if out.is_dir() and any(out.iterdir()):
+        if not overwrite:
+            raise ValueError(f"run folder {out} is not empty; pass --overwrite to replace it")
+        if not any((out / m).exists() for m in RUN_MARKERS):
+            raise ValueError(f"run folder {out} is not empty and does not look like a bench run folder "
+                             f"(no {' or '.join(RUN_MARKERS)}); refusing to clear it")
+
+
+def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
+                 yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
+                 material_vcols: dict | None = None, image_dirs: list | None = None,
+                 bind_unrigged: bool = False,
+                 size: int = DEFAULT_SIZE, height: float = HEIGHT_STUDS, samples_flat: int = 16,
+                 samples_lit: int = 128, device: str = "auto", timeout: float = 3600.0,
+                 overwrite: bool = False) -> dict:
+    """Render `asset` into the run folder `out` and return its stage-2 record (see the module docstring).
+    `out` must be empty or missing; with `overwrite`, an existing bench run folder there is cleared first."""
+    asset, out = Path(asset), Path(out)
+    check_inputs(asset, out, pose=pose, include=include, exclude=exclude, size=size, height=height,
+                 samples_flat=samples_flat, samples_lit=samples_lit, overwrite=overwrite)
+    if out.is_dir() and any(out.iterdir()):
+        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     rec = StageRecord(out, 2, "turnaround")
     with tempfile.TemporaryDirectory(prefix="herogen-bench-") as tmp:

@@ -451,7 +451,13 @@ def base_colour_source(mat, image_override, vcol_override):
 
 def normalise_materials(meshes, images, vcols, report):
     """Rebuild every used material around its base colour: a lit principled shader and an unlit emission
-    shader fed by the same source. `set_shading` switches the material output between them."""
+    shader fed by the same source. `set_shading` switches the material output between them. Overrides must
+    name materials the chosen meshes use."""
+    used = sorted({m.name for o in meshes for m in o.data.materials if m is not None})
+    unknown = sorted((set(images) | set(vcols)) - set(used))
+    if unknown:
+        raise ValueError(f"--image/--vcol name materials the chosen meshes do not use: {', '.join(unknown)} "
+                         f"(they use: {', '.join(used) or 'no materials'})")
     done = {}
     for o in meshes:
         if not o.data.materials:
@@ -595,7 +601,7 @@ def raycast_view(bvh, cam, verts):
     rows, cols = rows.ravel(), cols.ravel()
     origins, fwd = CAM.pixel_rays(cam, rows, cols)
     d = Vector(fwd.tolist())
-    far = 2.0 * CAM.CAMERA_DISTANCE
+    far = 2.0 * cam["distance"]
     centre = np.asarray(cam["image_centre_world"])
     for r, c, o in zip(rows.tolist(), cols.tolist(), origins.tolist()):
         hit = bvh.ray_cast(Vector(o), d, far)[0]
@@ -652,7 +658,7 @@ def add_render_camera(cam):
     data.type = "ORTHO"
     data.ortho_scale = cam["ortho_scale"]
     data.clip_start = 0.01
-    data.clip_end = 500.0
+    data.clip_end = 2.0 * cam["distance"]
     data.sensor_fit = "HORIZONTAL"
     obj = bpy.data.objects.new("BenchCam", data)
     bpy.context.scene.collection.objects.link(obj)
@@ -737,7 +743,7 @@ def main():
 
     size = int(JOB["size"])
     ppu = CAM.choose_ppu(verts, size, JOB["height"])
-    cams = CAM.all_cameras(ppu, size, JOB["height"])
+    cams = CAM.all_cameras(ppu, size, JOB["height"], CAM.camera_distance(verts, JOB["height"]))
     work = JOB["work"]
     os.makedirs(work, exist_ok=True)
 

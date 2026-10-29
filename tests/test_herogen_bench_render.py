@@ -248,6 +248,38 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("unsupported asset type", err)
 
+    def _dummy(self, tmp):
+        p = Path(tmp) / "figure.glb"
+        p.write_bytes(b"glTF")
+        return p
+
+    def test_bad_numbers_and_patterns_are_clear_errors(self):
+        cases = ((["--size", "0"], "--size"), (["--size", "100000"], "--size"),
+                 (["--height", "-1"], "--height"), (["--height", "nan"], "--height"),
+                 (["--include", "("], "--include"), (["--exclude", "[a-"], "--exclude"),
+                 (["--samples-lit", "0"], "--samples-lit"))
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = self._dummy(tmp)
+            for args, flag in cases:
+                out = os.path.join(tmp, "r")
+                code, err = self._main("render", "--asset", str(asset), "--out", out, *args)
+                self.assertEqual(code, 2, args)
+                self.assertIn(flag, err, args)
+                self.assertNotIn("Traceback", err, args)
+
+    def test_a_non_empty_folder_is_not_overwritten_by_default_or_cleared_unless_it_is_a_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset, out = self._dummy(tmp), Path(tmp) / "notes"
+            out.mkdir()
+            (out / "keep.txt").write_text("someone else's file")
+            code, err = self._main("render", "--asset", str(asset), "--out", str(out))
+            self.assertEqual(code, 2)
+            self.assertIn("--overwrite", err)
+            code, err = self._main("render", "--asset", str(asset), "--out", str(out), "--overwrite")
+            self.assertEqual(code, 2)
+            self.assertIn("refusing to clear it", err)
+            self.assertTrue((out / "keep.txt").exists())
+
     def test_material_override_needs_a_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "figure.glb"
@@ -278,10 +310,50 @@ class FacingErrorTest(unittest.TestCase):
 
     def _main(self, asset, *args):
         err = io.StringIO()
+        out = tempfile.mkdtemp(dir=self.tmp.name)
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            code = main(["render", "--asset", str(asset), "--out", os.path.join(self.tmp.name, "r"),
-                         "--size", "64", *args])
+            code = main(["render", "--asset", str(asset), "--out", out, "--size", "64", "--samples-flat", "2",
+                         "--samples-lit", "2", *args])
         return code, err.getvalue()
+
+    def test_include_that_matches_nothing(self):
+        code, err = self._main(self.rigged, "--include", "^NoSuchMesh$")
+        self.assertEqual(code, 2)
+        self.assertIn("no mesh objects selected", err)
+
+    def test_a_pose_on_an_unrigged_figure(self):
+        code, err = self._main(self.unrigged, "--pose", "a-pose", "--yaw", "0")
+        self.assertEqual(code, 2)
+        self.assertIn("needs both arms and both legs", err)
+
+    def test_override_for_a_material_the_figure_does_not_use(self):
+        code, err = self._main(self.rigged, "--image", "NoSuchMaterial=skin.png")
+        self.assertEqual(code, 2)
+        self.assertIn("NoSuchMaterial", err)
+        self.assertIn("TorsoMat", err)
+
+    def test_a_figure_far_taller_than_the_old_camera_distance(self):
+        run = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main(["render", "--asset", str(self.rigged), "--out", str(run), "--size", "64",
+                         "--samples-flat", "2", "--samples-lit", "2", "--height", "120"])
+        rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0, json.dumps(rec["checks"]))
+        cams = json.loads((run / "cameras.json").read_text())["cameras"]
+        self.assertGreater(cams[0]["distance"], 2 * 120)
+        self.assertTrue(np.isfinite(np.load(run / "depth" / "front.npy")).any())
+
+    def test_overwrite_replaces_a_run_folder_and_its_stale_files(self):
+        run = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        args = ["render", "--asset", str(self.rigged), "--out", str(run), "--size", "64",
+                "--samples-flat", "2", "--samples-lit", "2"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(args), 0)
+            (run / "stale.txt").write_text("left from an older run")
+            self.assertEqual(main(args), 2)          # not empty: refused
+            self.assertEqual(main(args + ["--overwrite"]), 0)
+        self.assertFalse((run / "stale.txt").exists())
+        self.assertTrue((run / "stage-2.json").exists())
 
     def test_a_yaw_that_contradicts_the_rig_is_refused(self):
         code, err = self._main(self.rigged, "--yaw", "180")

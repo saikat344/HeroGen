@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--samples-lit", type=int, default=128)
     r.add_argument("--device", choices=("auto", "cpu"), default="auto")
     r.add_argument("--timeout", type=float, default=3600.0, help="seconds allowed for the Blender call")
+    r.add_argument("--overwrite", action="store_true",
+                   help="replace an existing run folder at --out (only one this tool wrote)")
     a = ap.parse_args(argv)
 
     from herogen.blender.bl import BlenderError
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             material_images=_pairs(a.image, "--image"), material_vcols=_pairs(a.vcol, "--vcol"),
             image_dirs=a.image_dir, bind_unrigged=a.bind_unrigged, size=a.size, height=a.height,
             samples_flat=a.samples_flat, samples_lit=a.samples_lit, device=a.device, timeout=a.timeout,
+            overwrite=a.overwrite,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

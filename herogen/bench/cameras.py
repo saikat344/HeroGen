@@ -26,7 +26,6 @@ from . import BUILDING_AZIMUTHS, ELEVATION_DEG, EVALUATION_AZIMUTHS, HEIGHT_STUD
 # fraction of the width in any view; the scale is the larger one that satisfies both.
 HEIGHT_FILL = 440.0 / 512.0
 WIDTH_FILL = 0.94
-CAMERA_DISTANCE = 50.0  # studs from the image-centre point; the clip range is 0.01 to 500
 MIN_EVAL_SEPARATION_DEG = 10.0
 
 
@@ -45,10 +44,22 @@ def angular_gap(a: float, b: float) -> float:
     return min(d, 360.0 - d)
 
 
-def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGHT_STUDS) -> dict:
-    """One camera, in the dict form `herogen/blender/blender_job.add_camera` reads, with role and mapping."""
+def camera_distance(verts: np.ndarray, height: float = HEIGHT_STUDS) -> float:
+    """How far each camera sits from the image-centre point: well clear of the figure whatever its size
+    (twice the larger of its height and its widest reach from the vertical axis, plus a margin)."""
+    v = np.asarray(verts, dtype=np.float64)
+    reach = float(np.hypot(v[:, 0], v[:, 1]).max()) if len(v) else 0.0
+    return round(2.0 * max(height, reach) + 1.0, 4)
+
+
+def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGHT_STUDS,
+           distance: float | None = None) -> dict:
+    """One camera, in the dict form `herogen/blender/blender_job.add_camera` reads, with role and mapping.
+    `distance` defaults to what `camera_distance` gives a figure as wide as it is tall."""
     right, up, forward = axes(azimuth)
     centre = np.array([0.0, 0.0, height / 2.0])
+    if distance is None:
+        distance = round(2.0 * height + 1.0, 4)
     return {
         "view": view_name(azimuth),
         "azimuth_deg": int(azimuth),
@@ -56,7 +67,8 @@ def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGH
         "role": role,
         "projection": "orthographic",
         "right": right.round(12).tolist(), "up": up.tolist(), "forward": forward.round(12).tolist(),
-        "location": (centre - forward * CAMERA_DISTANCE).round(12).tolist(),
+        "location": (centre - forward * distance).round(12).tolist(),
+        "distance": distance,
         "image_centre_world": centre.tolist(),
         "ortho_scale": size / ppu,
         "resolution": int(size),
@@ -64,10 +76,11 @@ def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGH
     }
 
 
-def all_cameras(ppu: float, size: int, height: float = HEIGHT_STUDS) -> list[dict]:
+def all_cameras(ppu: float, size: int, height: float = HEIGHT_STUDS,
+                distance: float | None = None) -> list[dict]:
     """Building views (the four contract views, then the four diagonals), then the evaluation views."""
-    cams = [camera(a, "building", ppu, size, height) for a in BUILDING_AZIMUTHS]
-    cams += [camera(a, "evaluation", ppu, size, height) for a in EVALUATION_AZIMUTHS]
+    cams = [camera(a, "building", ppu, size, height, distance) for a in BUILDING_AZIMUTHS]
+    cams += [camera(a, "evaluation", ppu, size, height, distance) for a in EVALUATION_AZIMUTHS]
     return cams
 
 
@@ -84,14 +97,14 @@ def project(points: np.ndarray, cam: dict) -> np.ndarray:
 def pixel_rays(cam: dict, rows: np.ndarray, cols: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Ray origins [N, 3] through the centres of pixels (rows, cols), and the shared direction [3].
 
-    Origins lie on the plane `CAMERA_DISTANCE` in front of the image-centre point; a hit's depth is measured
-    from the plane through the image-centre point (see `depth_of`)."""
+    Origins lie on the plane the camera's `distance` in front of the image-centre point; a hit's depth is
+    measured from the plane through the image-centre point (see `depth_of`)."""
     size, ppu = cam["resolution"], cam["pixels_per_unit"]
     u = (np.asarray(cols, dtype=np.float64) + 0.5 - size / 2.0) / ppu
     v = (size / 2.0 - (np.asarray(rows, dtype=np.float64) + 0.5)) / ppu
     right, up, fwd = (np.asarray(cam[k], dtype=np.float64) for k in ("right", "up", "forward"))
     centre = np.asarray(cam["image_centre_world"], dtype=np.float64)
-    origins = centre + u[:, None] * right + v[:, None] * up - fwd * CAMERA_DISTANCE
+    origins = centre + u[:, None] * right + v[:, None] * up - fwd * cam["distance"]
     return origins, fwd
 
 
