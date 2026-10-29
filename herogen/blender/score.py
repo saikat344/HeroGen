@@ -9,7 +9,9 @@ body and view, `05-renders/<name>/<view>.png` (the body rendered flat in its own
 it has none), `<view>-silhouette.png` and `<view>-diff.png`. Any GLB can be scored, ours or another tool's, so
 bodies from different methods are compared on the same views. Numpy only: no Blender, no model calls.
 
-Bodies. Without `--body`, every stage 4 body in the run is scored: `04-body-carve/high.glb` as `carve`,
+Bodies. Any number of `--body NAME=GLB` bodies, inside the run folder or not (frozen builds of earlier
+milestones, other tools' outputs); a `version.json` next to a GLB is recorded under the body's `version` (its
+`label` and plain fields). Without `--body`, every stage 4 body in the run is scored: `04-body-carve/high.glb` as `carve`,
 `04-body/high.glb` as `carve` or `hybrid` by its `sections.json` mesh source, any other `04-body-<x>/high.glb` as
 `<x>`, and each extra atlas a body folder holds (`atlas-high-<variant>.png`) as `<name>-<variant>`: the same mesh
 with that image in place of its textures (`variant_of` names the body). `--atlas NAME=PNG` does the same for a
@@ -85,7 +87,7 @@ from . import PROFILES as TARGET_PROFILES
 from . import raster
 from .carve import components
 from .glb import Glb, GlbError, load_glb
-from .record import write_atomic
+from .record import code_version, write_atomic
 from .texture import compare
 from .views import largest_component, load_mask, save_mask
 
@@ -674,6 +676,33 @@ def _display_path(run: Path, path: Path) -> str:
         return path.name
 
 
+VERSION_KEYS = ("label", "frozen", "sketch", "profile", "note")
+
+
+def body_version(glb_path: Path) -> dict | None:
+    """The `version.json` next to a GLB (a frozen build of an earlier milestone, say), reduced to its plain
+    fields: `label` first, plus `frozen` (when it was frozen), `sketch`, `profile`, `note` and `code`
+    (`{"commit", "dirty"}`, the code that built it) when present. None when there is no such file."""
+    p = Path(glb_path).with_name("version.json")
+    if not p.is_file():
+        return None
+    try:
+        raw = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {"label": None, "error": "version.json could not be read"}
+    if not isinstance(raw, dict):
+        return {"label": None, "error": "version.json is not an object"}
+
+    def plain(v):
+        return v[:200] if isinstance(v, str) else v if isinstance(v, (bool, int, float)) or v is None else None
+
+    out = {"label": plain(raw.get("label"))}
+    out.update({k: plain(raw[k]) for k in VERSION_KEYS[1:] if k in raw})
+    if isinstance(raw.get("code"), dict):
+        out["code"] = {k: plain(raw["code"][k]) for k in ("commit", "dirty") if k in raw["code"]}
+    return out
+
+
 def seen_flags(view: ScoreView, shape: set, colour: set) -> dict:
     if view.heldout:
         return {"seen": False, "seen_shape": False, "seen_colour": False}
@@ -819,6 +848,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         "sanity": sanity,
         "views": rows,
         "notes": glb.notes,
+        "version": body_version(Path(glb_path)),
     }
     if atlas is not None:
         entry["atlas_image"] = _display_path(run, atlas)
@@ -880,6 +910,7 @@ def write_scores(run: Path, bodies: list[dict], views: list[ScoreView] | None = 
     data = {
         "scored": datetime.now().astimezone().isoformat(timespec="seconds"),
         "scorer": "herogen.blender.score",
+        "code": code_version(),
         "method": {
             "iou": "orthographic silhouette; turnaround views at their contract yaw with stage 3's mapping (one "
                    "pixel scale from the front mask's height over the body's, u = 0 on each mask's box centre, "

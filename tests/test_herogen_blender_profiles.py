@@ -98,6 +98,8 @@ class ProfilesEndToEnd(unittest.TestCase):
         stage4, sections, body = self.records()
         self.assertEqual(rec["profile"], {"name": "best", "lods": ["high"], "budgets": None})
         self.assertEqual((sections["profile"], sections["budgets"]), ("best", None))
+        self.assertIn("code", stage4)                                # the code version that built it
+        self.assertEqual(sections["code"], stage4["code"])
         self.assertFalse((body / "low.glb").exists())
         self.assertFalse((body / "atlas-low.png").exists())
         self.assertTrue((body / "high.glb").exists())

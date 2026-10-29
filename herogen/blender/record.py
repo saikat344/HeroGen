@@ -3,9 +3,33 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+
+GIT_TIMEOUT = 5.0     # seconds per git call; a slow or missing git never holds up a stage
+
+
+def code_version(where: Path | None = None) -> dict | None:
+    """The code that is running: `{"commit": <HEAD sha>, "dirty": <tracked files differ from it>}`, or None when
+    `where` (default: this package) is not in a git checkout or git is missing or too slow. Untracked files do
+    not count as dirty (run folders and local inputs sit next to the code)."""
+    where = Path(__file__).resolve().parent if where is None else Path(where)
+
+    def git(*args: str) -> str | None:
+        try:
+            p = subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True,
+                               timeout=GIT_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return p.stdout if p.returncode == 0 else None
+
+    head = git("rev-parse", "HEAD")
+    if not head or len(head.strip()) < 7:
+        return None
+    status = git("status", "--porcelain", "--untracked-files=no")
+    return {"commit": head.strip(), "dirty": None if status is None else bool(status.strip())}
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -39,6 +63,7 @@ class StageRecord:
             "seconds": None, "cost_usd": 0.0,
             "cost_basis": "local compute only (numpy + Blender); no paid 3D generation",
             "models": [], "tools": [], "outputs": [], "checks": [], "notes": "",
+            "code": code_version(),
         }
         self._t0 = time.monotonic()
 
