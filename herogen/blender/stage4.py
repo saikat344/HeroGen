@@ -1,4 +1,5 @@
-"""Stage 4: joints, R15 sections, high/low LODs and the pose test."""
+"""Stage 4: joints, R15 sections, the LODs a target profile asks for (`herogen.blender.PROFILES`) and the pose
+test."""
 from __future__ import annotations
 
 import colorsys
@@ -8,12 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import (HEIGHT_STUDS, PARENT, PIVOT_JOINT, SECTIONS, TRIANGLES_HIGH_MAX, TRIANGLES_LOW_MAX, VIEWS, bl,
-               body_joints, covers, joints, pose, split, texture)
+from . import (DEFAULT_PROFILE, HEIGHT_STUDS, PARENT, PIVOT_JOINT, PROFILES, SECTIONS, VIEWS, bl, body_joints,
+               covers, joints, pose, split, texture)
 from .carve import winding_inside
 from .stage3 import IOU_GATE, iou
 from .views import load_mask
-from .record import StageRecord, check
+from .record import StageRecord, check, write_atomic
 from .stage3 import work_dir
 from .views import load_views
 
@@ -56,6 +57,22 @@ ATLAS = {"high": 1024, "low": 512}
 # left): 1.0 11.7 / 14.2, 0.3 10.4 / 16.4, 0.1 9.6 / 18.4, 0.03 9.0 / 20.6.
 SIDE_TRUST = 0.3
 TARGET_FRACTIONS = (0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85)
+# How each profile's LODs are built: the triangle budget (None: none, the stage 3 mesh undecimated; "groups": the
+# avatar part groups), the cap and cover resolution ("high" or "low" settings above) and the atlas size. An
+# avatar part group has little room (Torso 1,750 with seven caps and both covers), so it takes the low settings.
+LOD_BUILD = {
+    "best": {"high": {"budget": None, "dome": "high", "cover": "high", "atlas": ATLAS["high"]}},
+    "roblox-ingame": {"high": {"budget": PROFILES["roblox-ingame"]["lods"]["high"], "dome": "high",
+                               "cover": "high", "atlas": ATLAS["high"]},
+                      "low": {"budget": PROFILES["roblox-ingame"]["lods"]["low"], "dome": "low", "cover": "low",
+                              "atlas": ATLAS["low"]}},
+    "roblox-avatar": {"high": {"budget": "groups", "dome": "low", "cover": "low", "atlas": ATLAS["high"]}},
+}
+# Whole-body decimation targets for the avatar profile; each part group then takes the candidate with the most
+# triangles that fits its own budget (sections are separate closed meshes, so groups can come from different
+# candidates).
+AVATAR_TARGETS = (1500, 2000, 2700, 3600, 4800, 6400, 8500, 11000, 15000, 20000, 27000, 36000, 48000, 64000)
+UNDECIMATED = 10 ** 12          # a target no mesh reaches: the decimate task keeps the mesh as it is
 
 
 def section_colors() -> dict[str, list[float]]:
@@ -119,7 +136,58 @@ def _comparison_sheet(colour_views: dict, renders: dict, path: Path) -> Path | N
     return path
 
 
-def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) -> dict:
+def _budgets_record(profile: str) -> dict | None:
+    """The profile's triangle budgets as `sections.json` records them (None under `best`)."""
+    spec = PROFILES[profile]
+    if profile == "best":
+        return None
+    if "groups" in spec:
+        return {"triangles_total_max": spec["triangles_total"],
+                "groups": {g: {"sections": list(secs), "triangles_max": n} for g, (secs, n) in spec["groups"].items()},
+                "texture_max_px": spec["texture_max_px"], "watertight_parts": spec["watertight_parts"],
+                "not_built": list(spec["not_built"])}
+    return {"triangles_high_max": spec["lods"]["high"], "triangles_low_max": spec["lods"]["low"]}
+
+
+def _section_groups(build: dict, profile: str) -> dict:
+    """Part group -> its sections, for the candidate selection of one LOD."""
+    if build["budget"] == "groups":
+        return {g: secs for g, (secs, _) in PROFILES[profile]["groups"].items()}
+    return {"body": SECTIONS}
+
+
+def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
+    """Section -> index of the candidate it is taken from. One budget: the largest candidate whose total fits
+    (else the smallest); no budget: the only candidate; part groups: per group, the candidate with the most
+    triangles in that group that fits the group's budget (else the fewest)."""
+    budget = build["budget"]
+    if budget is None:
+        return {n: 0 for n in SECTIONS}
+    if budget != "groups":
+        best = None
+        for i, c in enumerate(cands):
+            total = c["total"]
+            if best is None or (total <= budget and (best[1] > budget or total > best[1])) \
+                    or (best[1] > budget and total < best[1]):
+                best = (i, total)
+        return {n: best[0] for n in SECTIONS}
+    out = {}
+    for group, (secs, limit) in PROFILES[profile]["groups"].items():
+        counts = [sum(len(c["covered"][n].faces) for n in secs) for c in cands]
+        fits = [i for i, k in enumerate(counts) if k <= limit]
+        i = max(fits, key=lambda j: counts[j]) if fits else min(range(len(cands)), key=lambda j: counts[j])
+        out.update({n: i for n in secs})
+    return out
+
+
+def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
+               profile: str = DEFAULT_PROFILE) -> dict:
+    """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`)."""
+    if profile not in PROFILES:
+        raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
+    builds = LOD_BUILD[profile]
+    # An earlier record must not outlive a run that stops: nothing after stage 4 may read a stale pass.
+    (run / "stage-4.json").unlink(missing_ok=True)
     rec = StageRecord(run, 4, "game body")
     work = work_dir(run)
     mesh_npz = work / "03-mesh.npz"
@@ -141,6 +209,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     source = None
     src_uv, src_tex = work / "03-source-uv.npz", work / "03-source-texture.png"
     if mesh_source == "sam3d-objects" and src_uv.exists() and src_tex.exists():
+        import importlib.util
+
+        if importlib.util.find_spec("scipy") is None:
+            raise ModuleNotFoundError("the sam3d-objects body's texture fallback needs scipy (pip install \".[remote]\")")
         from PIL import Image as _Image
 
         d = np.load(src_uv)
@@ -149,20 +221,34 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                                           np.asarray(im.convert("RGB"), dtype=np.float64))
     for n in sk.notes:
         rec.note(n)
-    budgets = {"high": TRIANGLES_HIGH_MAX, "low": TRIANGLES_LOW_MAX}
+    budgets = {lod: b["budget"] for lod, b in builds.items()}
+    if profile == "best":
+        rec.note("profile best: no triangle budget, the high body keeps the stage 3 mesh's full detail, no low LOD")
+    if PROFILES[profile].get("not_built"):
+        rec.note(f"profile {profile}: meets the specification's triangle, watertight-part and texture limits; not "
+                 "built: " + ", ".join(PROFILES[profile]["not_built"]))
 
     # Decimate the whole body to a ladder of targets in one Blender call, then section each candidate and
     # keep the largest whose sectioned total (cuts and caps included) fits the budget.
-    targets, outs = {}, {}
+    targets, outs, ladder = {}, {}, {}
     for lod, budget in budgets.items():
-        for k, frac in enumerate(TARGET_FRACTIONS):
+        if budget is None:
+            steps = [UNDECIMATED]
+        elif budget == "groups":
+            steps = list(AVATAR_TARGETS)
+        else:
+            steps = [int(budget * frac) for frac in TARGET_FRACTIONS]
+        ladder[lod] = []
+        for k, n_tri in enumerate(steps):
             key = f"{lod}{k}"
-            targets[key] = int(budget * frac)
+            targets[key] = n_tri
             outs[key] = str((work / f"04-dec-{key}.npz").resolve())
+            ladder[lod].append(key)
     # coarse bodies the shoulder covers are shaped from (high LOD covers, low LOD covers)
     for key, n_tri in (("coverhigh", 2700), ("coverlow", 1200)):
-        targets[key] = n_tri
-        outs[key] = str((work / f"04-dec-{key}.npz").resolve())
+        if any(b["cover"] == key[len("cover"):] for b in builds.values()):
+            targets[key] = n_tri
+            outs[key] = str((work / f"04-dec-{key}.npz").resolve())
     dec = bl.run_job({"tasks": [{"task": "decimate", "mesh": str(mesh_src.resolve()), "targets": targets,
                                  "out": outs}]}, work, "stage4-decimate", timeout=timeout)
     rec.data["tools"] = [f"blender {dec['blender']}"]
@@ -182,29 +268,41 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
             ok &= v.inside(pts)
         return ok
 
-    # Covers are shaped from a coarse decimation of the body (2.7k triangles for the high LOD's covers, 1.2k
-    # for the low LOD's) so they stay cheap; they count in both budgets.
-    chosen, lod_secs, bare_secs, lod_info, cover_info = {}, {}, {}, {}, {}
-    for lod, budget in budgets.items():
-        cover_src = np.load(outs["cover" + lod])
-        best = None
-        for k in range(len(TARGET_FRACTIONS)):
-            key = f"{lod}{k}"
+    # Covers are shaped from a coarse decimation of the body (2.7k triangles for the high settings' covers, 1.2k
+    # for the low settings') so they stay cheap; they count in the budgets.
+    chosen, lod_secs, bare_secs, lod_info, cover_info, picks = {}, {}, {}, {}, {}, {}
+    for lod, build in builds.items():
+        cover_src = np.load(outs["cover" + build["cover"]])
+        rings, ring_points = DOME[build["dome"]]
+        cands = []
+        for key in ladder[lod]:
             d = np.load(outs[key])
-            secs, rig = split.build_sections(d["verts"], d["faces"], sk, cap="dome", rings=DOME[lod][0],
-                                             ring_points=DOME[lod][1])
+            secs, rig = split.build_sections(d["verts"], d["faces"], sk, cap="dome", rings=rings,
+                                             ring_points=ring_points)
             covered, cinfo = covers.add_covers(secs, cover_src["verts"], cover_src["faces"], owner=COVER_OWNER,
                                                radius=COVER_RADIUS, outset=COVER_OUTSET, inside=in_masks)
-            total = sum(len(s.faces) for s in covered.values())
-            if best is None or (total <= budget and (best[1] > budget or total > best[1])) \
-                    or (best[1] > budget and total < best[1]):
-                best = (key, total, covered, secs, cinfo, len(d["faces"]))
-        chosen[lod] = best[0]
-        lod_secs[lod], bare_secs[lod], cover_info[lod] = best[2], best[3], best[4]
-        lod_info[lod] = {"body_triangles_after_decimation": best[5], "triangles": best[1],
-                         "cap_triangles": sum(s.cap_triangles for s in best[3].values()),
-                         "cover_triangles": sum(c["triangles"] for c in best[4].values()),
-                         "dome_rings": DOME[lod][0], "dome_ring_points": DOME[lod][1], "atlas_size": ATLAS[lod]}
+            cands.append({"key": key, "covered": covered, "bare": secs, "covers": cinfo,
+                          "total": sum(len(s.faces) for s in covered.values()), "decimated": len(d["faces"])})
+        pick = _pick(cands, build, profile)
+        picks[lod] = {n: cands[i]["key"] for n, i in pick.items()}
+        lod_secs[lod] = {n: cands[pick[n]]["covered"][n] for n in SECTIONS}
+        bare_secs[lod] = {n: cands[pick[n]]["bare"][n] for n in SECTIONS}
+        owner = cands[pick[COVER_OWNER]]
+        cover_info[lod] = owner["covers"]
+        groups = _section_groups(build, profile)
+        chosen[lod] = (cands[pick[SECTIONS[0]]]["key"] if len(groups) == 1
+                       else {g: cands[pick[secs[0]]]["key"] for g, secs in groups.items()})
+        decimated = ({g: cands[pick[secs[0]]]["decimated"] for g, secs in groups.items()} if len(groups) > 1
+                     else cands[pick[SECTIONS[0]]]["decimated"])
+        lod_info[lod] = {"body_triangles_after_decimation": decimated,
+                         "triangles": sum(len(s.faces) for s in lod_secs[lod].values()),
+                         "cap_triangles": sum(s.cap_triangles for s in bare_secs[lod].values()),
+                         "cover_triangles": sum(c["triangles"] for c in cover_info[lod].values()),
+                         "dome_rings": rings, "dome_ring_points": ring_points, "atlas_size": build["atlas"],
+                         "budget": build["budget"] if build["budget"] != "groups" else "avatar part groups"}
+        if len(groups) > 1:
+            lod_info[lod]["triangles_by_group"] = {g: sum(len(lod_secs[lod][n].faces) for n in secs)
+                                                   for g, secs in groups.items()}
 
     # Pose test. Gated: the gap that stays visible with the covers on (both LODs). Reported alongside: the
     # visible gap without covers, the purely geometric gap without covers, and flat caps.
@@ -212,8 +310,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     gaps = {lod: pose.joint_gaps(lod_secs[lod], poses, visible=True) for lod in lod_secs}
     gaps_nocover_visible = pose.joint_gaps(bare_secs["high"], poses, visible=True)
     gaps_nocover_geometric = pose.joint_gaps(bare_secs["high"], poses)
-    d_hi = np.load(outs[chosen["high"]])
-    flat_secs, _ = split.build_sections(d_hi["verts"], d_hi["faces"], sk, cap="flat")
+    flat_by_key = {}
+    for key in sorted(set(picks["high"].values())):
+        d_hi = np.load(outs[key])
+        flat_by_key[key], _ = split.build_sections(d_hi["verts"], d_hi["faces"], sk, cap="flat")
+    flat_secs = {n: flat_by_key[picks["high"][n]][n] for n in SECTIONS}
     gaps_flat = pose.joint_gaps(flat_secs, poses)
 
     # UV atlases (Blender smart project, all sections of a LOD packed together), then colour projection.
@@ -224,6 +325,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     # would be scored as a variant of this body.
     for stale in body.glob("atlas-high-*.png"):
         stale.unlink()
+    for lod in ("high", "low"):            # a LOD this profile does not build must not survive from a past run
+        if lod not in builds:
+            for stale in (body / f"{lod}.glb", body / f"atlas-{lod}.png"):
+                if stale.exists():
+                    stale.unlink()
     lod_paths, uv_paths = {}, {}
     for lod, secs in lod_secs.items():
         lod_paths[lod] = work / f"04-{lod}.npz"
@@ -235,12 +341,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     colour_views = texture.observed_colour_views(vs, run)
     atlas_paths, tex_stats, zbuf = {}, {}, None
     from PIL import Image
-    for lod in ("high", "low"):
+    for lod in builds:
         u = np.load(uv_paths[lod])
         uvs = {k.split("__")[0]: u[k] for k in u.files}
         _save_lod(lod_paths[lod], lod_secs[lod], uvs)
         if colour_views:
-            atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf, source=source)
+            size = builds[lod]["atlas"]
+            atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf, source=source)
             atlas_paths[lod] = body / f"atlas-{lod}.png"
             Image.fromarray(atlas).save(atlas_paths[lod])
             tex_stats[lod] = stats
@@ -248,12 +355,12 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                 # comparison atlases, scored by `score` as variants: no source fallback (its effect), and the
                 # side views down-weighted (they did not shape this mesh, so their colours land on oblique
                 # surfaces at the wrong depth)
-                plain, pstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf)
+                plain, pstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf)
                 Image.fromarray(plain).save(body / f"atlas-{lod}-no-source-fallback.png")
                 tex_stats[lod + "_no_source_fallback"] = pstats
                 trust = {v: SIDE_TRUST for v in colour_views if v in ("left", "right") and v not in shape_views}
                 if trust:
-                    tr, tstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, ATLAS[lod], zbuf, source=source,
+                    tr, tstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf, source=source,
                                                  trust=trust)
                     Image.fromarray(tr).save(body / f"atlas-{lod}-side-trust.png")
                     tex_stats[lod + "_side_trust"] = {**tstats, "trust": trust}
@@ -265,7 +372,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                  for name, loc in poses.items()]
     res = bl.run_job({"tasks": [{
         "task": "body", "lods": {k: str(v.resolve()) for k, v in lod_paths.items()},
-        "glb": {"high": str((body / "high.glb").resolve()), "low": str((body / "low.glb").resolve())},
+        "glb": {lod: str((body / f"{lod}.glb").resolve()) for lod in builds},
         "atlas": {k: str(v.resolve()) for k, v in atlas_paths.items()},
         "colors": section_colors(), "poses": pose_jobs, "pose_cameras": pose_cameras(height),
         "pose_dir": str((body / "pose-renders").resolve()), "pose_lod": "high",
@@ -274,12 +381,35 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     bres = res["results"][0]
 
     # Checks.
-    hi, lo = lod_secs["high"], lod_secs["low"]
-    nonempty = sum(1 for n in SECTIONS if len(hi[n].faces) and len(lo[n].faces))
+    hi, lo = lod_secs["high"], lod_secs.get("low")
+    nonempty = sum(1 for n in SECTIONS if all(len(ss[n].faces) for ss in lod_secs.values()))
     rec.add(check("sections_non_empty", nonempty, 15))
     for lod, budget in budgets.items():
-        rec.add(check(f"triangles_{lod}", lod_info[lod]["triangles"], budget,
-                      passed=lod_info[lod]["triangles"] <= budget, rule="<="))
+        n_tri = lod_info[lod]["triangles"]
+        if budget is None:
+            rec.add(check(f"triangles_{lod}", n_tri, None, gate=False,
+                          note=f"profile {profile}: no triangle budget"))
+        elif budget == "groups":
+            spec = PROFILES[profile]
+            rec.add(check("triangles_total", n_tri, spec["triangles_total"],
+                          passed=n_tri <= spec["triangles_total"], rule="<="))
+            for group, (secs, limit) in spec["groups"].items():
+                k = lod_info[lod]["triangles_by_group"][group]
+                rec.add(check(f"triangles_{group}", k, limit, passed=k <= limit, rule="<=", sections=list(secs)))
+        else:
+            rec.add(check(f"triangles_{lod}", n_tri, budget, passed=n_tri <= budget, rule="<="))
+    if PROFILES[profile].get("watertight_parts"):
+        from .score import mesh_sanity
+
+        not_closed = [n for n in SECTIONS
+                      if not mesh_sanity(hi[n].verts, hi[n].faces, 1e-6 * height)["watertight"]]
+        rec.add(check("watertight_parts", len(not_closed), 0, passed=not not_closed, rule="==",
+                      note="parts with a boundary or non-manifold edge after welding: " + ", ".join(not_closed)
+                      if not_closed else "every part closed and manifold"))
+    if PROFILES[profile].get("texture_max_px"):
+        biggest = max(b["atlas"] for b in builds.values())
+        rec.add(check("texture_max_px", biggest, PROFILES[profile]["texture_max_px"],
+                      passed=biggest <= PROFILES[profile]["texture_max_px"], rule="<="))
     open_e = {f"{lod}:{n}": _open_edges(s.faces) for lod, ss in lod_secs.items() for n, s in ss.items()}
     rec.add(check("open_edges", sum(open_e.values()), 0, passed=sum(open_e.values()) == 0, rule="=="))
     pivot_rows = {}
@@ -304,7 +434,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
                   worst_offset_over_radius=round(worst_off, 3)))
     gated = {lod: max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
              for lod, g in gaps.items()}
-    for lod in ("high", "low"):
+    for lod in builds:
         rec.add(check(f"max_joint_gap_{lod}", round(gated[lod], 4), GAP_GATE, passed=gated[lod] <= GAP_GATE,
                       rule="<=", poses=sorted(p for p in poses if p not in UNGATED_POSES)))
     for p in sorted(UNGATED_POSES):
@@ -367,8 +497,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         "sections": [{
             "name": n, "parent": PARENT[n], "joint": PIVOT_JOINT[n],
             "pivot": [round(float(c), 4) for c in hi[n].pivot],
-            "triangles_high": int(len(hi[n].faces)), "triangles_low": int(len(lo[n].faces)),
-            "cap_triangles_high": hi[n].cap_triangles, "cap_triangles_low": lo[n].cap_triangles,
+            "triangles_high": int(len(hi[n].faces)), "triangles_low": int(len(lo[n].faces)) if lo else None,
+            "cap_triangles_high": hi[n].cap_triangles, "cap_triangles_low": lo[n].cap_triangles if lo else None,
             "cap_points_outside_high": hi[n].cap_points_outside,
             "bounds_min": [round(float(c), 4) for c in hi[n].verts.min(axis=0)] if len(hi[n].verts) else None,
             "bounds_max": [round(float(c), 4) for c in hi[n].verts.max(axis=0)] if len(hi[n].verts) else None,
@@ -380,18 +510,20 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         "joint_method": (body_joints.__doc__ if joints_source == "sam3d-body" else joints.__doc__).strip(),
         "silhouette_joints": silhouette_joints,
         "split_method": split.__doc__.strip(),
-        "budgets": {"triangles_high_max": TRIANGLES_HIGH_MAX, "triangles_low_max": TRIANGLES_LOW_MAX},
+        "profile": profile,
+        "budgets": _budgets_record(profile),
         "lods": lod_info,
         "pose_test": {"method": pose.__doc__.strip(), "visible_gap_method": pose.joint_gaps.__doc__.strip(),
                       "gate_studs": GAP_GATE, "ungated_poses": sorted(UNGATED_POSES),
-                      "gaps_high": gaps["high"], "gaps_low": gaps["low"],
+                      "gaps_high": gaps["high"], "gaps_low": gaps.get("low"),
                       "gaps_high_visible_no_covers": gaps_nocover_visible,
                       "gaps_high_geometric_no_covers": gaps_nocover_geometric, "gaps_high_flat_caps": gaps_flat},
         "covers": {"method": covers.__doc__.strip(), "owner": COVER_OWNER, "radius_cut_radii": COVER_RADIUS,
-                   "outset_studs": COVER_OUTSET, "pieces_high": cover_info["high"], "pieces_low": cover_info["low"],
+                   "outset_studs": COVER_OUTSET, "pieces_high": cover_info["high"],
+                   "pieces_low": cover_info.get("low"),
                    "contract_note": "covers are merged into their owner section so each GLB keeps the 15 R15 "
                                     "parts; they are listed under sections.json \"covers\""},
-        "texture": {"method": texture.__doc__.strip(), "atlas_sizes": ATLAS,
+        "texture": {"method": texture.__doc__.strip(), "atlas_sizes": {lod: b["atlas"] for lod, b in builds.items()},
                     "atlases": {k: str(v.relative_to(run)) for k, v in atlas_paths.items()},
                     "colour_views": sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
                     "gates": {"mean_abs_error_max": TEX_ERROR_GATE, "ssim_min": TEX_SSIM_GATE}},
@@ -399,17 +531,20 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
         "joint_error_synthetic": joint_err,
         "checks": rec.data["checks"],
     }
-    (body / "sections.json").write_text(json.dumps(sections_json, indent=2))
-    rec.data["outputs"] = (["04-body/high.glb", "04-body/low.glb", "04-body/sections.json"]
+    write_atomic(body / "sections.json", json.dumps(sections_json, indent=2))
+    rec.data["outputs"] = ([f"04-body/{lod}.glb" for lod in builds] + ["04-body/sections.json"]
                            + [str(v.relative_to(run)) for v in atlas_paths.values()]
                            + ([str(sheet.relative_to(run))] if sheet else [])
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["pose_renders"]]
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["rest_textured"].values()])
     rec.data["mesh_source"] = mesh_source
     rec.data["joints_source"] = joints_source
+    rec.data["profile"] = {"name": profile, "lods": sorted(builds), "budgets": _budgets_record(profile)}
     rec.data["body"] = {"lods": lod_info, "decimation": dec["results"][0], "chosen_targets": chosen,
+                        "sections_from": picks,
                         "max_gap_by_pose_high": {p: max(r.values()) for p, r in gaps["high"].items()},
-                        "max_gap_by_pose_low": {p: max(r.values()) for p, r in gaps["low"].items()},
+                        "max_gap_by_pose_low": ({p: max(r.values()) for p, r in gaps["low"].items()}
+                                                if "low" in gaps else None),
                         "max_gap_by_pose_high_flat": {p: max(r.values()) for p, r in gaps_flat.items()},
                         "max_gap_by_pose_high_visible_no_covers":
                             {p: max(r.values()) for p, r in gaps_nocover_visible.items()},
