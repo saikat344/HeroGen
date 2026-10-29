@@ -106,12 +106,21 @@ after an under-turn, less after an overshoot), kept within 5-85 degrees, with th
 reference once it reaches 50. After a generation whose facing checks said the other way, or that had no figure
 or turnaround landmarks to measure, the same request is sent again as a new sample. The generation kept is the
 best by status (accepted, else needs human review because a check could not decide, else rejected because a
-gated check failed), then the smaller window miss, then the lower pose error. The gate passes when every
-view is accepted. Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png` when
+gated check failed), then the smaller window miss, then the lower pose error. Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png` when
 accepted, and to `heldout/review/` or `heldout/rejected/` otherwise.
 
-`stage-2h.json` also holds each view's status, found yaw and every attempt with its request, inputs and yaw
-ranges (`details.views`); the turnaround it was made from
+A person decides views with
+`python3 -m herogen.pipeline review --run-id <id> --view <view> --accept|--reject [--note TEXT] [--by NAME]`,
+which moves the view's three files (all or none) and appends the decision (who, when, decision, note, image
+hash) to `details.decisions`. A view whose gated checks failed can be rejected but not accepted, and a view
+judged under other checks must be judged again first with `recheck --run-id <id>` (no model calls).
+`run --stages 2h --views <v1,v2>` remakes only those views and keeps the others with their decisions: each kept
+view must come from the current turnaround (else the run stops and says to remake every view), and is judged
+again if the checks changed since. The files of a remade view that a person decided on move to
+`heldout/archive/`, never deleted. The gate passes when every view is accepted.
+
+`stage-2h.json` also holds each view's status, the checks' own verdict (`machine_status`), found yaw and every
+attempt with its request, inputs and yaw ranges (`details.views`); the turnaround it was made from
 (`stage2_identity`, a hash of the cover, views and masks), the checks it was judged under (`checks_version`, a
 hash of every constant and judging function, so any change to them is noticed) and its image's SHA-256; and
 `"reference": "generated"`: a score against a generated view measures consistency with the generated

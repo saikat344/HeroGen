@@ -15,10 +15,15 @@ must land in its window; up to 5 degrees outside needs human review. Its image, 
 to `heldout/<view>.png`, `heldout/<view>-mask.png` and `heldout/<view>-raw.png` when it is accepted, to
 `heldout/review/` when a check could not decide (needs human review), and to `heldout/rejected/` when a gated
 check failed, so `heldout/<view>.png` only ever holds an accepted view. All are on the same square canvas as
-`views/`, at the shared pixel scale; scoring reads only accepted views.
+`views/`, at the shared pixel scale. A person decides views with `review_view` (the CLI's `review`
+command), which moves the files and appends the decision to the record; scoring reads only accepted views.
+`stage2h_heldout(views=...)` remakes some views and keeps the others and their decisions: a kept view must
+come from the current turnaround, and is judged again (`recheck_view`) if the checks changed since; the
+files of a remade view a person decided on are archived, never deleted.
 
-The record is `stage-2h.json`: each view's status, found yaw and attempts under `details.views`, the
-building azimuths and clearance (`build_azimuths_deg`, `azimuth_clearance_deg`, `fit_error_deg`), each attempt's yaw ranges,
+The record is `stage-2h.json`: each view's status (and what the checks said, `machine_status`), found yaw
+and attempts under `details.views`, the human decisions under `details.decisions`, the building azimuths and
+clearance (`build_azimuths_deg`, `azimuth_clearance_deg`, `fit_error_deg`), each attempt's yaw ranges,
 and `"reference": "generated"` (a score against a generated view measures consistency, not
 accuracy). Each view also records the turnaround it was made from, the checks it was judged under and its
 image's SHA-256; `accepted_views` gives a scorer the accepted views whose image and turnaround still match.
@@ -54,8 +59,10 @@ import json
 import math
 import os
 import posixpath
+import re
 import shutil
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,7 +75,7 @@ from herogen.pipeline import imaging
 from herogen.pipeline.client import (
     IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss, SamInstance,
 )
-from herogen.pipeline.runfolder import RunFolder
+from herogen.pipeline.runfolder import RunFolder, now_iso
 from herogen.pipeline.stages import _load, _sam_or_threshold, _Stage, method_kind
 
 ATTEMPTS = 4  # generations per view before it is given up on
@@ -962,9 +969,33 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-# Provenance. Each view records the stage-2 identity it was made from (the SHA-256 of the files below), the
-# checks version it was judged under (`checks_version`) and its image's SHA-256, so a scorer can tell that an
-# accepted view still belongs to the run (`accepted_views`).
+def move_files(run: RunFolder, moves: dict[str, str]) -> None:
+    """Move run-folder files ``src -> dst`` (both under `heldout/`) all or none: every source must exist
+    before anything moves, and a failure part-way moves the moved ones back."""
+    pairs = []
+    for src, dst in moves.items():
+        a, b = heldout_rel(src), heldout_rel(dst)
+        if a is None or b is None:
+            raise ValueError(f"refusing to move {src!r} to {dst!r}: not under heldout/")
+        if not (run.path / a).is_file():
+            raise FileNotFoundError(f"{a} is missing from the run folder")
+        if a != b:
+            pairs.append((a, b))
+    done: list[tuple[str, str]] = []
+    try:
+        for a, b in pairs:
+            run.file(b)
+            os.replace(run.path / a, run.path / b)
+            done.append((a, b))
+    except BaseException:
+        for a, b in reversed(done):
+            os.replace(run.path / b, run.path / a)
+        raise
+
+
+# Provenance. Each view records the stage-2 identity it was made from (the SHA-256 of the files below) and
+# the checks version it was judged under (`checks_version`). A view whose turnaround changed is never kept;
+# one judged under other checks is checked again (`recheck_view`) before it is kept or reviewed.
 IDENTITY_FILES = ("01-cover.png", "views/meta.json", "views/front.png", "views/left.png", "views/right.png",
                   "masks/front.png", "masks/left.png", "masks/right.png")
 
@@ -979,7 +1010,8 @@ def stage2_identity(run: RunFolder) -> str:
 def checks_version() -> str:
     """A hash of everything a view is judged by: every upper-case constant of this module (thresholds,
     landmark bands, the yaw grid, the windows), and the source of the judging functions here and of the
-    `checks` and `imaging` modules. A change to any of them changes the version without anyone bumping it."""
+    `checks` and `imaging` modules. A change to any of them changes the version without anyone bumping it,
+    and the views are judged again (no model calls) before they are kept or reviewed."""
     consts = {}
     for name, value in sorted(globals().items()):
         if name.isupper() and isinstance(value, (int, float, str, tuple, list, dict, np.ndarray)):
@@ -987,7 +1019,7 @@ def checks_version() -> str:
     sources = [inspect.getsource(f) for f in (
         _runs, _band, _extent, landmarks, arm_slopes, TurnaroundModel, turnaround_model, landmark_errors,
         _rms, fit_yaw, hand_z_morph, yaw_range, range_clearance, azimuth_clearance, window_miss, yaw_window,
-        toe_offset_h, face_offset, _vote, _review, view_checks, view_status, C, imaging)]
+        toe_offset_h, face_offset, _vote, _review, view_checks, view_status, recheck_view, C, imaging)]
     digest = hashlib.sha256(json.dumps([consts, sources], sort_keys=True).encode()).hexdigest()[:12]
     return f"c-{digest}"
 
@@ -1060,8 +1092,9 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
             raise ReplayMiss(
                 f"{view.name} generation {attempt + 1}: {e}. A request (its prompt and input images) "
                 "depends on the code that drew the inputs and on the yaws earlier generations were found at, "
-                "so a cache recorded by another version can miss; make the views again, live: --stages 2h "
-                "--live") from e
+                "so a cache recorded by another version can miss; views kept with --views need no new "
+                f"generations, so make only this one again, live: --stages 2h --views {view.name} --live"
+            ) from e
         mask, method = figure_mask(client, raw)
         # Raw px -> input-canvas px (the model may answer at another resolution) -> turnaround px.
         scale = ctx.cover.size[0] / raw.size[0] / framing
@@ -1105,6 +1138,8 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
     st.save_image(inputs["turn_guide"], images[2])
     details = {
         "status": status,
+        "machine_status": status,  # what the checks decided; `status` can change on human review
+        "review": None,  # the latest human decision (`review_view`)
         "accepted": status == "accepted",
         "image_sha256": file_sha256(st.staged(files["image"])),
         "stage2_identity": ctx.identity,
@@ -1138,12 +1173,24 @@ def _profile_face(client: ModelClient, run: RunFolder) -> tuple[float | None, di
     return (ref if ref is not None and ref >= FACE_PROFILE_MIN else None), found
 
 
+def _view_outputs(d: dict[str, Any]) -> list[str]:
+    """The files a view's record lists: its image, mask and raw generation and its kept inputs."""
+    rels = list((d.get("files") or {}).values())
+    rels += [v for k, v in (d.get("kept_inputs") or {}).items() if k != "cover"]
+    return [r for r in rels if heldout_rel(r)]
+
+
 def _status_checks(name: str, d: dict[str, Any]) -> list[C.Check]:
-    """The gated `<view>.status_accepted` check for a view waiting for human review (its own gated checks
-    passed, so nothing else closes the gate)."""
+    """The gated `<view>.status_accepted` check for a view that is not accepted but whose own gated checks
+    passed: one waiting for human review, or one rejected on review."""
+    review = d.get("review") or {}
     if d["status"] == "needs review":
         return [C.check(f"{name}.status_accepted", 0.0, 1.0, op="==",
                         note="needs human review: a check could not decide")]
+    if d["status"] == "rejected" and review.get("decision") == "rejected":
+        why = review.get("note") or "no note"
+        return [C.check(f"{name}.status_accepted", 0.0, 1.0, op="==",
+                        note=f"rejected on human review by {review.get('by')}: {why}")]
     return []
 
 
@@ -1158,7 +1205,87 @@ def _ordered(per_view: dict[str, Any]) -> dict[str, Any]:
     return dict(sorted(per_view.items(), key=lambda kv: order.get(kv[0], len(order))))
 
 
+def _iso(t: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(t) if isinstance(t, str) else None
+    except ValueError:
+        return None
+
+
+def _view_started(prev: dict[str, Any], name: str) -> Any:
+    """When ``name`` was made: its own record, else the earlier record's note of kept views, else the
+    record's start."""
+    d = ((prev.get("details") or {}).get("views") or {}).get(name) or {}
+    kept = (prev.get("details") or {}).get("kept_from_earlier_run") or {}
+    if d.get("run_started"):
+        return d["run_started"]
+    if isinstance(kept.get("views"), list) and name in kept["views"]:  # written before views kept their own
+        return kept.get("started")
+    return prev.get("started")  # a stopped run leaves the record's start as the run that made the views
+
+
+def check_provenance(run: RunFolder, prev: dict[str, Any], name: str, identity: str) -> None:
+    """Raise unless view ``name`` of the earlier record was made from this run's current turnaround: its
+    recorded `stage2_identity` matches, or (records written before identities) it was made after stages 1
+    and 2 last ran."""
+    d = prev["details"]["views"][name]
+    remake = (f"remake it: run --stages 2h without --views (or with --views {name}) so every view comes "
+              "from the current turnaround")
+    if d.get("stage2_identity"):
+        if d["stage2_identity"] != identity:
+            raise ValueError(f"{name} was made from an earlier turnaround (stage 1 or 2 has run since); "
+                             f"{remake}")
+        return
+    made = _iso(_view_started(prev, name))
+    for n in (1, 2):
+        ran = _iso((run.read_stage(n) or {}).get("started"))
+        if made is None or ran is None or ran >= made:
+            raise ValueError(f"{name} has no turnaround identity and can't be shown to be newer than stage "
+                             f"{n}; {remake}")
+
+
+def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: TurnaroundModel | None,
+                 profile_toe: float, profile_face: float | None, profile_face_error: bool,
+                 identity: str) -> tuple[dict[str, Any], list[C.Check], dict[str, str]]:
+    """Judge a recorded view's kept generation again under the current checks, from its files and recorded
+    measurements (no model calls). A human decision on the same image still holds (a rejection always; an
+    acceptance unless a gated check now fails). Returns the updated record, its checks and the file moves to
+    its new status's folder."""
+    view = VIEW_BY_NAME[name]
+    kept = dict(d["attempts"][d["kept_attempt"]])
+    rels = {k: heldout_rel(d["files"].get(k)) for k in ("image", "mask", "raw")}
+    if None in rels.values():
+        raise ValueError(f"{name}'s files {d['files']} are not all under heldout/")
+    placed = imaging.from_mask_image(_load(run, rels["mask"]))
+    area = next((c["value"] for c in kept["checks"] if c["name"] == "figure_area_frac"), 1.0)
+    face = (kept.get("measured") or {}).get("face") or {"offset": None}
+    checks, measured = view_checks(view, placed, model, profile_toe, area, face, profile_face,
+                                   profile_face_error=profile_face_error)
+    machine = view_status(checks)
+    image_sha = d.get("image_sha256") or file_sha256(run.path / rels["image"])
+    review = d.get("review")
+    status = machine
+    if review and review.get("image_sha256") == image_sha:
+        if review["decision"] == "rejected" or machine != "rejected":
+            status = review["decision"]
+    files = view_paths(view, status)
+    # Only the kept generation's files exist, so only it is judged again; the others keep their old
+    # measurements, marked as judged under the earlier checks.
+    attempts = [a if i == d["kept_attempt"] else
+                {**a, "stale": True, "judged_under": a.get("judged_under") or d.get("checks_version")}
+                for i, a in enumerate(d["attempts"])]
+    attempts[d["kept_attempt"]] = {**kept, "status": machine, "checks": checks, "measured": measured}
+    new = {**d, "status": status, "machine_status": machine, "accepted": status == "accepted", "files": files,
+           "image_sha256": image_sha, "stage2_identity": identity, "checks_version": checks_version(),
+           "found_yaw_deg": measured.get("found_yaw_deg"), "yaw_window_deg": list(view.window_deg),
+           "attempts": attempts,
+           "rechecked": {"at": now_iso(), "from_checks_version": d.get("checks_version"),
+                         "machine_status_before": d.get("machine_status") or d["status"]}}
+    return new, checks, {rels[k]: files[k] for k in files}
+
+
 STAGING_DIR = "heldout/.staging"
+ARCHIVE_DIR = "heldout/archive"
 
 
 class _HeldoutStage(_Stage):
@@ -1175,17 +1302,31 @@ class _HeldoutStage(_Stage):
         self.outputs.append(rel)
 
 
-def _commit(run: RunFolder, st: _HeldoutStage, prev: dict[str, Any]) -> None:
-    """Swap a finished run's files in: the earlier run's files (and any stray file at a view's paths) go,
-    then the staged files move into place."""
-    old = {heldout_rel(r) for r in prev.get("outputs", [])} - {None}
-    for view in VIEWS:
+def _commit(run: RunFolder, st: _HeldoutStage, prev: dict[str, Any], made: list[str],
+            kept_outputs: list[str], moves: dict[str, str], decisions: list[dict[str, Any]]) -> None:
+    """Swap a finished run's files in: the earlier files of the views made again go (to ARCHIVE_DIR when a
+    person decided on them, never deleted), kept views move to their status's folder, staged files move in."""
+    prev_views = (prev.get("details") or {}).get("views") or {}
+    stamp = re.sub(r"[^0-9A-Za-z]+", "-", str(st.started)).strip("-")
+    old = {heldout_rel(r) for r in prev.get("outputs", [])} - {None} - set(kept_outputs) - set(moves)
+    for name in made:
+        view = VIEW_BY_NAME[name]
         old |= {rel for status in _STATUS_DIR for rel in view_paths(view, status).values()}
+    decided = {r for n, d in prev_views.items() if n in made and d.get("review") for r in _view_outputs(d)}
     for rel in sorted(old):
-        if (run.path / rel).is_file():
+        if not (run.path / rel).is_file():
+            continue
+        if rel in decided:
+            dst = f"{ARCHIVE_DIR}/{stamp}/{rel.removeprefix('heldout/')}"
+            move_files(run, {rel: dst})
+            for e in decisions:
+                if e.get("image") == rel and not e.get("archived_to"):
+                    e["archived_to"] = dst
+        else:
             (run.path / rel).unlink()
+    move_files(run, moves)
     for rel in st.outputs:
-        if (run.path / STAGING_DIR / rel).is_file():
+        if rel not in kept_outputs and (run.path / STAGING_DIR / rel).is_file():
             run.file(rel)
             os.replace(run.path / STAGING_DIR / rel, run.path / rel)
     shutil.rmtree(run.path / STAGING_DIR, ignore_errors=True)
@@ -1193,10 +1334,13 @@ def _commit(run: RunFolder, st: _HeldoutStage, prev: dict[str, Any]) -> None:
 
 
 def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTEMPTS,
-                    time_limit_s: float | None = TIME_LIMIT_S) -> dict[str, Any]:
-    """Generate, mask and check the four held-out views for a run whose stage 2 passed. Writes only
-    `heldout/` and `stage-2h.json`; every earlier output is left as it is. The gate passes when every view
-    is accepted; a view that needs human review or was rejected fails it.
+                    views: list[str] | None = None, time_limit_s: float | None = TIME_LIMIT_S
+                    ) -> dict[str, Any]:
+    """Generate, mask and check the held-out views for a run whose stage 2 passed: all four, or only
+    ``views`` (by name), keeping the others, their files and their review decisions from the earlier record
+    (each checked to come from the current turnaround, and judged again if the checks changed since).
+    Writes only `heldout/` and `stage-2h.json`; every earlier output is left as it is. The gate passes when
+    every view is accepted; a view that needs human review or was rejected fails it.
 
     New files are written to STAGING_DIR and swapped in only when every view is made. Meanwhile
     `stage-2h.json` keeps the earlier record, marked as running; if the stage stops early (an error, a replay
@@ -1204,9 +1348,24 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     s2 = run.read_stage(2)
     if not s2 or not s2.get("ok"):
         raise FileNotFoundError("stage 2 has not passed in this run folder; run stage 2 first")
-    chosen = list(VIEWS)
+    names = [v.name for v in VIEWS] if not views else list(dict.fromkeys(views))
+    unknown = [n for n in names if n not in VIEW_BY_NAME]
+    if unknown:
+        raise ValueError(f"unknown held-out views {unknown}; the views are {[v.name for v in VIEWS]}")
+    chosen = [v for v in VIEWS if v.name in names]
     prev = run.read_stage("2h") or {}  # type: ignore[arg-type]
+    prev_views = (prev.get("details") or {}).get("views") or {}
+    keep = {n: d for n, d in prev_views.items() if n not in names and n in VIEW_BY_NAME}
+    missing = [v.name for v in VIEWS if v.name not in names and v.name not in keep]
+    if views and missing:
+        raise FileNotFoundError(f"no earlier stage 2h record of {missing} to keep; make all views first")
     identity = stage2_identity(run)
+    try:
+        for name in keep:
+            check_provenance(run, prev, name, identity)
+    except ValueError as e:  # the earlier record no longer describes this run's views: say so in it
+        run.write_stage({**prev, "ok": False, "status": "error", "error": str(e)})
+        raise
     meta = run.read_json("views/meta.json")
     cover = _load(run, "01-cover.png")
     front = imaging.from_mask_image(_load(run, "masks/front.png"))
@@ -1219,14 +1378,25 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
 
     st = _HeldoutStage(run, client, "2h", "heldout")  # type: ignore[arg-type]
     shutil.rmtree(run.path / STAGING_DIR, ignore_errors=True)  # a run that was killed
-    per_view: dict[str, Any] = {}
+    decisions = [dict(e) for e in (prev.get("details") or {}).get("decisions") or []]
+    kept_checks = [c for c in prev.get("checks", [])
+                   if c["name"].split(".", 1)[0] in keep and not c["name"].endswith(".status_accepted")]
+    kept_outputs = [r for d in keep.values() for r in _view_outputs(d)]
+    per_view: dict[str, Any] = {n: {**d, "run_started": _view_started(prev, n)} for n, d in keep.items()}
+    moves: dict[str, str] = {}
 
     def assemble() -> None:
         pv = _ordered(per_view)
+        st.checks = list(kept_checks) + [c for c in st.checks if c["name"].split(".", 1)[0] not in keep]
         st.checks = [c for c in st.checks if not c["name"].endswith(".status_accepted")]
         for name, d in pv.items():
             st.checks += _status_checks(name, d)
-        st.details.update({"views": pv, **_summary(pv)})
+        outs = kept_outputs + [o for o in st.outputs if o not in kept_outputs]
+        st.outputs = list(dict.fromkeys(moves.get(o, o) for o in outs))
+        st.details.update({"views": pv, **_summary(pv), "decisions": decisions,
+                           "made_this_run": [v.name for v in chosen]})
+        if keep:
+            st.details["kept_from_earlier_run"] = {n: per_view[n]["run_started"] for n in keep}
 
     def stopped(error: str, status: str) -> dict[str, Any]:
         """The earlier record, its views, files, calls and cost untouched, with this run added to
@@ -1270,6 +1440,16 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
             profile_face_error=any(f.get("api_error") for f in profile_face_found.values()),
             identity=identity,
         )
+        version = checks_version()
+        for name, d in keep.items():
+            if d.get("checks_version") != version:
+                new, checks, mv = recheck_view(run, name, d, ctx.model, ctx.profile_toe, profile_face,
+                                               ctx.profile_face_error, identity)
+                per_view[name] = {**new, "run_started": per_view[name]["run_started"]}
+                kept_checks[:] = [c for c in kept_checks if c["name"].split(".", 1)[0] != name]
+                kept_checks += [{**c, "name": f"{name}.{c['name']}"} for c in checks]
+                moves.update(mv)
+                st.notes.append(f"{name}: checked again under the current checks: {new['status']}.")
         for view in chosen:
             status, checks, details = _generate_view(st, client, view, ctx, attempts, deadline)
             st.checks += [{**c, "name": f"{view.name}.{c['name']}"} for c in checks]
@@ -1282,6 +1462,8 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         shutil.rmtree(run.path / STAGING_DIR, ignore_errors=True)
         stopped(f"{type(e).__name__}: {e}"[:800], status="error")
         raise
+    if keep:
+        st.notes.append(f"Kept from earlier runs: {', '.join(keep)}.")
     assemble()
     st.details.update({
         "reference": "generated",
@@ -1311,7 +1493,7 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     })
     st.notes.append(f"Held-out views from {IMAGE_MODEL}, not used to build any body.")
     try:
-        _commit(run, st, prev)
+        _commit(run, st, prev, [v.name for v in chosen], kept_outputs, moves, decisions)
     except BaseException as e:
         stopped(f"swapping the new files in failed: {type(e).__name__}: {e}"[:800], status="error")
         raise
@@ -1344,3 +1526,138 @@ def accepted_views(run: RunFolder) -> dict[str, str]:
         if img in rec.get("outputs", []) and run.exists(img):
             out[det["view"]] = img
     return out
+
+
+# ---- human review --------------------------------------------------------------------------------------
+
+DECISIONS = ("accepted", "rejected")
+
+
+def _profile_values(run: RunFolder, rec: dict[str, Any]
+                    ) -> tuple[TurnaroundModel | None, float, float | None, bool]:
+    """The turnaround model and profile cues a recorded run was judged with, without model calls."""
+    m = {v: imaging.from_mask_image(_load(run, f"masks/{v}.png")) for v in ("front", "left", "right")}
+    det = rec.get("details") or {}
+    pf = det.get("profile_face") or {}
+    return (turnaround_model(m["front"], m["left"], m["right"]),
+            float(np.mean([abs(toe_offset_h(m[v])) for v in ("left", "right")])),
+            det.get("profile_face_offset"),
+            any(isinstance(f, dict) and f.get("api_error") for f in pf.values()))
+
+
+def recheck_heldout(run: RunFolder) -> dict[str, Any]:
+    """Judge every recorded view again under the current checks (no model calls; each must come from the
+    current turnaround), move files to their new status's folder and rewrite `stage-2h.json`."""
+    rec = run.read_stage("2h")  # type: ignore[arg-type]
+    if not rec or not (rec.get("details") or {}).get("views"):
+        raise FileNotFoundError("this run folder has no stage 2h record; run stage 2h first")
+    if rec.get("status") == "running":
+        raise ValueError("stage 2h is running in this run folder; wait for it to finish")
+    identity = stage2_identity(run)
+    views = rec["details"]["views"]
+    for name in views:
+        if name not in VIEW_BY_NAME:
+            raise ValueError(f"{name} is not a current held-out view; run stage 2h again")
+        check_provenance(run, rec, name, identity)
+    model, toe, face, face_err = _profile_values(run, rec)
+    checks = [c for c in rec["checks"] if c["name"].split(".", 1)[0] not in views]
+    moves: dict[str, str] = {}
+    for name, d in list(views.items()):
+        new, ch, mv = recheck_view(run, name, d, model, toe, face, face_err, identity)
+        views[name] = {**new, "run_started": _view_started(rec, name)}
+        checks += [{**c, "name": f"{name}.{c['name']}"} for c in ch] + _status_checks(name, views[name])
+        moves.update(mv)
+    move_files(run, moves)
+    try:
+        rec["checks"] = checks
+        rec["ok"] = C.gate_ok(checks) and not rec.get("error")  # a stopped run's error stays
+        rec["outputs"] = [moves.get(o, o) for o in rec.get("outputs", [])]
+        rec["details"].update({**_summary(views), "checks_version": checks_version(),
+                               "stage2_identity": identity, "fit_error_deg": list(FIT_ERROR_DEG)})
+        for old in ("yaw_uncertainty_deg", "found_yaw_clearance_deg", "hand_z_sigmas"):
+            rec["details"].pop(old, None)
+        rec["notes"] = (rec.get("notes", "") + f" Checked again under checks {checks_version()} at "
+                        f"{now_iso()}: " + ", ".join(f"{n} {d['status']}" for n, d in views.items()) + ".")
+        _remove_empty_status_dirs(run)
+        run.write_stage(rec)
+    except BaseException:
+        move_files(run, {b: a for a, b in moves.items() if a != b})
+        raise
+    return rec
+
+
+def review_view(run: RunFolder, view_name: str, decision: str, *, note: str = "", by: str) -> dict[str, Any]:
+    """Record a person's decision on one held-out view and move its image, mask and raw generation to
+    `heldout/` (accepted) or `heldout/rejected/` (rejected).
+
+    The decision is appended to `details.decisions` in `stage-2h.json` (who, when, the decision, the note,
+    the status before and after, the image's SHA-256), the view's `status` and `review` are updated and the
+    gate is re-evaluated: it passes once every view is accepted. A view whose own gated checks failed can be
+    rejected but not accepted: review decides what a check could not, it doesn't overrule a failed gate. The
+    view must come from the current turnaround and have been judged under the current checks (`recheck`),
+    and its image must still be the one judged. The files move all or none, and back if the record can't be
+    written. Returns the updated record."""
+    if decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {DECISIONS}")
+    if not by.strip():
+        raise ValueError("say who decided (--by)")
+    rec = run.read_stage("2h")  # type: ignore[arg-type]
+    if not rec or not (rec.get("details") or {}).get("views"):
+        raise FileNotFoundError("this run folder has no stage 2h record; run stage 2h first")
+    if rec.get("status") == "running":
+        raise ValueError("stage 2h is running in this run folder; wait for it to finish")
+    views = rec["details"]["views"]
+    if view_name not in views:
+        raise ValueError(f"no held-out view {view_name!r} in this run; it has {list(views)}")
+    if view_name not in VIEW_BY_NAME:
+        raise ValueError(f"{view_name} is not a current held-out view; run stage 2h again")
+    d = views[view_name]
+    check_provenance(run, rec, view_name, stage2_identity(run))
+    if d.get("checks_version") != checks_version():
+        raise ValueError(f"{view_name} was judged under other checks ({d.get('checks_version')}); judge it "
+                         f"again first: python3 -m herogen.pipeline recheck --run-id {run.run_id}")
+    img = heldout_rel(d["files"].get("image"))
+    if img is None or not (run.path / img).is_file():
+        raise FileNotFoundError(f"{view_name}'s image {d['files'].get('image')!r} is missing")
+    if file_sha256(run.path / img) != d.get("image_sha256"):
+        raise ValueError(f"{img} is not the image that was checked (its SHA-256 differs); run stage 2h again")
+    machine = d.get("machine_status") or d["status"]
+    if decision == "accepted" and machine == "rejected":
+        failed = [c["name"] for c in rec["checks"]
+                  if c["name"].startswith(view_name + ".") and c.get("gate", True) and not c["pass"]]
+        raise ValueError(f"{view_name} failed gated checks ({', '.join(failed)}); it can't be accepted on "
+                         "review")
+    target = view_paths(VIEW_BY_NAME[view_name], decision)
+    old_files = dict(d["files"])
+    moves = {old_files[k]: target[k] for k in target}
+    move_files(run, moves)
+    try:
+        entry = {
+            "view": view_name,
+            "decision": decision,
+            "by": by.strip(),
+            "at": now_iso(),
+            "note": note,
+            "from_status": d["status"],
+            "to_status": decision,
+            "machine_status": machine,
+            "image": target["image"],
+            "image_sha256": d["image_sha256"],
+        }
+        d.update({"status": decision, "machine_status": machine, "accepted": decision == "accepted",
+                  "files": target, "review": entry})
+        details = rec["details"]
+        details.setdefault("decisions", []).append(entry)
+        details.update(_summary(views))
+        rec["outputs"] = [moves.get(o, o) for o in rec.get("outputs", [])]
+        rec["checks"] = [c for c in rec["checks"] if c["name"] != f"{view_name}.status_accepted"]
+        rec["checks"] += _status_checks(view_name, d)
+        rec["ok"] = C.gate_ok(rec["checks"]) and not rec.get("error")
+        rec["notes"] = (rec.get("notes", "") + f" {view_name}: {decision} on human review by {entry['by']}"
+                        + (f" ({note})." if note else ".")).strip()
+        _remove_empty_status_dirs(run)
+        run.write_stage(rec)
+    except BaseException:
+        move_files(run, {b: a for a, b in moves.items() if a != b})
+        raise
+    return rec

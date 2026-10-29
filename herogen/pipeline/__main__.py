@@ -2,17 +2,24 @@
 
 Stage 2 is followed by the held-out views (`2h`) when it passes. `--stages 2h` makes only the held-out views
 for a run whose stage 2 already passed, leaving every earlier output untouched; it prints each view's status
-(accepted, needs review or rejected), found yaw and file.
+(accepted, needs review or rejected), found yaw and file. `--views front-left-60,front-right-60` makes only
+those views and keeps the others from the earlier stage 2h record.
+
+`python3 -m herogen.pipeline review --run-id <id> --view <view> --accept|--reject [--note TEXT] [--by NAME]`
+records a person's decision on one held-out view: the view's files move to `heldout/` (accepted) or
+`heldout/rejected/`, and the decision is appended to `stage-2h.json`. `recheck --run-id <id>` judges every
+recorded held-out view again under the current checks, with no model calls.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
 from pathlib import Path
 
 from herogen.pipeline.client import ModelClient
-from herogen.pipeline.heldout import stage2h_heldout
+from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
 from herogen.pipeline.stages import GateFailed, stage0_input, stage1_cover, stage2_turnaround
 from herogen.pipeline.results import stage5_results
@@ -59,7 +66,9 @@ def _print_heldout(rec: dict) -> None:
         yaw = v.get("found_yaw_deg")
         found = f"found yaw {yaw:+.0f}" if isinstance(yaw, (int, float)) else "no yaw found"
         tries = len(v["attempts"])
-        print(f"  {name}: {v['status']} after {tries} generation(s), {found}: {v['files']['image']}")
+        review = v.get("review") or {}
+        by = f" (on review by {review['by']})" if review.get("by") else ""
+        print(f"  {name}: {v['status']}{by} after {tries} generation(s), {found}: {v['files']['image']}")
 
 
 def run_pipeline(
@@ -71,6 +80,7 @@ def run_pipeline(
     runs: str | None = None,
     cache: str | None = None,
     label: str = "",
+    views: list[str] | None = None,
 ) -> int:
     root = runs_root(runs)
     run = RunFolder(root, run_id)
@@ -92,7 +102,7 @@ def run_pipeline(
             elif n == 2:
                 rec = stage2_turnaround(run, client)
             else:
-                rec = stage2h_heldout(run, client)
+                rec = stage2h_heldout(run, client, views=views)
             print(f"stage {n} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
             if n == HELDOUT:
                 _print_heldout(rec)
@@ -127,6 +137,21 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
     r.add_argument("--label", default="", help="label for the input, e.g. 'stand-in sketch'")
+    r.add_argument("--views", default=None,
+                   help="held-out views to make, e.g. front-left-60,front-right-60 (default all; the others "
+                        "are kept from the earlier stage 2h record)")
+    c = sub.add_parser("recheck", help="judge the recorded held-out views again under the current checks")
+    c.add_argument("--run-id", "--run", dest="run_id", required=True)
+    c.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
+    v = sub.add_parser("review", help="record a person's decision on one held-out view")
+    v.add_argument("--run-id", "--run", dest="run_id", required=True)
+    v.add_argument("--view", required=True, help="e.g. front-left-60")
+    d = v.add_mutually_exclusive_group(required=True)
+    d.add_argument("--accept", dest="decision", action="store_const", const="accepted")
+    d.add_argument("--reject", dest="decision", action="store_const", const="rejected")
+    v.add_argument("--note", default="", help="why, e.g. 'arms not in A-pose'")
+    v.add_argument("--by", default=None, help="who decided (default: the login name)")
+    v.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     s = sub.add_parser("stand-in", help="draw a stand-in pencil sketch with muse-image-1.0")
     s.add_argument("out", type=Path)
     s.add_argument("--live", action="store_true")
@@ -138,10 +163,34 @@ def main(argv: list[str] | None = None) -> int:
             stages = parse_stages(a.stages)
         except ValueError as e:
             ap.error(str(e))
+        views = [x.strip() for x in a.views.split(",") if x.strip()] if a.views else None
+        if views and HELDOUT not in stages and 2 not in stages:
+            ap.error("--views needs stage 2h")
         return run_pipeline(
             a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
-            runs=a.runs, cache=a.cache, label=a.label,
+            runs=a.runs, cache=a.cache, label=a.label, views=views,
         )
+    if a.cmd == "recheck":
+        try:
+            rec = recheck_heldout(RunFolder(runs_root(a.runs), a.run_id))
+        except (OSError, ValueError) as e:  # a missing file, no permission, a bad request: one line
+            print(f"recheck: {e}", file=sys.stderr)
+            return 1
+        print(f"stage 2h checked again: {'passes' if rec['ok'] else 'does not pass'}")
+        _print_heldout(rec)
+        return 0
+    if a.cmd == "review":
+        assert a.decision in DECISIONS
+        try:
+            rec = review_view(RunFolder(runs_root(a.runs), a.run_id), a.view, a.decision, note=a.note,
+                              by=a.by if a.by is not None else getpass.getuser())
+        except (OSError, ValueError) as e:  # a missing file, no permission, a bad request: one line
+            print(f"review: {e}", file=sys.stderr)
+            return 1
+        print(f"{a.view}: {a.decision} ({rec['details']['views'][a.view]['files']['image']}); stage 2h "
+              f"{'passes' if rec['ok'] else 'does not pass'}")
+        _print_heldout(rec)
+        return 0
     root = runs_root(a.runs)
     client = ModelClient(Path(a.cache) if a.cache else root / "_cache", mode="live" if a.live else "replay")
     img = client.generate_image(STAND_IN_PROMPT, size="1024x1536")
