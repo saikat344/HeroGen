@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "One hand-drawn character sketch to a measured, game-ready Roblox hero body."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["numpy", "pillow"]
 
 [project.optional-dependencies]
+live = ["meta-sam-parser"]
 remote = ["modal"]
 
 [tool.setuptools.packages.find]
