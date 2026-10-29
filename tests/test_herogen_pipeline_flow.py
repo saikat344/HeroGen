@@ -21,7 +21,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import heldout, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
-from herogen.pipeline.client import ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
+from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
 
 DUMMY_KEY = "dummy-test-key-not-real-0123456789"
@@ -168,6 +168,45 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(assign["side_fixes"].get("mirrored_left"))
         left = imaging.from_mask_image(_img(self.root / "reorder/masks/left.png"))
         self.assertLess(imaging.facing_offset(left), 0)
+
+    def test_partial_cache_is_not_a_threshold_mask(self):
+        # A SAM call missing from the replay cache stops the stage; it never falls back to the threshold mask.
+        self.assertEqual(self._record(FakeAPI(), "rec"), 0)
+        cache = self.root / "_cache"
+        sketch = _img(self.root / "rec" / "00-sketch.png")
+        sha = client_mod._sha(client_mod.png_bytes(sketch))
+        for p in sorted(cache.glob("*.json")):
+            req = json.loads(p.read_text())["request"]
+            if req.get("text") == stages.SAM_TEXTS[0] and req.get("image_sha256") == sha:
+                p.unlink()
+        with self.assertRaises(ReplayMiss):
+            stages._sam_or_threshold(ModelClient(cache), sketch)
+        self.assertEqual(self._replay("rep"), 1)
+        self.assertFalse((self.root / "rep" / "stage-1.json").exists())
+
+    def test_corrupt_cached_mask_is_not_a_threshold_mask(self):
+        # A cached SAM mask of the wrong size is a broken cache, not an API failure: the replay stops.
+        self.assertEqual(self._record(FakeAPI(), "rec"), 0)
+        cache = self.root / "_cache"
+        mask = sorted(cache.glob("*-mask-0.png"))[0]
+        Image.new("L", (3, 3), 255).save(mask)
+        self.assertEqual(self._replay("rep"), 1)
+
+    def test_live_sam_failure_falls_back_and_replays(self):
+        api = FakeAPI()
+        post = api.post
+
+        def flaky(c, endpoint, body):
+            if endpoint == "responses" and body["input"][0]["content"][0]["text"] == stages.SAM_TEXTS[0]:
+                raise ApiError("responses failed: HTTP 503")
+            return post(c, endpoint, body)
+
+        api.post = flaky
+        self.assertEqual(self._record(api, "rec"), 0)
+        self.assertEqual(self._replay("rep"), 0)
+        for run in ("rec", "rep"):
+            s1 = json.loads((self.root / run / "stage-1.json").read_text())
+            self.assertEqual(s1["details"]["mask_method"]["sketch"], f"{client_mod.SAM_MODEL}:{stages.SAM_TEXTS[1]}")
 
     def test_gate_failure_stops_and_still_reports(self):
         api = FakeAPI(sheet_order=("front", "right", "front"))

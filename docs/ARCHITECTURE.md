@@ -80,7 +80,9 @@ and fit scale and offset from the mask's bounding box. When a run folder holds `
 page shows its per-body table (see `herogen/pipeline/results.py` for the format).
 
 **Mask method.** `views/meta.json` records how each mask was made: `"mask_method": {"front": "sam-3.1", ...}`
-(`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`.
+(`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`. A mask falls back to the threshold only
+when the SAM call failed on the Model API; the failure is cached, so a replay falls back the same way. A replay
+miss, a corrupt cache entry or any other error stops the stage.
 
 **Shoulder covers.** Stage 4 adds one cover per shoulder, merged into its owner section (`UpperTorso`) so each
 GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and
