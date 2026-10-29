@@ -17,10 +17,15 @@ with that image in place of its textures (`variant_of` names the body). `--atlas
 
 Views. The four turnaround views (`masks/<view>.png`, colours from `views/<view>.png`) at their contract yaw, and
 every held-out view found as `heldout/<name>.png` with `heldout/<name>-mask.png`. No building stage reads
-`heldout/`. A held-out view's true angle is unknown, so its yaw is searched (coarse, then fine) for the best
-IoU: `front-left-*` views in 15-75 degrees, `front-right-*` in -75 to -15, any other name all the way round;
-`--yaw-range VIEW=LO,HI` overrides one view's range. Front-left and front-right views are also scored at the
-angle the image model was asked for (45 degrees, `at_fixed_yaw`).
+`heldout/` (and files in its subfolders, such as `review/` and `rejected/`, are never scored). A held-out view's
+true angle is unknown, so its yaw is searched (coarse, then fine) for the best IoU, around the target its name
+gives: `front-left-30` in 5-55 degrees, `front-right-60` in -85 to -35 (25 degrees each side of the target),
+`front-left-34` (stage 2h's three-quarter view, asked for at 45 degrees) in 15-75, any other name all the way
+round; `--yaw-range VIEW=LO,HI` overrides one view's range. A named view is also scored at its target angle
+(`at_fixed_yaw`). When `stage-2h.json` says the held-out views are generated images (`"reference":
+"generated"`), scores against them are labelled `"measures": "consistency"`, with the reference kind and stage
+2h's own status and found yaw for the view, since a generated view can invent detail and so measures
+consistency with the generated character, not accuracy; without that field both are null.
 
 Silhouettes. A body is projected orthographically at a yaw about +Z: u = cos(yaw) X + sin(yaw) Y, v = Z, so
 yaw 0 is the front view, 90 left, 180 back, 270 right (docs/ARCHITECTURE.md). The turnaround views use stage 3's
@@ -91,7 +96,11 @@ HELDOUT_DIR = "heldout"
 HELDOUT_VIEW = "front-left-34"
 HELDOUT_MASK = f"{HELDOUT_DIR}/{HELDOUT_VIEW}-mask.png"
 HELDOUT_YAW_RANGE = (15.0, 75.0)
-SIDE_YAW = {"front-left": ((15.0, 75.0), 45.0), "front-right": ((-75.0, -15.0), -45.0)}
+# Held-out names: `front-left-<deg>` / `front-right-<deg>` name their target yaw (stage 2h: 30 and 60); the
+# older single view `front-left-34` means a three-quarter view asked for at 45 degrees.
+TURNED = re.compile(r"^front-(left|right)-(\d+)$")
+LEGACY_THREE_QUARTER = {"34": ((15.0, 75.0), 45.0)}
+TARGET_MARGIN = 25.0           # degrees searched each side of a named target yaw (kept inside 1-89)
 OTHER_YAW_RANGE = (-180.0, 180.0)
 COARSE_STEP, FINE_STEP = 2.0, 0.5
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")   # the results page's rule: names become paths
@@ -118,6 +127,8 @@ class ScoreView:
     fixed_yaw: float | None = None   # the angle the image model was asked for, when known
     mask_path: str = ""
     image_path: str | None = None
+    reference: str | None = None     # stage-2h.json's "reference" ("generated": scores measure consistency)
+    stage2h: dict | None = None      # that view's status and found yaw in stage-2h.json, when recorded
 
     @property
     def heldout(self) -> bool:
@@ -132,11 +143,38 @@ def _load_rgb(path: Path) -> np.ndarray:
 
 
 def heldout_yaw(name: str) -> tuple[tuple[float, float], float | None]:
-    """(search range, the angle asked for) for a held-out view, from its name."""
-    for prefix, (rng, fixed) in SIDE_YAW.items():
-        if name.startswith(prefix):
-            return rng, fixed
-    return OTHER_YAW_RANGE, None
+    """(search range, the angle asked for) for a held-out view, from its name: `front-left-30` is searched in
+    5-55 degrees and measured at 30, `front-right-60` in -85 to -35 and at -60, the older `front-left-34` in
+    15-75 and at 45; any other name all the way round, with no target."""
+    m = TURNED.match(name)
+    if m is None:
+        return OTHER_YAW_RANGE, None
+    sign = 1.0 if m.group(1) == "left" else -1.0
+    if m.group(2) in LEGACY_THREE_QUARTER:
+        (lo, hi), fixed = LEGACY_THREE_QUARTER[m.group(2)]
+    else:
+        fixed = float(m.group(2))
+        if not 0 < fixed < 90:
+            return OTHER_YAW_RANGE, None
+        lo, hi = max(1.0, fixed - TARGET_MARGIN), min(89.0, fixed + TARGET_MARGIN)
+    return ((lo, hi) if sign > 0 else (-hi, -lo)), sign * fixed
+
+
+def heldout_record(run: Path) -> dict:
+    """What `stage-2h.json` says about the held-out views: the reference kind and each view's status and found
+    yaw (empty when the run has no readable record)."""
+    try:
+        rec = json.loads((run / "stage-2h.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    details = rec.get("details") if isinstance(rec.get("details"), dict) else {}
+    views = details.get("views") if isinstance(details.get("views"), dict) else {}
+    ref = details.get("reference", rec.get("reference"))
+    out = {"reference": ref if isinstance(ref, str) else None, "views": {}}
+    for name, d in views.items():
+        if isinstance(d, dict):
+            out["views"][name] = {k: d[k] for k in ("status", "found_yaw_deg", "yaw_window_deg") if k in d}
+    return out
 
 
 def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | None = None) -> list[ScoreView]:
@@ -161,7 +199,10 @@ def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | Non
         out.append(ScoreView(v, m, img, CONTRACT_YAW[v], mask_path=p.relative_to(run).as_posix(),
                              image_path=ipath))
     held = run / HELDOUT_DIR
-    names = sorted(p.name[: -len("-mask.png")] for p in held.glob("*-mask.png")) if held.is_dir() else []
+    # only files directly in heldout/: its review/ and rejected/ subfolders hold views that must not be scored
+    names = sorted(p.name[: -len("-mask.png")] for p in held.glob("*-mask.png") if p.is_file()) \
+        if held.is_dir() else []
+    record = heldout_record(run)
     for name in names:
         ip, mp = held / f"{name}.png", held / f"{name}-mask.png"
         if not ip.exists() or not SAFE_NAME.match(name) or name in CONTRACT_YAW:
@@ -174,7 +215,8 @@ def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | Non
         if yaw_ranges and name in yaw_ranges:
             rng = yaw_ranges[name]
         img, ipath = colour(ip, m)
-        out.append(ScoreView(name, m, img, None, tuple(rng), fixed, mp.relative_to(run).as_posix(), ipath))
+        out.append(ScoreView(name, m, img, None, tuple(rng), fixed, mp.relative_to(run).as_posix(), ipath,
+                             record.get("reference"), record.get("views", {}).get(name)))
     return out
 
 
@@ -730,6 +772,10 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         row = {"iou": round(geo["iou"], 4), **colour_scores(view, geo["yaw"], geo["sil"]),
                "yaw_deg": round(geo["yaw"], 2), **seen_flags(view, shape_seen, colour_seen)}
         if view.heldout:
+            row["reference"] = view.reference
+            row["measures"] = "consistency" if view.reference == "generated" else None
+            if view.stage2h:
+                row["stage2h"] = view.stage2h
             lo, hi = geo["range"]
             row["scale"] = round(geo["pps"] / front_pps, 4) if front_pps else None
             row["yaw_range"] = [lo, hi]
@@ -844,11 +890,14 @@ def write_scores(run: Path, bodies: list[dict], views: list[ScoreView] | None = 
                       "silhouettes a few pixels in from their edges (texture.compare, as stage 4)",
             "heldout_yaw": f"searched in {COARSE_STEP:g} then {FINE_STEP:g} degree steps; best IoU kept",
             "heldout_scale": "held-out fitted pixel scale / front fitted pixel scale",
+            "heldout_reference": "a held-out view stage-2h.json marks \"reference\": \"generated\" is a generated "
+                                 "image: its scores measure consistency with the generated character, not accuracy",
             "seen": "seen_shape: the shape was built from the view; seen_colour: the colours were; seen: either",
             "budget": "none unless --budget or --profile is given",
         },
         "views": [{"view": v.name, "mask": v.mask_path, "image": v.image_path, "heldout": v.heldout,
-                   **({"yaw_range": list(v.yaw_range), "fixed_yaw": v.fixed_yaw} if v.heldout else
+                   **({"yaw_range": list(v.yaw_range), "fixed_yaw": v.fixed_yaw, "reference": v.reference,
+                       "measures": "consistency" if v.reference == "generated" else None} if v.heldout else
                       {"yaw_deg": v.yaw})} for v in views],
         "bodies": kept + bodies,
     }
