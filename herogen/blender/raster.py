@@ -31,13 +31,11 @@ def project(view_name: str, pps: float, cmid: float, vref: float, verts: np.ndar
     return vref - uv[:, 1] * pps, uv[:, 0] * pps + cmid, verts @ FORWARD[view_name]
 
 
-def rasterize(rows: np.ndarray, cols: np.ndarray, depth: np.ndarray, faces: np.ndarray, shape: tuple[int, int],
-              chunk: int = 4096) -> Frame:
-    """Nearest-surface rasterisation of triangles given their vertices' (row, col, depth)."""
+def _fragments(rows: np.ndarray, cols: np.ndarray, depth: np.ndarray, faces: np.ndarray, shape: tuple[int, int],
+               chunk: int = 4096):
+    """Every (pixel, triangle) whose pixel centre lies inside the triangle, a chunk of triangles at a time:
+    yields (flat pixel index, depth, triangle index, barycentrics)."""
     h, w = shape
-    best_d = np.full(h * w, np.inf)
-    best_t = np.full(h * w, -1, dtype=np.int64)
-    best_b = np.zeros((h * w, 3))
     R, C, D = rows[faces], cols[faces], depth[faces]          # [M, 3]
     for s in range(0, len(faces), chunk):
         r, c, d = R[s:s + chunk], C[s:s + chunk], D[s:s + chunk]
@@ -70,15 +68,38 @@ def rasterize(rows: np.ndarray, cols: np.ndarray, depth: np.ndarray, faces: np.n
             continue
         bary = np.stack([l0[inside], l1[inside], l2[inside]], axis=1)
         z = np.einsum("nk,nk->n", bary, d[t])
-        pix = pr * w + pc
-        order = np.lexsort((z, pix))
-        pix, z, t, bary = pix[order], z[order], t[order], bary[order]
-        first = np.concatenate([[True], pix[1:] != pix[:-1]])
-        pix, z, t, bary = pix[first], z[first], t[first], bary[first]
+        yield pr * w + pc, z, t + s, bary
+
+
+def nearest(pix: np.ndarray, z: np.ndarray, t: np.ndarray, bary: np.ndarray):
+    """Of fragments, the nearest one per pixel."""
+    order = np.lexsort((z, pix))
+    pix, z, t, bary = pix[order], z[order], t[order], bary[order]
+    first = np.concatenate([[True], pix[1:] != pix[:-1]]) if len(pix) else np.zeros(0, dtype=bool)
+    return pix[first], z[first], t[first], bary[first]
+
+
+def fragments(rows: np.ndarray, cols: np.ndarray, depth: np.ndarray, faces: np.ndarray, shape: tuple[int, int]):
+    """All fragments of the triangles: (flat pixel index, depth, triangle index, barycentrics), concatenated."""
+    parts = list(_fragments(rows, cols, depth, faces, shape))
+    if not parts:
+        return np.zeros(0, np.int64), np.zeros(0), np.zeros(0, np.int64), np.zeros((0, 3))
+    return tuple(np.concatenate(x) for x in zip(*parts))
+
+
+def rasterize(rows: np.ndarray, cols: np.ndarray, depth: np.ndarray, faces: np.ndarray, shape: tuple[int, int],
+              chunk: int = 4096) -> Frame:
+    """Nearest-surface rasterisation of triangles given their vertices' (row, col, depth)."""
+    h, w = shape
+    best_d = np.full(h * w, np.inf)
+    best_t = np.full(h * w, -1, dtype=np.int64)
+    best_b = np.zeros((h * w, 3))
+    for pix, z, t, bary in _fragments(rows, cols, depth, faces, shape, chunk):
+        pix, z, t, bary = nearest(pix, z, t, bary)
         better = z < best_d[pix]
         pix, z, t, bary = pix[better], z[better], t[better], bary[better]
         best_d[pix] = z
-        best_t[pix] = t + s
+        best_t[pix] = t
         best_b[pix] = bary
     return Frame(best_t.reshape(h, w), best_b.reshape(h, w, 3), best_d.reshape(h, w))
 

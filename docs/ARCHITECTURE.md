@@ -364,13 +364,17 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
   asked for at 45 degrees): 15 to 75; other names all the way round. Scale and offset are fitted from the mask's
   box, and the view is also measured at the target itself (`at_fixed_yaw`; 45 degrees for `front-left-34`). Each
   held-out row carries `reference` and `measures` from `stage-2h.json` (`measures` is `"consistency"` when the
-  record says `"reference": "generated"`, otherwise both are `null`) and stage 2h's own `status` and
+  record says `"reference": "generated"` and `"accuracy"` for `"ground-truth"`, otherwise both are `null`) and stage 2h's own `status` and
   `found_yaw_deg` for the view, when it records them.
 - **Measures, per view.** Silhouette IoU; colour error (mean absolute, 0-255) and grey SSIM between a flat render
   of the body's own colours (base-colour texture, factor and vertex colours; nearest surface, no lighting) and
   the view's image, inside both silhouettes as stage 4's texture gates measure them; `seen_shape` (the shape was
   built from the view), `seen_colour` (the colours were) and `seen` (either), from `sections.json`
-  (`shape_views`, `texture.colour_views`) or `--seen` / `--seen-shape`. A held-out view is never seen.
+  (`shape_views`, `texture.colour_views`) or `--seen` / `--seen-shape`. A held-out view is never seen. A body's
+  shape, a ground-truth body's included, is its alpha-clipped surface: faces of an `alphaMode: MASK` material
+  count, in the silhouette and the colour alike, only where alpha reaches `alphaCutoff`, and the body is placed
+  (the turnaround registration and the held-out fit) by that surface's extent, so a transparent card never
+  shifts or shrinks it; OPAQUE materials are never clipped (BLEND is scored as opaque).
 - **Per body.** Triangles (and the low LOD's), atlas size, mesh sanity after welding (degenerate triangles,
   boundary, non-manifold and inconsistently wound edges, components, inside-out closed meshes, the meshes that
   are not closed; self-intersections are not checked), and the checks of a profile when one is asked for.
@@ -547,7 +551,8 @@ yet check `heldout.accepted_views`, so a view left directly in `heldout/` that t
 from an earlier turnaround, or whose image changed) is still scored; each row carries the view's `status` from
 the record. A held-out row carries `reference` and `measures` from `stage-2h.json`: when the record says
 `"reference": "generated"`, the row is labelled `"measures": "consistency"`, since a generated view can invent
-detail and a score against it measures consistency with the generated character, not accuracy.
+detail and a score against it measures consistency with the generated character, not accuracy; a
+`"reference": "ground-truth"` view, a render of a known body, is labelled `"measures": "accuracy"`.
 
 **Mask method.** Every figure mask is SAM 3.1's: the first of the prompts `character` and `person` that finds
 something, recorded per mask as `sam-3.1:<prompt>` (`sam-3.1:none` when neither finds anything, an empty mask).

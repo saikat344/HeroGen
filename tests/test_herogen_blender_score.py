@@ -10,6 +10,7 @@ import json
 import math
 import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -317,12 +318,158 @@ class ExactRegistration(Tmp):
             self.assertEqual(fit["views"][v]["iou"], 1.0, v)
             self.assertEqual(on["views"][v]["iou"], 1.0, v)
 
+    def test_a_transparent_card_does_not_misplace_the_body(self):
+        """The same exact body with a fully transparent alphaMode MASK card above its head still registers to
+        the pixel: the scorer places a body by its visible surface, not by every vertex."""
+        tex = np.zeros((8, 8, 4), np.uint8)
+        tex[..., :3] = 128
+        tex[:, 4:, 3] = 255
+        meshes = [(f"part{i}", *box(c, h), np.tile([0.75, 0.5], (8, 1))) for i, (c, h) in enumerate((BODY, ARM))]
+        top = max(c[2] + h[2] for c, h in (BODY, ARM))
+        cv = np.array([[-0.6, -0.3, top + 0.1], [0.6, -0.3, top + 0.1], [0.6, -0.3, top + 0.9], [-0.6, -0.3, top + 0.9]])
+        meshes.append(("card", cv, np.array([[0, 1, 2], [0, 2, 3]]), np.tile([0.25, 0.5], (4, 1))))
+        p = G.write_glb(self.tmp / "carded.glb", meshes, texture_png=png(tex), alpha_mode="MASK")
+        run = make_run(self.tmp)
+        r = S.score_body(run, "carded", p, frame="fit")
+        for v in (*S.TURNAROUND, S.HELDOUT_VIEW):
+            self.assertEqual(r["views"][v]["iou"], 1.0, v)
+
     def test_heldout_view_registers_and_the_fine_search_finds_half_degrees(self):
         # 40.5 degrees is off the 2-degree coarse grid (15, 17, ... 75): only the 0.5-degree search reaches it
         run = make_run(self.tmp, yaw_heldout=40.5)
         h = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)))["views"][S.HELDOUT_VIEW]
         self.assertEqual(h["yaw_deg"], 40.5)
         self.assertEqual(h["iou"], 1.0)
+
+
+def card(x0, x1, z0, z1, y=-0.6):
+    """A flat quad facing the front camera (-Y), with texture coordinates across it (u left to right)."""
+    v = np.array([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], float)
+    f = np.array([[0, 1, 2], [0, 2, 3]])
+    uv = np.array([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+    return v, f, uv
+
+
+def half_alpha_texture(right_alpha: int = 64) -> np.ndarray:
+    """Red, fully opaque on its left half; on its right half alpha `right_alpha` (below a 0.5 cutoff)."""
+    tex = np.zeros((8, 8, 4), np.uint8)
+    tex[..., :3] = RED
+    tex[:, :4, 3] = 255
+    tex[:, 4:, 3] = right_alpha
+    return tex
+
+
+class AlphaMask(Tmp):
+    """glTF alphaMode MASK: the shape is the alpha-clipped surface; OPAQUE ignores texture alpha."""
+
+    def render(self, path):
+        glb = G.load_glb(path)
+        verts, faces = glb.merged()
+        xy = np.stack([(verts[:, 0] + 1.0) * 50.0, (2.5 - verts[:, 2]) * 50.0], axis=1)      # 50 px per unit
+        clip = S.alpha_clip(glb, faces)
+        cover = S.coverage(xy, faces, (128, 128), clip)
+        colour = S.body_colour(glb, faces)
+        img, m = S.colour_render(colour, xy, S.view_depth(verts, 0.0), faces, (128, 128), clip)
+        return clip, cover, img, m
+
+    def test_a_masked_card_keeps_only_its_opaque_half(self):
+        v, f, uv = card(-0.5, 0.5, 1.0, 2.0)
+        p = G.write_glb(self.tmp / "card.glb", [("card", v, f, uv)], texture_png=png(half_alpha_texture()),
+                        alpha_mode="MASK", alpha_cutoff=0.5)
+        clip, cover, img, m = self.render(p)
+        self.assertIsNotNone(clip)
+        self.assertEqual(int(clip.mask_faces.sum()), 2)
+        cols = np.nonzero(cover.any(axis=0))[0]
+        # x -0.5 .. about 0: the left (opaque) half; the edge falls where the bilinearly sampled alpha crosses
+        # the cutoff, within one texel (6.25 px) of the middle
+        self.assertEqual(cols.min(), 25)
+        self.assertLessEqual(abs(int(cols.max()) - 50), 4)
+        self.assertLessEqual(abs(int(cover.sum()) - 25 * 50), 4 * 50)
+        self.assertTrue(np.array_equal(cover, m))                       # the colour render covers the same pixels
+        self.assertTrue(np.all(img[m][:, 0] > 200))                     # and shows the card's red
+
+    def test_a_transparent_card_does_not_move_or_scale_the_body(self):
+        """An opaque 2 x 2 box with a fully transparent card above it is placed by the box alone: in a held-out
+        fit, a turnaround registration (both frames) and the scorer, the silhouette matches the box's mask."""
+        import io
+
+        from PIL import Image
+
+        def rgba_png(a):
+            b = io.BytesIO()
+            Image.fromarray(a.astype(np.uint8), "RGBA").save(b, format="PNG")
+            return b.getvalue()
+
+        quad = np.array([[0, 1, 2], [0, 2, 3]])
+        box = np.array([[-1, 0, 0], [1, 0, 0], [1, 0, 2], [-1, 0, 2]], float)
+        card_v = np.array([[-1, -0.01, 2], [1, -0.01, 2], [1, -0.01, 3], [-1, -0.01, 3]], float)
+        tex = np.zeros((8, 8, 4))
+        tex[..., :3] = 128
+        tex[:, 4:, 3] = 255                                       # right half opaque, left half alpha 0
+        p = self.tmp / "carded.glb"
+        G.write_glb(p, [("body", box, quad, np.full((4, 2), [0.75, 0.5])),
+                        ("hair_card", card_v, quad, np.full((4, 2), [0.25, 0.5]))],
+                    texture_png=rgba_png(tex), alpha_mode="MASK")
+        g = G.load_glb(p)
+        verts, faces = g.merged()
+        clip = S.alpha_clip(g, faces)
+        mask = np.zeros((64, 64), bool)
+        mask[8:56, 8:56] = True
+        sil, _ = S.silhouette(verts, faces, 0.0, mask, clip)
+        self.assertGreater(S.iou(sil, mask), 0.98)
+        ext = S.visible_points(verts, faces, clip)
+        self.assertAlmostEqual(float(ext[:, 2].max()), 2.0)       # the card adds nothing to the extent
+        view = types.SimpleNamespace(name="front", mask=mask, heldout=False, yaw=0.0)
+        for frame in S.FRAMES:
+            reg = S.registration(verts, [view], frame, None, ext)
+            self.assertAlmostEqual(reg["height"], 2.0, msg=frame)
+            cover = S.coverage(S.turnaround_xy(verts, view, reg), faces, mask.shape, clip)
+            self.assertGreater(S.iou(cover, mask), 0.98, frame)
+        # without the clip the card counts, as it renders under OPAQUE
+        self.assertAlmostEqual(S.registration(verts, [view], "fit", None)["height"], 3.0)
+
+    def test_a_clipped_point_shows_the_surface_behind_it(self):
+        v, f, uv = card(-0.5, 0.5, 1.0, 2.0)
+        bv, bf = box((0.0, 0.0, 1.5), (0.5, 0.2, 0.5))                  # white (no material), behind the card
+        p = G.write_glb(self.tmp / "both.glb", [("box", bv, bf), ("card", v, f, uv)],
+                        texture_png=png(half_alpha_texture()), alpha_mode="MASK")
+        _, cover, img, m = self.render(p)
+        left, right = img[50, 35], img[50, 65]                          # same row, the card's two halves
+        self.assertGreater(left[0], 200)
+        self.assertLess(left[1], 80)                                     # red: the card
+        self.assertTrue(np.all(right > 240))                             # white: the box seen through the clip
+        self.assertTrue(m[50, 65] and cover[50, 65])
+
+    def test_an_opaque_material_ignores_texture_alpha(self):
+        v, f, uv = card(-0.5, 0.5, 1.0, 2.0)
+        p = G.write_glb(self.tmp / "opaque.glb", [("card", v, f, uv)], texture_png=png(half_alpha_texture(0)))
+        clip, cover, img, m = self.render(p)
+        self.assertIsNone(clip)
+        self.assertEqual(int(cover.sum()), 50 * 50)                     # the whole card, alpha 0 or not
+        self.assertEqual(G.load_glb(p).materials[0].alpha_mode, "OPAQUE")
+
+    def test_scores_use_the_clipped_shape(self):
+        run = make_run(self.tmp)
+        v, f, uv = card(-0.5, 0.5, 0.0, 2.0, y=0.0)
+        masked = G.write_glb(self.tmp / "m.glb", [("card", v, f, uv)], texture_png=png(half_alpha_texture()),
+                             alpha_mode="MASK")
+        opaque = G.write_glb(self.tmp / "o.glb", [("card", v, f, uv)], texture_png=png(half_alpha_texture()))
+        a = S.score_body(run, "m", masked, frame="contract", height=2.0)
+        b = S.score_body(run, "o", opaque, frame="contract", height=2.0)
+        self.assertEqual(a["alpha_clip"]["mask_faces"], 2)
+        self.assertIsNone(b["alpha_clip"])
+        self.assertNotEqual(a["views"]["front"]["iou"], b["views"]["front"]["iou"])
+        sil = np.asarray(Image.open(run / "05-renders" / "m" / "front-silhouette.png").convert("L")) > 127
+        full = np.asarray(Image.open(run / "05-renders" / "o" / "front-silhouette.png").convert("L")) > 127
+        self.assertAlmostEqual(sil.sum() / full.sum(), 0.5, delta=0.03)
+
+    def test_a_ground_truth_reference_measures_accuracy(self):
+        run = make_run(self.tmp)
+        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True,
+                                                       "details": {"reference": "ground-truth"}}))
+        row = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)))["views"][S.HELDOUT_VIEW]
+        self.assertEqual((row["reference"], row["measures"]), ("ground-truth", "accuracy"))
+        self.assertEqual(S.MEASURES, {"generated": "consistency", "ground-truth": "accuracy"})
 
 
 class Colour(Tmp):
