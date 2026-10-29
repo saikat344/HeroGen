@@ -67,7 +67,13 @@ REGISTRATION_MARGIN = 3.0
 REGISTRATION_SIZE = 1024        # the image size the thresholds were measured at, and the smallest they gate
 CENTROID_MAX_PX = round(REGISTRATION_MEASURED["centroid_px"] * REGISTRATION_MARGIN, 4)        # 0.3339
 AREA_RATIO_MAX_DEV = round(REGISTRATION_MEASURED["area_ratio_dev"] * REGISTRATION_MARGIN, 5)  # 0.00108
-FACING_MIN_X = 0.999            # cos of the right-to-left axis's angle from +X (about 2.6 degrees)
+# Facing: after the turn to the nearest 90 degrees, the rig's right-to-left hip axis sits this far from +X.
+# Rigs place the hip joints a little off square (Mixamo rigs up to 2.58 degrees over the 18 rigged delivered
+# runs, while their shoulders, hands and feet are square); the gate allows 3 times that. A figure facing the
+# wrong way is 90 or 180 degrees off.
+FACING_MEASURED_DEG = 2.58
+FACING_MARGIN = 3.0
+FACING_MIN_X = round(math.cos(math.radians(FACING_MEASURED_DEG * FACING_MARGIN)), 4)   # 0.9909, 7.74 degrees
 
 
 def sha256(path: Path) -> str:
@@ -237,7 +243,10 @@ def facing_check(facing: dict) -> dict:
         return check("facing_left_axis_x", None, None, passed=True, gate=False,
                      note="no rig with named left and right limbs: yaw given by the operator, checked by eye")
     x = float(facing["left_axis_after_yaw"][0])
-    return check("facing_left_axis_x", round(x, 6), FACING_MIN_X, axis=facing["rig_axis"])
+    return check("facing_left_axis_x", round(x, 6), FACING_MIN_X, axis=facing["rig_axis"],
+                 residual_deg=round(math.degrees(math.acos(max(-1.0, min(1.0, x)))), 3),
+                 basis=f"{FACING_MARGIN:g} x the largest residual of the rigged delivered runs "
+                       f"({FACING_MEASURED_DEG} degrees)")
 
 
 def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
