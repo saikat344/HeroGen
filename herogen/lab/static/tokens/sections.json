@@ -1,0 +1,159 @@
+{
+  "surfaces": {
+    "light": "#F5F6F8",
+    "dark": "#11161C"
+  },
+  "sections": [
+    {
+      "id": 1,
+      "label": "Head",
+      "color": "#7B7B7B",
+      "pattern": "dot",
+      "contrast": {
+        "light": 3.9143,
+        "dark": 4.2942
+      }
+    },
+    {
+      "id": 2,
+      "label": "UpperTorso",
+      "color": "#2C8496",
+      "pattern": "horizontal",
+      "contrast": {
+        "light": 4.0058,
+        "dark": 4.1961
+      }
+    },
+    {
+      "id": 3,
+      "label": "LowerTorso",
+      "color": "#CC5064",
+      "pattern": "vertical",
+      "contrast": {
+        "light": 3.9642,
+        "dark": 4.2402
+      }
+    },
+    {
+      "id": 4,
+      "label": "LeftUpperArm",
+      "color": "#4364C8",
+      "pattern": "diagonal-up",
+      "contrast": {
+        "light": 4.9852,
+        "dark": 3.3717
+      }
+    },
+    {
+      "id": 5,
+      "label": "RightUpperArm",
+      "color": "#6A84D4",
+      "pattern": "diagonal-down",
+      "contrast": {
+        "light": 3.3118,
+        "dark": 5.0755
+      }
+    },
+    {
+      "id": 6,
+      "label": "LeftLowerArm",
+      "color": "#9244C9",
+      "pattern": "cross",
+      "contrast": {
+        "light": 4.9892,
+        "dark": 3.369
+      }
+    },
+    {
+      "id": 7,
+      "label": "RightLowerArm",
+      "color": "#AA6DD5",
+      "pattern": "diagonal-up",
+      "contrast": {
+        "light": 3.3155,
+        "dark": 5.0698
+      }
+    },
+    {
+      "id": 8,
+      "label": "LeftHand",
+      "color": "#935F2B",
+      "pattern": "vertical",
+      "contrast": {
+        "light": 4.9638,
+        "dark": 3.3863
+      }
+    },
+    {
+      "id": 9,
+      "label": "RightHand",
+      "color": "#BB7936",
+      "pattern": "horizontal",
+      "contrast": {
+        "light": 3.2909,
+        "dark": 5.1076
+      }
+    },
+    {
+      "id": 10,
+      "label": "LeftUpperLeg",
+      "color": "#387823",
+      "pattern": "dot",
+      "contrast": {
+        "light": 5.0065,
+        "dark": 3.3574
+      }
+    },
+    {
+      "id": 11,
+      "label": "RightUpperLeg",
+      "color": "#48992D",
+      "pattern": "cross",
+      "contrast": {
+        "light": 3.3084,
+        "dark": 5.0806
+      }
+    },
+    {
+      "id": 12,
+      "label": "LeftLowerLeg",
+      "color": "#23785B",
+      "pattern": "diagonal-up",
+      "contrast": {
+        "light": 4.9679,
+        "dark": 3.3834
+      }
+    },
+    {
+      "id": 13,
+      "label": "RightLowerLeg",
+      "color": "#2C9974",
+      "pattern": "diagonal-down",
+      "contrast": {
+        "light": 3.2828,
+        "dark": 5.1203
+      }
+    },
+    {
+      "id": 14,
+      "label": "LeftFoot",
+      "color": "#B53595",
+      "pattern": "horizontal",
+      "contrast": {
+        "light": 4.9694,
+        "dark": 3.3825
+      }
+    },
+    {
+      "id": 15,
+      "label": "RightFoot",
+      "color": "#D05DB3",
+      "pattern": "vertical",
+      "contrast": {
+        "light": 3.2923,
+        "dark": 5.1054
+      }
+    }
+  ],
+  "accessibility": "Always pair section colors with the stable section name, number and pattern. Fifteen colors alone cannot reliably identify every part for all color-vision deficiencies."
+}

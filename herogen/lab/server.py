@@ -2,7 +2,8 @@
 
 Routes:
   /                      the page (static/index.html), with its Content-Security-Policy; also at /index.html
-  /static/<file>         the page's CSS and JS only (HTML is never served from here, so never without the CSP)
+  /static/<path>         the page's CSS, JS, SVG icons, JSON tokens and licence texts, subfolders included (HTML
+                         is never served from here, so the page never comes without its CSP)
   /api/runs              JSON list of runs
   /api/runs/<id>         JSON detail of one run (stage records, chain images, bodies, scores)
   /runs/<id>/<path>      a PNG, JPEG, GLB or JSON file inside that run folder
@@ -51,7 +52,15 @@ RUN_FILE_TYPES = {
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+    ".txt": "text/plain; charset=utf-8",
+    ".ttf": "font/ttf",
+    ".woff2": "font/woff2",
 }
+# Every response except the page itself: nothing in it may run or load anything, even if it is opened on its own
+# (an SVG or a JSON file opened directly in a tab).
+FILE_CSP = "default-src 'none'; sandbox"
 PAGE = STATIC_DIR / "index.html"
 PAGE_TYPE = "text/html; charset=utf-8"
 
@@ -106,16 +115,29 @@ def safe_run_file(root: Path, url_path: str) -> tuple[Path, str] | None:
 
 
 def safe_static_file(name: str) -> tuple[Path, str] | None:
-    """(file, content type) for `/static/<name>`: CSS and JS only, matched after decoding and case-folding the
-    extension (so `%69ndex.html` or `Index.HTML` is refused like `index.html`)."""
+    """(file, content type) for `/static/<name>`, where `name` may name a file in a subfolder (`icons/box.svg`).
+
+    Every segment must be a plain name (no `..`, `.`, hidden names, backslashes or NUL), the type must be in
+    STATIC_TYPES after decoding and case-folding the extension (so `%69ndex.html` or `Index.HTML` is refused like
+    `index.html`), and the file must resolve inside the static folder (symlinks included)."""
     name = unquote(name)
-    if not runindex.SAFE_NAME.match(name):
+    if not name or "\x00" in name or "\\" in name or name.startswith("/"):
         return None
-    ctype = STATIC_TYPES.get(Path(name).suffix.lower())
-    p = STATIC_DIR / name
-    if ctype is None or not p.is_file() or p.resolve().parent != STATIC_DIR:
+    parts = name.split("/")
+    if any(not runindex.SAFE_NAME.match(p) for p in parts):
         return None
-    return p, ctype
+    ctype = STATIC_TYPES.get(Path(parts[-1]).suffix.lower())
+    if ctype is None:
+        return None
+    try:
+        resolved = STATIC_DIR.joinpath(*parts).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_relative_to(STATIC_DIR) or not resolved.is_file():
+        return None
+    if STATIC_TYPES.get(resolved.suffix.lower()) != ctype:
+        return None
+    return resolved, ctype
 
 
 class LabHandler(BaseHTTPRequestHandler):
@@ -261,7 +283,8 @@ class LabHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-        for k, v in (extra or {}).items():
+        headers = {"Content-Security-Policy": FILE_CSP, **(extra or {})}
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         if not head:
