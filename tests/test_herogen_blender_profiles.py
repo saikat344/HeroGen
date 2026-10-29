@@ -38,6 +38,14 @@ class Selection(unittest.TestCase):
         self.assertIsNone(S4.LOD_BUILD["best"]["high"]["budget"])
         self.assertEqual(set(S4.LOD_BUILD["roblox-avatar"]), {"high"})
         self.assertIsNone(S4._budgets_record("best"))
+        # atlas sizes per profile: in-game 1024 / 512; best and the avatar from the source's pixel density, at
+        # most 4096 and the avatar's 2048 px limit
+        self.assertEqual({lod: b["atlas"] for lod, b in S4.LOD_BUILD["roblox-ingame"].items()},
+                         {"high": 1024, "low": 512})
+        self.assertEqual(S4.LOD_BUILD["roblox-avatar"]["high"]["atlas"],
+                         ("source", PROFILES["roblox-avatar"]["texture_max_px"]))
+        self.assertEqual(S4.LOD_BUILD["best"]["high"]["atlas"], ("source", 4096))
+        self.assertEqual(S4.UV_GUTTER_PX, 2)
         not_built = " ".join(S4._budgets_record("roblox-avatar")["not_built"])
         for part in ("rig", "skinning", "attachments", "DynamicHead", "cages"):
             self.assertIn(part, not_built)
@@ -117,6 +125,12 @@ class ProfilesEndToEnd(unittest.TestCase):
         self.assertEqual(checks["open_edges"]["value"], 0)
         self.assertTrue(checks["watertight_parts"]["gate"])           # gated under every profile
         self.assertFalse(checks["max_joint_gap_high_heldout"]["gate"])  # held-out poses: reported only
+        # the atlas: the smallest size with a texel per view pixel, or the largest allowed
+        choice = sections["texture"]["atlas_choice"]["high"]
+        size = sections["texture"]["atlas_sizes"]["high"]
+        self.assertEqual(choice["chosen"], size)
+        reach = [int(n) for n, d in choice["texels_per_stud"].items() if d >= choice["view_px_per_stud"]]
+        self.assertEqual(size, min(reach) if reach else 4096)
         self.assertIsNone(sections["sections"][0]["triangles_low"])
 
     def test_avatar_fits_every_part_group(self):

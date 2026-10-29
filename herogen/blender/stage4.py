@@ -50,23 +50,41 @@ COVER_OWNER = "UpperTorso"
 COVER_RADIUS = 2.5
 COVER_OUTSET = 0.06
 COVER_MASK_TOLERANCE_PX = 3
-# Atlas sizes: ZBurst's hero LODs use 1024 maps for High and 512 for Low.
+# Atlas sizes. roblox-ingame: ZBurst's hero LODs use 1024 maps for High and 512 for Low. best and roblox-avatar:
+# the smallest of ATLAS_SIZES that gives at least one texel per pixel of the views the colours come from (at the
+# atlas's measured UV fill and the body's surface area), at most 4096 under best and the specification's 2048
+# under roblox-avatar. A texel finer than the source pixel adds nothing the views hold: on the pencil-sketch figure
+# (1078 px views, 168.5 px per stud; carve full detail, 61% UV fill packed for 4096; texels per stud 123 / 246 /
+# 492 at 1024 / 2048 / 4096) the held-out view's colour error at a quarter of its size, where the body is about
+# as large as on a screen, was 39.19 / 39.35 / 39.38 (half a degree of yaw moves it by up to 0.09), while the
+# front view it was baked from fell from 1.79 to 0.60: the extra texels only reproduce the baked views more
+# exactly.
 ATLAS = {"high": 1024, "low": 512}
+ATLAS_SIZES = (1024, 2048, 4096)
+ATLAS_AVATAR = 2048
+ATLAS_BEST = 4096
+# UV packing gutter between islands, in texels of the LOD's atlas. Smart UV Project islands packed with a fixed
+# 0.004 margin filled 15% of the atlas at full detail, 25% for the in-game decimation and 32% for the avatar body
+# (many small islands, each with its own margin). Unwrapped without margin, packed by concave island shape with a
+# 2-texel gutter, the pencil-sketch bodies fill 35-58% (summed UV triangle area: hybrid full detail 48%, in-game
+# 41% / 35%, avatar 51%; carve 58%, 49% / 44%, 58%); on an earlier recording of the hybrid, the in-game high body
+# at 1024 went from front colour error 11.52 and SSIM 0.712 to 10.29 and 0.758.
+UV_GUTTER_PX = 2
 # Comparison variant only (atlas-high-side-trust.png): weight of a side view that did not shape the mesh. On the
 # pencil figure's hybrid (the pinned runners' results, in-game high body, numpy flat renders, colour error front /
-# left): 1.0 11.7 / 14.2, 0.3 10.4 / 16.4, 0.1 9.6 / 18.4, 0.03 9.0 / 20.6.
+# left): 1.0 10.0 / 13.4, 0.3 8.7 / 15.7, 0.1 7.8 / 17.8, 0.03 7.2 / 20.0.
 SIDE_TRUST = 0.3
 TARGET_FRACTIONS = (0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85)
 # How each profile's LODs are built: the triangle budget (None: none, the stage 3 mesh undecimated; "groups": the
 # avatar part groups), the cap and cover resolution ("high" or "low" settings above) and the atlas size. An
 # avatar part group has little room (Torso 1,750 with seven caps and both covers), so it takes the low settings.
 LOD_BUILD = {
-    "best": {"high": {"budget": None, "dome": "high", "cover": "high", "atlas": ATLAS["high"]}},
+    "best": {"high": {"budget": None, "dome": "high", "cover": "high", "atlas": ("source", ATLAS_BEST)}},
     "roblox-ingame": {"high": {"budget": PROFILES["roblox-ingame"]["lods"]["high"], "dome": "high",
                                "cover": "high", "atlas": ATLAS["high"]},
                       "low": {"budget": PROFILES["roblox-ingame"]["lods"]["low"], "dome": "low", "cover": "low",
                               "atlas": ATLAS["low"]}},
-    "roblox-avatar": {"high": {"budget": "groups", "dome": "low", "cover": "low", "atlas": ATLAS["high"]}},
+    "roblox-avatar": {"high": {"budget": "groups", "dome": "low", "cover": "low", "atlas": ("source", ATLAS_AVATAR)}},
 }
 # Whole-body decimation targets for the avatar profile; each part group then takes the candidate with the most
 # triangles that fits its own budget (sections are separate closed meshes, so groups can come from different
@@ -111,6 +129,19 @@ def _save_lod(path: Path, secs: dict, uvs: dict | None = None) -> None:
         if uvs is not None and n in uvs:
             arrs[f"{n}__uv"] = uvs[n]
     np.savez(path, **arrs)
+
+
+def _uv_fill(secs: dict, uvs: dict) -> tuple[float, float]:
+    """The fraction of the unit UV square the LOD's triangles cover, and their surface area (square studs)."""
+    fill = area = 0.0
+    for n, s in secs.items():
+        if n not in uvs or len(s.faces) == 0:
+            continue
+        uv, t = uvs[n], s.verts[s.faces]
+        fill += 0.5 * float(np.abs((uv[:, 1, 0] - uv[:, 0, 0]) * (uv[:, 2, 1] - uv[:, 0, 1])
+                                   - (uv[:, 2, 0] - uv[:, 0, 0]) * (uv[:, 1, 1] - uv[:, 0, 1])).sum())
+        area += 0.5 * float(np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1).sum())
+    return fill, area
 
 
 def _open_edges(faces: np.ndarray) -> int:
@@ -332,7 +363,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                          "triangles": sum(len(s.faces) for s in lod_secs[lod].values()),
                          "cap_triangles": sum(s.cap_triangles for s in bare_secs[lod].values()),
                          "cover_triangles": sum(c["triangles"] for c in cover_info[lod].values()),
-                         "dome_rings": rings, "dome_ring_points": ring_points, "atlas_size": build["atlas"],
+                         "dome_rings": rings, "dome_ring_points": ring_points,
                          "budget": build["budget"] if build["budget"] != "groups" else "avatar part groups"}
         if len(groups) > 1:
             lod_info[lod]["triangles_by_group"] = {g: sum(len(lod_secs[lod][n].faces) for n in secs)
@@ -370,9 +401,35 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         lod_paths[lod] = work / f"04-{lod}.npz"
         uv_paths[lod] = work / f"04-{lod}-uv.npz"
         _save_lod(lod_paths[lod], secs)
-    bl.run_job({"tasks": [{"task": "uv", "lods": {k: str(v.resolve()) for k, v in lod_paths.items()},
-                           "out": {k: str(v.resolve()) for k, v in uv_paths.items()}, "margin": 0.004}]},
-               work, "stage4-uv", timeout=timeout)
+    # A fixed atlas size is packed once. A size chosen from the source ("source", largest) is packed for the largest,
+    # measured (UV fill and texel density), and packed again for the size chosen if that is smaller.
+    atlas_size = {lod: (b["atlas"][1] if isinstance(b["atlas"], tuple) else b["atlas"]) for lod, b in builds.items()}
+    atlas_choice = {}
+
+    def pack(lods):
+        bl.run_job({"tasks": [{"task": "uv", "lods": {k: str(lod_paths[k].resolve()) for k in lods},
+                               "out": {k: str(uv_paths[k].resolve()) for k in lods},
+                               "margin": {k: UV_GUTTER_PX / atlas_size[k] for k in lods}}]},
+                   work, "stage4-uv", timeout=timeout)
+
+    pack(list(lod_paths))
+    repack = []
+    for lod, b in builds.items():
+        if isinstance(b["atlas"], tuple):
+            u = np.load(uv_paths[lod])
+            fill, area = _uv_fill(lod_secs[lod], {k.split("__")[0]: u[k] for k in u.files})
+            density = {n: round(float(np.sqrt(fill * n * n / area)), 1) for n in ATLAS_SIZES if n <= b["atlas"][1]}
+            size = min((n for n, d in density.items() if d >= vs.pps), default=max(density))
+            atlas_choice[lod] = {"rule": "smallest size with at least one texel per view pixel",
+                                 "view_px_per_stud": round(float(vs.pps), 1), "uv_fill": round(fill, 4),
+                                 "surface_sq_studs": round(area, 3), "texels_per_stud": density, "chosen": size}
+            if size != atlas_size[lod]:
+                atlas_size[lod] = size
+                repack.append(lod)
+    if repack:
+        pack(repack)
+    for lod in builds:
+        lod_info[lod]["atlas_size"] = atlas_size[lod]
     colour_views = texture.observed_colour_views(vs, run)
     atlas_paths, tex_stats, zbuf = {}, {}, None
     from PIL import Image
@@ -381,7 +438,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         uvs = {k.split("__")[0]: u[k] for k in u.files}
         _save_lod(lod_paths[lod], lod_secs[lod], uvs)
         if colour_views:
-            size = builds[lod]["atlas"]
+            size = atlas_size[lod]
             atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf, source=source)
             atlas_paths[lod] = body / f"atlas-{lod}.png"
             Image.fromarray(atlas).save(atlas_paths[lod])
@@ -443,7 +500,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                   note="parts with a boundary or non-manifold edge after welding: " + ", ".join(not_closed)
                   if not_closed else "every part closed and manifold"))
     if PROFILES[profile].get("texture_max_px"):
-        biggest = max(b["atlas"] for b in builds.values())
+        biggest = max(atlas_size.values())
         rec.add(check("texture_max_px", biggest, PROFILES[profile]["texture_max_px"],
                       passed=biggest <= PROFILES[profile]["texture_max_px"], rule="<="))
     open_e = {f"{lod}:{n}": _open_edges(s.faces) for lod, ss in lod_secs.items() for n, s in ss.items()}
@@ -566,7 +623,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                    "pieces_low": cover_info.get("low"),
                    "contract_note": "covers are merged into their owner section so each GLB keeps the 15 R15 "
                                     "parts; they are listed under sections.json \"covers\""},
-        "texture": {"method": texture.__doc__.strip(), "atlas_sizes": {lod: b["atlas"] for lod, b in builds.items()},
+        "texture": {"method": texture.__doc__.strip(), "atlas_sizes": atlas_size, "atlas_choice": atlas_choice,
                     "atlases": {k: str(v.relative_to(run)) for k, v in atlas_paths.items()},
                     "colour_views": sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
                     "gates": {"mean_abs_error_max": TEX_ERROR_GATE, "ssim_min": TEX_SSIM_GATE}},

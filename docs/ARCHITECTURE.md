@@ -161,6 +161,21 @@ carve's waist up half a radius, knees a quarter radius down and ankles half a ra
 gate gap 0.127 to 0.116). The worst gaps left are at joints it does not move: the hybrid's left hip (0.28 in
 walk_a) and the carve's right shoulder (0.156 in arms_across).
 
+**Atlases.** All sections of a LOD share one UV atlas: Blender's Smart UV Project unwraps them without margin, and
+the islands are packed by their concave shapes with a 2-texel gutter. `roblox-ingame` uses 1024 for the high and
+512 for the low LOD. `best` and `roblox-avatar` take the smallest of 1024, 2048 and 4096 that gives at least one
+texel per pixel of the views the colours come from, at the atlas's measured UV fill and the body's surface area
+(at most 4096 under `best`, 2048 under `roblox-avatar`); `sections.json` records the choice under
+`"texture": {"atlas_choice"}`. A finer atlas only reproduces the views the colours were baked from more exactly:
+on the pencil-sketch figure (1078 px views, 168.5 px per stud), from 1024 to 2048 to 4096 the full-detail carve's
+front colour error at the view's resolution fell 5.34, 3.06, 1.93, while the held-out view's at a quarter of its
+size, about as large as the body is on a screen, stayed 39.19, 39.35, 39.38 (half a degree of yaw moves it by up
+to 0.09; the hybrid: 38.02, 38.26, 38.31, up to 0.26). Both chose 2048 (229 and 246 texels per stud). UV fill
+(the fraction of the atlas the triangles cover, measured as the summed area of the UV triangles): hybrid full
+detail 48% at 2048, in-game 41% / 35% (high / low), avatar 51%; carve full detail 58%, in-game 49% / 44%, avatar
+58%, against 15% to 32% with the earlier fixed 0.004 island margin. On the hybrid the side views' texture follows its shape: at 2048 left 11.92 / 0.702, within
+the gates by a small margin, and at the in-game 1024 left 13.40 / 0.653, which fails them.
+
 **Pose test.** Each section is rotated about its pivot into the test poses (`herogen/blender/pose.py`); a rim
 point of a cut that one section carries outside the other section's closed surface is an exposed cut, and its
 distance to that surface is the gap. The gated gap counts only exposures a ray in one of 26 directions can see.
