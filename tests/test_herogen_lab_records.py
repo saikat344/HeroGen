@@ -204,6 +204,12 @@ class BudgetAndDeliverablesTest(Tmp):
         self.assertEqual([(i["key"], i["value"], i["limit"]) for i in m["items"]],
                          [("total", 9686, 10742), ("Head", 3652, 4000), ("Torso", 101.0 + 102.0, 1750)])
 
+    def test_unreadable_sections(self):
+        write(self.run / "04-body" / "high.glb", mesh_glb({"Head": 1}))
+        (self.run / "04-body" / "sections.json").write_text("[1,")
+        m = runindex.run_detail(self.run)["budget_meters"]
+        self.assertEqual((m["kind"], m["error"]), ("unreadable", "sections.json could not be read (JSONDecodeError)"))
+
     def test_deliverables(self):
         stage4 = record(4, "game body")
         stage4["profile"] = {"name": "roblox-avatar", "lods": ["high"]}

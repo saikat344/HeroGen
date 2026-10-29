@@ -49,11 +49,35 @@ class VendoredAssetsTest(unittest.TestCase):
                 self.assertLessEqual(set(el.attrib) - SVG_ATTRIBUTES, set(), (f.name, el.tag))
 
     def test_icons_the_page_uses_exist(self):
-        js = "\n".join(p.read_text() for p in STATIC_DIR.glob("*.js"))
-        names = set(re.findall(r"""icon\(\s*['"]([a-z0-9-]+)['"]""", js))
-        names |= set(re.findall(r"""['"]icon['"]\s*:\s*['"]([a-z0-9-]+)['"]""", js))
-        for n in names:
+        app = (STATIC_DIR / "app.js").read_text()
+        listed = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"const ICONS = \[(.*?)\];", app, re.S).group(1)))
+        illustrations = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"const ILLUSTRATIONS = \[(.*?)\];", app,
+                                                                     re.S).group(1)))
+        self.assertGreater(len(listed), 40)
+        for n in listed:
             self.assertTrue((STATIC_DIR / "icons" / f"{n}.svg").is_file(), n)
+        for n in illustrations:
+            self.assertTrue((STATIC_DIR / "illustrations" / f"{n}.svg").is_file(), n)
+        # Every icon a script names is one the page loads (an unknown name would draw an empty box).
+        js = "\n".join(p.read_text() for p in STATIC_DIR.glob("*.js"))
+        used = set(re.findall(r"""\bicon\(\s*['"]([a-z0-9-]+)['"]""", js))
+        used |= set(re.findall(r"""\bic: ['"]([a-z0-9-]+)['"]""", js))
+        used |= set(re.findall(r"""\bicon: ['"]([a-z0-9-]+)['"]""", js))
+        self.assertLessEqual(used - listed - illustrations - {"wordmark"}, set())
+
+    def test_every_vendored_asset_is_used(self):
+        # Nothing ships that the page does not load: each icon and illustration is named in app.js, and the brand
+        # folder holds the wordmark and the favicon only.
+        app = (STATIC_DIR / "app.js").read_text()
+        html = (STATIC_DIR / "index.html").read_text()
+        listed = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"const ICONS = \[(.*?)\];", app, re.S).group(1)))
+        listed_ill = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"const ILLUSTRATIONS = \[(.*?)\];", app,
+                                                                   re.S).group(1)))
+        self.assertEqual({p.stem for p in (STATIC_DIR / "icons").glob("*.svg")}, listed)
+        self.assertEqual({p.stem for p in (STATIC_DIR / "illustrations").glob("*.svg")}, listed_ill)
+        for p in (STATIC_DIR / "brand").glob("*.svg"):
+            self.assertTrue(f"'{p.stem}'" in app or f"static/brand/{p.name}" in html, p.name)
+        self.assertEqual([p.name for p in (STATIC_DIR / "tokens").iterdir()], ["sections.json"])
 
     def test_licences_ship_with_the_assets(self):
         notices = (STATIC_DIR / "licenses" / "THIRD-PARTY-NOTICES.txt").read_text()
@@ -61,6 +85,7 @@ class VendoredAssetsTest(unittest.TestCase):
         self.assertIn("ISC License", notices)
         self.assertIn("Feather", notices)
         self.assertIn("SIL Open Font License", notices)
+        self.assertIn("modified from lucide-static", notices)  # the pack's Lucide SVGs are changed: say so
         self.assertIn("ISC License", (STATIC_DIR / "licenses" / "LUCIDE-LICENSE.txt").read_text())
         self.assertIn("SIL OPEN FONT LICENSE Version 1.1", (STATIC_DIR / "licenses" / "INTER-OFL.txt").read_text())
         # Every Lucide icon is Lucide's own (the custom ones are prefixed hg-); the notices cover each of them.
