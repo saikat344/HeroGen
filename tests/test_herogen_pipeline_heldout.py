@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -19,7 +21,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import heldout, imaging, stages  # noqa: E402
-from herogen.pipeline.__main__ import run_pipeline  # noqa: E402
+from herogen.pipeline.__main__ import main, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ModelClient, ReplayMiss  # noqa: E402
 from herogen.pipeline.results import stage5_results  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder, runs_root  # noqa: E402
@@ -51,11 +53,12 @@ class HeldoutTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _live(self, api: FakeAPI, run_id: str, stage_list, cache: str | None = None) -> int:
+    def _live(self, api: FakeAPI, run_id: str, stage_list, cache: str | None = None, views=None) -> int:
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
                 mock.patch.object(ModelClient, "_post", lambda c, e, b: api.post(c, e, b)), \
                 mock.patch.object(client_mod, "decode_sam_output", api.decode):
-            return run_pipeline(self.sketch, run_id, stage_list, mode="live", runs=str(self.root), cache=cache)
+            return run_pipeline(self.sketch, run_id, stage_list, mode="live", runs=str(self.root), cache=cache,
+                                views=views)
 
     def _replay(self, run_id: str, stage_list) -> int:
         def no_network(*_a, **_k):
@@ -93,6 +96,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(rec["details"]["checks_version"], heldout.checks_version())
         self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")),
                          {v.name: heldout.view_paths(v)["image"] for v in heldout.VIEWS})
+        self.assertEqual(rec["details"]["decisions"], [])
         for view in heldout.VIEWS:
             files = heldout.view_paths(view)
             self.assertEqual(files["image"], f"heldout/{view.name}.png")
@@ -482,6 +486,243 @@ class HeldoutTest(unittest.TestCase):
         for bad in ("heldout/../x.png", "heldout/a/../../x", "/heldout/x", "heldout", "views/x.png", None, 3,
                     "heldout\\..\\x"):
             self.assertIsNone(heldout.heldout_rel(bad), bad)
+
+    def _review(self, view: str, decision: str, note: str = "", by: str = "tester") -> int:
+        return main(["review", "--runs", str(self.root), "--run-id", "r", "--view", view, f"--{decision}",
+                     "--note", note, "--by", by])
+
+    def _all_in_review(self) -> None:
+        # The fake A-pose fits to about 0.011; with the pass limit below that, every view lands in review. The
+        # limit stays patched for the whole test: it is part of the checks version a review must match.
+        patch = mock.patch.object(heldout, "POSE_RMS_PASS", 0.005)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 2)
+
+    def test_human_review(self):
+        self._all_in_review()
+        run = self.root / "r"
+        self.assertEqual(self._rec()["details"]["needs_review_views"], VIEWS)
+        self.assertEqual(self._review("front-left-30", "accept", "looks right"), 0)
+        rec = self._rec()
+        d = rec["details"]["views"]["front-left-30"]
+        self.assertEqual((d["status"], d["machine_status"], d["files"]),
+                         ("accepted", "needs review", heldout.view_paths(heldout.VIEWS[0])))
+        for rel in d["files"].values():
+            self.assertTrue((run / rel).exists(), rel)
+        self.assertFalse((run / "heldout/review/front-left-30.png").exists())
+        entry = rec["details"]["decisions"][-1]
+        self.assertEqual({k: entry[k] for k in ("view", "decision", "by", "note", "from_status", "to_status")},
+                         {"view": "front-left-30", "decision": "accepted", "by": "tester", "note": "looks right",
+                          "from_status": "needs review", "to_status": "accepted"})
+        self.assertEqual(len(entry["image_sha256"]), 64)
+        self.assertTrue(entry["at"])
+        self.assertNotIn("front-left-30.status_accepted", [c["name"] for c in rec["checks"]])
+        self.assertFalse(rec["ok"])  # three views still wait
+        self.assertIn("heldout/front-left-30.png", rec["outputs"])
+        self.assertNotIn("heldout/review/front-left-30.png", rec["outputs"])
+
+        self.assertEqual(self._review("front-left-60", "reject", "arms not in A-pose", by="Maintainer"), 0)
+        rec = self._rec()
+        d = rec["details"]["views"]["front-left-60"]
+        self.assertEqual(d["files"], heldout.view_paths(heldout.VIEW_BY_NAME["front-left-60"], "rejected"))
+        self.assertTrue((run / d["files"]["image"]).exists())
+        failing = {c["name"]: c["note"] for c in rec["checks"] if not c["pass"] and c.get("gate", True)}
+        self.assertIn("arms not in A-pose", failing["front-left-60.status_accepted"])
+        self.assertEqual(rec["details"]["rejected_views"], ["front-left-60"])
+        # A rejection can be reversed by a later decision, and every decision stays in the log.
+        self.assertEqual(self._review("front-left-60", "accept", "second look"), 0)
+        for v in ("front-right-30", "front-right-60"):
+            self.assertEqual(self._review(v, "accept"), 0)
+        rec = self._rec()
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["details"]["accepted_views"], VIEWS)
+        self.assertEqual([e["decision"] for e in rec["details"]["decisions"]],
+                         ["accepted", "rejected", "accepted", "accepted", "accepted"])
+        self.assertFalse((run / "heldout/review").exists() or (run / "heldout/rejected").exists())
+        # Scoring and the results page see only accepted views.
+        self.assertEqual(self._live(FakeAPI(), "r", [5]), 0)
+        self.assertIn("src='heldout/front-left-60.png'", (run / "results.html").read_text())
+
+    def test_review_cannot_overrule_a_failed_gate(self):
+        self.assertEqual(self._live(FakeAPI(heldout_yaw=0.0), "r", [0, 1, 2]), 2)
+        before = self._rec()
+        self.assertEqual(self._review("front-left-30", "accept"), 1)
+        self.assertEqual(self._rec(), before)
+        self.assertEqual(self._review("front-left-30", "reject", "front-on"), 0)  # rejecting it is recorded
+        self.assertEqual(self._rec()["details"]["decisions"][-1]["machine_status"], "rejected")
+        self.assertEqual(self._review("front-left-99", "reject"), 1)
+        self.assertEqual(main(["review", "--runs", str(self.root), "--run-id", "nothing", "--view",
+                               "front-left-30", "--reject", "--by", "x"]), 1)
+
+    def test_remake_some_views_keeps_the_others(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        self._rec_started = self._rec()["started"]
+        self.assertEqual(self._review("front-left-60", "reject", "arms not in A-pose"), 0)
+        self.assertEqual(self._review("front-right-60", "reject", "arms not in A-pose"), 0)
+        kept = {rel: (run / rel).read_bytes() for v in heldout.VIEWS[:2] for rel in heldout.view_paths(v).values()}
+        rejected = {rel: (run / rel).read_bytes() for v in heldout.VIEWS[2:]
+                    for rel in heldout.view_paths(v, "rejected").values()}
+        # A remake that fails part-way deletes nothing: the human-rejected files stay where they are.
+        broken = FakeAPI()
+        broken.post = lambda c, e, b: (_ for _ in ()).throw(RuntimeError("down")) if e == "images/edits" \
+            else FakeAPI.post(broken, c, e, b)
+        self.assertEqual(self._live(broken, "r", ["2h"], cache=str(Path(self.tmp.name) / "broken"),
+                                    views=["front-left-60", "front-right-60"]), 1)
+        self.assertEqual({rel: (run / rel).read_bytes() for rel in rejected}, rejected)
+        self.assertEqual(self._rec()["details"]["rejected_views"], ["front-left-60", "front-right-60"])
+        api = FakeAPI()
+        self.assertEqual(self._live(api, "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh"),
+                                    views=["front-left-60", "front-right-60"]), 0)
+        self.assertEqual(api.calls, ["responses"] * 4 + (["images/edits"] + ["responses"] * 3) * 2)
+        rec = self._rec()
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["details"]["accepted_views"], VIEWS)
+        self.assertEqual(rec["details"]["made_this_run"], ["front-left-60", "front-right-60"])
+        first = self._rec_started
+        self.assertEqual(rec["details"]["kept_from_earlier_run"], {"front-left-30": first, "front-right-30": first})
+        self.assertEqual([e["decision"] for e in rec["details"]["decisions"]], ["rejected", "rejected"])
+        # The rejected images carried a person's decision: archived, not deleted, and the log says where.
+        for e in rec["details"]["decisions"]:
+            self.assertTrue(e["archived_to"].startswith(heldout.ARCHIVE_DIR + "/"), e)
+            self.assertEqual(heldout.file_sha256(run / e["archived_to"]), e["image_sha256"])
+        self.assertIsNone(rec["details"]["views"]["front-left-60"]["review"])
+        self.assertEqual({rel: (run / rel).read_bytes() for rel in kept}, kept)
+        self.assertFalse((run / "heldout/rejected").exists())
+        names = {c["name"].split(".", 1)[0] for c in rec["checks"]}
+        self.assertEqual(names, set(VIEWS))
+        for rel in rec["outputs"]:
+            self.assertTrue((run / rel).exists(), rel)
+        self.assertEqual(len(rec["outputs"]), 4 * 5)
+        # A second remake keeps the first run's start for the views it keeps.
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-right-60"]), 0)
+        self.assertEqual(self._rec()["details"]["kept_from_earlier_run"]["front-left-30"], first)
+        # Only views the stage knows, and only with an earlier record of the others.
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-45"]), 1)
+        self._fresh_heldout(run)
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-60"]), 1)
+
+    def test_views_from_an_earlier_turnaround_are_not_kept(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        # Stages 0-2 again from another sketch: the kept views would belong to the old turnaround.
+        paint(place(figure_mask(240, "front"), (300, 320), (40, 30)), colour=(40, 90, 40)).save(self.sketch)
+        cache = str(Path(self.tmp.name) / "c2")
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2], cache=cache, views=["front-left-30"]), 1)
+        rec = self._rec()
+        self.assertFalse(rec["ok"])
+        self.assertIn("earlier turnaround", rec["error"])
+        self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")), {})
+        # Remaking every view is the way on.
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], cache=cache), 0)
+        ident = heldout.stage2_identity(RunFolder(self.root, "r"))
+        self.assertEqual({d["stage2_identity"] for d in self._rec()["details"]["views"].values()}, {ident})
+
+    def test_kept_views_are_judged_again_under_new_checks(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        old_version = self._rec()["details"]["checks_version"]
+        with mock.patch.object(heldout, "POSE_RMS_PASS", 0.005):  # stricter checks since the views were made
+            self.assertNotEqual(heldout.checks_version(), old_version)
+            self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-30"]), 2)
+            rec = self._rec()
+            for name in VIEWS[1:]:  # kept, judged again: now waiting for review, and moved there
+                d = rec["details"]["views"][name]
+                self.assertEqual((d["status"], d["checks_version"]), ("needs review", heldout.checks_version()))
+                self.assertEqual(d["rechecked"]["from_checks_version"], old_version)
+                self.assertEqual(d["files"]["image"], f"heldout/review/{name}.png")
+                self.assertTrue((run / d["files"]["image"]).exists())
+                self.assertFalse((run / f"heldout/{name}.png").exists())
+            self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")), {})
+
+    def test_review_needs_the_current_checks_and_image(self):
+        self._all_in_review()
+        run = self.root / "r"
+        with mock.patch.object(heldout, "POSE_RMS_FAIL", 0.03):
+            self.assertEqual(self._review("front-left-30", "accept"), 1)  # judged under other checks
+            self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
+            self.assertEqual(self._review("front-left-30", "accept"), 0)
+        # An image changed since it was checked can't be decided on.
+        Image.new("RGB", (8, 8), "red").save(run / "heldout/review/front-right-30.png")
+        self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
+        before = self._rec()
+        self.assertEqual(self._review("front-right-30", "accept"), 1)
+        self.assertEqual(self._rec(), before)
+
+    def test_a_stricter_recheck_overrules_an_acceptance(self):
+        self._all_in_review()
+        run = self.root / "r"
+        self.assertEqual(self._review("front-left-30", "accept", "looks right"), 0)
+        with mock.patch.object(heldout, "POSE_RMS_FAIL", 0.005):  # a gate the view now fails
+            self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
+            d = self._rec()["details"]["views"]["front-left-30"]
+            self.assertEqual((d["status"], d["machine_status"]), ("rejected", "rejected"))
+            self.assertEqual(d["review"]["decision"], "accepted")  # the decision stays on record
+            self.assertTrue((run / "heldout/rejected/front-left-30.png").exists())
+            self.assertFalse((run / "heldout/front-left-30.png").exists())
+            self.assertNotIn("front-left-30", heldout.accepted_views(RunFolder(self.root, "r")))
+            stale = [a for i, a in enumerate(d["attempts"]) if i != d["kept_attempt"]]
+            self.assertTrue(stale and all(a["stale"] for a in stale))
+
+    def test_move_files_rolls_back(self):
+        run = RunFolder(self.root, "m")
+        for rel in ("heldout/review/a.png", "heldout/review/b.png"):
+            Image.new("RGB", (4, 4), "white").save(run.file(rel))
+        real, calls = os.replace, []
+
+        def flaky(a, b):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            return real(a, b)
+
+        with mock.patch("os.replace", side_effect=flaky), self.assertRaises(OSError):
+            heldout.move_files(run, {"heldout/review/a.png": "heldout/a.png", "heldout/review/b.png": "heldout/b.png"})
+        for rel in ("heldout/review/a.png", "heldout/review/b.png"):
+            self.assertTrue(run.exists(rel), rel)
+        self.assertFalse(run.exists("heldout/a.png") or run.exists("heldout/b.png"))
+        with self.assertRaises(ValueError):
+            heldout.move_files(run, {"heldout/review/a.png": "heldout/../a.png"})
+
+    def test_review_reports_file_errors_in_one_line(self):
+        err = io.StringIO()
+        with mock.patch("herogen.pipeline.__main__.review_view",
+                        side_effect=PermissionError(13, "Permission denied", "heldout/x.png")), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(self._review("front-left-30", "accept"), 1)
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("Permission denied", err.getvalue())
+
+    def test_recheck_keeps_a_stopped_runs_error(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        api = FakeAPI()
+        api.post = lambda c, e, b: (_ for _ in ()).throw(RuntimeError("down")) if e == "images/edits" \
+            else FakeAPI.post(api, c, e, b)
+        self.assertEqual(self._live(api, "r", ["2h"], cache=str(Path(self.tmp.name) / "broken")), 1)
+        stopped = self._rec()
+        self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
+        rec = self._rec()
+        self.assertEqual((rec["status"], rec["error"], rec["ok"]), ("error", stopped["error"], False))
+        self.assertEqual(rec["stopped_runs"], stopped["stopped_runs"])
+
+    def test_review_moves_all_files_or_none(self):
+        self._all_in_review()
+        run = self.root / "r"
+        before = self._rec()
+        (run / "heldout/review/front-left-30-raw.png").unlink()
+        self.assertEqual(self._review("front-left-30", "accept"), 1)
+        self.assertEqual(self._rec(), before)
+        for rel in ("heldout/review/front-left-30.png", "heldout/review/front-left-30-mask.png"):
+            self.assertTrue((run / rel).exists(), rel)
+        self.assertFalse((run / "heldout/front-left-30.png").exists())
+        self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")), {})
+        # A record that can't be written moves the files back.
+        with mock.patch.object(RunFolder, "write_stage", side_effect=OSError("disk full")), \
+                self.assertRaises(OSError):
+            heldout.review_view(RunFolder(self.root, "r"), "front-right-30", "accepted", by="tester")
+        self.assertTrue((run / "heldout/review/front-right-30.png").exists())
+        self.assertFalse((run / "heldout/front-right-30.png").exists())
+        self.assertEqual(self._rec(), before)
 
     def test_scoring_reads_accepted_views_from_the_record(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
