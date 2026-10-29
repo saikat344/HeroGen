@@ -1,7 +1,8 @@
 """CLI: `python3 -m herogen.pipeline run <sketch.png> --run-id <id> [--stages 0-2,5] [--live]`.
 
-Stage 2 is followed by the held-out view (`2h`) when it passes. `--stages 2h` makes only the held-out view
-for a run whose stage 2 already passed, leaving every earlier output untouched.
+Stage 2 is followed by the held-out views (`2h`) when it passes. `--stages 2h` makes only the held-out views
+for a run whose stage 2 already passed, leaving every earlier output untouched; it prints each view's status
+(accepted, needs review or rejected), found yaw and file.
 """
 
 from __future__ import annotations
@@ -53,6 +54,14 @@ def parse_stages(spec: str) -> list[Stage]:
     return sorted(out, key=_order)
 
 
+def _print_heldout(rec: dict) -> None:
+    for name, v in (rec.get("details") or {}).get("views", {}).items():
+        yaw = v.get("found_yaw_deg")
+        found = f"found yaw {yaw:+.0f}" if isinstance(yaw, (int, float)) else "no yaw found"
+        tries = len(v["attempts"])
+        print(f"  {name}: {v['status']} after {tries} generation(s), {found}: {v['files']['image']}")
+
+
 def run_pipeline(
     sketch: Path | None,
     run_id: str,
@@ -84,8 +93,12 @@ def run_pipeline(
             else:
                 rec = stage2h_heldout(run, client)
             print(f"stage {n} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
+            if n == HELDOUT:
+                _print_heldout(rec)
         except GateFailed as e:
             print(f"stage {n}: {e}; stopping", file=sys.stderr)
+            if n == HELDOUT:
+                _print_heldout(e.record)
             status = 2
             break
         except Exception as e:  # noqa: BLE001  (report, stop, still write results)
@@ -104,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="run pipeline stages on a sketch")
     r.add_argument("sketch", nargs="?", type=Path)
     r.add_argument("--run-id", required=True)
-    r.add_argument("--stages", default="0-2,5", help="e.g. 0-2,5; 2 is followed by the held-out view 2h; 2h alone")
+    r.add_argument("--stages", default="0-2,5",
+                   help="e.g. 0-2,5; 2 is followed by the held-out views 2h; 2h alone")
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
