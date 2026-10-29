@@ -574,11 +574,23 @@ def read_alpha(mat, bsdf, override_node, flag, legacy):
                      f"pass --alpha {name}=opaque to ignore it")
 
 
+def same_image(a, b):
+    """True for one image, or two image datablocks loading the same file (FBX import loads a texture once per
+    use: "Skin.png" and "Skin.png.001")."""
+    if a is None or b is None:
+        return False
+    if a == b:
+        return True
+    pa, pb = (os.path.normcase(os.path.abspath(bpy.path.abspath(i.filepath))) if i.filepath else None
+              for i in (a, b))
+    return pa is not None and pa == pb
+
+
 def check_alpha_node(name, node, colour_sock):
     """The clipped alpha must be the base-colour texture's own alpha (glTF keeps alpha there), sampled the way
     the bench's masks can reproduce."""
     cnode = colour_sock.node if colour_sock is not None else None
-    if cnode is None or cnode.type != "TEX_IMAGE" or cnode.image != node.image:
+    if cnode is None or cnode.type != "TEX_IMAGE" or not same_image(cnode.image, node.image):
         raise ValueError(f"material {name}: the alpha comes from {node.image.name}, which is not its "
                          f"base-colour texture; glTF keeps alpha in the base-colour texture, so pack it "
                          f"there first")
