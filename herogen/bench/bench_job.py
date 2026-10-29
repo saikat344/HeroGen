@@ -627,6 +627,13 @@ def setup_cycles(scene, size, report):
     scene.view_settings.look = "None"
     scene.view_settings.exposure = 0.0
     scene.view_settings.gamma = 1.0
+    scene.view_settings.use_curve_mapping = False
+    scene.cycles.film_exposure = 1.0
+    scene.render.pixel_aspect_x = 1.0
+    scene.render.pixel_aspect_y = 1.0
+    scene.render.use_border = False
+    scene.render.use_crop_to_border = False
+    scene.render.use_motion_blur = False
     scene.cycles.pixel_filter_type = "BOX"
     scene.cycles.filter_width = 1.0
     scene.cycles.use_adaptive_sampling = False
@@ -651,6 +658,19 @@ def setup_cycles(scene, size, report):
         except Exception as exc:  # no usable GPU backend: render on the CPU
             report.append(f"GPU setup failed ({exc.__class__.__name__}); rendering on the CPU")
     return device
+
+
+def bench_world(scene):
+    """A world of the bench's own (never the file's world or HDRI): one plain Background node. Returns it."""
+    world = bpy.data.worlds.new("BenchWorld")
+    world.use_nodes = True
+    nt = world.node_tree
+    nt.nodes.clear()
+    bg = nt.nodes.new("ShaderNodeBackground")
+    out = nt.nodes.new("ShaderNodeOutputWorld")
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+    scene.world = world
+    return bg
 
 
 def add_render_camera(cam):
@@ -757,10 +777,7 @@ def main():
 
     t2 = time.time()
     device = setup_cycles(scene, size, report)
-    world = scene.world or bpy.data.worlds.new("World")
-    scene.world = world
-    world.use_nodes = True
-    bg = world.node_tree.nodes.get("Background")
+    bg = bench_world(scene)
     for cam in cams:
         cobj = add_render_camera(cam)
         scene.camera = cobj

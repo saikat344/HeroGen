@@ -108,12 +108,14 @@ BUILD = textwrap.dedent('''
 ''')
 
 # An unrigged box saved as a .blend whose material is a bare legacy colour, with a solid orange image packed
-# into the file but connected to nothing: the case of older asset files, rendered with --image.
+# into the file but connected to nothing: the case of older asset files, rendered with --image. With
+# "hostile", the file also carries render settings that must not reach the bench's renders: a bright red
+# world, film exposure, a 2:1 pixel aspect and a render border.
 BUILD_BLEND = textwrap.dedent('''
     import sys
     import bpy
 
-    out = sys.argv[-1]
+    out, hostile = sys.argv[-1], sys.argv[-2] == "hostile"
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 1.0))
     box = bpy.context.active_object
@@ -126,6 +128,17 @@ BUILD_BLEND = textwrap.dedent('''
     img.pixels = [1.0, 0.5, 0.0, 1.0] * 64
     img.pack()
     img.use_fake_user = True
+    if hostile:
+        scene = bpy.context.scene
+        scene.world = bpy.data.worlds.new("Sunset")
+        scene.world.use_nodes = True
+        bg = scene.world.node_tree.nodes["Background"]
+        bg.inputs["Color"].default_value = (1.0, 0.0, 0.0, 1.0)
+        bg.inputs["Strength"].default_value = 50.0
+        scene.cycles.film_exposure = 8.0
+        scene.render.pixel_aspect_x = 2.0
+        scene.render.use_border = True
+        scene.render.border_min_x, scene.render.border_max_x = 0.4, 0.6
     bpy.ops.wm.save_as_mainfile(filepath=out)
 ''')
 
@@ -143,23 +156,57 @@ def build_figure(path: Path, rigged: bool, extra: str = "none") -> None:
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class BlendFileTest(unittest.TestCase):
-    def test_packed_image_named_by_override_is_the_base_colour(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            asset, run = Path(tmp) / "box.blend", Path(tmp) / "run"
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.runs = {}
+        for mode in ("plain", "hostile"):
+            asset, run = Path(cls.tmp.name) / f"box-{mode}.blend", Path(cls.tmp.name) / f"run-{mode}"
             cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_BLEND, "--",
-                   str(asset)]
+                   mode, str(asset)]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            self.assertTrue(asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:])
+            assert asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:]
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "96",
-                             "--samples-flat", "4", "--samples-lit", "4", "--image", "Legacy=Skin",
+                             "--samples-flat", "4", "--samples-lit", "16", "--image", "Legacy=Skin",
                              "--yaw", "0"])
-            rec = json.loads((run / "stage-2.json").read_text())
-            self.assertEqual(code, 0, json.dumps(rec["checks"]))
-            self.assertEqual(rec["details"]["pose"], "as-shipped")
-            img = np.asarray(Image.open(run / "views" / "front.png").convert("RGB")).astype(int)
-            # the image's stored sRGB bytes (1.0, 0.5, 0.0 -> 255, 128, 0), shown unlit and unchanged
-            np.testing.assert_allclose(img[48, 48], [255, 128, 0], atol=2)
+            cls.runs[mode] = (code, run)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _run(self, mode):
+        code, run = self.runs[mode]
+        rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0, json.dumps(rec["checks"]))
+        return rec, run
+
+    def test_packed_image_named_by_override_is_the_base_colour(self):
+        rec, run = self._run("plain")
+        self.assertEqual(rec["details"]["pose"], "as-shipped")
+        img = np.asarray(Image.open(run / "views" / "front.png").convert("RGB")).astype(int)
+        # the image's stored sRGB bytes (1.0, 0.5, 0.0 -> 255, 128, 0), shown unlit and unchanged
+        np.testing.assert_allclose(img[48, 48], [255, 128, 0], atol=2)
+
+    def test_the_files_world_exposure_aspect_and_border_do_not_reach_the_renders(self):
+        _, plain = self._run("plain")
+        _, hostile = self._run("hostile")
+        for rel in ("views/front.png", "views-lit/front.png", "heldout/az025-lit.png", "masks/front.png"):
+            a = np.asarray(Image.open(plain / rel).convert("RGB")).astype(int)
+            b = np.asarray(Image.open(hostile / rel).convert("RGB")).astype(int)
+            self.assertEqual(a.shape, b.shape, rel)
+            self.assertLess(np.abs(a - b).mean(), 1.0, rel)
+
+    def test_logs_name_no_home_folder_or_work_folder(self):
+        from herogen.bench.render import HOME_PATH
+
+        _, run = self._run("plain")
+        log = (run / "logs" / "bench-render.log").read_text(encoding="utf-8")
+        self.assertIn("Blender", log)
+        self.assertIsNone(HOME_PATH.search(log), HOME_PATH.search(log))
+        self.assertNotIn(str(run.resolve()), log)
+        self.assertNotIn(self.tmp.name, log)
 
 
 def limb(limb, side, error, converged=True):
@@ -279,6 +326,17 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("refusing to clear it", err)
             self.assertTrue((out / "keep.txt").exists())
+
+    def test_scrub_paths_hides_folders_and_home_paths(self):
+        from herogen.bench.render import scrub_paths
+
+        work = Path(tempfile.gettempdir()) / "herogen-bench-abc"
+        windows_home = "\\".join(["C:", "Users", "pat", "x.blend"])   # built, so no home path sits in git
+        posix_home = "/".join(["", "home", "pat", "y"])
+        text = f"Saved: '{work}{os.sep}views{os.sep}front.png'; read {windows_home} and {posix_home}"
+        out = scrub_paths(text, {"<work>": work})
+        self.assertIn("<work>", out)
+        self.assertNotIn("pat", out)
 
     def test_material_override_needs_a_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
