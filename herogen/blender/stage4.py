@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (DEFAULT_PROFILE, HEIGHT_STUDS, PARENT, PIVOT_JOINT, PROFILES, SECTIONS, VIEWS, bl, body_joints,
-               covers, joints, pose, split, texture)
+               covers, cuts, joints, pose, split, texture)
 from .carve import winding_inside
 from .stage3 import IOU_GATE, iou
 from .views import load_mask
@@ -70,8 +70,10 @@ LOD_BUILD = {
 }
 # Whole-body decimation targets for the avatar profile; each part group then takes the candidate with the most
 # triangles that fits its own budget (sections are separate closed meshes, so groups can come from different
-# candidates).
-AVATAR_TARGETS = (1500, 2000, 2700, 3600, 4800, 6400, 8500, 11000, 15000, 20000, 27000, 36000, 48000, 64000)
+# candidates). The ladder reaches down to 1,000: on the pencil-sketch hybrid a waist cut moved half a torso radius
+# up made the Torso group 1,752 triangles at the 1,500 target, over its 1,750.
+AVATAR_TARGETS = (1000, 1200, 1500, 2000, 2700, 3600, 4800, 6400, 8500, 11000, 15000, 20000, 27000, 36000, 48000,
+                  64000)
 UNDECIMATED = 10 ** 12          # a target no mesh reaches: the decimate task keeps the mesh as it is
 
 
@@ -181,8 +183,9 @@ def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
 
 
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
-               profile: str = DEFAULT_PROFILE) -> dict:
-    """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`)."""
+               profile: str = DEFAULT_PROFILE, cut_search: bool = True) -> dict:
+    """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
+    cut at its joint (for comparison; the record says so)."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
     builds = LOD_BUILD[profile]
@@ -244,9 +247,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             targets[key] = n_tri
             outs[key] = str((work / f"04-dec-{key}.npz").resolve())
             ladder[lod].append(key)
-    # coarse bodies the shoulder covers are shaped from (high LOD covers, low LOD covers)
-    for key, n_tri in (("coverhigh", 2700), ("coverlow", 1200)):
-        if any(b["cover"] == key[len("cover"):] for b in builds.values()):
+    # coarse bodies the shoulder covers are shaped from (high LOD covers, low LOD covers; the high ones also for
+    # the cut search), and the reference body the cuts are placed on
+    for key, n_tri in (("coverhigh", 2700), ("coverlow", 1200), ("cutsearch", cuts.REFERENCE_TRIANGLES)):
+        if key != "coverlow" or any(b["cover"] == "low" for b in builds.values()):
             targets[key] = n_tri
             outs[key] = str((work / f"04-dec-{key}.npz").resolve())
     dec = bl.run_job({"tasks": [{"task": "decimate", "mesh": str(mesh_src.resolve()), "targets": targets,
@@ -268,6 +272,36 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             ok &= v.inside(pts)
         return ok
 
+    # Where to cut: a cut moved along its normal only where the gate poses show a gain beyond noise, found once on
+    # the reference body and used for every LOD (see cuts). The held-out poses never choose; the record shows the
+    # reference body on both pose sets with the cuts unmoved and moved.
+    bone_dirs = pose.bone_directions(sk)
+    poses = pose.pose_library(bone_dirs)
+    heldout = pose.heldout_poses(bone_dirs)
+    gate_poses = {k: v for k, v in poses.items() if k not in UNGATED_POSES}
+    ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
+    cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
+    if cut_search:
+        cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
+                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE)
+    else:
+        cut_offsets = {}
+        cut_record = {"method": "not searched: every cut at its joint (comparison run)", "chosen_fraction": {},
+                      "unmoved_worst_gap": cuts.worst_by_joint(ref["verts"], ref["faces"], sk, {}, {"gate": gate_poses},
+                                                               (cover_ref["verts"], cover_ref["faces"]), cover_kw,
+                                                               DOME["high"])["gate"]}
+    ref_sets = {}
+    for label, offs in (("unmoved", {}), ("moved", cut_offsets)):
+        sets = {"heldout": heldout} if label == "unmoved" else {"gate": gate_poses, "heldout": heldout}
+        ref_sets[label] = cuts.worst_by_joint(ref["verts"], ref["faces"], sk, offs, sets,
+                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"])
+    ref_sets["unmoved"]["gate"] = cut_record["unmoved_worst_gap"]
+    cut_record["reference_worst_gap"] = {label: {k: {j: round(v, 4) for j, v in d.items()} for k, d in sets.items()}
+                                         for label, sets in ref_sets.items()}
+    moved = {j: f for j, f in cut_record["chosen_fraction"].items() if f}
+    rec.note("cuts moved along their normals (fractions of the child bone's radius): "
+             + (", ".join(f"{j} {f:+.2f}" for j, f in moved.items()) if moved else "none"))
+
     # Covers are shaped from a coarse decimation of the body (2.7k triangles for the high settings' covers, 1.2k
     # for the low settings') so they stay cheap; they count in the budgets.
     chosen, lod_secs, bare_secs, lod_info, cover_info, picks = {}, {}, {}, {}, {}, {}
@@ -278,7 +312,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         for key in ladder[lod]:
             d = np.load(outs[key])
             secs, rig = split.build_sections(d["verts"], d["faces"], sk, cap="dome", rings=rings,
-                                             ring_points=ring_points)
+                                             ring_points=ring_points, cut_offsets=cut_offsets)
             covered, cinfo = covers.add_covers(secs, cover_src["verts"], cover_src["faces"], owner=COVER_OWNER,
                                                radius=COVER_RADIUS, outset=COVER_OUTSET, inside=in_masks)
             cands.append({"key": key, "covered": covered, "bare": secs, "covers": cinfo,
@@ -306,14 +340,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
 
     # Pose test. Gated: the gap that stays visible with the covers on (both LODs). Reported alongside: the
     # visible gap without covers, the purely geometric gap without covers, and flat caps.
-    poses = pose.pose_library(pose.bone_directions(sk))
     gaps = {lod: pose.joint_gaps(lod_secs[lod], poses, visible=True) for lod in lod_secs}
+    gaps_heldout = {lod: pose.joint_gaps(lod_secs[lod], heldout, visible=True) for lod in lod_secs}
     gaps_nocover_visible = pose.joint_gaps(bare_secs["high"], poses, visible=True)
     gaps_nocover_geometric = pose.joint_gaps(bare_secs["high"], poses)
     flat_by_key = {}
     for key in sorted(set(picks["high"].values())):
         d_hi = np.load(outs[key])
-        flat_by_key[key], _ = split.build_sections(d_hi["verts"], d_hi["faces"], sk, cap="flat")
+        flat_by_key[key], _ = split.build_sections(d_hi["verts"], d_hi["faces"], sk, cap="flat",
+                                                   cut_offsets=cut_offsets)
     flat_secs = {n: flat_by_key[picks["high"][n]][n] for n in SECTIONS}
     gaps_flat = pose.joint_gaps(flat_secs, poses)
 
@@ -437,6 +472,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     for lod in builds:
         rec.add(check(f"max_joint_gap_{lod}", round(gated[lod], 4), GAP_GATE, passed=gated[lod] <= GAP_GATE,
                       rule="<=", poses=sorted(p for p in poses if p not in UNGATED_POSES)))
+        held = max(v for row in gaps_heldout[lod].values() for v in row.values())
+        rec.add(check(f"max_joint_gap_{lod}_heldout", round(held, 4), GAP_GATE, passed=held <= GAP_GATE, gate=False,
+                      rule="<=", poses=sorted(heldout),
+                      note="poses nothing is chosen on (the cut search never sees them); reported, not gated"))
     for p in sorted(UNGATED_POSES):
         rec.add(check(f"max_joint_gap_high_{p}", round(max(gaps["high"][p].values()), 4), GAP_GATE,
                       passed=max(gaps["high"][p].values()) <= GAP_GATE, gate=False, rule="<="))
@@ -514,9 +553,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         "budgets": _budgets_record(profile),
         "code": rec.data["code"],
         "lods": lod_info,
+        "cuts": cut_record,
         "pose_test": {"method": pose.__doc__.strip(), "visible_gap_method": pose.joint_gaps.__doc__.strip(),
                       "gate_studs": GAP_GATE, "ungated_poses": sorted(UNGATED_POSES),
                       "gaps_high": gaps["high"], "gaps_low": gaps.get("low"),
+                      "gaps_high_heldout": gaps_heldout["high"], "gaps_low_heldout": gaps_heldout.get("low"),
                       "gaps_high_visible_no_covers": gaps_nocover_visible,
                       "gaps_high_geometric_no_covers": gaps_nocover_geometric, "gaps_high_flat_caps": gaps_flat},
         "covers": {"method": covers.__doc__.strip(), "owner": COVER_OWNER, "radius_cut_radii": COVER_RADIUS,
@@ -542,8 +583,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     rec.data["joints_source"] = joints_source
     rec.data["profile"] = {"name": profile, "lods": sorted(builds), "budgets": _budgets_record(profile)}
     rec.data["body"] = {"lods": lod_info, "decimation": dec["results"][0], "chosen_targets": chosen,
-                        "sections_from": picks,
+                        "sections_from": picks, "cuts": cut_record,
                         "max_gap_by_pose_high": {p: max(r.values()) for p, r in gaps["high"].items()},
+                        "max_gap_by_pose_high_heldout": {p: max(r.values()) for p, r in gaps_heldout["high"].items()},
                         "max_gap_by_pose_low": ({p: max(r.values()) for p, r in gaps["low"].items()}
                                                 if "low" in gaps else None),
                         "max_gap_by_pose_high_flat": {p: max(r.values()) for p, r in gaps_flat.items()},

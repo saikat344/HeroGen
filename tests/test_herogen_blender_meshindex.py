@@ -1,5 +1,6 @@
-"""The grid-accelerated mesh queries (herogen.blender.meshindex) give the brute-force answers, and the pose test
-gives the same gaps through either.
+"""The grid-accelerated mesh queries (herogen.blender.meshindex) give the brute-force answers, the pose test gives
+the same gaps through either, the cut centre does not move with mesh density, and the cut search keeps every
+joint's gap at or below the unmoved cut's.
 
 Synthetic inputs only; nothing needs Blender.
 """
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from herogen.blender import carve, joints, pose, split, synth, views
+from herogen.blender import carve, cuts, joints, pose, split, synth, views
 from herogen.blender.carve import point_mesh_distance, ray_hits, winding_inside
 from herogen.blender.meshindex import MeshIndex
 
@@ -107,6 +108,76 @@ class TestPoseTestThroughTheIndex(Base):
             for p in slow:
                 for j in slow[p]:
                     self.assertAlmostEqual(fast[p][j], slow[p][j], places=6, msg=f"{p} {j} visible={visible}")
+
+
+class TestCuts(Base):
+    def test_the_cut_centre_does_not_follow_the_vertex_density(self):
+        t = np.concatenate([np.linspace(0, np.pi, 200, endpoint=False), np.linspace(np.pi, 2 * np.pi, 20,
+                                                                                    endpoint=False)])
+        ring = np.stack([np.cos(t), 0.5 * np.sin(t), np.zeros_like(t)], axis=1) + [0.3, 0.1, 2.0]
+        nrm = np.array([0.0, 0.0, 1.0])
+        self.assertTrue(np.allclose(split.cut_centre(ring, nrm), [0.3, 0.1, 2.0], atol=2e-3))
+        self.assertGreater(np.linalg.norm(split.cut_centre(ring, nrm, "vertex") - [0.3, 0.1, 2.0]), 0.2)
+
+    def test_the_pivot_opening_is_the_largest_by_area_not_by_vertex_count(self):
+        nrm = np.array([0.0, 0.0, 1.0])
+        t = np.linspace(0, 2 * np.pi, 300, endpoint=False)
+        small_dense = np.stack([0.1 * np.cos(t), 0.1 * np.sin(t), np.zeros_like(t)], axis=1)
+        t = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+        big_sparse = np.stack([0.5 * np.cos(t), 0.5 * np.sin(t), np.zeros_like(t)], axis=1)
+        self.assertGreater(len(small_dense), len(big_sparse))
+        self.assertGreater(split.loop_area(big_sparse, nrm), 10 * split.loop_area(small_dense, nrm))
+        self.assertAlmostEqual(split.loop_area(big_sparse, nrm), 0.5 * 12 * 0.25 * np.sin(2 * np.pi / 12), places=9)
+
+    def test_a_cut_offset_moves_the_plane_along_its_normal(self):
+        rig0, rig1 = split.build_rig(self.sk), split.build_rig(self.sk, {"Waist": -0.1})
+        p0, n0 = rig0.planes["Waist"]
+        p1, n1 = rig1.planes["Waist"]
+        self.assertTrue(np.allclose(n0, n1))
+        self.assertTrue(np.allclose(p1, p0 - 0.1 * n0))
+        self.assertTrue(np.allclose(rig1.planes["Neck"][0], rig0.planes["Neck"][0]))
+
+    def test_the_search_moves_only_near_the_gate_and_only_for_a_gain_beyond_noise(self):
+        poses = pose.pose_library(pose.bone_directions(self.sk))
+        gate = {k: poses[k] for k in ("rest", "crouch", "walk_b")}
+        cover = {"owner": "UpperTorso", "radius": 2.5, "outset": 0.0}
+        args = (self.verts, self.faces, self.sk, gate, (self.verts, self.faces), cover, (1, 8))
+        # a gate far above every gap: no joint is near it, nothing moves, nothing is tried
+        offsets, rec = cuts.choose(*args, gate=10.0)
+        self.assertEqual(rec["eligible"], [])
+        self.assertEqual(rec["trials"], {})
+        self.assertTrue(all(o == 0.0 for o in offsets.values()))
+        # a gate at zero: every joint is near it and may move (three fractions keep the test short)
+        full = cuts.FRACTIONS
+        cuts.FRACTIONS = (-0.25, 0.0, 0.25)
+        try:
+            offsets, rec = cuts.choose(*args, gate=0.0)
+        finally:
+            cuts.FRACTIONS = full
+        self.assertEqual(set(rec["eligible"]), {k for ks in cuts.GROUPS.values() for k in ks})
+        zero = rec["unmoved_worst_gap"]
+        for group, kinds in cuts.GROUPS.items():
+            trial = rec["trials"][group]
+            chosen = {k: rec["chosen_fraction"][k] for k in kinds}
+            moved = {k: f for k, f in chosen.items() if f}
+            pick = next(t for t in trial["tried"] if {k: f for k, f in t["fractions"].items() if f} == moved)
+            unmoved = trial["tried"][0]
+            self.assertEqual(unmoved["fractions"], {})
+            if moved:      # a move must beat the unmoved cuts by more than the noise and open no neighbour
+                self.assertLess(pick["worst_gap"], unmoved["worst_gap"] - cuts.NOISE_STUDS)
+                self.assertEqual(pick["neighbours_opened"], [])
+                for t in trial["tried"][1:]:      # and it has the lowest gap plus distance cost of those that do
+                    if t["worst_gap"] < unmoved["worst_gap"] - cuts.NOISE_STUDS and not t["neighbours_opened"]:
+                        self.assertLessEqual(pick["score"], t["score"])
+            else:          # no move beat the unmoved cuts by more than the noise without opening a neighbour
+                for t in trial["tried"][1:]:
+                    self.assertTrue(t["worst_gap"] >= unmoved["worst_gap"] - cuts.NOISE_STUDS or t["neighbours_opened"])
+        for kind in ("Elbow", "Wrist", "Knee", "Ankle"):      # left and right alike
+            f = rec["chosen_fraction"][kind]
+            for side in ("Left", "Right"):
+                j = side + kind
+                self.assertAlmostEqual(offsets[j], f * rec["radius_studs"][j], places=3)
+        self.assertTrue(set(cuts.affected(("Neck", "Waist"))) <= set(zero))
 
 
 if __name__ == "__main__":

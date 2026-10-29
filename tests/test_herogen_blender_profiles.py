@@ -115,6 +115,7 @@ class ProfilesEndToEnd(unittest.TestCase):
                      "texture_colour_error_front"):
             self.assertTrue(checks[name]["gate"], name)               # every other gate unchanged
         self.assertEqual(checks["open_edges"]["value"], 0)
+        self.assertFalse(checks["max_joint_gap_high_heldout"]["gate"])  # held-out poses: reported only
         self.assertIsNone(sections["sections"][0]["triangles_low"])
 
     def test_avatar_fits_every_part_group(self):

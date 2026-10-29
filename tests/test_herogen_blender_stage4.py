@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
     HAVE_DEPS = False
 
 if HAVE_DEPS:
-    from herogen.blender import SECTIONS, bl, carve, joints, pose, split, synth, views
+    from herogen.blender import SECTIONS, bl, carve, cuts, joints, pose, split, synth, views
 
 
 def _open_edges(faces):
@@ -174,6 +174,18 @@ class TestEndToEndBlender(SyntheticBase):
             self.assertTrue(checks[f"rest_iou_with_covers_{v}"]["pass"])
         self.assertEqual(body["texture"]["atlas_sizes"], {"high": 1024, "low": 512})
         self.assertEqual(len(body["covers"]["pieces_high"]), 2)
+        # the cuts were placed once, on the reference body, and the record says where and why
+        cuts_rec = body["cuts"]
+        self.assertEqual(set(cuts_rec["chosen_fraction"]), {k for ks in cuts.GROUPS.values() for k in ks})
+        self.assertEqual(set(cuts_rec["offsets_studs"]), set(cuts.JOINTS))
+        self.assertEqual(stage4["body"]["cuts"]["offsets_studs"], cuts_rec["offsets_studs"])
+        self.assertIn("cuts moved along their normals", stage4["notes"])
+        ref = cuts_rec["reference_worst_gap"]
+        self.assertEqual(set(ref), {"unmoved", "moved"})
+        self.assertEqual(set(ref["moved"]), {"gate", "heldout"})
+        for kind, f in cuts_rec["chosen_fraction"].items():
+            if f:       # only an eligible joint moves, and only for a gain beyond the noise
+                self.assertIn(kind, cuts_rec["eligible"])
         self.assertTrue((self.rundir / "04-body" / "textured-vs-views.png").exists())
         for lod in ("high", "low"):
             raw = (self.rundir / "04-body" / f"{lod}.glb").read_bytes()

@@ -15,7 +15,8 @@ triangles are split. Both sides get the same cut vertices, so the rest pose is c
 Closing: each cut opening becomes a spherical cap centred on the joint pivot and bulging into the neighbour.
 Rotating a section about its pivot keeps its cap on the same sphere, so a round joint stays covered in any pose
 (measured in pose.py); `cap="flat"` gives plain fans for comparison. Shoulders are cut one arm radius out from
-the joint, where the arm is rounder; every pivot is the centre of its cut, as in R15.
+the joint, where the arm is rounder; every pivot is the centre (area centroid) of its cut, as in R15. Any cut can
+be moved along its normal (`cut_offsets`; stage 4 chooses them, see `cuts`).
 """
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ class Rig:
     crotch_z: float
 
 
-def build_rig(sk: Skeleton) -> Rig:
+def build_rig(sk: Skeleton, cut_offsets: dict | None = None) -> Rig:
     j, e, r = sk.joints, sk.ends, sk.radii
     bones = {
         "Head": (j["Neck"], j["HeadTop"], r["head"]),
@@ -99,6 +100,9 @@ def build_rig(sk: Skeleton) -> Rig:
             chain[side + s] = side + "Arm"
         for s in ("UpperLeg", "LowerLeg", "Foot"):
             chain[side + s] = side + "Leg"
+    for jn, off in (cut_offsets or {}).items():     # a cut moved along its own normal (see stage 4)
+        p, n = planes[jn]
+        planes[jn] = (p + float(off) * n, n)
     return Rig(bones, planes, chain, x0, cz)
 
 
@@ -236,8 +240,8 @@ def refine(verts: np.ndarray, faces: np.ndarray, lb: Labeller, max_iter: int = 6
     return verts, faces, added
 
 
-def split_mesh(verts: np.ndarray, faces: np.ndarray, sk: Skeleton):
-    rig = build_rig(sk)
+def split_mesh(verts: np.ndarray, faces: np.ndarray, sk: Skeleton, cut_offsets: dict | None = None):
+    rig = build_rig(sk, cut_offsets)
     lb = Labeller(rig)
     verts, faces, refined = refine(verts, faces, lb)
     lab = lb.labels(verts)
@@ -510,10 +514,57 @@ def _split_two_neighbours(loop: list[int], nbs: list, pos: np.ndarray, new_pos: 
     return [(path_a + chord, a_lab), (path_b + chord[::-1], b_lab)]
 
 
+def _plane_coords(loop: np.ndarray, nrm: np.ndarray):
+    o = loop.mean(axis=0)
+    u = np.cross(nrm, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 1e-6:
+        u = np.cross(nrm, [0.0, 1.0, 0.0])
+    u = u / np.linalg.norm(u)
+    v = np.cross(nrm, u)
+    return o, u, v, np.stack([(loop - o) @ u, (loop - o) @ v], axis=1)
+
+
+def loop_area(loop: np.ndarray, nrm: np.ndarray) -> float:
+    """Area enclosed by an ordered loop of points, projected onto the plane with normal `nrm`."""
+    if len(loop) < 3:
+        return 0.0
+    _, _, _, q = _plane_coords(loop, nrm)
+    q2 = np.roll(q, -1, axis=0)
+    return float(abs((q[:, 0] * q2[:, 1] - q2[:, 0] * q[:, 1]).sum()) / 2)
+
+
+def cut_centre(loop: np.ndarray, nrm: np.ndarray, method: str = "area") -> np.ndarray:
+    """Centre of a cut opening (an ordered loop of points on a plane with normal `nrm`): "area" (the pivot), the
+    centroid of the enclosed polygon, which depends only on the cut's shape; "arc", the arc-length-weighted
+    centroid of the loop; "vertex", the mean of its vertices, which moves with how densely the mesh happens to be
+    sampled along the loop (on the pencil-sketch hybrid's waist the vertex mean wandered 0.06 studs between a
+    16k-triangle decimation and the full 159k mesh while the area centroid stayed within 0.001)."""
+    o = loop.mean(axis=0)
+    if method == "vertex" or len(loop) < 3:
+        return o
+    u = np.cross(nrm, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 1e-6:
+        u = np.cross(nrm, [0.0, 1.0, 0.0])
+    u = u / np.linalg.norm(u)
+    v = np.cross(nrm, u)
+    q = np.stack([(loop - o) @ u, (loop - o) @ v], axis=1)
+    q2 = np.roll(q, -1, axis=0)
+    if method == "arc":
+        seg = np.linalg.norm(q2 - q, axis=1)
+        c = ((q + q2) / 2 * seg[:, None]).sum(axis=0) / max(seg.sum(), 1e-12)
+    else:
+        cr = q[:, 0] * q2[:, 1] - q2[:, 0] * q[:, 1]
+        area = cr.sum() / 2
+        if abs(area) < 1e-12:
+            return o
+        c = ((q + q2) * cr[:, None]).sum(axis=0) / (6 * area)
+    return o + c[0] * u + c[1] * v
+
+
 def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2,
-                   ring_points: int = 16) -> tuple[dict, Rig]:
+                   ring_points: int = 16, cut_offsets: dict | None = None) -> tuple[dict, Rig]:
     """Split, find each cut loop's neighbour and joint, set pivots and close the openings."""
-    rig, lb, pos, sec_faces, pair_of, refined = split_mesh(verts, faces, sk)
+    rig, lb, pos, sec_faces, pair_of, refined = split_mesh(verts, faces, sk, cut_offsets)
     new_pos: list[np.ndarray] = []
     base = len(pos)
     loop_info: dict[str, list] = {}
@@ -537,7 +588,7 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         loop_info[name] = infos
     if new_pos:
         pos = np.concatenate([pos, np.array(new_pos)])
-    # pivot per joint: centroid of the child's whole opening at that joint, on the cut plane
+    # pivot per joint: area centroid of the child's largest opening at that joint, on the cut plane
     joint_centre: dict[str, tuple] = {}
     for name, infos in loop_info.items():
         for info in infos:
@@ -545,11 +596,12 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
             if jn is None or jn != PIVOT_JOINT[name] or not info["shared"]:
                 continue
             pts = pos[info["loop"]]
-            if jn not in joint_centre or len(pts) > joint_centre[jn][1]:
-                p, nrm = rig.planes[jn]
-                c = pts.mean(axis=0)
+            p, nrm = rig.planes[jn]
+            area = loop_area(pts, nrm)         # the largest opening by area, not by vertex count
+            if jn not in joint_centre or area > joint_centre[jn][1]:
+                c = cut_centre(pts, nrm)
                 c = c - ((c - p) @ nrm) * nrm      # onto the cut plane (R15: the pivot is the cut's centre)
-                joint_centre[jn] = (c, len(pts))
+                joint_centre[jn] = (c, area)
     flat_cache: dict[str, tuple] = {}
 
     def closed_flat(name: str):
