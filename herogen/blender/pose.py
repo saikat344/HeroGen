@@ -6,7 +6,13 @@ closed surface marks an exposed cut; its distance to that surface is the gap the
 largest such distance over both sides, in studs. At rest every rim point lies on both surfaces, so the gap is
 0; a covered joint stays near 0 in any pose.
 
-Poses follow ZBurst's intake deformation set (arms up, deep crouch, aim/arms forward, run, twist, head turn).
+Two fixed pose sets. The gate set (`pose_library`) is ZBurst's intake deformation set (arms up, deep crouch,
+aim/arms forward, run, twist, head turn) and thirteen more that reach the same joints further and in other
+directions (long and short strides, deep, shallow and leaning crouches, a lunge, arms across the chest, elbow
+curls, a side bend, a lean back with a nod, a kick, sitting, a one-arm reach and wrist flexes). The held-out set
+(`heldout_poses`) covers the same joint ranges with eight different combinations; nothing chooses anything from
+it, so a gap measured on it shows whether choices made on the gate set (stage 4's cut placement) hold for poses
+they were not made for.
 """
 from __future__ import annotations
 
@@ -70,7 +76,102 @@ def pose_library(bone_dirs: dict) -> dict[str, dict[str, np.ndarray]]:
         "UpperTorso": rot(UP, 30), "Head": rot(UP, 45),
         "LeftUpperArm": swing(d["LeftUpperArm"], FWD, 30), "RightUpperArm": swing(d["RightUpperArm"], BACK, 30),
     }
+
+    def walk(s1, s2, thigh_f, knee_f, thigh_b, knee_b, arm, foot):
+        return {s1 + "UpperLeg": swing(d[s1 + "UpperLeg"], FWD, thigh_f),
+                s1 + "LowerLeg": swing(d[s1 + "LowerLeg"], BACK, knee_f),
+                s2 + "UpperLeg": swing(d[s2 + "UpperLeg"], BACK, thigh_b),
+                s2 + "LowerLeg": swing(d[s2 + "LowerLeg"], BACK, knee_b), s2 + "Foot": rot([1, 0, 0], foot),
+                s1 + "UpperArm": swing(d[s1 + "UpperArm"], BACK, arm), s2 + "UpperArm": swing(d[s2 + "UpperArm"], FWD, arm),
+                s1 + "LowerArm": swing(d[s1 + "LowerArm"], FWD, 25), s2 + "LowerArm": swing(d[s2 + "LowerArm"], FWD, 35)}
+
+    def crouch(thigh, knee, foot, torso, head):
+        return {"LeftUpperLeg": swing(d["LeftUpperLeg"], FWD, thigh), "RightUpperLeg": swing(d["RightUpperLeg"], FWD, thigh),
+                "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, knee), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, knee),
+                "LeftFoot": rot([1, 0, 0], foot), "RightFoot": rot([1, 0, 0], foot),
+                "UpperTorso": swing(UP, FWD, torso), "Head": swing(UP, BACK, head)}
+
+    poses["walk_long_L"] = walk("Left", "Right", 42, 25, 32, 55, 35, -25)
+    poses["walk_short_R"] = walk("Right", "Left", 18, 8, 15, 25, 15, -8)
+    poses["crouch_deep"] = {**crouch(95, 125, 35, 35, 25), "LeftUpperArm": swing(d["LeftUpperArm"], FWD, 55),
+                            "RightUpperArm": swing(d["RightUpperArm"], FWD, 55)}
+    poses["crouch_shallow"] = crouch(45, 60, 15, 15, 10)
+    poses["crouch_side_torso"] = {
+        "LeftUpperLeg": swing(d["LeftUpperLeg"], FWD, 70), "RightUpperLeg": swing(d["RightUpperLeg"], FWD, 70),
+        "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 95), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 95),
+        "UpperTorso": swing(UP, FWD + 0.6 * out_l, 25), "Head": swing(UP, BACK + 0.5 * out_r, 15)}
+    poses["lunge_L"] = {
+        "LeftUpperLeg": swing(d["LeftUpperLeg"], FWD, 70), "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 85),
+        "RightUpperLeg": swing(d["RightUpperLeg"], BACK, 35), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 30),
+        "RightFoot": rot([1, 0, 0], -30), "LeftFoot": rot([1, 0, 0], 15), "UpperTorso": swing(UP, FWD, 12)}
+    poses["arms_across"] = {
+        "LeftUpperArm": swing(d["LeftUpperArm"], FWD + 0.8 * out_r, 75),
+        "RightUpperArm": swing(d["RightUpperArm"], FWD + 0.8 * out_l, 75),
+        "LeftLowerArm": swing(d["LeftLowerArm"], out_r, 80), "RightLowerArm": swing(d["RightLowerArm"], out_l, 80),
+        "LeftHand": swing(d["LeftLowerArm"], UP, 30), "RightHand": swing(d["RightLowerArm"], UP, 30)}
+    poses["elbows_curl"] = {
+        "LeftLowerArm": swing(d["LeftLowerArm"], FWD + UP, 115), "RightLowerArm": swing(d["RightLowerArm"], FWD + UP, 115),
+        "LeftHand": swing(d["LeftLowerArm"], FWD, 40), "RightHand": swing(d["RightLowerArm"], BACK, 40)}
+    poses["torso_side_bend"] = {"UpperTorso": swing(UP, out_l, 22), "Head": swing(UP, out_r, 18),
+                                "LeftUpperArm": swing(d["LeftUpperArm"], out_l + UP, 40)}
+    poses["lean_back_nod"] = {"UpperTorso": swing(UP, BACK, 18), "Head": swing(UP, FWD, 28)}
+    poses["kick_R"] = {"RightUpperLeg": swing(d["RightUpperLeg"], FWD, 85),
+                       "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 10), "RightFoot": rot([1, 0, 0], -35),
+                       "LeftUpperLeg": swing(d["LeftUpperLeg"], BACK, 10)}
+    poses["sit"] = {"LeftUpperLeg": swing(d["LeftUpperLeg"], FWD, 90), "RightUpperLeg": swing(d["RightUpperLeg"], FWD, 90),
+                    "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 90), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 90)}
+    poses["reach_up_L"] = {"LeftUpperArm": swing(d["LeftUpperArm"], out_l + 2 * UP, 120),
+                           "LeftLowerArm": swing(d["LeftLowerArm"], UP, 15),
+                           "LeftHand": swing(d["LeftLowerArm"], BACK, 30), "UpperTorso": swing(UP, out_r, 8)}
+    poses["wrists_flex"] = {"LeftHand": swing(d["LeftLowerArm"], FWD, 60), "RightHand": swing(d["RightLowerArm"], BACK, 60),
+                            "LeftLowerArm": swing(d["LeftLowerArm"], FWD, 30),
+                            "RightLowerArm": swing(d["RightLowerArm"], FWD, 30)}
     return poses
+
+
+def heldout_poses(bone_dirs: dict) -> dict[str, dict[str, np.ndarray]]:
+    """Eight poses over the gate set's joint ranges in other combinations; reported, never used to choose."""
+    d = bone_dirs
+    out_l, out_r = np.array([1.0, 0, 0]), np.array([-1.0, 0, 0])
+    return {
+        "rest": {},
+        # a jog: shorter, higher-kneed stride than the walks, elbows bent
+        "jog_R": {"RightUpperLeg": swing(d["RightUpperLeg"], FWD, 35), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 50),
+                  "LeftUpperLeg": swing(d["LeftUpperLeg"], BACK, 20), "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 70),
+                  "LeftFoot": rot([1, 0, 0], -20),
+                  "LeftUpperArm": swing(d["LeftUpperArm"], FWD, 30), "RightUpperArm": swing(d["RightUpperArm"], BACK, 30),
+                  "LeftLowerArm": swing(d["LeftLowerArm"], FWD + UP, 70),
+                  "RightLowerArm": swing(d["RightLowerArm"], FWD + UP, 70)},
+        # a wide squat: thighs forward and out, torso a little forward
+        "squat_wide": {"LeftUpperLeg": swing(d["LeftUpperLeg"], FWD + 0.4 * out_l, 65),
+                       "RightUpperLeg": swing(d["RightUpperLeg"], FWD + 0.4 * out_r, 65),
+                       "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 105), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 105),
+                       "LeftFoot": rot([1, 0, 0], 20), "RightFoot": rot([1, 0, 0], 20), "UpperTorso": swing(UP, FWD, 20)},
+        # a bow from the waist with the head following
+        "bow": {"UpperTorso": swing(UP, FWD, 30), "Head": swing(UP, FWD, 15),
+                "LeftUpperArm": swing(d["LeftUpperArm"], FWD, 20), "RightUpperArm": swing(d["RightUpperArm"], FWD, 20)},
+        # looking up, the chest opening backwards
+        "look_up": {"Head": swing(UP, BACK, 30), "UpperTorso": swing(UP, BACK, 10)},
+        # a punch with the left arm, the right arm guarding
+        "punch_L": {"LeftUpperArm": swing(d["LeftUpperArm"], FWD, 85), "LeftLowerArm": swing(d["LeftLowerArm"], FWD, 10),
+                    "RightUpperArm": swing(d["RightUpperArm"], FWD, 40),
+                    "RightLowerArm": swing(d["RightLowerArm"], FWD + UP, 100),
+                    "RightHand": swing(d["RightLowerArm"], UP, 20), "UpperTorso": rot(UP, -12)},
+        # climbing: both arms up and forward, one knee raised
+        "climb": {"LeftUpperArm": swing(d["LeftUpperArm"], FWD + UP, 100),
+                  "RightUpperArm": swing(d["RightUpperArm"], FWD + UP, 80),
+                  "LeftLowerArm": swing(d["LeftLowerArm"], UP, 25), "RightLowerArm": swing(d["RightLowerArm"], UP, 40),
+                  "RightUpperLeg": swing(d["RightUpperLeg"], FWD, 75), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 95),
+                  "RightFoot": rot([1, 0, 0], 20)},
+        # a wave: the right arm out and up, the forearm bent, the hand tilted
+        "wave_R": {"RightUpperArm": swing(d["RightUpperArm"], out_r + UP, 100),
+                   "RightLowerArm": swing(d["RightLowerArm"], UP, 70), "RightHand": swing(d["RightLowerArm"], out_r, 30),
+                   "UpperTorso": swing(UP, out_l, 6)},
+        # kneeling on the right knee, the left foot forward
+        "kneel_R": {"LeftUpperLeg": swing(d["LeftUpperLeg"], FWD, 80), "LeftLowerLeg": swing(d["LeftLowerLeg"], BACK, 95),
+                    "RightUpperLeg": swing(d["RightUpperLeg"], BACK, 5), "RightLowerLeg": swing(d["RightLowerLeg"], BACK, 110),
+                    "RightFoot": rot([1, 0, 0], -25), "UpperTorso": swing(UP, FWD, 8)},
+    }
 
 
 def world_matrices(local: dict[str, np.ndarray], pivots: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -126,7 +227,8 @@ class _Brute:
         return ray_hits(o, d, self.tri)
 
 
-def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = True) -> dict:
+def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = True,
+               joints: set | None = None) -> dict:
     """Largest gap (studs) per joint per pose, using the rim shared by each child and its parent.
 
     With `visible`, a rim point outside the other section only counts if it can be seen: a ray from it in at
@@ -136,6 +238,7 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
 
     `fast` (the default) answers the inside, distance and ray queries through `MeshIndex` grids, one per section
     for its rest frame and one per posed joint neighbourhood; `fast=False` runs the brute-force queries.
+    `joints` limits the test to those joints (the others are left out of the result).
     """
     query = MeshIndex if fast else _Brute
     index: dict[str, object] = {}
@@ -152,7 +255,7 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
         if parent is None:
             continue
         pts = [r["points"] for r in s.rims if r["neighbour"] == parent]
-        if pts and len(sections[parent].faces) and len(s.faces):
+        if pts and len(sections[parent].faces) and len(s.faces) and (joints is None or PIVOT_JOINT[name] in joints):
             rims[name] = np.concatenate(pts)
     result: dict[str, dict[str, float]] = {}
     for pname, local in poses.items():

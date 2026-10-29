@@ -138,15 +138,40 @@ LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 }
 ```
 
+**Cuts and pivots.** Each cut is a plane through a joint (`herogen/blender/split.py`); the pivot is the area
+centroid of the child's largest opening there (largest by area), so it depends only on the cut's shape, not on
+how densely the mesh is sampled along it (the mean of the opening's vertices, used before, moved the
+pencil-sketch hybrid's waist pivot 0.06 studs between a 16k-triangle decimation and the full mesh).
+
+Stage 4 may then move the neck, waist, elbow, wrist, knee and ankle cuts along their normals by up to half the
+child bone's radius (`herogen/blender/cuts.py`): a cut on a costume ledge (a belt, a hem) leaves the wider side's
+rim standing proud when the joint bends. Only the gate poses choose; the held-out poses are measured and reported
+beside them and never used to choose a cut. Joints move in groups (neck with waist, elbows with wrists, knees with
+ankles), left and right alike; a joint may move only if its unmoved gap is within 0.045 studs of the gate, a move
+must lower its group's worst gate gap by more than 0.025 studs and may not open a neighbouring joint by more, and
+among such moves the lowest gap plus 0.025 studs per bone radius moved wins. Both constants are measured: over nine
+decimations of one stage 3 mesh a joint's worst gate gap varies by up to 0.044 studs, 0.018-0.031 at the 90th
+percentile. The search runs once on a 20,000-triangle decimation of the stage 3 mesh and every LOD of every profile
+is cut at the same places; `sections.json` and `stage-4.json` record it under `"cuts"`, with every candidate tried
+and the reference body's worst gate and held-out gaps, cuts unmoved and moved. On the pencil-sketch figure it moves
+the hybrid's waist up half a radius (reference body, waist: gate 0.183 to 0.150, held-out 0.191 to 0.132) and the
+carve's waist up half a radius, knees a quarter radius down and ankles half a radius up (carve full detail, worst
+gate gap 0.127 to 0.116). The worst gaps left are at joints it does not move: the hybrid's left hip (0.28 in
+walk_a) and the carve's right shoulder (0.156 in arms_across).
+
 **Pose test.** Each section is rotated about its pivot into the test poses (`herogen/blender/pose.py`); a rim
 point of a cut that one section carries outside the other section's closed surface is an exposed cut, and its
 distance to that surface is the gap. The gated gap counts only exposures a ray in one of 26 directions can see.
-The inside, distance and ray queries go through a uniform grid of each section's triangles
-(`herogen/blender/meshindex.py`) instead of testing every point against every triangle. They give the same
-answers: distances and ray hits pair by pair, and the inside test (signed ray crossings) the generalised winding
-number's for every point off the surface. Measured on the pencil-sketch hybrid, every joint's gap in every pose
-is identical either way, at full detail (171,716 triangles; visible pass 503 s brute force, 7.0 s through the
-grid; geometric 187 s and 3.0 s) and on the 22,768-triangle in-game body (32.7 s and 3.3 s).
+The gate set is ZBurst's intake set (walk, arms forward, arms up, crouch; the twist is reported, not gated) and
+thirteen more poses that reach the same joints further and in other directions; eight held-out poses over the
+same joint ranges are measured and reported (`max_joint_gap_<lod>_heldout`, not gated) and choose nothing. On the
+pencil-sketch carve the wider gate set fails the in-game body that passed the intake set: its right shoulder in
+arms_across gaps 0.156. The inside, distance and ray queries go through a uniform grid of each section's
+triangles (`herogen/blender/meshindex.py`) instead of testing every point against every triangle. They give the
+same answers: distances and ray hits pair by pair, and the inside test (signed ray crossings) the generalised
+winding number's for every point off the surface. Measured on a pencil-sketch hybrid body, every joint's gap in
+every pose is identical either way, at full detail (171,716 triangles; visible pass 503 s brute force, 7.0 s
+through the grid; geometric 187 s and 3.0 s) and on the 22,768-triangle in-game body (32.7 s and 3.3 s).
 
 ## Turnaround sheet (stage 2)
 
