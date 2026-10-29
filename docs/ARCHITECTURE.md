@@ -805,3 +805,356 @@ half-sent request is closed after 30 seconds.
 allow-list) and `fonts/` (the three interface fonts and `fonts.css`, same-origin, so the CSP needs no font source
 of its own). Records name poses the viewer does not define (the newer pose sets); "Show me" then isolates the joint
 at rest and says so.
+
+## Service
+
+`herogen/service` is the hosted, invite-only version: people sign in with an emailed link, upload a sketch or
+describe a hero, follow its stages, and download the GLB and a Roblox bundle. It runs on Modal; dev mode runs the
+whole service on one machine with stand-ins.
+
+```bash
+pip install -r herogen/service/requirements-dev.txt
+python3 -m herogen.service dev                    # http://127.0.0.1:8800, sign-in links printed and in service-data/outbox.jsonl
+python3 -m herogen.service dev --runner local     # the real stage CLIs on this machine (Blender, MODEL_API_KEY)
+python3 -m herogen.service admin invite --count 3 # admin commands against the dev store
+modal deploy -m herogen.service.modal_app         # deploy (see "Deploying" below)
+```
+
+### Components
+
+| Part | Where | What it does |
+| --- | --- | --- |
+| Web | `web.py`, Modal `web` | Starlette ASGI app: pages, JSON API, Lab API, downloads. Holds the `<app>-web` secret. |
+| Metadata store | `store.py`, `snapshot.py`, Modal `StoreService` | Users, allowlist, invites, sign-in links, sessions, jobs, stages, audit log. The only writer. |
+| Upload cleaner | `uploads.py`, Modal `sanitize_image` | Opens and re-encodes uploads, with no network, no secrets, no volumes and no access to other Modal resources. |
+| Job orchestrator | `worker.py` `run_job`, Modal `run_job` | One per job attempt: claims the job, runs the stage groups in order, finishes the job. |
+| Stage groups | `worker.py` `run_group`, `runner.py`, Modal `model_stages`, `blender_stages`, `export_stages` | Run the pipeline's own CLIs on a local copy of the job's files, each group in a fresh container. |
+| Sweep, retention | `worker.py` `reconcile`, `purge`, Modal `sweep` (every minute), `retention` (daily 03:17 UTC) | Requeue jobs whose worker died, start queued jobs, delete expired files and records. |
+| Admin | `admin.py`, Modal `admin` entrypoint | Invites, allowlist, users, quotas, jobs, audit log. No admin web page. |
+
+### Decisions
+
+**Web: Starlette (BSD-3-Clause) on Modal's ASGI support.** FastAPI is built on Starlette; the extra it brings
+(pydantic models, OpenAPI) buys nothing for a dozen hand-checked endpoints, and Starlette alone has the pieces
+used here: request-body limits per route (`max_body_size`), the trusted-host check, and multipart parsing through
+python-multipart (Apache-2.0) with limits on files, fields and part size. Dev mode serves the same app with
+uvicorn on 127.0.0.1.
+
+**Jobs: an orchestrator and three stage groups, retries owned by the store.** Modal starts an input again after its
+container dies, without a limit, and has no idempotency key, so no function sets Modal `retries` and every job
+function is `nonpreemptible`. Instead:
+
+- `job_claim` is a worker's first call. It starts the next numbered attempt of a queued job and returns nothing for
+  a job that is running, finished, deleted or unknown, so a duplicate or restarted orchestrator does nothing. A job
+  out of attempts (`max_attempts`, default 2) fails there, before any paid call.
+- Every later update names its attempt, and the store refuses updates from any attempt but the live one; a
+  canceled or deleted job's worker stops at the next stage. A stage group that a restarted container starts more
+  than twice for one attempt stops before running anything (`group_enter`).
+- Each running stage holds a lease covering its timeout plus 10 minutes. The sweep requeues a job whose lease ran out
+  (its worker died) or fails it when it is out of attempts.
+- Errors are sorted three ways. A failed gate rejects the job, with the stage's reason. A timeout, a network
+  error, or the model or GPU service answering HTTP 429 or 5xx queues another attempt. Anything else (a 4xx, a bad
+  response, a bug) fails the job.
+- A failed job gives its quota back only if it spent nothing (the recorded cost of its stages, model calls and
+  compute together, is zero), and at most twice per user in any 24 hours (`store.REFUNDS_PER_DAY`). A refund gives
+  back the day's slot only; the job still counts toward the lifetime total. A stage that fails after paid calls
+  therefore cannot be used to run paid work past the quota.
+- A retried attempt resumes after the leading stages whose records already passed. Model calls go through the
+  model client's record/replay cache, kept per user, so a repeated call is replayed at no cost.
+- A group works on a local copy of the run folder, its input and the user's caches. After each stage it copies the
+  results back to the data volume and commits, but only while its attempt is still the live one, so a stale worker
+  never overwrites a newer attempt's files.
+- At most `max_running_jobs` jobs run at once (default 4, to stay well inside the Model API's per-team rate limits);
+  the rest wait queued, oldest first.
+
+Stages run as the same commands a person types (`python3 -m herogen.pipeline run`, `python3 -m herogen.blender
+run`), each in a subprocess with a timeout and an environment that holds only what the stage needs:
+`MODEL_API_KEY` reaches the model stages only, and no stage sees the session key or the email key. Options that
+only some versions of a stage CLI have (`--profile`, `--remote-cache`) are passed only when that CLI's `--help`
+lists them. A job that starts from a description first runs stage `p` (`sketchgen.py`): one `muse-image-1.0`
+generation from a fixed pencil-sketch prompt around the description, recorded as `stage-p.json`; the pipeline then
+starts at stage 0 from that sketch.
+
+| Group | Stages | Worker | Secret |
+| --- | --- | --- | --- |
+| model | p (described heroes only), 0, 1, 2 with 2h | 2 CPU, 4 GiB, 4.5 h | `<app>-model` |
+| blender | 3, 4 | 8 CPU, 32 GiB, 6.5 h, Blender 4.5.14 LTS | none |
+| export | 6 (Roblox rig: `python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`), 5 (results page) | 2 CPU, 4 GiB, 2.5 h | none |
+
+The function timeouts follow the stage timeouts (`HEROGEN_SERVICE_STAGE_TIMEOUT`, 1 h per stage, and
+`HEROGEN_SERVICE_BLENDER_TIMEOUT`, 3 h per Blender stage): each group's function allows all its stages back to back
+plus 30 minutes, and the orchestrator (`run_job`, 14 h with the defaults) allows every group plus 30 minutes.
+`modal_app` computes them at deploy time and refuses a configuration over Modal's 24-hour limit.
+
+Stage 2's outcome is decided by `stage-2.json`; the held-out view's record (`stage-2h.json`) adds its cost but its
+gate does not stop the job, since that view exists only for scoring. Stages 6 and 5 are optional: a rejection or
+error there is recorded on the stage and shown as the reason the Roblox bundle is unavailable, and the job still
+delivers its GLB. When the deployed code has no `herogen.roblox` package, stage 6 is recorded as skipped with
+that reason. The export writes `stage-6.json` at the run root with its `outputs` relative to it; an `error` line
+in that record is shown to the user only when it names no path.
+
+**Storage: two Modal Volumes per app, per-user folders.** `<app>-data` holds every user's files under
+`users/<user-id>/` (`inputs/<job-id>.png`, `runs/<job-id>/`, `cache/`, `cache-remote/`; see `storage.py`). User and
+job ids are made by the service (`u_` or `j_` and 26 random base32 characters) and checked against that pattern
+before they touch a path. The only request text that becomes a path is a run-relative file path, accepted only as
+plain name segments of an allowed type (PNG, JPEG, GLB, JSON) that resolve, with no link along the way, inside
+that job's run folder. Each user's storage is limited (`user_storage_max_bytes`, default 2 GiB), counted from the
+recorded size of each finished job. `<app>-legal` holds the published `terms.md` and `privacy.md`.
+
+**Metadata store: SQLite, one writer, snapshots on a Volume.** The store needs transactions (a quota check and the
+job it allows, a sign-in link and the account and session it opens), so a key-value store does not fit, and a
+Modal Dict also drops entries after 7 days without use. SQLite cannot keep its own file on a Volume either: Volumes
+have no file locking and the last commit wins. So `StoreService` runs in at most one container
+(`max_containers=1`, one input at a time), keeps the live database on local disk (WAL journal, `synchronous=FULL`)
+and after every write transaction copies it with SQLite's online backup into a new numbered snapshot on
+`<app>-meta`, then commits, before the call returns. Two store containers can still overlap during a deploy, and a
+Volume has no compare-and-swap: a commit that started before a check can land after it. So no file is ever written
+by two containers, and the newest state is decided by file names (`snapshot.py`):
+
+- Each store container has a random id. On start it adds a lease file `lease-<epoch>-<id>`, one epoch above every
+  lease it sees, and checks after committing that its lease is the largest (epoch, then id). Each snapshot is a new
+  file `meta-<epoch>-<id>-<generation>.db`; the newest state is the largest (epoch, id, generation) snapshot SQLite
+  can read.
+- Before writing, a store reloads the Volume. It stops for good if a larger lease or a snapshot from a larger epoch
+  exists, and restores and retries the call if the newest snapshot is not the one it holds. After committing it
+  reloads again and reports the write saved only if its lease is still the largest. A call the store cannot
+  complete this way reaches the user as "busy" (below).
+- Snapshots are written in SQLite's rollback-journal mode, so each is one self-contained file: reading it needs no
+  `-wal` or `-shm` file beside it, and none is ever created on the Volume.
+
+Guaranteed: if a save returns, its snapshot is on the Volume, and every store that starts afterwards restores that
+snapshot or one written later by a store that restored it (directly or through such later snapshots), unless one of
+those snapshots is found corrupt when it is restored. No store container, stale or new, can replace or outrank it:
+a newer store's lease landed after that commit, so the newer store restored it, and everything an older store
+commits afterwards ranks below the newer store's epoch. A save refused before writing is retried after restoring,
+and nothing of it reached the Volume. A save that cannot be confirmed after its commit is reported as failed and not
+retried; that write may still survive. A store that has been superseded never writes again.
+
+Reading a snapshot: the store copies it to local disk and uses it only after the copy has the file's size on the
+Volume and SQLite opens it and `PRAGMA integrity_check` passes. If the file cannot be read or opened right now (an
+I/O error, a short read), the store does not start and logs why; it never falls back, so a passing fault cannot drop
+confirmed writes. A file proven corrupt (not a database, a malformed image or a failed integrity check, which is also
+how a torn or partly written file shows) is moved to quarantine on the Volume (`quarantine-<id>-<name>`, which no
+container restores, prunes or counts among the three snapshots kept), logged, and the previous snapshot is restored;
+the writes only that file held are then lost. The store starts from an empty database only on a Volume holding no
+snapshot file, and no quarantined one either unless an operator allowed it ("If the store will not start",
+below).
+
+The schema is versioned (`PRAGMA user_version`): an older database is upgraded in place by the steps in
+`store.MIGRATIONS`, and a version this code does not know is refused at start. A managed Postgres would remove the
+single-writer limit, at the cost of another provider account; every query is in `store.py`, so moving is contained.
+Rate-limit counters live in the store's memory and reset when it restarts.
+
+**Sign-in: invite-only, emailed links, no passwords.**
+
+- A sign-in link carries a 256-bit token in its URL fragment (`/signin#t=...`), which browsers never send to a
+  server or in a Referer. The page shows the masked address and asks for an explicit click, then POSTs the token,
+  so a mail scanner that fetches the link cannot use it up. Links expire after 15 minutes (`link_ttl_s`), work once,
+  and using one cancels every other outstanding link for that address.
+- Links are built from the configured `base_url`, never from the request's Host header.
+- A link is sent only to an active account, an allowlisted address, or an address with a usable invite code (a code
+  may be limited in uses, lifetime and to one address). Before answering, the request does only the rate-limit checks
+  and, when a code is given, checks the code alone (a read that is the same for every address; an unknown, expired,
+  revoked or used-up code is refused). The answer is then the same for every address. Whether the address may sign
+  in, the link (a durable write) and the email all happen after the response, so neither the answer nor its timing
+  says who has an account.
+- Sign-in emails must go out without click tracking: turn off click and open tracking for the sending domain in
+  Resend, or the link is rewritten through the provider's redirect.
+- Creating an account, and signing in after the terms version changes, needs two confirmations: that the person is
+  18 or older, and that they accept the Terms of Service and Privacy Policy (`terms_version`). Without a published
+  version no one can sign in, and in production both documents must be on `<app>-legal`.
+- Sessions are a cookie: `__Host-hg_session`, HttpOnly, Secure, SameSite=Lax, Path=/. They last 30 days at most
+  and end after 7 days unused. Logging out, disabling the account or deleting it revokes the session on the server.
+- Tokens, session ids and invite codes are stored only as HMAC-SHA256 under keys derived from `HEROGEN_SESSION_KEY`,
+  one per purpose, so a copy of the database cannot be replayed as a link or a session.
+- The audit log names accounts by id and addresses and IPs by keyed digests, never in clear.
+
+**CSRF.** Three layers on every POST, PUT, PATCH and DELETE:
+
+1. SameSite=Lax cookies.
+2. An origin check: `Sec-Fetch-Site` must be `same-origin` when present, `Origin` must equal the service's origin when
+   present, and one of the two must be present.
+3. An `X-CSRF-Token` header that must equal the HMAC of the browser's own `__Host-hg_csrf` cookie, a random value set
+   on the first page or session request and replaced at sign-in. The page reads its token from `/api/session`.
+
+**Rate limits** (count per window, settable): sign-in requests 20 per hour per IP and 5 per hour per address; link
+checks and uses 60 per hour per IP; new jobs 20 per hour per user; the whole API 600 per minute per IP, counted in
+each web container. Behind a proxy that sets the client address, `HEROGEN_SERVICE_IP_HEADER` names its header (the
+last entry of a list is used).
+
+**Quota.** Each user may start `jobs_per_day` jobs in any 24 hours (default 5) and `jobs_total` in all (default
+50); admins can set a different quota per user. The check runs in the same transaction that creates the job, before
+any paid call. Every job counts toward both limits, except one canceled before it started; a failed job that spent
+nothing counts toward the lifetime total but not the day's (see "Jobs": at most two such refunds per user per
+day).
+
+**Uploads.**
+
+- An upload is accepted only as PNG, JPEG or WebP. Its type is recognised by its leading bytes; the file name and
+  declared type are ignored.
+- It must be within 12 MiB and 40 megapixels. The pixel count and the memory the decoded image will take (its
+  mode from the header; at most 4 bytes per allowed pixel) are checked before anything is decoded, and Pillow's
+  decompression-bomb warning is an error. It must have one frame and at least 256 pixels on its short side.
+- 16-bit images become 8-bit in integers (the high byte) and 32-bit ones in float32 a block of rows at a time, so
+  converting never makes a full-size float copy; running out of memory is a rejection, not a server error.
+- Pillow opens it with only the matching decoder enabled, verifies it, decodes it, applies the EXIF orientation and
+  converts it to sRGB.
+- What is kept is a new RGB image made from the pixels alone, with transparency on white and at most 2048 pixels on
+  its long side. It is saved as a PNG with no metadata: no EXIF, GPS, XMP, ICC profile, text or time chunks. The
+  client's file name is never stored.
+- Descriptions are normalised (NFC, control and direction characters removed, at most 600 characters) and passed
+  to the stage on stdin, never on a command line. Hero names keep letters, digits, spaces and `' - . _` (at most 60).
+
+**Downloads.** `GET /api/jobs/<id>/download/glb` sends `04-body/high.glb` (`?lod=low` for `low.glb` when the
+profile builds it). `GET /api/jobs/<id>/download/roblox` sends a zip of exactly the files `stage-6.json` lists in its
+`outputs` (`06-roblox/`: the `.rbxmx` rig, `bind_meshes.luau`, the rig test script and the README), each checked
+like a run file, plus `04-body/high.glb`, which the bind script binds, and `stage-6.json` itself. The zip keeps the
+run's layout because the README refers to `../04-body/high.glb` and `../stage-6.json`. It is offered only when
+stage 6 passed. Both are `Content-Disposition:
+attachment` with a file name made from the hero's name.
+
+**Security headers.** Every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, a
+restrictive `Permissions-Policy`, `Cache-Control: no-store` and, on https, `Strict-Transport-Security` (two years).
+Pages get the Lab's CSP: the service's own files, the inline import map by its SHA-256, and the one pinned three.js
+path (`https://cdn.jsdelivr.net/npm/three@0.160.0/`, each module with its integrity hash). Everything else,
+including run files, gets `default-src 'none'; frame-ancestors 'none'; sandbox`. Requests must name an allowed host
+(`HEROGEN_SERVICE_HOSTS`, default the host of `base_url`).
+
+**Observability.** Every request and job event is one JSON log line (`event`, ids, stage, state, seconds, cost),
+never an address, token, description or IP. Each job records the code commit it was started with (baked into the
+image at deploy time, `-dirty` when `herogen/` had uncommitted changes), its wall time and its cost: the stage
+records' model and GPU estimates plus wall seconds times the worker's list price (8 CPU and 32 GiB at
+$0.047 per core-hour and $0.008 per GiB-hour for the Blender worker). Costs are estimates; Modal's and Meta's bills
+are the actuals.
+
+### API
+
+| Method and path | What |
+| --- | --- |
+| `GET /api/session` | Signed in or not, the user and usage, the limits, the CSRF token |
+| `POST /api/auth/request` `{email, invite_code?}` | Send a sign-in link if the address may sign in |
+| `POST /api/auth/link` `{token}` | The masked address of a link and whether terms must be accepted (nothing is used up) |
+| `POST /api/auth/verify` `{token, accept_terms, adult}` | Use the link: create the account if new, open a session |
+| `POST /api/auth/logout` | End the session |
+| `DELETE /api/account` `{confirm: "delete my account"}` | Delete the account and every file now |
+| `GET /api/quota` | Jobs in the last 24 hours and in total, the limits, stored bytes |
+| `GET /api/jobs` | The user's jobs, newest first |
+| `POST /api/jobs` (multipart: `kind` sketch or prompt, `sketch` or `prompt`, `name`, `profile`; header `Idempotency-Key`) | Start a job; the same key returns the same job (200), the same key with a different request is refused (409) |
+| `GET /api/jobs/<id>` | State, stages, the error with its stage and reason, images, downloads, the Roblox README, time, cost, commit |
+| `POST /api/jobs/<id>/cancel`, `DELETE /api/jobs/<id>` | Cancel; delete with its files |
+| `GET /api/jobs/<id>/download/glb`, `.../download/roblox` | Downloads |
+| `GET /api/workspace`, `GET /api/runs/r1/<id>`, `GET /runs/r1/<id>/<path>` | The Lab API over the user's own runs |
+
+Errors are `{"error": {"code", "message"}}`, with the message written for the user. When the metadata store is
+restarting or cannot confirm a write, any call answers 503 with `"code": "busy"` and `Retry-After: 5`. For a new job
+that answer means the job may or may not have been saved: its sketch is kept, and sending the same form again with
+the same `Idempotency-Key` returns the saved job (200) or starts it (201), never a second one. The page keeps the key,
+with a hash of the form, in the tab's `sessionStorage` from before it sends the request until the server answers with
+the job (200 or 201) or a 409 (the key belongs to a saved job with a different form). On any other answer (503, another
+5xx, a lost connection, 401, 429, a refused upload) it sends the same key with the next attempt from that tab, also
+after a reload; other tabs and devices make their own keys. A sketch no job claims is deleted by retention after a day. Status polling is every 3
+seconds while a job is queued or running.
+
+### Lab API and viewer
+
+The service answers the Lab's JSON API per user (`labapi.py`): each user's runs folder is the one runs root, key
+`r1`, labelled "Your heroes", so a run is `r1/<job-id>` as the Lab names it. It uses the Lab's own code when the
+deployed HeroGen has it (`herogen.lab.workspace.Workspace`, else `herogen.lab.runindex`) and otherwise builds a
+minimal summary with the same field names. `/viewer` serves the Studio page and `/static/` its files when
+`herogen/lab/static/` holds the Studio (`index.html` and `app.js`); otherwise it serves the service's own minimal
+viewer, which reads only that API. Both open `#run=r1/<job-id>`.
+
+### Remote models from a worker
+
+herogen.blender's remote client starts `$HEROGEN_MODAL run <runner>.py::main --job ... --out ...`. The Blender
+worker image points `HEROGEN_MODAL` at `modal_bridge.py`, which takes the same arguments, calls the runner's `infer`
+in its deployed app (the runner's `APP` constant) and writes the files the runner's own `main` writes, so the
+client's cache, cost estimate and error handling are unchanged. Stage 3 uses the remote models only when
+`HEROGEN_SERVICE_STAGE3_ARGS` asks for them (for example `--mesh-source sam3d-objects --remote live`); by default it
+runs with the pipeline's own defaults.
+
+### Retention
+
+| What | Kept |
+| --- | --- |
+| Uploads, described heroes' sketches, run folders (images, meshes, records) | `retention_days` (default 30) after the job finishes, then deleted; at once when the user deletes the job or account |
+| An uploaded sketch no job claims (a job create the store could not confirm and that was not saved) | A day, then deleted by retention |
+| A job's description and name | Cleared with its files |
+| A job's row (state, times, cost, attempts, error, commit) | Kept for quota and cost accounting, without files, description or name |
+| Model caches (per user: recorded model and remote-model outputs) | `retention_days` after each entry was written; at once when the account is deleted |
+| Sign-in links | Deleted a day after they expire or are used |
+| Sessions | Deleted when they expire, or a day after they are revoked |
+| Audit log | `audit_retention_days` (default 365) |
+| Account | Until the user deletes it. The address is then replaced by `deleted:<user-id>` and removed everywhere else: sign-in links, the allowlist, invites bound to it (which are revoked) and any audit entry |
+
+### Settings
+
+Non-secret settings are environment variables read at start (`config.py`; on Modal, baked into the image from the
+deploying shell). The main ones:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HEROGEN_SERVICE_APP` | `herogen-service` | Modal app name; prefixes every volume and secret |
+| `HEROGEN_SERVICE_MODE` | `dev` | `production` requires https, a real email provider and its key, your own sending domain |
+| `HEROGEN_SERVICE_BASE_URL` | `http://127.0.0.1:8800` | The public origin; sign-in links and the origin check use it |
+| `HEROGEN_SERVICE_DOMAIN` | | Custom domains for the web function (comma-separated) |
+| `HEROGEN_SERVICE_HOSTS` | host of the base URL | Allowed Host headers |
+| `HEROGEN_SERVICE_EMAIL_PROVIDER`, `HEROGEN_SERVICE_EMAIL_FROM` | `file`, `HeroGen <signin@example.com>` | `resend` in production; the From address |
+| `HEROGEN_SERVICE_TERMS_VERSION` | (empty) | The published terms version users accept; empty closes sign-in |
+| `HEROGEN_SERVICE_JOBS_PER_DAY`, `HEROGEN_SERVICE_JOBS_TOTAL` | 5, 50 | Default quota |
+| `HEROGEN_SERVICE_MAX_RUNNING`, `HEROGEN_SERVICE_MAX_ATTEMPTS` | 4, 2 | Jobs running at once; attempts per job |
+| `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
+| `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
+| `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `roblox-ingame` | Profiles offered, and the default |
+| `HEROGEN_SERVICE_STAGE3_ARGS` | (empty) | Extra `herogen.blender run` options for stage 3 |
+| `HEROGEN_SERVICE_IP_HEADER` | (empty) | Header holding the client address behind a proxy |
+
+`config.ENV` lists every variable, including the link and session lifetimes, the rate limits and the stage
+timeouts.
+
+| Secret (Modal secret) | Variables | Used by |
+| --- | --- | --- |
+| `<app>-web` | `HEROGEN_SESSION_KEY` (at least 32 random bytes), `HEROGEN_EMAIL_API_KEY` | `web`, `admin_command` |
+| `<app>-model` | `MODEL_API_KEY` | `model_stages` |
+| `<app>-admin` | `HEROGEN_ADMIN_KEY` (at least 32 random bytes) | `StoreService`, `admin_command`: the store's admin methods (invites, allowlist, users, quotas, audit) accept calls only with this key, so the web and worker functions cannot reach them |
+| `huggingface` | `HF_TOKEN` | the SAM 3D apps, only when stage 3 uses them |
+
+### Deploying
+
+From the repository root, with the secrets and the legal documents in place. Any local use of
+`herogen.service.modal_app` (deploy, `admin`, `selfcheck`) refuses to run unless `HEROGEN_SERVICE_MODE=production`
+and the other production settings are valid:
+
+```bash
+export HEROGEN_SERVICE_MODE=production
+export HEROGEN_SERVICE_BASE_URL=https://<your host>
+export HEROGEN_SERVICE_EMAIL_PROVIDER=resend
+export HEROGEN_SERVICE_EMAIL_FROM="HeroGen <signin@<your sending domain>>"
+export HEROGEN_SERVICE_TERMS_VERSION=<version of the published terms>
+modal volume put herogen-service-legal terms.md /terms.md
+modal volume put herogen-service-legal privacy.md /privacy.md
+modal deploy -m herogen.service.modal_app
+modal run -m herogen.service.modal_app::selfcheck
+modal run -m herogen.service.modal_app::admin --args "invite --count 3"
+```
+
+**If the store will not start.** The store refuses to start when its newest snapshot cannot be read (the log names
+the file and the reason), when every snapshot is quarantined, or when the Volume holds snapshot files this version
+does not recognise. A passing fault clears on the next start. For a file that never becomes readable (a permanent I/O
+error, or corruption SQLite reports as an open error such as "unsupported file format"):
+
+```bash
+modal run -m herogen.service.modal_app::admin --args "snapshots"
+modal run -m herogen.service.modal_app::admin --args "snapshot-quarantine meta-00000004-<id>-0000000123.db"
+```
+
+`snapshot-quarantine` first takes a newer lease (a store still running stops writing), then renames the file to
+`quarantine-<id>-<name>`, so the next store starts from the snapshot before it; the writes only that file held are
+lost. Nothing is deleted. It refuses to quarantine the last snapshot unless `--allow-empty` is added, which lets the
+next store start from an empty database (every account, invite and job record is then gone). Both commands work on
+the `<app>-meta` volume directly, so they run while the store is down, and every use is logged.
+
+Staging is the same with `HEROGEN_SERVICE_APP=herogen-service-staging` (its own secrets
+`herogen-service-staging-web`, `-model` and `-admin`, and its own volumes) and its own base URL. Without a custom domain the
+base URL is the address Modal prints for the `web` function; set it and deploy again.
