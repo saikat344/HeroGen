@@ -22,6 +22,7 @@ from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import heldout, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
+from test_herogen_pipeline_heldout_synth import fake_heldout_image  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
 
 DUMMY_KEY = "dummy-test-key-not-real-0123456789"
@@ -45,9 +46,11 @@ def _decode_data_url(url: str) -> Image.Image:
 class FakeAPI:
     """Stands in for Meta's Model API. Draws every image by code; SAM masks come from thresholding."""
 
-    def __init__(self, sheet_order=("front", "right", "front", "left"), heldout_squash: float = 0.7) -> None:
+    def __init__(self, sheet_order=("front", "right", "front", "left"), heldout_yaw: float = 45.0,
+                 heldout_pose: str = "a") -> None:
         self.sheet_order = sheet_order
-        self.heldout_squash = heldout_squash  # held-out figure width / front width (1.0 fails the angle check)
+        self.heldout_yaw = heldout_yaw  # how far the held-out figures are turned; negative: the wrong way
+        self.heldout_pose = heldout_pose  # "a", "down" or "stride" (see test_herogen_pipeline_heldout_synth)
         self.calls: list[str] = []
         self.prompts: list[str] = []
         self.last_sam_image: Image.Image | None = None
@@ -69,12 +72,10 @@ class FakeAPI:
             img, _ = sheet(order=self.sheet_order)
         elif prompt == stages.TOP_PROMPT:
             img = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))  # not a real top view
-        elif prompt == heldout.HELDOUT_PROMPT:
-            # A turned figure: the front figure squeezed sideways, same height and framing as the cover.
-            front = imaging.to_mask_image(figure_mask(200, "front"))
-            w = max(1, round(front.size[0] * self.heldout_squash))
-            turned = imaging.from_mask_image(front.resize((w, front.size[1]), Image.BILINEAR))
-            img = paint(place(turned, (300, 280), (150 - w // 2, 40)), colour=(30, 80, 160), bg=(255, 255, 255))
+        elif prompt in heldout.PROMPTS.values():
+            # The sheet's stick figure turned in 3D, framed like the pose reference (the last image).
+            frame = _decode_data_url(body["images"][-1]["image_url"])
+            img = fake_heldout_image(prompt, self.heldout_yaw, self.heldout_pose, frame=frame)
         else:
             raise AssertionError(f"unexpected prompt {prompt[:40]!r}")
         return {"data": [{"b64_json": _b64png(img)}], "usage": {"input_tokens": 1}}
