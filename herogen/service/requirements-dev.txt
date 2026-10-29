@@ -1,0 +1,15 @@
+# Dev mode and the web tests: the service's dependencies plus a local server and Starlette's test client.
+# A package requirements-test.txt (what CI installs) also pins has the same version there. uvicorn and click are
+# dev mode's only: CI does not install them.
+-r requirements.txt
+uvicorn==0.54.0           # BSD-3-Clause
+httpx2==2.13.1            # BSD-3-Clause (Starlette's test client)
+
+# Their dependencies.
+anyio==4.15.1             # MIT
+click==8.5.0              # BSD-3-Clause (uvicorn's command line)
+h11==0.16.0               # MIT
+httpcore2==2.13.1         # BSD-3-Clause
+idna==3.20                # BSD-3-Clause
+truststore==0.10.5        # MIT
+typing_extensions==4.16.0 # PSF-2.0

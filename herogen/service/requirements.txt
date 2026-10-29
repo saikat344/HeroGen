@@ -1,0 +1,6 @@
+# The hosted service's own dependencies, pinned (installed into the Modal images and the dev environment).
+# The pipeline's numpy and pillow are pinned here too so the service runs one known set.
+starlette==1.8.0          # BSD-3-Clause
+python-multipart==0.0.32  # Apache-2.0 (Starlette's form parser)
+numpy==2.5.4              # BSD-3-Clause
+pillow==12.3.0            # MIT-CMU

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HeroGen</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  },
+  "integrity": {
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js": "sha384-qlO/ZugKPxAQUAvTlQoo0QECzxJIJySZmCF/DHdb2Xn/hHndFwX/vfUAC9Hbk6LP",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js": "sha384-oxY9vSeh7Mrt5WmhN8xfWoDRnmoW9krEiRBY7vJKaK90jMUidM0fhbUwcblpBgTu",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js": "sha384-jHGXS4+FuVOBnZkNme2ury3Ccg5DWDLYK22xX/WGdZCZsjRM4J+3n6Qc4CXx1Hjf"
+  }
+}
+</script>
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">HeroGen <span class="beta">beta</span></a>
+  <div class="spacer"></div>
+  <span id="who" class="who" hidden></span>
+  <button type="button" id="signOut" class="link" hidden>Sign out</button>
+</header>
+<div id="banner" class="banner" role="alert" hidden></div>
+<main>
+  <p id="loading" class="muted">Loading…</p>
+
+  <section id="signin" class="card narrow" hidden aria-labelledby="signinH">
+    <h1 id="signinH">Sign in</h1>
+    <p class="muted">HeroGen is invite-only during the beta. We email you a link; there is no password.</p>
+    <form id="signinForm" novalidate>
+      <label for="email">Email address</label>
+      <input id="email" name="email" type="email" autocomplete="email" required maxlength="254">
+      <label for="invite">Invite code <span class="muted">(first sign-in only)</span></label>
+      <input id="invite" name="invite" type="text" autocomplete="off" maxlength="40" placeholder="XXXX-XXXX-XXXX-XXXX">
+      <button type="submit" class="primary">Email me a sign-in link</button>
+    </form>
+    <p id="signinMsg" class="msg" role="status"></p>
+  </section>
+
+  <section id="verify" class="card narrow" hidden aria-labelledby="verifyH">
+    <h1 id="verifyH">Finish signing in</h1>
+    <p id="verifyWho"></p>
+    <form id="verifyForm" novalidate>
+      <div id="terms" hidden>
+        <label class="check"><input type="checkbox" id="adult"> I am 18 or older.</label>
+        <label class="check"><input type="checkbox" id="accept"> I accept the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
+      </div>
+      <button type="submit" class="primary" id="verifyBtn">Sign in</button>
+    </form>
+    <p id="verifyMsg" class="msg" role="status"></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="grid">
+      <section class="card" aria-labelledby="newH">
+        <h2 id="newH">New hero</h2>
+        <p id="quota" class="muted"></p>
+        <form id="jobForm" novalidate>
+          <fieldset class="seg">
+            <legend class="sr">Start from</legend>
+            <label><input type="radio" name="kind" value="sketch" checked> Upload a sketch</label>
+            <label><input type="radio" name="kind" value="prompt"> Describe it</label>
+          </fieldset>
+          <div id="sketchIn">
+            <label for="sketch">Sketch (PNG, JPEG or WebP)</label>
+            <input id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp">
+            <p class="muted small">One character, full body from head to feet, standing and facing forward, arms a little away from the body, on plain paper.</p>
+          </div>
+          <div id="promptIn" hidden>
+            <label for="prompt">Describe the hero</label>
+            <textarea id="prompt" name="prompt" rows="3"></textarea>
+          </div>
+          <label for="name">Name <span class="muted">(optional)</span></label>
+          <input id="name" name="name" type="text" maxlength="60">
+          <label for="profile">Target</label>
+          <select id="profile" name="profile"></select>
+          <button type="submit" class="primary" id="go">Make my hero</button>
+        </form>
+        <p id="jobMsg" class="msg" role="status"></p>
+      </section>
+      <section class="card" aria-labelledby="listH">
+        <h2 id="listH">Your heroes</h2>
+        <ul id="jobs" class="jobs"></ul>
+        <p id="noJobs" class="muted" hidden>None yet.</p>
+      </section>
+    </div>
+
+    <section id="detail" class="card" hidden aria-labelledby="detailH">
+      <div class="row"><h2 id="detailH"></h2><span id="state" class="state"></span><div class="spacer"></div>
+        <button type="button" id="cancelJob" class="link" hidden>Cancel</button>
+        <button type="button" id="deleteJob" class="link danger">Delete</button></div>
+      <p id="detailSub" class="muted"></p>
+      <p id="detailErr" class="err" hidden></p>
+      <ol id="stages" class="stages"></ol>
+      <div id="images" class="images"></div>
+      <div id="previewWrap" hidden><canvas id="preview" aria-label="3D preview of the body"></canvas></div>
+      <div id="downloads" class="downloads"></div>
+      <div id="studio" hidden>
+        <h3>Using it in Roblox Studio</h3>
+        <ol class="steps">
+          <li>Download the Roblox bundle and unzip it.</li>
+          <li>Open README.txt from the bundle and follow it: it imports <code>high.glb</code>, inserts the rig and runs <code>bind_meshes.luau</code>, then checks the result with the rig test script.</li>
+        </ol>
+        <details><summary>README.txt</summary><pre id="readme"></pre></details>
+      </div>
+      <p class="small"><a id="viewerLink" href="/viewer">Open in the viewer</a></p>
+    </section>
+
+    <details class="card account"><summary>Account</summary>
+      <p class="muted small">Heroes and their files are deleted <span id="retention"></span> days after they finish. Deleting your account removes them all now.</p>
+      <label for="confirmDelete">Type <code>delete my account</code> to confirm</label>
+      <input id="confirmDelete" type="text" autocomplete="off">
+      <button type="button" id="deleteAccount" class="danger">Delete my account</button>
+    </details>
+  </section>
+</main>
+<footer class="foot"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
+</body>
+</html>

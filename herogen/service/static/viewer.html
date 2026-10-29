@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HeroGen viewer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  },
+  "integrity": {
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js": "sha384-qlO/ZugKPxAQUAvTlQoo0QECzxJIJySZmCF/DHdb2Xn/hHndFwX/vfUAC9Hbk6LP",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js": "sha384-oxY9vSeh7Mrt5WmhN8xfWoDRnmoW9krEiRBY7vJKaK90jMUidM0fhbUwcblpBgTu",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js": "sha384-jHGXS4+FuVOBnZkNme2ury3Ccg5DWDLYK22xX/WGdZCZsjRM4J+3n6Qc4CXx1Hjf"
+  }
+}
+</script>
+<script type="module" src="/assets/viewer.js"></script>
+</head>
+<body>
+<header class="top"><a class="brand" href="/">HeroGen <span class="beta">beta</span></a><div class="spacer"></div>
+  <label class="sr" for="run">Run</label><select id="run"></select></header>
+<main>
+  <p id="msg" class="muted">Loading…</p>
+  <section class="card"><canvas id="preview" class="big" aria-label="3D view of the body"></canvas></section>
+  <section class="card"><h2>Stages</h2><table class="checks"><thead><tr><th>Stage</th><th>Status</th><th>Time</th><th>Cost (estimate)</th></tr></thead><tbody id="stages"></tbody></table></section>
+  <section class="card"><h2>Images</h2><div id="images" class="images"></div></section>
+</main>
+</body>
+</html>
