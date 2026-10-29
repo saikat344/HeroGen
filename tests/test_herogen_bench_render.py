@@ -111,7 +111,8 @@ BUILD = textwrap.dedent('''
 # into the file but connected to nothing: the case of older asset files, rendered with --image. With
 # "hostile", the file also carries render settings that must not reach the bench's renders: a bright red
 # world, film exposure, a 2:1 pixel aspect and a render border. Both carry a visible text object (geometry
-# the bench skips and must report) and a keyframed box, whose animation the bench must clear.
+# the bench skips and must report) and a keyframed box, whose animation the bench must clear. With "holes",
+# the image is transparent (alpha 0) on its left half, as alpha cut-outs are.
 BUILD_BLEND = textwrap.dedent('''
     import sys
     import bpy
@@ -125,8 +126,9 @@ BUILD_BLEND = textwrap.dedent('''
     mat.use_nodes = False
     mat.diffuse_color = (0.1, 0.1, 0.1, 1.0)
     box.data.materials.append(mat)
-    img = bpy.data.images.new("Skin", 8, 8)
-    img.pixels = [1.0, 0.5, 0.0, 1.0] * 64
+    img = bpy.data.images.new("Skin", 8, 8, alpha=True)
+    holes = sys.argv[-2] == "holes"
+    img.pixels = [px for i in range(64) for px in (1.0, 0.5, 0.0, 0.0 if holes and i % 8 < 4 else 1.0)]
     img.pack()
     img.use_fake_user = True
     bpy.ops.object.text_add(location=(3.0, 0.0, 0.0))
@@ -163,7 +165,7 @@ class BlendFileTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.runs = {}
-        for mode in ("plain", "hostile"):
+        for mode in ("plain", "hostile", "holes"):
             asset, run = Path(cls.tmp.name) / f"box-{mode}.blend", Path(cls.tmp.name) / f"run-{mode}"
             cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_BLEND, "--",
                    mode, str(asset)]
@@ -179,11 +181,23 @@ class BlendFileTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def _run(self, mode):
+    def _run(self, mode, expect=0):
         code, run = self.runs[mode]
         rec = json.loads((run / "stage-2.json").read_text())
-        self.assertEqual(code, 0, json.dumps(rec["checks"]))
+        self.assertEqual(code, expect, json.dumps(rec["checks"]))
         return rec, run
+
+    def test_visible_transparent_texels_are_measured_and_fail_the_run(self):
+        rec, _ = self._run("holes", expect=1)
+        c = next(c for c in rec["checks"] if c["name"] == "visible_transparent_texels_px")
+        self.assertFalse(c["pass"])
+        self.assertGreater(c["per_view"]["front"], 100)
+        self.assertEqual(c["image_alpha_transparent_share"], {"Skin": 0.5})
+        failed = [x["name"] for x in rec["checks"] if not x["pass"]]
+        self.assertEqual(failed, ["visible_transparent_texels_px"])
+        plain, _ = self._run("plain")
+        c = next(c for c in plain["checks"] if c["name"] == "visible_transparent_texels_px")
+        self.assertEqual((c["value"], c["image_alpha_transparent_share"]), (0, {"Skin": 0.0}))
 
     def test_packed_image_named_by_override_is_the_base_colour(self):
         rec, run = self._run("plain")

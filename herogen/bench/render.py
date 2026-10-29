@@ -138,6 +138,14 @@ def off_edge_disagreement(coverage: np.ndarray, mask: np.ndarray) -> int:
     return int(((coverage != mask) & ~near_edge(mask)).sum())
 
 
+def visible_transparent(alpha_render: Path, mask: np.ndarray) -> int:
+    """Figure pixels (away from the edge) where the texture under the pixel is transparent (alpha below one
+    half): surface the renders show as solid although its texture says it is see-through."""
+    with Image.open(alpha_render) as im:
+        grey = np.asarray(im.convert("RGBA"), dtype=np.float64)[..., 0] / 255.0
+    return int((mask & ~near_edge(mask) & (grey < 0.5)).sum())
+
+
 def border_pixels(mask: np.ndarray) -> int:
     return int(mask[0].sum() + mask[-1].sum() + mask[1:-1, 0].sum() + mask[1:-1, -1].sum())
 
@@ -268,7 +276,8 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
                   "<repo>": REPO_ROOT, "<blender>": Path(bl.find_blender() or ".").resolve().parent}
         res = run_blender(job, work, out / "logs" / "bench-render.log", timeout, places)
         cams = res["cameras"]
-        outputs, ious, borders, off_edge = ["gt/body.glb", "cameras.json", "views/meta.json"], {}, {}, {}
+        outputs = ["gt/body.glb", "cameras.json", "views/meta.json"]
+        ious, borders, off_edge, see_through = {}, {}, {}, {}
         for cam in cams:
             paths = view_paths(cam)
             cam["files"] = paths
@@ -285,6 +294,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             outputs += list(paths.values())
             ious[cam["view"]] = round(iou(alpha >= 0.5, mask), 5)
             off_edge[cam["view"]] = off_edge_disagreement(alpha >= 0.5, mask)
+            see_through[cam["view"]] = visible_transparent(work / "views" / f"{cam['view']}-alpha.png", mask)
             borders[cam["view"]] = border_pixels(mask)
 
     ppu, size = res["pixels_per_unit"], int(size)
@@ -333,6 +343,10 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
                   note="edge pixels weigh more at small sizes; render_mask_off_edge_px is the gate"))
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
                   names=res["missing_images"]))
+    rec.add(check("visible_transparent_texels_px", max(see_through.values()), 0,
+                  passed=max(see_through.values()) == 0, per_view=see_through,
+                  image_alpha_transparent_share=res["image_alpha_transparent_share"],
+                  note="figure pixels whose texture alpha is below 0.5 (edge pixels excluded)"))
     rec.add(facing_check(res["facing"]))
     rec.add(check("skipped_visible_geometry", len(res["skipped_geometry"]), None, gate=False,
                   objects=res["skipped_geometry"],

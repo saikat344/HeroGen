@@ -12,7 +12,7 @@ One job renders one asset:
    about the forward axis so it points 5 degrees out from vertical seen from the front (its forward or
    backward lean stays as modelled). Each limb turns as one piece about its root joint; elbows and knees keep
    their rest bend. "rest" keeps the rest pose; "as-shipped" keeps the file's own pose and animation frame.
-   Before posing, the figure's facing is read from the rig: the right-to-left shoulder (else hip) vector must
+   Before posing, the figure's facing is read from the rig: the right-to-left hip (else shoulder) vector must
    point along +X, which with +Z up means the figure faces -Y. With no `yaw_deg` the turn that achieves this
    is found from the rig (to the nearest 90 degrees); a given `yaw_deg` that disagrees with the rig is an
    error, and an unrigged figure needs `yaw_deg`, since nothing in it says which way it faces.
@@ -314,11 +314,12 @@ def rotate_bones_world(arm, names, rot3, pivot_world):
 
 
 def rig_left_axis(arms):
-    """World vector from the right to the left shoulder (else hip) joint of the first rig that has both, and
-    how it was found; (None, reason) when no rig names a left and a right limb."""
+    """World vector from the right to the left hip (else shoulder) joint of the first rig that has both, and
+    how it was found; (None, reason) when no rig names a left and a right limb. The hips come first: they
+    carry the body's facing, while a rest pose may twist the shoulders."""
     for arm in arms:
         deform = [b.name for b in arm.data.bones if b.use_deform] or [b.name for b in arm.data.bones]
-        for limb in ("arm", "leg"):
+        for limb in ("leg", "arm"):
             left, right = RIG.find_limb_root(deform, limb, "L"), RIG.find_limb_root(deform, limb, "R")
             if left and right:
                 v = bone_world_head(arm, left) - bone_world_head(arm, right)
@@ -563,6 +564,42 @@ def images_feeding_colour(meshes):
     return found
 
 
+def image_alpha(img):
+    """Share of the image's texels with alpha below one half, or None when the image has no alpha."""
+    if img.channels < 4 or img.alpha_mode == "NONE" or not has_pixels(img):
+        return None
+    px = np.empty(len(img.pixels), dtype=np.float32)
+    img.pixels.foreach_get(px)
+    return float((px[3::4] < 0.5).mean())
+
+
+def add_alpha_shaders(meshes):
+    """Give every material a `BenchAlpha` emission shader showing, as grey, the alpha of the first image
+    upstream of its base colour (white when that image has no alpha or there is none)."""
+    seen = set()
+    for o in meshes:
+        for mat in o.data.materials:
+            if mat is None or mat.name in seen:
+                continue
+            seen.add(mat.name)
+            nt = mat.node_tree
+            em = nt.nodes.new("ShaderNodeEmission")
+            em.name = "BenchAlpha"
+            em.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+            stack, visited = [nt.nodes["BenchFlat"]], set()
+            while stack:
+                node = stack.pop(0)
+                if node.name in visited:
+                    continue
+                visited.add(node.name)
+                image = node.image if node.type == "TEX_IMAGE" else None
+                if image is not None and image_alpha(image) is not None:
+                    nt.links.new(node.outputs["Alpha"], em.inputs["Color"])
+                    break
+                for inp in node.inputs:
+                    stack.extend(link.from_node for link in inp.links)
+
+
 def set_shading(meshes, mode):
     seen = set()
     for o in meshes:
@@ -574,6 +611,8 @@ def set_shading(meshes, mode):
             out = next(n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
             if mode == "flat":
                 src = nt.nodes["BenchFlat"].outputs["Emission"]
+            elif mode == "alpha":
+                src = nt.nodes["BenchAlpha"].outputs["Emission"]
             else:
                 src = nt.nodes["BenchLit"].outputs["BSDF"]
             for link in list(out.inputs["Surface"].links):
@@ -791,6 +830,8 @@ def main():
     missing_images = sorted(im.name for im in used if not has_pixels(im))
     if unused_missing:
         report.append(f"missing images no rendered colour uses: {', '.join(unused_missing)}")
+    alpha_share = {im.name: image_alpha(im) for im in sorted(used, key=lambda im: im.name)}
+    add_alpha_shaders(meshes)
     object_names, rig_names = [o.name for o in meshes], [a.name for a in rigs]
     frozen = freeze(meshes, yaw, report)
     verts, tris = all_triangles(frozen)
@@ -834,6 +875,11 @@ def main():
         scene.cycles.use_denoising = False
         scene.render.filepath = os.path.join(work, cam["view"] + "-flat.png")
         bpy.ops.render.render(write_still=True)
+        # alpha: each surface point's texture alpha as grey, to find transparent texels the render shows
+        set_shading(frozen, "alpha")
+        scene.cycles.samples = int(JOB.get("samples_flat", 16))
+        scene.render.filepath = os.path.join(work, cam["view"] + "-alpha.png")
+        bpy.ops.render.render(write_still=True)
         # lit: principled base colour, camera-fixed suns, soft ambient world
         set_shading(frozen, "lit")
         bg.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
@@ -859,6 +905,8 @@ def main():
         "yaw_deg": yaw_deg,
         "facing": facing,
         "skipped_geometry": skipped,
+        "image_alpha_transparent_share": {k: (None if v is None else round(v, 5))
+                                          for k, v in alpha_share.items()},
         "contract_scale": float(contract[0, 0]),
         "triangles": int(len(tris)),
         "vertices": int(len(verts)),
