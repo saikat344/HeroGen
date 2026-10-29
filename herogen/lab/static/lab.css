@@ -151,6 +151,7 @@ td.res-fail { color: var(--fail); font-weight: 600; }
 td.res-info { color: var(--warn); font-weight: 600; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 .empty { color: var(--muted); font-style: italic; margin: 6px 0; }
+.empty.error { color: var(--fail); font-style: normal; }
 
 /* Body panel */
 .body-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; }

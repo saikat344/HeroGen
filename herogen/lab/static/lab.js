@@ -322,6 +322,23 @@ function scaleReference() {
   return g;
 }
 
+function disposeMaterial(mat, seen) {
+  if (!mat || seen.has(mat)) return;
+  seen.add(mat);
+  for (const v of Object.values(mat)) if (v && v.isTexture && !seen.has(v)) { seen.add(v); v.dispose(); }
+  mat.dispose();
+}
+
+// Free the GPU memory of everything under `root`, plus any materials kept outside it.
+function disposeTree(root, extraMaterials = []) {
+  const seen = new Set();
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    for (const m of [].concat(o.material || [])) disposeMaterial(m, seen);
+  });
+  for (const m of extraMaterials) disposeMaterial(m, seen);
+}
+
 class Viewer {
   constructor(el) {
     this.el = el;
@@ -365,8 +382,10 @@ class Viewer {
     this.lit = false;
     this.selected = null;
     this.isolate = false;
-    this.cache = new Map(); // url -> Promise<entry>
+    this.cache = new Map(); // url -> Promise<entry>, for the current run only (see releaseAll)
     this.entries = [];      // every loaded body root, shown only while it is in a slot
+    this.loaded = [];       // every prepared entry, so releaseAll can free its GPU memory
+    this.gen = 0;           // bumped by releaseAll; a load that finishes after it is thrown away
     this.loader = new GLTFLoader();
     this.pose = { from: null, to: {}, t0: 0, dur: 450, walk: false, phase: 0 };
     this.clock = new THREE.Clock();
@@ -400,9 +419,31 @@ class Viewer {
 
   load(url) {
     if (!this.cache.has(url)) {
-      this.cache.set(url, this.loader.loadAsync(url).then((gltf) => this.prepare(gltf)));
+      const gen = this.gen;
+      this.cache.set(url, this.loader.loadAsync(url).then((gltf) => {
+        if (gen !== this.gen) {
+          disposeTree(gltf.scene);
+          throw new Error('superseded by another run');
+        }
+        return this.prepare(gltf);
+      }));
     }
     return this.cache.get(url);
+  }
+
+  // Drop every body: out of the slots and the scene, geometry, materials and textures freed, cache emptied.
+  releaseAll() {
+    this.gen += 1;
+    this.selected = null;
+    this.setSlots([]);
+    this.pose.from = null;
+    for (const entry of this.loaded) {
+      this.scene.remove(entry.root);
+      disposeTree(entry.root, entry.meshes.flatMap((m) => [m.lit, m.basic]));
+    }
+    this.loaded = [];
+    this.entries = [];
+    this.cache.clear();
   }
 
   prepare(gltf) {
@@ -458,6 +499,7 @@ class Viewer {
     this.scene.add(root);
     this.entries.push(root);
     const entry = { root, nodes, meshes, tris, totalTris, rest, pivots, dirs, sectionCount: Object.keys(nodes).length };
+    this.loaded.push(entry);
     this.applyMaterials(entry);
     this.applyPoseTo(entry);
     return entry;
@@ -689,7 +731,7 @@ function viewerMessage(text) {
 
 function renderBodyControls() {
   const run = state.run;
-  const bodies = run.bodies;
+  const bodies = run ? run.bodies : [];
   fill('#body-pick', ...bodies.map((b, i) => h('button', {
     type: 'button', class: i === ui.bodyIndex ? 'on' : '', title: b.dir,
     onclick: () => { ui.bodyIndex = i; ui.compare = false; renderBodyControls(); showBodies(); },
@@ -709,12 +751,13 @@ function renderBodyControls() {
 async function showBodies() {
   const run = state.run;
   const token = ++loadToken;
+  if (!run) return;
   const bodies = run.bodies;
   renderSectionList();
   if (!bodies.length) {
     viewer.setSlots([]);
-    fill('#viewer-labels', );
-    fill('#tri-totals', );
+    fill('#viewer-labels');
+    fill('#tri-totals');
     viewerMessage('Stage 4 not run: this run has no 04-body/high.glb or low.glb.');
     return;
   }
@@ -776,7 +819,7 @@ function renderSectionList(entry) {
   const names = entry ? SECTIONS.filter((n) => entry.nodes[n]) : (sec ? sec.sections.map((s) => s.name) : []);
   if (!names.length) {
     fill('#section-list', h('li', { class: 'empty', text: 'not run' }));
-    fill('#section-detail', );
+    fill('#section-detail');
     return;
   }
   fill('#section-list', ...names.map((n) => {
@@ -923,6 +966,7 @@ function compareActions(run) {
 }
 
 function setCompare(on) {
+  if (!state.run) return;
   ui.compare = on && state.run.bodies.length > 1;
   renderBodyControls();
   showBodies();
@@ -931,10 +975,56 @@ function setCompare(on) {
 // ---------------------------------------------------------------------------------------------------------
 // Boot
 
+let runToken = 0;
+
+// Empty every panel that shows a run, so nothing from the previous run stays on the page.
+function clearRun(message) {
+  state.run = null;
+  state.stageKey = null;
+  ui.bodyIndex = 0;
+  ui.compare = false;
+  ui.section = null;
+  loadToken += 1; // a body still loading for the previous run must not land
+  viewer.releaseAll();
+  fill('#run-meta');
+  fill('#chain', message ? h('p', { class: 'empty error', role: 'alert', text: message }) : null);
+  fill('#checks');
+  fill('#viewer-labels');
+  fill('#tri-totals');
+  fill('#section-list');
+  fill('#section-detail');
+  fill('#scores');
+  renderBodyControls();
+  viewerMessage(message ? 'No run loaded.' : 'Loading…');
+}
+
 async function loadRun(id) {
-  const run = await getJson('/api/runs/' + encodeURIComponent(id));
-  state.run = run;
+  const token = ++runToken;
+  $('#run-select').value = id;
   history.replaceState(null, '', '#run=' + encodeURIComponent(id));
+  clearRun(null);
+  let run;
+  try {
+    run = await getJson('/api/runs/' + encodeURIComponent(id));
+  } catch (err) {
+    if (token !== runToken) return;
+    clearRun(`Could not load run ${id}: ${err.message || err}`);
+    return;
+  }
+  if (token !== runToken) return;
+  try {
+    showRun(run);
+  } catch (err) {
+    // A record the page cannot draw: say so for this run rather than show part of it.
+    console.error(err);
+    clearRun(`Could not show run ${id}: ${err.message || err}`);
+    return;
+  }
+  await showBodies();
+}
+
+function showRun(run) {
+  state.run = run;
   const firstWithRecord = run.chain.find((c) => (run.stages.find((s) => s.stage === c.stage) || {}).status !== 'not run');
   state.stageKey = (firstWithRecord || run.chain[0]).stage;
   ui.bodyIndex = 0;
@@ -946,7 +1036,6 @@ async function loadRun(id) {
   renderChecks();
   renderBodyControls();
   renderScores(run);
-  await showBodies();
 }
 
 async function boot() {
