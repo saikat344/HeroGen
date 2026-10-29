@@ -62,7 +62,20 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_blender(job: dict, work: Path, log: Path, timeout: float) -> dict:
+HOME_PATH = re.compile(r"(?i)\b[A-Z]:[\\/]+Users[\\/]+[^\\/\s'\"]+|(?:/Users|/home)/[^/\s'\"]+")
+
+
+def scrub_paths(text: str, places: dict[str, Path]) -> str:
+    """Replace the given folders (either slash direction, any case) by their placeholder names, then any
+    remaining home-folder path by `~`, so a log names no person and no machine layout."""
+    for name, path in sorted(places.items(), key=lambda kv: -len(str(kv[1]))):
+        for form in {str(path), str(path).replace("\\", "/"), str(path).replace("/", "\\")}:
+            text = re.sub(re.escape(form), lambda _m, name=name: name, text, flags=re.IGNORECASE)
+    return HOME_PATH.sub("~", text)
+
+
+def run_blender(job: dict, work: Path, log: Path, timeout: float,
+                places: dict[str, Path] | None = None) -> dict:
     """Run the bench job in headless Blender (scripts embedded in the asset are never run)."""
     blender = bl.find_blender()
     if blender is None:
@@ -77,7 +90,8 @@ def run_blender(job: dict, work: Path, log: Path, timeout: float) -> dict:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise bl.BlenderError(f"Blender timed out after {timeout:.0f} s") from exc
-    log.write_text(proc.stdout + "\n--- stderr ---\n" + proc.stderr, encoding="utf-8")
+    log.write_text(scrub_paths(proc.stdout + "\n--- stderr ---\n" + proc.stderr, places or {}),
+                   encoding="utf-8")
     if proc.returncode != 0 or not result_path.exists():
         tail = (proc.stdout + proc.stderr)[-2000:]
         raise bl.BlenderError(f"Blender failed (exit {proc.returncode}); log {log}\n{tail}")
@@ -224,7 +238,9 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             "samples_lit": samples_lit, "device": device, "gt_glb": str((out / "gt" / "body.glb").resolve()),
             "work": str(work / "views"),
         }
-        res = run_blender(job, work, out / "logs" / "bench-render.log", timeout)
+        places = {"<work>": work.resolve(), "<run>": out.resolve(), "<asset-dir>": asset.resolve().parent,
+                  "<repo>": REPO_ROOT, "<blender>": Path(bl.find_blender() or ".").resolve().parent}
+        res = run_blender(job, work, out / "logs" / "bench-render.log", timeout, places)
         cams = res["cameras"]
         outputs, ious, borders, off_edge = ["gt/body.glb", "cameras.json", "views/meta.json"], {}, {}, {}
         for cam in cams:
