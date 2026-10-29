@@ -119,8 +119,9 @@ A run recorded without them has no cache entries for those calls, so replaying i
 
 ## Stage 4 body format: `sections.json`
 
-R15-style rigid sections: `Head, UpperTorso, LowerTorso, LeftUpperArm, LeftLowerArm, LeftHand, RightUpperArm,
-RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
+Stage 4 builds the body in its current rigid form, R15-style rigid sections: `Head, UpperTorso, LowerTorso,
+LeftUpperArm, LeftLowerArm, LeftHand, RightUpperArm, RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg,
+LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 
 ```json
 {
@@ -136,6 +137,16 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
   "checks": []
 }
 ```
+
+**Pose test.** Each section is rotated about its pivot into the test poses (`herogen/blender/pose.py`); a rim
+point of a cut that one section carries outside the other section's closed surface is an exposed cut, and its
+distance to that surface is the gap. The gated gap counts only exposures a ray in one of 26 directions can see.
+The inside, distance and ray queries go through a uniform grid of each section's triangles
+(`herogen/blender/meshindex.py`) instead of testing every point against every triangle. They give the same
+answers: distances and ray hits pair by pair, and the inside test (signed ray crossings) the generalised winding
+number's for every point off the surface. Measured on the pencil-sketch hybrid, every joint's gap in every pose
+is identical either way, at full detail (171,716 triangles; visible pass 503 s brute force, 7.0 s through the
+grid; geometric 187 s and 3.0 s) and on the 22,768-triangle in-game body (32.7 s and 3.3 s).
 
 ## Turnaround sheet (stage 2)
 

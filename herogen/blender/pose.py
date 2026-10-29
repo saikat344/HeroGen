@@ -14,6 +14,7 @@ import numpy as np
 
 from . import PARENT, PIVOT_JOINT, SECTIONS
 from .carve import point_mesh_distance, ray_hits, winding_inside
+from .meshindex import MeshIndex
 
 FWD = np.array([0.0, -1.0, 0.0])
 BACK = np.array([0.0, 1.0, 0.0])
@@ -108,14 +109,42 @@ VIS_RADIUS = 1.0              # studs: posed geometry within this distance of th
 VIS_MIN_GAP = 0.01            # studs: smaller exposures are not ray-tested
 
 
-def joint_gaps(sections: dict, poses: dict, visible: bool = False) -> dict:
+class _Brute:
+    """The brute-force queries (every point against every triangle), kept to check `MeshIndex` against."""
+
+    def __init__(self, verts, faces):
+        self.verts, self.faces = verts, faces
+        self.tri = verts[faces]
+
+    def inside(self, pts):
+        return winding_inside(pts, self.verts, self.faces)
+
+    def distance(self, pts):
+        return point_mesh_distance(pts, self.verts, self.faces)
+
+    def ray_hits(self, o, d):
+        return ray_hits(o, d, self.tri)
+
+
+def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = True) -> dict:
     """Largest gap (studs) per joint per pose, using the rim shared by each child and its parent.
 
     With `visible`, a rim point outside the other section only counts if it can be seen: a ray from it in at
     least one of 26 directions leaves the posed body (every section, shoulder covers included, within
     VIS_RADIUS of the joint) without hitting anything. A gap under a cover, or inside a crease the body itself
     closes, is therefore not counted; a gap a cover only hides at rest is.
+
+    `fast` (the default) answers the inside, distance and ray queries through `MeshIndex` grids, one per section
+    for its rest frame and one per posed joint neighbourhood; `fast=False` runs the brute-force queries.
     """
+    query = MeshIndex if fast else _Brute
+    index: dict[str, object] = {}
+
+    def rest_index(name: str):
+        if name not in index:
+            index[name] = query(sections[name].verts, sections[name].faces)
+        return index[name]
+
     pivots = {n: s.pivot for n, s in sections.items()}
     rims = {}
     for name, s in sections.items():
@@ -128,35 +157,44 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False) -> dict:
     result: dict[str, dict[str, float]] = {}
     for pname, local in poses.items():
         mats = world_matrices(local, pivots)
-        posed_tri = None
+        posed = None
         if visible:
-            posed_tri = {n: _apply(mats[n], s.verts)[s.faces] for n, s in sections.items() if len(s.faces)}
+            posed = {n: _apply(mats[n], s.verts) for n, s in sections.items() if len(s.faces)}
         row = {}
         for child, rim in rims.items():
             parent = PARENT[child]
             mp, mc = mats[parent], mats[child]
             worst = 0.0
+            near = None
             for carrier, other, mo in ((mp, child, mc), (mc, parent, mp)):
                 # rim carried by one section, tested against the other's rest-frame surface
                 pts = _apply(np.linalg.inv(mo) @ carrier, rim)
-                so = sections[other]
-                out = ~winding_inside(pts, so.verts, so.faces)
+                so = rest_index(other)
+                out = ~so.inside(pts)
                 if not out.any():
                     continue
-                dist = point_mesh_distance(pts[out], so.verts, so.faces)
+                dist = so.distance(pts[out])
                 if visible:
                     keep = dist > VIS_MIN_GAP
                     if not keep.any():
                         worst = max(worst, float(dist.max()))
                         continue
                     world = _apply(carrier, rim[out][keep])
-                    centre = mats[child][:3, :3] @ pivots[child] + mats[child][:3, 3]
-                    tri = np.concatenate([t[np.linalg.norm(t.mean(axis=1) - centre, axis=1) < VIS_RADIUS]
-                                          for t in posed_tri.values()])
+                    if near is None:
+                        # the posed body near the joint: every triangle whose centre is within VIS_RADIUS
+                        centre = mats[child][:3, :3] @ pivots[child] + mats[child][:3, 3]
+                        vs, fs, base = [], [], 0
+                        for n, pv in posed.items():
+                            f = sections[n].faces
+                            f = f[np.linalg.norm(pv[f].mean(axis=1) - centre, axis=1) < VIS_RADIUS]
+                            vs.append(pv)
+                            fs.append(f + base)
+                            base += len(pv)
+                        near = query(np.concatenate(vs), np.concatenate(fs))
                     k, nd = len(world), len(VIEW_DIRS)
                     o = np.repeat(world, nd, axis=0)
                     d = np.tile(VIEW_DIRS, (k, 1))
-                    blocked = ray_hits(o + d * 2e-3, d, tri).reshape(k, nd)
+                    blocked = near.ray_hits(o + d * 2e-3, d).reshape(k, nd)
                     seen = ~blocked.all(axis=1)
                     small = dist[~keep]
                     cand = list(dist[keep][seen]) + list(small)
