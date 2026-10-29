@@ -365,7 +365,6 @@ class RenderMaskAgreementTest(unittest.TestCase):
         cover[34, 5] = 0.9                                  # well covered: that is not a sliver
         self.assertEqual(self.off_edge(cover, self.mask, coverage_margin(16)), 1)
         self.assertEqual(coverage_margin(16), 0.125)
-        self.assertEqual(coverage_margin(4), 0.25)
 
     def test_a_shifted_camera_is_caught_at_any_size(self):
         from herogen.bench.render import coverage_margin
@@ -477,6 +476,66 @@ class AlphaClipTest(unittest.TestCase):
             self.assertIn(words, err.getvalue(), variant)
 
 
+def ellipse_coverage(size, cx, cy, rx, ry, sub=8):
+    """Coverage (0..1) of an ellipse per pixel from sub x sub samples, and the mask from pixel centres."""
+    offsets = (np.arange(sub) + 0.5) / sub
+    rows, cols = np.indices((size, size), dtype=np.float64)
+    cover = np.zeros((size, size))
+    for dy in offsets:
+        for dx in offsets:
+            cover += (((cols + dx - cx) / rx) ** 2 + ((rows + dy - cy) / ry) ** 2) <= 1.0
+    centre = (((cols + 0.5 - cx) / rx) ** 2 + ((rows + 0.5 - cy) / ry) ** 2) <= 1.0
+    return cover / sub ** 2, centre
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class RegistrationTest(unittest.TestCase):
+    """The registration gates see what the edge gate cannot: a half-pixel shift and a 0.2% scale error."""
+
+    def setUp(self):
+        from herogen.bench import render
+
+        self.r = render
+        self.cover, self.mask = ellipse_coverage(400, 200.0, 210.0, 90.0, 170.0)
+
+    def test_an_aligned_render_is_within_both_gates(self):
+        c, a = self.r.registration(self.cover, self.mask)
+        self.assertLessEqual(c, self.r.CENTROID_MAX_PX)
+        self.assertLessEqual(a, self.r.AREA_RATIO_MAX_DEV)
+
+    def test_a_half_pixel_shift_fails_the_centroid_gate(self):
+        shifted, _ = ellipse_coverage(400, 200.5, 210.0, 90.0, 170.0)
+        c, _ = self.r.registration(shifted, self.mask)
+        self.assertAlmostEqual(c, 0.5, delta=0.05)
+        self.assertGreater(c, self.r.CENTROID_MAX_PX)
+        self.assertEqual(self.r.off_edge_disagreement(shifted, self.mask, self.r.coverage_margin(16)), 0)
+
+    def test_a_scale_error_of_a_fifth_of_a_percent_fails_the_area_gate(self):
+        bigger, _ = ellipse_coverage(400, 200.0, 210.0, 90.0 * 1.002, 170.0 * 1.002)
+        _, a = self.r.registration(bigger, self.mask)
+        self.assertAlmostEqual(a, 0.004, delta=0.0006)
+        self.assertGreater(a, self.r.AREA_RATIO_MAX_DEV)
+
+    def test_the_gates_come_from_the_measured_runs(self):
+        m = self.r.REGISTRATION_MEASURED
+        margin = self.r.REGISTRATION_MARGIN
+        self.assertAlmostEqual(self.r.CENTROID_MAX_PX, round(m["centroid_px"] * margin, 4))
+        self.assertAlmostEqual(self.r.AREA_RATIO_MAX_DEV, round(m["area_ratio_dev"] * margin, 5))
+
+    def test_the_gates_apply_at_the_measured_size_and_are_recorded_below_it(self):
+        bad = {"front": 0.6}
+        for size, gate in ((1024, True), (2048, True), (512, False)):
+            checks = self.r.registration_checks(bad, {"front": 0.01}, size)
+            self.assertEqual([c["gate"] for c in checks], [gate, gate], size)
+            self.assertEqual([c["pass"] for c in checks], [not gate, not gate], size)
+        ok = self.r.registration_checks({"front": 0.05}, {"front": 0.0001}, 1024)
+        self.assertTrue(all(c["pass"] and c["gate"] for c in ok))
+
+    def test_coverage_noise_allowance_follows_the_sample_count(self):
+        self.assertEqual(self.r.coverage_margin(16), 0.125)
+        self.assertEqual(self.r.coverage_margin(64), 0.03125)
+
+
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class CliTest(unittest.TestCase):
     def _main(self, *args):
@@ -508,7 +567,7 @@ class CliTest(unittest.TestCase):
         cases = ((["--size", "0"], "--size"), (["--size", "100000"], "--size"),
                  (["--height", "-1"], "--height"), (["--height", "nan"], "--height"),
                  (["--include", "("], "--include"), (["--exclude", "[a-"], "--exclude"),
-                 (["--samples-lit", "0"], "--samples-lit"))
+                 (["--samples-lit", "0"], "--samples-lit"), (["--samples-flat", "8"], "--samples-flat"))
         with tempfile.TemporaryDirectory() as tmp:
             asset = self._dummy(tmp)
             for args, flag in cases:
@@ -634,8 +693,8 @@ class FacingErrorTest(unittest.TestCase):
         err = io.StringIO()
         out = tempfile.mkdtemp(dir=self.tmp.name)
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            code = main(["render", "--asset", str(asset), "--out", out, "--size", "64", "--samples-flat", "2",
-                         "--samples-lit", "2", *args])
+            code = main(["render", "--asset", str(asset), "--out", out, "--size", "64",
+                         "--samples-flat", "16", "--samples-lit", "2", *args])
         return code, err.getvalue()
 
     def test_include_that_matches_nothing(self):
@@ -658,7 +717,7 @@ class FacingErrorTest(unittest.TestCase):
         run = Path(tempfile.mkdtemp(dir=self.tmp.name))
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = main(["render", "--asset", str(self.rigged), "--out", str(run), "--size", "64",
-                         "--samples-flat", "2", "--samples-lit", "2", "--height", "120"])
+                         "--samples-flat", "16", "--samples-lit", "2", "--height", "120"])
         rec = json.loads((run / "stage-2.json").read_text())
         self.assertEqual(code, 0, json.dumps(rec["checks"]))
         cams = json.loads((run / "cameras.json").read_text())["cameras"]
@@ -668,7 +727,7 @@ class FacingErrorTest(unittest.TestCase):
     def test_overwrite_replaces_a_run_folder_and_its_stale_files(self):
         run = Path(tempfile.mkdtemp(dir=self.tmp.name))
         args = ["render", "--asset", str(self.rigged), "--out", str(run), "--size", "64",
-                "--samples-flat", "2", "--samples-lit", "2"]
+                "--samples-flat", "16", "--samples-lit", "2"]
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(args), 0)
             stale = run / "heldout" / "front-left-34.png"   # a view an older version wrote
@@ -696,7 +755,7 @@ class FacingErrorTest(unittest.TestCase):
         run = Path(self.tmp.name) / "auto"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = main(["render", "--asset", str(armless_legs), "--out", str(run), "--size", "64",
-                         "--samples-flat", "2", "--samples-lit", "2"])
+                         "--samples-flat", "16", "--samples-lit", "2"])
         rec = json.loads((run / "stage-2.json").read_text())
         self.assertEqual(code, 0)
         self.assertEqual(rec["details"]["pose"], "rest")
@@ -729,7 +788,7 @@ class RenderTest(unittest.TestCase):
             run = root / f"run-{key}"
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", str(cls.SIZE),
-                             "--samples-flat", "4", "--samples-lit", "4", "--timeout", "900", *extra])
+                             "--samples-flat", "16", "--samples-lit", "4", "--timeout", "900", *extra])
             cls.runs[key] = (code, run)
 
     @classmethod
