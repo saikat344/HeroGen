@@ -141,7 +141,9 @@ LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 **Cuts and pivots.** Each cut is a plane through a joint (`herogen/blender/split.py`); the pivot is the area
 centroid of the child's largest opening there (largest by area), so it depends only on the cut's shape, not on
 how densely the mesh is sampled along it (the mean of the opening's vertices, used before, moved the
-pencil-sketch hybrid's waist pivot 0.06 studs between a 16k-triangle decimation and the full mesh).
+pencil-sketch hybrid's waist pivot 0.06 studs between a 16k-triangle decimation and the full mesh). A cut vertex
+stays at least 1e-4 studs from both ends of the edge it splits, so a plane through a vertex leaves no sliver for
+welding to collapse.
 
 Stage 4 may then move the neck, waist, elbow, wrist, knee and ankle cuts along their normals by up to half the
 child bone's radius (`herogen/blender/cuts.py`): a cut on a costume ledge (a belt, a hem) leaves the wider side's
@@ -405,7 +407,7 @@ and the scorer checks the same names (`--profile`):
 | `roblox-ingame` | `high.glb` and `low.glb`, each the largest whole-body decimation whose sectioned total fits | `triangles_high` <= 24,000, `triangles_low` <= 6,000 |
 | `roblox-avatar` | one `high.glb` (Roblox makes its own LODs) that meets the triangle, watertight-part and texture limits of Roblox's character body specification; each part group takes, from a ladder of whole-body decimations, the densest candidate that fits its own budget (sections are separate closed meshes, so groups may come from different candidates), with the low cap and cover settings | `triangles_total` <= 10,742; per group `triangles_Head` <= 4,000, `triangles_Torso` (`UpperTorso`, `LowerTorso`) <= 1,750, each arm and leg (three sections) <= 1,248; `watertight_parts` (every part closed and manifold after welding); `texture_max_px` <= 2048 |
 
-Budget gates apply only under a Roblox profile; every other gate (sections, open edges, pivots, joint gaps,
+Budget gates apply only under a Roblox profile; every other gate (sections, open edges, watertight parts, pivots, joint gaps,
 rest IoU, texture) is the same under every profile, applied to the LODs the profile builds. The rest of the
 specification is not built, so a `roblox-avatar` body is not yet a complete avatar body: the R15 bone rig with
 skinning, attachments, facial animation (DynamicHead) and the inner and outer cages for layered clothing; the

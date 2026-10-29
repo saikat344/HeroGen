@@ -87,6 +87,34 @@ class TestSections(SyntheticBase):
         cls.verts, cls.faces, _ = carve.build_mesh(cls.vs, 5.5, 96)
         cls.sk = joints.estimate(cls.vs, 5.5)
 
+    def test_a_dome_over_a_three_vertex_opening_stays_manifold(self):
+        """An opening of three unevenly spaced rim vertices (a small separate cut loop): sampling the dome's ring
+        evenly along it would keep only two points; the cap must still close the part cleanly."""
+        from herogen.blender.score import mesh_sanity
+
+        v = np.array([[0, 0, 0], [0.05, 0, 0], [0.1, 0.02, 0], [0.05, 0.01, -0.1]], float)
+        f = np.array([[0, 2, 3], [2, 1, 3], [1, 0, 3]])          # a tetrahedron missing its top face
+        loop = [0, 1, 2]
+        cp = {"centre": v[:3].mean(axis=0), "dir": np.array([0.0, 0.0, 1.0]), "depth": 0.3, "rings": 2,
+              "ring_points": 12}
+        cv, cf = split.close_section(v, f, [loop], [cp])
+        self.assertTrue(mesh_sanity(cv, cf, 1e-9)["watertight"])
+
+    def test_a_cut_through_a_vertex_leaves_every_part_watertight(self):
+        """A cut plane a hair from a vertex: the cut vertex must not land within the weld tolerance of it, or the
+        sliver between them collapses on welding and opens the part."""
+        from herogen.blender.score import mesh_sanity
+
+        p, n = split.build_rig(self.sk).planes["Waist"]
+        d = (self.verts - p) @ n
+        for i in np.argsort(np.abs(d))[:8]:
+            for eps in (2e-6, -2e-6):
+                secs, _ = split.build_sections(self.verts, self.faces, self.sk, cap="dome", rings=1, ring_points=8,
+                                               cut_offsets={"Waist": float(d[i]) - eps})
+                for name in ("UpperTorso", "LowerTorso"):
+                    sanity = mesh_sanity(secs[name].verts, secs[name].faces, 1e-6 * 5.5)
+                    self.assertTrue(sanity["watertight"], (int(i), eps, name, sanity))
+
     def test_fifteen_closed_sections_with_pivots_inside(self):
         secs, _ = split.build_sections(self.verts, self.faces, self.sk)
         self.assertEqual(list(secs), list(SECTIONS))

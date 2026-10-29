@@ -31,6 +31,9 @@ from .joints import Skeleton
 
 SID = {n: i for i, n in enumerate(SECTIONS)}
 SHOULDER_CUT_OFFSET = 1.0     # in arm radii, along the upper arm (see build_rig)
+# A cut vertex stays at least this far (studs) from both ends of the edge it splits: 18 times the parts' weld
+# tolerance (1e-6 of the height), a few hundredths of a pixel at the views' scale.
+CUT_MIN_STUDS = 1e-4
 HIP_CUT_OFFSET = 0.75         # in thigh radii, along the thigh (see build_rig)
 
 
@@ -257,7 +260,11 @@ def split_mesh(verts: np.ndarray, faces: np.ndarray, sk: Skeleton, cut_offsets: 
         la, lb_ = lab[key[0]], lab[key[1]]
         g = lb.boundary(la, lb_, verts[list(key)])
         t = g[0] / (g[0] - g[1]) if g[0] * g[1] < 0 else 0.5
-        t = float(np.clip(t, 0.0, 1.0))
+        # a vertex that lies almost on the plane would put the new cut vertex on top of it: closer than the weld
+        # tolerance, the sliver between them collapses when the part is welded and leaves boundary edges
+        length = float(np.linalg.norm(verts[key[1]] - verts[key[0]]))
+        lo = CUT_MIN_STUDS / length if length > 2 * CUT_MIN_STUDS else 0.5
+        t = float(np.clip(t, lo, 1.0 - lo))
         p = verts[key[0]] + t * (verts[key[1]] - verts[key[0]])
         cut_key[key] = n0 + len(cut_pos)
         cut_pos.append(p)
@@ -384,6 +391,8 @@ def cap_geometry(rim: np.ndarray, cp: dict):
     seg = np.linalg.norm(np.roll(rim, -1, axis=0) - rim, axis=1)
     t_rim = np.concatenate([[0.0], np.cumsum(seg)]) / max(seg.sum(), 1e-12)   # t of rim vertex i, i=0..m
     sample = np.unique(np.searchsorted(t_rim[:m], np.arange(q) / q, side="left").clip(0, m - 1))
+    if len(sample) < 3:      # a tiny opening (three or four rim vertices, unevenly spaced): ring on every one
+        sample = np.arange(m)
     t_ring = np.concatenate([t_rim[sample], [1.0]])
     w = rim[sample] - c
     rad = np.linalg.norm(w, axis=1)
