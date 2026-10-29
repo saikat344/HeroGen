@@ -39,6 +39,26 @@ python3 -m herogen.pipeline run sketch.png --run-id my-hero --stages 5
 
 Without `--live`, model calls replay from the cache, which is how the tests run.
 
+## Lab
+
+```bash
+python3 -m herogen.lab serve --runs runs --port 8790   # then open http://127.0.0.1:8790/
+```
+
+A local, read-only page for one run at a time, picked from the runs folder:
+
+- The chain from sketch to cover art, turnaround views, held-out view, base mesh and game body, each with its
+  stage's checks (value, comparison, threshold), time and cost.
+- A 3D viewer for `04-body/high.glb` and `low.glb`: unlit or lit, ground grid, a 5.5-stud scale reference, the
+  15 sections with their triangles and pivots (click to highlight or isolate one), triangle totals against the
+  budgets, and pose presets and sliders that turn each section about its pivot.
+- Other bodies in the run (such as `04-body-carve/`) side by side with the same camera, and the per-body table
+  from `05-scores.json` with the held-out view marked unseen. Missing files show as "not run".
+
+The server binds to 127.0.0.1, uses the standard library only, and serves PNG, JPEG, GLB and JSON files from
+inside the runs folder only. The page loads three.js 0.160.0 from jsDelivr through an import map and makes no
+other external requests.
+
 ## Tests
 
 ```bash
