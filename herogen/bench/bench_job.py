@@ -12,8 +12,12 @@ One job renders one asset:
    about the forward axis so it points 5 degrees out from vertical seen from the front (its forward or
    backward lean stays as modelled). Each limb turns as one piece about its root joint; elbows and knees keep
    their rest bend. "rest" keeps the rest pose; "as-shipped" keeps the file's own pose and animation frame.
-4. Freeze the posed meshes into the contract frame (`yaw_deg` turns the figure to face -Y first), scale to
-   `height`, and export `gt_glb`.
+   Before posing, the figure's facing is read from the rig: the right-to-left shoulder (else hip) vector must
+   point along +X, which with +Z up means the figure faces -Y. With no `yaw_deg` the turn that achieves this
+   is found from the rig (to the nearest 90 degrees); a given `yaw_deg` that disagrees with the rig is an
+   error, and an unrigged figure needs `yaw_deg`, since nothing in it says which way it faces.
+4. Freeze the posed meshes into the contract frame (turned by the yaw to face -Y), scale to `height`, and
+   export `gt_glb`.
 5. For every camera: a mask and a depth map by casting one orthographic ray through each pixel centre against
    the frozen mesh, then a flat (unlit base colour) and a lit colour render with Cycles, on a transparent
    background.
@@ -40,6 +44,7 @@ from herogen.bench import cameras as CAM  # noqa: E402
 from herogen.bench import rig as RIG  # noqa: E402
 
 IMAGE_EXTS = (".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".exr")
+FACING_TOLERANCE_DEG = 45.0  # a given yaw must put the rig's left side within this of +X
 POSE_STEPS = 8
 POSE_CONVERGED_DEG = 0.01
 DISTAL_FRACTION = 0.85
@@ -264,6 +269,46 @@ def rotate_bones_world(arm, names, rot3, pivot_world):
     for n, m in targets.items():
         arm.pose.bones[n].matrix = m
     bpy.context.view_layer.update()
+
+
+def rig_left_axis(arms):
+    """World vector from the right to the left shoulder (else hip) joint of the first rig that has both, and
+    how it was found; (None, reason) when no rig names a left and a right limb."""
+    for arm in arms:
+        deform = [b.name for b in arm.data.bones if b.use_deform] or [b.name for b in arm.data.bones]
+        for limb in ("arm", "leg"):
+            left, right = RIG.find_limb_root(deform, limb, "L"), RIG.find_limb_root(deform, limb, "R")
+            if left and right:
+                v = bone_world_head(arm, left) - bone_world_head(arm, right)
+                if math.hypot(v[0], v[1]) > 1e-9:
+                    return v, f"{arm.name}: {right} -> {left}"
+    return None, "no rig names a left and a right arm or leg"
+
+
+def resolve_yaw(arms, given):
+    """The yaw (degrees) that turns the figure to face -Y, and a record of how it was decided."""
+    axis, how = rig_left_axis(arms)
+    if axis is None:
+        if given is None:
+            raise ValueError("the figure has no rig with left and right limbs, so its facing cannot be read; "
+                             "look at it and pass --yaw (0 when it already faces -Y)")
+        return float(given), {"source": "given", "checked": False,
+                              "note": f"unrigged or unnamed limbs ({how})"}
+    measured = -math.degrees(math.atan2(axis[1], axis[0]))     # turns the left axis onto +X
+    snapped = float((round(measured / 90.0) * 90) % 360)
+    record = {"rig_axis": how, "rig_yaw_deg": round(measured % 360, 3), "checked": True}
+    if given is None:
+        yaw, record = snapped, dict(record, source="rig")
+    else:
+        off = CAM.angular_gap(measured, float(given))
+        if off > FACING_TOLERANCE_DEG:
+            raise ValueError(f"--yaw {given:g} disagrees with the rig: it would put the figure's left side "
+                             f"{off:.0f} degrees away from +X (the rig says --yaw {snapped:g}; or leave "
+                             f"--yaw out)")
+        yaw, record = float(given), dict(record, source="given")
+    turned = CAM.yaw_matrix(yaw)[:3, :3] @ axis
+    record["left_axis_after_yaw"] = (turned[:2] / math.hypot(turned[0], turned[1])).round(6).tolist()
+    return yaw, record
 
 
 def a_pose(arms, meshes, yaw, report):
@@ -633,12 +678,13 @@ def main():
     rigs = rigs_of(meshes)
     missing_images = resolve_images(JOB.get("image_dirs", []), report)
     pose_mode = JOB.get("pose", "auto")
-    yaw = CAM.yaw_matrix(float(JOB.get("yaw_deg", 0.0)))
     limbs = []
     if pose_mode != "as-shipped":
         for arm in rigs:
             reset_rig(arm, report)
         bpy.context.view_layer.update()
+    yaw_deg, facing = resolve_yaw(rigs, JOB.get("yaw_deg"))
+    yaw = CAM.yaw_matrix(yaw_deg)
     if JOB.get("bind_unrigged") and rigs:
         bind_unrigged(meshes, report)
     if pose_mode in ("auto", "a-pose") and rigs:
@@ -730,7 +776,8 @@ def main():
         "pose_requested": pose_mode,
         "pose": pose_used,
         "limbs": limbs,
-        "yaw_deg": float(JOB.get("yaw_deg", 0.0)),
+        "yaw_deg": yaw_deg,
+        "facing": facing,
         "contract_scale": float(contract[0, 0]),
         "triangles": int(len(tris)),
         "vertices": int(len(verts)),
@@ -750,4 +797,15 @@ def main():
         json.dump(result, fh, indent=2)
 
 
-main()
+def run():
+    """Input problems (a ValueError) go back to the caller as {"ok": false, "error": ...}, not a traceback."""
+    path = sys.argv[sys.argv.index("--") + 1]
+    stem = path[: -len(".json")] if path.endswith(".json") else path
+    try:
+        main()
+    except ValueError as exc:
+        with open(stem + ".result.json", "w") as fh:
+            json.dump({"ok": False, "error": str(exc)}, fh, indent=2)
+
+
+run()

@@ -47,6 +47,7 @@ POSES = ("auto", "a-pose", "rest", "as-shipped")
 RENDER_MASK_IOU_MIN = 0.97
 HEIGHT_TOLERANCE_PX = 1.0       # front mask height vs height_units * pixels_per_unit
 POSE_TOLERANCE_DEG = 1.0        # achieved limb angle vs the A-pose target
+FACING_MIN_X = 0.999            # cos of the right-to-left axis's angle from +X (about 2.6 degrees)
 
 
 def sha256(path: Path) -> str:
@@ -76,7 +77,10 @@ def run_blender(job: dict, work: Path, log: Path, timeout: float) -> dict:
     if proc.returncode != 0 or not result_path.exists():
         tail = (proc.stdout + proc.stderr)[-2000:]
         raise bl.BlenderError(f"Blender failed (exit {proc.returncode}); log {log}\n{tail}")
-    return json.loads(result_path.read_text())
+    result = json.loads(result_path.read_text())
+    if result.get("ok") is False:
+        raise ValueError(result["error"])
+    return result
 
 
 def composite(rgba_path: Path, background=BACKGROUND) -> tuple[Image.Image, np.ndarray]:
@@ -111,6 +115,17 @@ def view_paths(cam: dict) -> dict[str, str]:
             "depth": f"heldout/{v}-depth.npy"}
 
 
+def facing_check(facing: dict) -> dict:
+    """The rig's right-to-left axis after the yaw must point along +X (so the figure faces -Y). A figure
+    without a named rig is turned by the given yaw alone, which nothing here can confirm: recorded, not
+    gated."""
+    if not facing.get("checked"):
+        return check("facing_left_axis_x", None, None, passed=True, gate=False,
+                     note="no rig with named left and right limbs: yaw given by the operator, checked by eye")
+    x = float(facing["left_axis_after_yaw"][0])
+    return check("facing_left_axis_x", round(x, 6), FACING_MIN_X, axis=facing["rig_axis"])
+
+
 def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
     out = []
     if pose != "a-pose":
@@ -130,7 +145,7 @@ def pose_checks(pose: str, limbs: list[dict]) -> list[dict]:
 
 
 def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude: str | None = None,
-                 yaw_deg: float = 0.0, pose: str = "auto", material_images: dict | None = None,
+                 yaw_deg: float | None = None, pose: str = "auto", material_images: dict | None = None,
                  material_vcols: dict | None = None, image_dirs: list | None = None,
                  bind_unrigged: bool = False,
                  size: int = DEFAULT_SIZE, height: float = HEIGHT_STUDS, samples_flat: int = 16,
@@ -221,6 +236,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
     rec.add(check("render_mask_iou_min", min(ious.values()), RENDER_MASK_IOU_MIN, per_view=ious))
     rec.add(check("missing_images", len(res["missing_images"]), 0, passed=not res["missing_images"],
                   names=res["missing_images"]))
+    rec.add(facing_check(res["facing"]))
     for c in pose_checks(res["pose"], res["limbs"]):
         rec.add(c)
     rec.data["models"] = []
@@ -239,6 +255,7 @@ def render_asset(asset: Path, out: Path, *, include: str | None = None, exclude:
             "pose": res["pose"],
             "limbs": res["limbs"],
             "yaw_deg": res["yaw_deg"],
+            "facing": res["facing"],
             "contract_scale": res["contract_scale"],
             "include": include, "exclude": exclude,
             "material_sources": res["materials"],
