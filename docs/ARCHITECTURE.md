@@ -15,7 +15,7 @@ tested separately.
 | 1 cover art | `herogen/pipeline` | `01-cover.png` |
 | 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view) |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
-| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/low.glb`, `04-body/sections.json`, `04-body/atlas-{high,low}.png`, `04-body/pose-renders/*.png`; for a SAM 3D Objects mesh also the comparison atlases `04-body/atlas-high-{no-source-fallback,side-trust}.png` |
+| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png`, `04-body/pose-renders/*.png`; `04-body/low.glb` and `atlas-low.png` when the profile has a low LOD (`roblox-ingame`); for a SAM 3D Objects mesh also the comparison atlases `04-body/atlas-high-{no-source-fallback,side-trust}.png` |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
 | 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
@@ -44,6 +44,9 @@ of this pipeline.
 ```
 
 `checks` hold measured numbers only. A gate fails when any check with `"gate": true` (default true) fails.
+Stage 3 and 4 records (and `sections.json`) also record the code that built them,
+`"code": {"commit": "<git HEAD sha>", "dirty": <tracked files differ from it>}`, or `null` outside a git
+checkout, so a body can be compared with the version that made it.
 
 ## Views and cameras
 
@@ -68,6 +71,7 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
      "bounds_min": [-0.5, -0.5, 4.5], "bounds_max": [0.5, 0.5, 5.5]}
   ],
   "joints": {"Neck": [0.0, 0.0, 4.5]},
+  "profile": "roblox-ingame",
   "budgets": {"triangles_high_max": 24000, "triangles_low_max": 6000},
   "checks": []
 }
@@ -174,21 +178,29 @@ source (`remote.person_box`, `remote.box_source`) and the runner's code commits 
 numpy only, so any GLB can be compared with ours on the same views (`herogen/blender/score.py`; GLBs are read by
 `herogen/blender/glb.py`, the one GLB reader).
 
-- **Bodies.** With no `--body`, every stage 4 body: `04-body-carve/high.glb` as `carve`, `04-body/high.glb` as
+- **Bodies.** Any number of `--body NAME=GLB`, from anywhere (frozen builds of earlier milestones, other
+  tools' outputs; outside the run only the file name is recorded). A `version.json` next to a GLB is recorded
+  under the body's `"version"`: its `label` and plain fields (`frozen`, `sketch`, `profile`, `note`, and
+  `code`: `{"commit", "dirty"}`). With no `--body`, every stage 4 body: `04-body-carve/high.glb` as `carve`, `04-body/high.glb` as
   `carve` or `hybrid` by its mesh source, `04-body-<x>/high.glb` as `<x>`, and each `atlas-high-<variant>.png`
   next to one as `<name>-<variant>`, the same mesh with that atlas (`variant_of`). `--body NAME=GLB` scores any
   file, `--atlas NAME=PNG` gives it another atlas.
 - **Views.** The four turnaround views at their contract yaw, and every held-out view: each
-  `heldout/<name>.png` with a matching `heldout/<name>-mask.png` (stage 2h makes `front-left-30`, `front-right-30`,
-  `front-left-60` and `front-right-60`; any other name is scored the same way). The scorer takes the files
-  directly in `heldout/`; it does not consult the accepted views of `stage-2h.json` (see Held-out views).
+  `heldout/<name>.png` directly in `heldout/` with a matching `heldout/<name>-mask.png` (stage 2h makes
+  `front-left-30`, `front-right-30`, `front-left-60` and `front-right-60`; any other name is scored the same way).
+  Files in subfolders, such as `review/`, `rejected/` or `archive/`, are not scored, and an image without a mask
+  is skipped; the scorer does not consult the accepted views of `stage-2h.json` (see Held-out views).
 - **Placement.** Turnaround views use stage 3's mapping: one pixel scale (the front mask's height over the
   body's height), u = 0 on each mask's box centre, feet on its bottom edge. Stage 4 bodies are placed as built
   (`"frame": "contract"`), so a stage 4 body is scored with the same mapping and metric as stage 4's gates;
   other GLBs by their own bounding box (`"frame": "fit"`). A held-out view's yaw is searched (2 degrees, then
-  0.5 around the best; front-left views 15 to 75 degrees, front-right -75 to -15, other names all the way
-  round), with scale and offset fitted from the mask's box; front-left and front-right views are also measured
-  at a fixed 45 degrees (`at_fixed_yaw`).
+  0.5 around the best) 25 degrees each side of the target its name gives (`front-left-30`: 5 to 55;
+  `front-right-60`: -85 to -35), except `front-left-34` (the single three-quarter view an earlier stage 2h wrote,
+  asked for at 45 degrees): 15 to 75; other names all the way round. Scale and offset are fitted from the mask's
+  box, and the view is also measured at the target itself (`at_fixed_yaw`; 45 degrees for `front-left-34`). Each
+  held-out row carries `reference` and `measures` from `stage-2h.json` (`measures` is `"consistency"` when the
+  record says `"reference": "generated"`, otherwise both are `null`) and stage 2h's own `status` and
+  `found_yaw_deg` for the view, when it records them.
 - **Measures, per view.** Silhouette IoU; colour error (mean absolute, 0-255) and grey SSIM between a flat render
   of the body's own colours (base-colour texture, factor and vertex colours; nearest surface, no lighting) and
   the view's image, inside both silhouettes as stage 4's texture gates measure them; `seen_shape` (the shape was
@@ -202,6 +214,7 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
 {
   "scored": "2026-10-29T10:00:00-07:00",
   "scorer": "herogen.blender.score",
+  "code": {"commit": "<git HEAD sha>", "dirty": false},
   "method": {"iou": "...", "colour": "...", "heldout_yaw": "..."},
   "views": [{"view": "front", "mask": "masks/front.png", "image": "views/front.png", "heldout": false,
              "yaw_deg": 0.0},
@@ -219,25 +232,51 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
       "front-left-34": {"iou": 0.63, "colour_error": 39.7, "ssim": 0.14, "pixels": 122000, "yaw_deg": 21.5,
                         "seen": false, "seen_shape": false, "seen_colour": false, "scale": 0.98,
                         "yaw_range": [15.0, 75.0], "yaw_at_range_edge": false, "yaw_search": [[15.0, 0.626]],
-                        "at_fixed_yaw": {"45": {"iou": 0.55, "colour_error": 41.5, "ssim": 0.13}}}
+                        "at_fixed_yaw": {"45": {"iou": 0.55, "colour_error": 41.5, "ssim": 0.13}},
+                        "reference": null, "measures": null}
     },
-    "notes": []
+    "notes": [],
+    "version": null
   }]
 }
 ```
 
-Scoring again replaces bodies of the same name and keeps the others. The results page and the lab read `name`,
-`glb`, `triangles`, `atlas`, `variant_of`, `mesh_source`, `joints_source`, `triangles_low` and, per view,
-`iou`, `colour_error`, `ssim`, `yaw_deg`, `scale` and `seen`; every other field is additional.
+`05-scores.json` also records the scorer's own `"code"` version. Scoring again replaces bodies of the same name
+and keeps the others. The results page reads `name`, `glb`, `triangles`, `atlas` and, per view, `iou`,
+`colour_error`, `ssim`, `yaw_deg`, `scale` and `seen`; the lab also reads `variant_of`, `mesh_source`,
+`joints_source` and `triangles_low`; every other field is additional.
 
-## Triangle budgets
+## Target profiles
 
-Stage 4 builds the high and low LODs within 24,000 and 6,000 triangles (`TRIANGLES_HIGH_MAX`,
-`TRIANGLES_LOW_MAX`), and gates on them. The scorer applies no budget unless asked: `--budget NAME=N` sets a
-plain total for one body, and `--profile roblox-avatar` checks Roblox's character body specification: 10,742
-triangles in total; per part group Head 4,000, Torso (`UpperTorso`, `LowerTorso`) 1,750, and each arm and each
-leg (three sections) 1,248, found by mesh name; every part watertight; textures at most 2048 px. A group with no
-mesh of its names is reported with value `null` and not failed.
+The default target is the best-quality body, with no triangle budget; Roblox's budgets are opt-in. Stage 4
+builds to one profile (`python3 -m herogen.blender run --stages 4 --profile ...`, `herogen.blender.PROFILES`)
+and the scorer checks the same names (`--profile`):
+
+| Profile | Stage 4 builds | Budget gates |
+| --- | --- | --- |
+| `best` (default) | `high.glb` from the stage 3 mesh undecimated (full detail); no low LOD | none: `triangles_high` is reported, not gated |
+| `roblox-ingame` | `high.glb` and `low.glb`, each the largest whole-body decimation whose sectioned total fits | `triangles_high` <= 24,000, `triangles_low` <= 6,000 |
+| `roblox-avatar` | one `high.glb` (Roblox makes its own LODs) that meets the triangle, watertight-part and texture limits of Roblox's character body specification; each part group takes, from a ladder of whole-body decimations, the densest candidate that fits its own budget (sections are separate closed meshes, so groups may come from different candidates), with the low cap and cover settings | `triangles_total` <= 10,742; per group `triangles_Head` <= 4,000, `triangles_Torso` (`UpperTorso`, `LowerTorso`) <= 1,750, each arm and leg (three sections) <= 1,248; `watertight_parts` (every part closed and manifold after welding); `texture_max_px` <= 2048 |
+
+Budget gates apply only under a Roblox profile; every other gate (sections, open edges, pivots, joint gaps,
+rest IoU, texture) is the same under every profile, applied to the LODs the profile builds. The rest of the
+specification is not built, so a `roblox-avatar` body is not yet a complete avatar body: the R15 bone rig with
+skinning, attachments, facial animation (DynamicHead) and the inner and outer cages for layered clothing; the
+records list them (`not_built`).
+`stage-4.json` records `"profile": {"name", "lods", "budgets"}`; `sections.json` records `"profile"` and
+`"budgets"` (`null` under `best`; `{"triangles_high_max": 24000, "triangles_low_max": 6000}` under
+`roblox-ingame`; the total, the groups, the texture size, `watertight_parts` and `not_built` under
+`roblox-avatar`), and `"lods"` holds only the LODs built (`triangles_low` of each section is `null` without a
+low LOD). A LOD the profile does not build is removed from `04-body/` if an earlier run left one.
+
+The scorer applies no budget unless asked: `--profile best` adds no checks, `--profile roblox-ingame` checks
+the body's triangles (and its low LOD's, when a `low.glb` sits next to it) against 24,000 and 6,000, and
+`--profile roblox-avatar` checks the specification's triangle, watertight-part and texture limits, finding part
+groups by mesh name (a group with no mesh of its names is reported with value `null`); what the profile does not
+build is listed (`not_built`, `"required": false`), not checked. A profile's `"pass"` is `true` (`"status":
+"pass"`) only when every required check was measured and met, `false` (`"fail"`) when one fails and `null`
+(`"incomplete"`) when one could not be measured: no `low.glb` next to the body under `roblox-ingame`, meshes not
+named after the sections or no texture under `roblox-avatar`. `--budget NAME=N` sets a plain total for one body.
 
 ## Held-out views, mask method and covers
 
@@ -303,6 +342,15 @@ cost, and `cost_usd` counts both (`run_cost_usd` is the run that made the views)
 the body's render, for each held-out view the record accepts; other views the scores file names are listed as
 not accepted (see `herogen/pipeline/results.py` for the format).
 
+The blender scorer (`herogen.blender.score`) takes its held-out views from the folder, not from the record: any
+`heldout/<name>.png` directly in `heldout/` with a matching `heldout/<name>-mask.png` (files in subfolders are not
+scored); a name `front-left-<deg>` or `front-right-<deg>` gives the target yaw it searches around. It does not
+yet check `heldout.accepted_views`, so a view left directly in `heldout/` that the record does not accept (made
+from an earlier turnaround, or whose image changed) is still scored; each row carries the view's `status` from
+the record. A held-out row carries `reference` and `measures` from `stage-2h.json`: when the record says
+`"reference": "generated"`, the row is labelled `"measures": "consistency"`, since a generated view can invent
+detail and a score against it measures consistency with the generated character, not accuracy.
+
 **Mask method.** `views/meta.json` records how each mask was made: `"mask_method": {"front": "sam-3.1", ...}`
 (`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`. A mask falls back to the threshold only
 when the SAM call failed on the Model API; the failure is cached, so a replay falls back the same way. A replay
@@ -310,7 +358,8 @@ miss, a corrupt cache entry or any other error stops the stage.
 
 **Shoulder covers.** Stage 4 adds one cover per shoulder, merged into its owner section (`UpperTorso`) so each
 GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and
-`pieces_high` / `pieces_low` with each piece's triangles. Covers count in the triangle budgets.
+`pieces_high` / `pieces_low` with each piece's triangles. Covers count in the triangle budgets (in the Torso
+group under `roblox-avatar`).
 
 ## Versions
 

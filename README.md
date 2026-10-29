@@ -15,7 +15,7 @@ sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joi
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1 |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Carves a mesh from the four view masks (default), or builds it with SAM 3D Objects from the front view (`--mesh-source sam3d-objects`, which today fails the side views' silhouette gate); finds the joints from the silhouettes (default) or with SAM 3D Body (`--joints sam3d-body`); checks the mesh's silhouettes against every observed view's mask | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
-| 4 game body | Cuts the mesh at the joints into the 15 R15 sections with pivots, shoulder covers, high and low LODs within triangle budgets, turnaround colours baked into one atlas per LOD (a SAM 3D Objects mesh's own texture where no view faces the surface), and a pose test that measures visible joint gaps | Blender |
+| 4 game body | Cuts the mesh at the joints into the 15 R15 sections with pivots and shoulder covers, at the detail a target profile asks for (default `best`: full detail, no triangle budget; `roblox-ingame`: high and low LODs within 24,000 / 6,000 triangles; `roblox-avatar`: one body within the triangle, watertight-part and texture limits of Roblox's character body specification, without its rig, attachments, facial animation or cages), bakes the turnaround colours into one atlas per LOD (a SAM 3D Objects mesh's own texture where no view faces the surface), and runs a pose test that measures visible joint gaps | Blender |
 | scores (after 4) | Scores every body, ours or another tool's GLB, on the turnaround views and every held-out view: silhouette IoU, colour error, SSIM, mesh sanity, and optionally a platform's limits | numpy (`herogen.blender.score`) |
 | 5 results | A static results page with every stage's images, checks, scores, time and cost | code |
 | versions | `python3 -m herogen.versions` freezes a run's body and its records as a write-once, hashed version, then lists, verifies and compares versions (per-view scores on seen and held-out views, triangles, gates, joint gaps) | code |
@@ -59,6 +59,14 @@ python3 -m herogen.blender score --run runs/my-hero
 python3 -m herogen.pipeline run sketch.png --run-id my-hero --stages 5
 ```
 
+Stage 4 builds the best-quality body by default, with no triangle budget. For Roblox, choose a profile:
+`--profile roblox-ingame` (a high and a low LOD within 24,000 and 6,000 triangles) or `--profile roblox-avatar`
+(one body within the triangle, watertight-part and texture limits of Roblox's character body specification:
+10,742 triangles split across the head, torso, arms and legs, watertight parts, textures up to 2048 px). The rest
+of the specification is not built: the R15 bone rig with skinning, attachments, facial animation (DynamicHead)
+and layered-clothing cages, so the body is not yet a complete avatar body. Budget gates apply only under a Roblox
+profile; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#target-profiles).
+
 The hybrid body (SAM 3D Objects shape, SAM 3D Body joints) instead of the carve. Its shape comes from the front
 view alone and does not yet match the side views: on the pencil-sketch run its silhouette IoU is 0.688 left and
 0.691 right against the 0.90 gate (front 0.965, back 0.944), so stage 3 fails and stage 4 needs `--force`:
@@ -81,8 +89,13 @@ including the held-out ones:
 python3 -m herogen.blender score --run runs/my-hero --body other=other-tool.glb
 ```
 
+`--body` may be given any number of times and point anywhere, so earlier milestones' frozen bodies are scored
+against today's on the same views; a `version.json` next to a GLB is recorded with its score (its `label`), and
+every stage record and score file records the code version (`git` commit and whether it was modified) that
+made it.
+
 With no `--body` it scores every stage 4 body in the run. It applies no triangle budget by default; add
-`--profile roblox-avatar` to check Roblox's character body limits (`--profile roblox-ingame` for the in-game budgets).
+`--profile roblox-ingame` or `--profile roblox-avatar` to check a Roblox profile's limits.
 
 ## Lab
 
