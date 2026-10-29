@@ -30,13 +30,15 @@ except ImportError:  # numpy or Pillow missing
 # Builds a box figure in Blender, facing -Y, arms straight out along X (a T-pose), 2 units tall, with a rig
 # (KayKit-style bone names) whose arm and leg bones carry the boxes, and one colour per part: the character's
 # left arm red, its right arm blue. With "cuff", a yellow box around the left forearm that the rig does not
-# deform. Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none>`.
+# deform. With "turned", the whole figure faces +Y instead (a model exported the other way round).
+# Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none|turned>`.
 BUILD = textwrap.dedent('''
     import sys
     import bpy
     import bmesh
 
-    out, rigged, cuff = sys.argv[-3], sys.argv[-2] == "1", sys.argv[-1] == "cuff"
+    out, rigged, extra = sys.argv[-3], sys.argv[-2] == "1", sys.argv[-1]
+    cuff, turned = extra == "cuff", extra == "turned"
     bpy.ops.wm.read_factory_settings(use_empty=True)
     # (name, centre, size, colour, bone)
     PARTS = [
@@ -96,6 +98,8 @@ BUILD = textwrap.dedent('''
             g.add(list(range(len(me.vertices))), 1.0, "REPLACE")
             o.modifiers.new("Armature", "ARMATURE").object = arm
             o.parent = arm
+    if turned:
+        arm.rotation_euler[2] = 3.141592653589793
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True)
 ''')
@@ -126,10 +130,10 @@ TORSO_DEPTH = 0.3
 TORSO_COLOUR = (0.2, 0.7, 0.2)  # linear, as built
 
 
-def build_figure(path: Path, rigged: bool, cuff: bool = False) -> None:
+def build_figure(path: Path, rigged: bool, extra: str = "none") -> None:
     proc = subprocess.run(
         [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD, "--", str(path),
-         "1" if rigged else "0", "cuff" if cuff else "none"], capture_output=True, text=True, timeout=300)
+         "1" if rigged else "0", extra], capture_output=True, text=True, timeout=300)
     if proc.returncode != 0 or not path.exists():
         raise RuntimeError(f"building the test figure failed:\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
 
@@ -145,7 +149,8 @@ class BlendFileTest(unittest.TestCase):
             self.assertTrue(asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:])
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "96",
-                             "--samples-flat", "4", "--samples-lit", "4", "--image", "Legacy=Skin"])
+                             "--samples-flat", "4", "--samples-lit", "4", "--image", "Legacy=Skin",
+                             "--yaw", "0"])
             rec = json.loads((run / "stage-2.json").read_text())
             self.assertEqual(code, 0, json.dumps(rec["checks"]))
             self.assertEqual(rec["details"]["pose"], "as-shipped")
@@ -185,6 +190,45 @@ class CliTest(unittest.TestCase):
         self.assertIn("MATERIAL=VALUE", str(cm.exception.code))
 
 
+def cams_name(cams: dict, azimuth: int) -> str:
+    return next(name for name, c in cams.items() if c["azimuth_deg"] == azimuth)
+
+
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
+class FacingErrorTest(unittest.TestCase):
+    """Facing that cannot be read or that contradicts the rig stops with a clear message, before posing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.rigged, cls.unrigged = Path(cls.tmp.name) / "rigged.glb", Path(cls.tmp.name) / "unrigged.glb"
+        build_figure(cls.rigged, True)
+        build_figure(cls.unrigged, False)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _main(self, asset, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = main(["render", "--asset", str(asset), "--out", os.path.join(self.tmp.name, "r"),
+                         "--size", "64", *args])
+        return code, err.getvalue()
+
+    def test_a_yaw_that_contradicts_the_rig_is_refused(self):
+        code, err = self._main(self.rigged, "--yaw", "180")
+        self.assertEqual(code, 2)
+        self.assertIn("disagrees with the rig", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_an_unrigged_figure_needs_a_yaw(self):
+        code, err = self._main(self.unrigged)
+        self.assertEqual(code, 2)
+        self.assertIn("pass --yaw", err)
+        self.assertNotIn("Traceback", err)
+
+
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class RenderTest(unittest.TestCase):
     """One rigged and one unrigged box figure, rendered small, checked against the geometry they were built
@@ -197,11 +241,12 @@ class RenderTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name)
         cls.runs = {}
-        for key, rigged, cuff in ((True, True, False), (False, False, False), ("cuff", True, True)):
+        cases = ((True, True, "none", []), (False, False, "none", ["--yaw", "0"]),
+                 ("cuff", True, "cuff", ["--bind-unrigged"]), ("turned", True, "turned", []))
+        for key, rigged, build, extra in cases:
             asset = root / f"figure-{key}.glb"
-            build_figure(asset, rigged, cuff)
+            build_figure(asset, rigged, build)
             run = root / f"run-{key}"
-            extra = ["--bind-unrigged"] if cuff else []
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main(["render", "--asset", str(asset), "--out", str(run), "--size", str(cls.SIZE),
                              "--samples-flat", "4", "--samples-lit", "4", "--timeout", "900", *extra])
@@ -314,6 +359,33 @@ class RenderTest(unittest.TestCase):
         self.assertGreater(ry.mean() - rr.min(), 0.5 * (rr.max() - rr.min()))
         self.assertLess(ry.mean(), rr.max())
         self.assertGreater(cy.mean(), self.SIZE / 2)
+
+    def _side_of_red_and_blue(self, run, rel_colour, rel_mask):
+        img = np.asarray(Image.open(run / rel_colour).convert("RGB")).astype(int)
+        mask = np.asarray(Image.open(run / rel_mask)) > 127
+        red = mask & (img[..., 0] > 200) & (img[..., 1] < 120) & (img[..., 2] < 120)
+        blue = mask & (img[..., 2] > 200) & (img[..., 0] < 120) & (img[..., 1] < 120)
+        return red, blue
+
+    def test_a_figure_facing_plus_y_is_turned_round_from_its_rig(self):
+        rec, run = self._record("turned")
+        self.assertEqual(rec["details"]["yaw_deg"], 180.0)
+        self.assertEqual(rec["details"]["facing"]["source"], "rig")
+        cams = {c["view"]: c for c in json.loads((run / "cameras.json").read_text())["cameras"]}
+        for rigged in (True, "turned"):  # built facing -Y, and built facing +Y then turned by the bench
+            _, run = self._record(rigged)
+            # the character's left (red) arm: image right from the front and the front three-quarter views,
+            # image left from the back; nearest the camera from the left side, hidden behind from the right
+            for view in ("front", cams_name(cams, 25), cams_name(cams, 335)):
+                paths = cams[view]["files"]
+                red, blue = self._side_of_red_and_blue(run, paths["colour"], paths["mask"])
+                self.assertGreater(np.nonzero(red)[1].mean(), np.nonzero(blue)[1].mean(), (rigged, view))
+            red, blue = self._side_of_red_and_blue(run, "views/back.png", "masks/back.png")
+            self.assertLess(np.nonzero(red)[1].mean(), np.nonzero(blue)[1].mean(), (rigged, "back"))
+            red, blue = self._side_of_red_and_blue(run, "views/left.png", "masks/left.png")
+            self.assertGreater(red.sum(), blue.sum(), (rigged, "left"))
+            red, blue = self._side_of_red_and_blue(run, "views/right.png", "masks/right.png")
+            self.assertGreater(blue.sum(), red.sum(), (rigged, "right"))
 
     def test_heldout_views_are_not_building_views(self):
         _, run = self._record(True)

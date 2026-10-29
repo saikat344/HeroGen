@@ -28,7 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--pose", default="auto", choices=("auto", "a-pose", "rest", "as-shipped"),
                    help="auto: A-pose when the rig's arms are found, else the rest pose "
                         "(unrigged: as shipped)")
-    r.add_argument("--yaw", type=float, default=0.0, help="degrees about +Z that turn the figure to face -Y")
+    r.add_argument("--yaw", type=float, default=None,
+                   help="degrees about +Z that turn the figure to face -Y; read from the rig when left out "
+                        "(required for a figure without a rig)")
     r.add_argument("--include", help="regex: render the meshes whose names match (hidden ones too)")
     r.add_argument("--exclude", help="regex: leave out the meshes whose names match")
     r.add_argument("--image", action="append", metavar="MATERIAL=IMAGE[@UVMAP]",
