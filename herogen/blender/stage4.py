@@ -220,6 +220,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0) 
     body = run / "04-body"
     (body / "pose-renders").mkdir(parents=True, exist_ok=True)
     (body / "rest-renders").mkdir(parents=True, exist_ok=True)
+    # Comparison atlases are written only for a hybrid body; one left by an earlier run of another mesh source
+    # would be scored as a variant of this body.
+    for stale in body.glob("atlas-high-*.png"):
+        stale.unlink()
     lod_paths, uv_paths = {}, {}
     for lod, secs in lod_secs.items():
         lod_paths[lod] = work / f"04-{lod}.npz"
