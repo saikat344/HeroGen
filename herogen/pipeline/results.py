@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from herogen.pipeline.heldout import accepted_views, stage2_identity
 from herogen.pipeline.runfolder import RunFolder, now_iso
 
 STAGES = [
@@ -19,17 +20,27 @@ STAGES = [
     (4, "game body"),
 ]
 
-# The held-out view's record, reported after stage 2 when it exists.
-HELDOUT_STAGE = ("2h", "held-out view")
+# The held-out views' record, reported after stage 2 when it exists.
+HELDOUT_STAGE = ("2h", "held-out views")
 
 # Images shown per stage beyond its record's `outputs` (stages 3-4 write folders of renders).
 EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
 
-# Scoring (05-scores.json, shown when a run folder holds one): rows in this order, the held-out view last.
-SCORE_VIEWS = ["front", "back", "left", "right", "front-left-34"]
-HELDOUT_VIEW = "front-left-34"
-HELDOUT_IMAGE = "heldout/front-left-34.png"
+# Scoring (05-scores.json, shown when a run folder holds one): the building views in this order, then every
+# held-out view the record accepts (`heldout.accepted_views`: status accepted and the image's recorded
+# SHA-256, never the folder layout), highlighted. Other views the scores file names are listed after them,
+# not highlighted and marked as not accepted.
+BUILD_VIEWS = ["front", "back", "left", "right"]
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+# A record's status when it isn't ok: a stage that stopped early says so (`_Stage.fail`).
+_FAILED = {"error": "error", "running": "did not finish"}
+
+
+def _stale_heldout(run: RunFolder, rec: dict[str, Any]) -> bool:
+    """A held-out record whose views were made from another turnaround than the run's current one."""
+    views = (rec.get("details") or {}).get("views") or {}
+    ids = {d.get("stage2_identity") for d in views.values() if isinstance(d, dict)}
+    return bool(ids - {None}) and ids != {stage2_identity(run)}
 
 
 def _images_for(run: RunFolder, n: int, record: dict[str, Any]) -> list[str]:
@@ -59,7 +70,11 @@ def collect_scores(run: RunFolder) -> dict[str, Any] | None:
             raise TypeError("bodies is not a list")
     except (ValueError, KeyError, TypeError) as e:
         return {"error": f"05-scores.json could not be read ({type(e).__name__})", "bodies": []}
-    heldout_image = HELDOUT_IMAGE if run.exists(HELDOUT_IMAGE) else None
+    images = accepted_views(run)
+    named = sorted({str(v) for b in bodies_in if isinstance(b, dict) and isinstance(b.get("views"), dict)
+                    for v in b["views"] if str(v) not in BUILD_VIEWS})
+    heldout_views = list(images)
+    other_views = [v for v in named if v not in images]
     bodies = []
     for b in bodies_in:
         if not isinstance(b, dict):
@@ -67,24 +82,29 @@ def collect_scores(run: RunFolder) -> dict[str, Any] | None:
         name = str(b.get("name", ""))
         views_in = b.get("views") if isinstance(b.get("views"), dict) else {}
         views = {}
-        for v in SCORE_VIEWS:
+        for v in BUILD_VIEWS + heldout_views + other_views:
             sv = views_in.get(v)
             if not isinstance(sv, dict):
                 continue
             row = {k: _num(sv.get(k)) for k in ("iou", "colour_error", "ssim", "yaw_deg", "scale")}
             row["seen"] = sv.get("seen") if isinstance(sv.get("seen"), bool) else None
             views[v] = row
-        render = f"05-renders/{name}/{HELDOUT_VIEW}.png"
+        renders = {}
+        for v in heldout_views:
+            render = f"05-renders/{name}/{v}.png"
+            # A body or view name only becomes a path when it is a plain file name.
+            if _SAFE_NAME.match(name) and _SAFE_NAME.match(v) and run.exists(render):
+                renders[v] = render
         bodies.append({
             "name": name,
             "glb": str(b.get("glb", "")),
             "triangles": _num(b.get("triangles")),
             "atlas": _num(b.get("atlas")),
             "views": views,
-            # A body name only becomes a path when it is a plain file name.
-            "heldout_render": render if _SAFE_NAME.match(name) and run.exists(render) else None,
+            "heldout_renders": renders,
         })
-    return {"bodies": bodies, "heldout_image": heldout_image}
+    return {"bodies": bodies, "heldout_views": heldout_views, "other_views": other_views,
+            "heldout_images": images}
 
 
 def collect(run: RunFolder) -> dict[str, Any]:
@@ -99,21 +119,24 @@ def collect(run: RunFolder) -> dict[str, Any]:
         if rec is None:
             stages.append({"stage": n, "name": label, "status": "not run"})
             continue
+        stopped = f"Stopped early: {rec['error']}" if rec.get("error") else ""
+        stale = n == HELDOUT_STAGE[0] and _stale_heldout(run, rec)
         total_cost += float(rec.get("cost_usd") or 0.0)
         total_seconds += float(rec.get("seconds") or 0.0)
         stages.append(
             {
                 "stage": n,
                 "name": rec.get("name", label),
-                "status": "pass" if rec.get("ok") else "gate failed",
-                "ok": bool(rec.get("ok")),
+                "status": "stale: stage 2 ran again" if stale else
+                ("pass" if rec.get("ok") else _FAILED.get(rec.get("status"), "gate failed")),
+                "ok": bool(rec.get("ok")) and not stale,
                 "seconds": rec.get("seconds"),
                 "cost_usd": rec.get("cost_usd"),
                 "cost_basis": rec.get("cost_basis", ""),
                 "models": rec.get("models", []),
                 "checks": rec.get("checks", []),
                 "images": _images_for(run, n, rec),
-                "notes": rec.get("notes", ""),
+                "notes": " ".join(x for x in (rec.get("notes", ""), stopped) if x),
                 "label": (rec.get("details") or {}).get("label", ""),
             }
         )
@@ -177,7 +200,7 @@ def render_scores(scores: dict[str, Any]) -> list[str]:
     e = html.escape
     parts = ["<section><h2>Scores</h2>",
              "<p class='meta'>From 05-scores.json. Silhouette IoU, colour error and SSIM inside the masks. "
-             "The highlighted row is the held-out front-left 3/4 view, which no body was built from.</p>"]
+             "Highlighted rows are the held-out views stage 2h accepted, which no body was built from.</p>"]
     if scores.get("error"):
         parts.append(f"<p class='fail'>{e(scores['error'])}</p>")
     for b in scores["bodies"]:
@@ -187,30 +210,35 @@ def render_scores(scores: dict[str, Any]) -> list[str]:
         parts.append(f"<p class='meta'>{e(b['glb'])} · triangles {tri} · atlas {atlas}</p>")
         parts.append("<div class='wide'><table><thead><tr><th>view</th><th>IoU</th><th>colour error</th>"
                      "<th>SSIM</th><th>seen / unseen</th></tr></thead><tbody>")
-        for v in SCORE_VIEWS:
+        heldout = scores.get("heldout_views", [])
+        others = [v for v in scores.get("other_views", []) if v in b["views"]]
+        for v in BUILD_VIEWS + heldout + others:
             row = b["views"].get(v)
-            cls = " class='heldout'" if v == HELDOUT_VIEW else ""
+            cls = " class='heldout'" if v in heldout else ""
             if row is None:
                 parts.append(f"<tr{cls}><td>{e(v)}</td><td colspan='4' class='muted'>not scored</td></tr>")
                 continue
             seen = {True: "seen", False: "unseen", None: "–"}[row["seen"]]
             label = e(v)
-            if v == HELDOUT_VIEW:
+            if v in heldout:
                 extra = []
                 if row["yaw_deg"] is not None:
                     extra.append(f"yaw {row['yaw_deg']:.1f}°")
                 if row["scale"] is not None:
                     extra.append(f"scale {row['scale']:.3f}")
                 label += f" (held out{'; ' + ', '.join(extra) if extra else ''})"
+            elif v in others:
+                label += " (not an accepted held-out view)"
             parts.append(f"<tr{cls}><td>{label}</td><td>{_cell(row['iou'])}</td>"
                          f"<td>{_cell(row['colour_error'], 1)}</td><td>{_cell(row['ssim'])}</td>"
                          f"<td>{seen}</td></tr>")
         parts.append("</tbody></table></div>")
-        if b["heldout_render"]:
+        if b["heldout_renders"]:
             parts.append("<div class='imgs'>")
-            if scores.get("heldout_image"):
-                parts.append(_figure(scores["heldout_image"], "held-out image"))
-            parts.append(_figure(b["heldout_render"], f"{b['name']} render, same view"))
+            for v, render in b["heldout_renders"].items():
+                if v in scores.get("heldout_images", {}):
+                    parts.append(_figure(scores["heldout_images"][v], f"held-out image {v}"))
+                parts.append(_figure(render, f"{b['name']} render, {v}"))
             parts.append("</div>")
     parts.append("</section>")
     return parts

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 from PIL import Image
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,11 +20,12 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import heldout, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import run_pipeline  # noqa: E402
-from herogen.pipeline.client import ModelClient  # noqa: E402
+from herogen.pipeline.client import ApiError, ModelClient, ReplayMiss  # noqa: E402
 from herogen.pipeline.results import stage5_results  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder, runs_root  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI, _decode_data_url, _img  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
+from test_herogen_pipeline_heldout_synth import figure, turnaround  # noqa: E402
 
 BUILD_FILES = ["00-sketch.png", "01-cover.png", "02-turnaround.png", "stage-0.json", "stage-1.json",
                "stage-2.json", "views/meta.json"] + [f"views/{v}.png" for v in stages.ALL_VIEWS] \
@@ -74,7 +76,7 @@ class HeldoutTest(unittest.TestCase):
         (run / "stage-2h.json").unlink()
         shutil.rmtree(run / "heldout")
 
-    def test_both_views_follow_stage2(self):
+    def test_four_views_follow_stage2(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2, 5]), 0)
         run = self.root / "r"
         meta = json.loads((run / "views/meta.json").read_text())
@@ -85,8 +87,12 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(rec["details"]["accepted_views"], VIEWS)
         self.assertEqual(rec["details"]["reference"], "generated")
         self.assertIn("consistency", rec["details"]["reference_note"])
-        self.assertEqual(rec["details"]["build_azimuths_deg"], [0.0, 90.0, 180.0, 270.0])
+        self.assertEqual(rec["details"]["build_azimuths_deg"], [45.0 * i for i in range(8)])
         self.assertEqual(rec["details"]["azimuth_clearance_deg"], 10.0)
+        self.assertEqual(rec["details"]["fit_error_deg"], [-2.0, 1.0])
+        self.assertEqual(rec["details"]["checks_version"], heldout.checks_version())
+        self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")),
+                         {v.name: heldout.view_paths(v)["image"] for v in heldout.VIEWS})
         for view in heldout.VIEWS:
             files = heldout.view_paths(view)
             self.assertEqual(files["image"], f"heldout/{view.name}.png")
@@ -99,10 +105,24 @@ class HeldoutTest(unittest.TestCase):
             self.assertEqual(imaging.bbox(imaging.from_mask_image(mask))[3], front[3])
             d = rec["details"]["views"][view.name]
             self.assertEqual((d["status"], d["files"], d["kept_attempt"]), ("accepted", files, 0))
+            self.assertEqual(d["image_sha256"], heldout.file_sha256(run / files["image"]))
+            self.assertEqual(d["stage2_identity"], heldout.stage2_identity(RunFolder(self.root, "r")))
+            measured0 = d["attempts"][0]["measured"]
+            fit0 = measured0["fit"][f"facing_{view.side}"]
+            self.assertEqual(measured0["found_yaw_range_deg"], sorted([fit0["yaw_deg"], fit0["plain_yaw_deg"]]))
+            lo, hi = measured0["true_yaw_range_deg"]
+            self.assertLess(lo, hi)
             self.assertEqual(d["mask_method"], "sam-3.1")
-            self.assertEqual(d["prompt"], view.prompt)
+            first = d["attempts"][0]
+            self.assertEqual(first["requested_yaw_deg"], view.yaw_deg)  # the first request is the target
+            self.assertEqual(first["pose_reference"],
+                             "views/front.png" if abs(view.yaw_deg) < 50 else f"views/{view.side}.png")
+            for rel in d["kept_inputs"].values():
+                self.assertTrue((run / rel).exists(), rel)
             yaw = d["found_yaw_deg"]
-            self.assertTrue(30 <= -view.facing * yaw <= 55, yaw)  # the fake turns the figure 45 degrees
+            self.assertEqual(-view.facing * yaw, abs(yaw))  # facing the view's way
+            self.assertTrue(view.window_deg[0] <= abs(yaw) <= view.window_deg[1], yaw)  # turned as asked
+            self.assertEqual(d["target_yaw_deg"], view.yaw_deg)
             measured = d["attempts"][0]["measured"]
             self.assertEqual(measured["facing_votes"]["landmarks"], 1)
             self.assertEqual(measured["facing_votes"]["toes"], 1)
@@ -112,9 +132,11 @@ class HeldoutTest(unittest.TestCase):
             self.assertGreaterEqual(checks[f"{view.name}.height_agreement_front"]["value"], 0.99)
             self.assertTrue(all(c["pass"] for c in checks.values()))
         self.assertIsNone(rec["details"]["profile_face_offset"])
-        self.assertAlmostEqual(rec["cost_usd"], 2 * COST_PER_GENERATION + COST_PROFILE_FACES)
-        self.assertNotEqual(heldout.VIEWS[0].prompt, heldout.VIEWS[1].prompt)
+        self.assertAlmostEqual(rec["cost_usd"], len(VIEWS) * COST_PER_GENERATION + COST_PROFILE_FACES)
+        prompts = [rec["details"]["views"][v]["attempts"][0]["prompt"] for v in VIEWS]
+        self.assertEqual(len(set(prompts)), len(VIEWS))
         self.assertFalse((run / "heldout/rejected").exists() or (run / "heldout/review").exists())
+        self.assertFalse((run / heldout.STAGING_DIR).exists())
         # Stage 2 itself is unchanged by the held-out views.
         s2 = json.loads((run / "stage-2.json").read_text())
         self.assertNotIn("heldout", json.dumps(s2["outputs"]))
@@ -122,7 +144,7 @@ class HeldoutTest(unittest.TestCase):
         res = json.loads((run / "results.json").read_text())
         self.assertEqual([s["stage"] for s in res["stages"]], [0, 1, 2, "2h", 3, 4])
         html = (run / "results.html").read_text()
-        for name in VIEWS:  # the page shows both, and the first stays where older pages read it
+        for name in VIEWS:  # the page shows all four
             self.assertIn(f"heldout/{name}.png", html)
 
     def test_heldout_only_on_existing_run(self):
@@ -141,18 +163,22 @@ class HeldoutTest(unittest.TestCase):
 
         api.post = record
         self.assertEqual(self._live(api, "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh-cache")), 0)
-        self.assertEqual(api.prompts, [v.prompt for v in heldout.VIEWS])  # no sheet, cover or top
-        # Each view is an edit of the cover with the turnaround's front view as the pose.
+        # One generation per view (no sheet, cover or top), each from the cover, a pose reference and a
+        # turn guide, all the cover's size.
+        self.assertEqual(len(api.prompts), len(VIEWS))
         cover = _img(run / "01-cover.png").size
-        self.assertEqual(inputs, [[cover, cover], [cover, cover]])
-        self.assertEqual(self._rec()["details"]["inputs"], ["01-cover.png", "heldout/pose-reference.png"])
-        # The pose reference holds the front view's figure, centred, at the set fill of the height or width.
-        ref = imaging.bbox(imaging.threshold_mask(_img(run / "heldout/pose-reference.png")))
-        w, h = imaging.box_size(ref)
-        self.assertTrue(abs(h / cover[1] - heldout.POSE_REFERENCE_FILL) <= 0.01
-                        or abs(w / cover[0] - heldout.POSE_REFERENCE_MAX_WIDTH) <= 0.01, (w, h))
-        self.assertLessEqual(abs((ref[0] + ref[2]) - cover[0]), 2)
-        self.assertEqual(api.calls, ["responses"] * 4 + (["images/edits"] + ["responses"] * 3) * 2)
+        self.assertEqual(inputs, [[cover] * 3] * len(VIEWS))
+        for view in heldout.VIEWS:
+            # The pose reference and the guide stand at the set fill of the height, centred.
+            for rel in self._rec()["details"]["views"][view.name]["kept_inputs"].values():
+                if "inputs/" not in rel:
+                    continue
+                box = imaging.bbox(imaging.threshold_mask(_img(run / rel)))
+                w, h = imaging.box_size(box)
+                self.assertTrue(abs(h / cover[1] - heldout.POSE_REFERENCE_FILL) <= 0.02
+                                or abs(w / cover[0] - heldout.POSE_REFERENCE_MAX_WIDTH) <= 0.01, (rel, w, h))
+                self.assertLessEqual(abs((box[0] + box[2]) - cover[0]), 4, rel)
+        self.assertEqual(api.calls, ["responses"] * 4 + (["images/edits"] + ["responses"] * 3) * len(VIEWS))
         self.assertEqual(self._snapshot(run), before)
         for view in heldout.VIEWS:
             self.assertTrue((run / heldout.view_paths(view)["image"]).exists())
@@ -175,7 +201,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertFalse(rec["ok"])
         self.assertEqual(rec["details"]["accepted_views"], [])
         for view in heldout.VIEWS:
-            self.assertEqual(api.prompts.count(view.prompt), heldout.ATTEMPTS)
+            self.assertEqual(len(rec["details"]["views"][view.name]["attempts"]), heldout.ATTEMPTS)
             d = rec["details"]["views"][view.name]
             self.assertEqual(d["status"], "rejected")
             self.assertEqual(len(d["attempts"]), heldout.ATTEMPTS)
@@ -190,15 +216,45 @@ class HeldoutTest(unittest.TestCase):
         return rec
 
     def test_wrong_facing_retries_and_fails_alone(self):
-        rec = self._assert_rejected(FakeAPI(heldout_yaw=-45.0), "facing_cues_against")
-        votes = rec["details"]["views"]["front-left-34"]["attempts"][0]["measured"]["facing_votes"]
+        rec = self._assert_rejected(FakeAPI(heldout_yaw=-30.0), "facing_cues_against")
+        votes = rec["details"]["views"]["front-left-30"]["attempts"][0]["measured"]["facing_votes"]
         self.assertEqual(votes, {"landmarks": -1, "toes": -1, "head": 0})
+
+    def test_under_turning_model_is_asked_for_more(self):
+        # A model that turns three quarters of what it is asked: each attempt adds the measured shortfall.
+        self.assertEqual(self._live(FakeAPI(heldout_gain=0.75), "r", [0, 1, 2]), 0)
+        rec = self._rec()
+        self.assertEqual(rec["details"]["accepted_views"], VIEWS)
+        for view in heldout.VIEWS:
+            tried = rec["details"]["views"][view.name]["attempts"]
+            self.assertGreater(len(tried), 1)
+            asked = [abs(a["requested_yaw_deg"]) for a in tried]
+            self.assertEqual(asked[0], abs(view.yaw_deg))
+            self.assertEqual(asked, sorted(asked))
+            for a, b in zip(tried, tried[1:]):  # the next request is the last one plus the shortfall
+                want = abs(a["requested_yaw_deg"]) + abs(view.yaw_deg) - abs(a["measured"]["found_yaw_deg"])
+                self.assertAlmostEqual(abs(b["requested_yaw_deg"]), min(heldout.MAX_REQUEST_DEG, want))
+            self.assertEqual(len({a["sample"] for a in tried}), len(tried))
+            if abs(tried[-1]["requested_yaw_deg"]) >= heldout.PROFILE_REFERENCE_FROM_DEG:
+                self.assertEqual(tried[-1]["pose_reference"], f"views/{view.side}.png")
 
     def test_stride_rejected(self):
         self._assert_rejected(FakeAPI(heldout_pose="stride"), "pose_landmark_rms")
 
-    def test_arms_down_rejected(self):
-        self._assert_rejected(FakeAPI(heldout_pose="down"), "pose_landmark_rms")
+    def test_arms_down_never_accepted(self):
+        self.assertEqual(self._live(FakeAPI(heldout_pose="down"), "r", [0, 1, 2]), 2)
+        rec = self._rec()
+        self.assertEqual(rec["details"]["accepted_views"], [])
+        for view in heldout.VIEWS:
+            d = rec["details"]["views"][view.name]
+            self.assertEqual(len(d["attempts"]), heldout.ATTEMPTS)
+            failed = [c["name"] for c in d["attempts"][d["kept_attempt"]]["checks"] if not c["pass"]]
+            self.assertIn("pose_landmark_rms_clear", failed)
+            # The coarse fake figure's arms hang half hidden at 60 degrees (0.0199, just inside review); the
+            # synthetic-humanoid tests reject every arms-down pose.
+            if abs(view.yaw_deg) == 30:
+                self.assertEqual(d["status"], "rejected")
+                self.assertIn("pose_landmark_rms", failed)
 
     def test_front_on_view_is_not_held_out(self):
         self._assert_rejected(FakeAPI(heldout_yaw=0.0), "found_yaw_clear_of_build_azimuths_deg")
@@ -225,16 +281,230 @@ class HeldoutTest(unittest.TestCase):
     def test_rerun_replaces_stale_files(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
         run = self.root / "r"
-        self.assertEqual(self._live(FakeAPI(heldout_yaw=-45.0), "r", ["2h"],
+        self.assertEqual(self._live(FakeAPI(heldout_yaw=-30.0), "r", ["2h"],
                                     cache=str(Path(self.tmp.name) / "other-cache")), 2)
         for view in heldout.VIEWS:
             for rel in heldout.view_paths(view).values():
                 self.assertFalse((run / rel).exists(), rel)
             self.assertTrue((run / heldout.view_paths(view, "rejected")["image"]).exists())
+        # A file an earlier version of the stage wrote and listed (an old view name) goes too.
+        Image.new("RGB", (8, 8), "white").save(run / "heldout/front-left-34.png")
+        rec = self._rec()
+        rec["outputs"].append("heldout/front-left-34.png")
+        (run / "stage-2h.json").write_text(json.dumps(rec))
         self.assertEqual(self._live(FakeAPI(), "r", ["2h"]), 0)  # replays the first, accepted, generations
+        self.assertFalse((run / "heldout/front-left-34.png").exists())
         for view in heldout.VIEWS:
             self.assertTrue((run / heldout.view_paths(view)["image"]).exists())
         self.assertFalse((run / "heldout/rejected").exists())
+
+    def test_wide_figure_on_a_portrait_canvas(self):
+        # A 2:3 portrait sketch with an A-pose figure 0.84 as wide as tall: the pose reference is held to the
+        # canvas width, and the guide is drawn at the same scale, so the figure the model draws at the guide's
+        # size maps back to the front view's height (it was about 11% too tall, failing the height check).
+        paint(place(figure_mask(200, "front"), (300, 450), (66, 125)), colour=(90, 90, 90)).save(self.sketch)
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run, rec = self.root / "r", self._rec()
+        self.assertEqual(rec["details"]["accepted_views"], VIEWS)
+        cover = _img(run / "01-cover.png").size
+        self.assertEqual(cover, (300, 450))
+        for view in heldout.VIEWS:
+            d = rec["details"]["views"][view.name]
+            boxes = {k: imaging.bbox(imaging.threshold_mask(_img(run / d["kept_inputs"][k])))
+                     for k in ("pose_reference", "turn_guide")}
+            heights = {k: imaging.box_size(b)[1] for k, b in boxes.items()}
+            self.assertLessEqual(abs(heights["pose_reference"] - heights["turn_guide"]), 2, (view.name, heights))
+            for b in boxes.values():
+                self.assertLessEqual(imaging.box_size(b)[0], heldout.POSE_REFERENCE_MAX_WIDTH * cover[0] + 2)
+            checks = {c["name"]: c["value"] for c in rec["checks"]}
+            self.assertGreaterEqual(checks[f"{view.name}.height_agreement_front"], 0.98, view.name)
+
+    def _drop_cached(self, cache: Path, text: str) -> None:
+        for p in sorted(cache.glob("*.json")):
+            if json.loads(p.read_text())["request"].get("text") == text:
+                p.unlink()
+                return
+        raise AssertionError(f"no cached {text!r} call")
+
+    def test_partial_cache_is_an_error_not_a_lost_vote(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        self._drop_cached(self.root / "_cache", "face")  # the first one: a profile view's face
+        self.assertEqual(self._replay("r2", [0, 1, 2]), 1)
+        rec = self._rec("r2")
+        self.assertFalse(rec["ok"])
+        self.assertEqual(rec["status"], "error")
+        self.assertIn("ReplayMiss", rec["error"])
+
+    def test_api_error_on_the_face_needs_review(self):
+        class Broken:
+            def segment(self, *_a):
+                raise ApiError("responses failed: HTTP 500")
+
+        out = heldout.measure_face(Broken(), None, np.ones((8, 8), bool))
+        self.assertTrue(out["api_error"])
+        self.assertIsNone(out["offset"])
+
+        class Missing:
+            def segment(self, *_a):
+                raise ReplayMiss("no cached SAM response")
+
+        with self.assertRaises(ReplayMiss):
+            heldout.measure_face(Missing(), None, np.ones((8, 8), bool))
+
+        class Bug:
+            def segment(self, *_a):
+                raise TypeError("a bug, not a measurement")
+
+        with self.assertRaises(TypeError):
+            heldout.measure_face(Bug(), None, np.ones((8, 8), bool))
+        t = turnaround(figure("a"))
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        from test_herogen_pipeline_heldout_synth import turned_mask  # noqa: PLC0415
+
+        seen = turned_mask(figure("a"), 30)
+        for face, profile_error in ((out, False), ({"offset": None}, True)):
+            checks, _ = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.3, 0.2, face,
+                                            None, profile_face_error=profile_error)
+            self.assertEqual(heldout.view_status(checks), "needs review")
+            self.assertEqual([c["name"] for c in checks if not c["pass"]], ["head_cue_measured"])
+
+    def test_live_api_failure_replays_the_same_way(self):
+        api = FakeAPI()
+        post, faces = api.post, []
+
+        def flaky(c, endpoint, body):
+            if endpoint == "responses" and body["input"][0]["content"][0]["text"] == "face":
+                faces.append(1)
+                if len(faces) == 3:  # the first held-out view's face call
+                    raise ApiError("responses failed: HTTP 500")
+            return post(c, endpoint, body)
+
+        api.post = flaky
+        live = self._live(api, "r", [0, 1, 2])
+        self.assertEqual(self._replay("r2", [0, 1, 2]), live)
+        a, b = self._rec("r"), self._rec("r2")
+        self.assertEqual([(c["name"], c["value"]) for c in a["checks"]], [(c["name"], c["value"]) for c in b["checks"]])
+        face = b["details"]["views"]["front-left-30"]["attempts"][0]["measured"]["face"]
+        self.assertTrue(face["api_error"])
+        self.assertIn("HTTP 500", face["error"])
+
+    def test_error_mid_stage_keeps_the_earlier_files(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        old = self._rec()
+        self.assertTrue(old["ok"])
+        before = {rel: (run / rel).read_bytes() for rel in old["outputs"]}
+        api = FakeAPI(heldout_yaw=-30.0)  # a re-run that would reject every view, then fails part-way
+        post, edits = api.post, []
+
+        def flaky(c, endpoint, body):
+            if endpoint == "images/edits":
+                edits.append(1)
+                if len(edits) == 3:
+                    raise RuntimeError("connection reset")
+            return post(c, endpoint, body)
+
+        api.post = flaky
+        self.assertEqual(self._live(api, "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh")), 1)
+        rec = self._rec()
+        self.assertEqual((rec["ok"], rec["status"]), (False, "error"))
+        self.assertIn("connection reset", rec["error"])
+        # The paid calls of the failed run are in the record: 4 profile SAM calls, then front-left-30's two
+        # generations before the third image call failed (the second drew the same image, so its 3 SAM calls
+        # came from the cache).
+        stop = rec["stopped_runs"][-1]
+        live = [c for c in stop["calls"] if not c["cached"]]
+        self.assertEqual(len(live), 4 + 4 + 1)
+        self.assertAlmostEqual(stop["cost_usd"], COST_PROFILE_FACES + COST_PER_GENERATION + IMG)
+        # The earlier run's calls and cost are kept, and the total counts both.
+        self.assertEqual(rec["calls"], old["calls"])
+        self.assertAlmostEqual(rec["run_cost_usd"], old["cost_usd"])
+        self.assertAlmostEqual(rec["cost_usd"], old["cost_usd"] + stop["cost_usd"])
+        self.assertEqual([r["status"] for r in rec["stopped_runs"]], ["error"])
+        res = stage5_results(RunFolder(self.root, "r"))
+        self.assertEqual({s["stage"]: s["status"] for s in res["stages"]}["2h"], "error")
+        # The next run that finishes counts the stopped one too.
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh2")), 0)
+        done = self._rec()
+        self.assertAlmostEqual(done["cost_usd"], done["run_cost_usd"] + stop["cost_usd"])
+        self.assertEqual([r["started"] for r in done["stopped_runs"]], [stop["started"]])
+        # The earlier run's views and files are untouched, and still what a scorer reads.
+        self.assertEqual(rec["details"], old["details"])
+        self.assertEqual(rec["started"], old["started"])  # the record still describes the earlier run
+        self.assertEqual({rel: (run / rel).read_bytes() for rel in old["outputs"]}, before)
+        self.assertEqual(sorted(heldout.accepted_views(RunFolder(self.root, "r"))), sorted(VIEWS))
+        self.assertFalse((run / heldout.STAGING_DIR).exists())
+
+    def test_record_marked_running_and_files_kept_until_done(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        old = self._rec()
+        files = sorted(p.name for p in (run / "heldout").rglob("*.png"))
+        seen = {}
+
+        def stop(*_a):
+            seen["rec"] = self._rec()
+            seen["files"] = sorted(p.name for p in (run / "heldout").rglob("*.png"))
+            seen["accepted"] = heldout.accepted_views(RunFolder(self.root, "r"))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(heldout, "_profile_face", stop), self.assertRaises(KeyboardInterrupt):
+            heldout.stage2h_heldout(RunFolder(self.root, "r"), ModelClient(self.root / "_cache"))
+        self.assertEqual(seen["rec"]["status"], "running")
+        self.assertEqual((seen["rec"]["outputs"], seen["rec"]["details"]), (old["outputs"], old["details"]))
+        self.assertEqual(seen["files"], files)
+        self.assertEqual(seen["accepted"], {})  # nothing is scored while the stage runs
+        self.assertEqual(sorted(heldout.accepted_views(RunFolder(self.root, "r"))), sorted(VIEWS))  # after: kept
+        self.assertEqual(self._rec()["status"], "error")
+        self.assertIn("KeyboardInterrupt", self._rec()["error"])
+        self.assertEqual(sorted(p.name for p in (run / "heldout").rglob("*.png")), files)
+
+    def test_time_limit(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        with self.assertRaises(heldout.StageTimeLimit):
+            heldout.stage2h_heldout(RunFolder(self.root, "r"), ModelClient(self.root / "_cache"), time_limit_s=0.0)
+        rec = self._rec()
+        self.assertEqual(rec["status"], "error")
+        self.assertIn("time limit", rec["error"])
+        self.assertEqual(heldout.TIME_LIMIT_S, 1800.0)
+
+    def test_listed_outputs_outside_heldout_are_never_deleted(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        rec = self._rec()
+        rec["outputs"] += ["heldout/../stage-2.json", "heldout/inputs/../../01-cover.png", "/etc/hosts",
+                           "views/front.png"]
+        (run / "stage-2h.json").write_text(json.dumps(rec))
+        before = self._snapshot(run)
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"]), 0)
+        self.assertEqual(self._snapshot(run), before)
+        self.assertEqual(heldout.heldout_rel("heldout/./a/../b.png"), "heldout/b.png")
+        for bad in ("heldout/../x.png", "heldout/a/../../x", "/heldout/x", "heldout", "views/x.png", None, 3,
+                    "heldout\\..\\x"):
+            self.assertIsNone(heldout.heldout_rel(bad), bad)
+
+    def test_scoring_reads_accepted_views_from_the_record(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        Image.new("RGB", (8, 8), "red").save(run / "heldout/front-left-30.png")  # not the image checked
+        Image.new("RGB", (8, 8), "red").save(run / "heldout/front-left-45.png")  # never recorded
+        Image.new("RGB", (8, 8), "red").save(run / "heldout/front-left-45-mask.png")
+        self.assertEqual(sorted(heldout.accepted_views(RunFolder(self.root, "r"))), sorted(VIEWS[1:]))
+
+    def test_checks_version_follows_constants_and_code(self):
+        base = heldout.checks_version()
+        self.assertEqual(heldout.checks_version(), base)
+        with mock.patch.object(heldout, "POSE_RMS_PASS", 0.01):
+            self.assertNotEqual(heldout.checks_version(), base)
+        with mock.patch.object(heldout, "LEG_BANDS", {**heldout.LEG_BANDS, "knee": (0.67, 0.74)}):
+            self.assertNotEqual(heldout.checks_version(), base)
+
+        def view_status(checks):  # same name, other code
+            return "accepted"
+
+        with mock.patch.object(heldout, "view_status", view_status):
+            self.assertNotEqual(heldout.checks_version(), base)
+        self.assertEqual(heldout.checks_version(), base)
 
     def test_needs_a_passed_stage2(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1]), 0)
@@ -277,11 +547,15 @@ class ScoresPageTest(unittest.TestCase):
         Image.new("RGB", (8, 8), "white").save(self.run.file("heldout/front-left-34.png"))
         Image.new("RGB", (8, 8), "grey").save(self.run.file("05-renders/carve/front-left-34.png"))
         Image.new("RGB", (8, 8), "grey").save(self.run.file("05-renders/evil/front-left-34.png"))
+        # A record written before per-view statuses: one view, accepted when the stage passed.
+        self.run.write_stage({"stage": "2h", "name": "heldout", "ok": True, "seconds": 1.0, "cost_usd": 0.0,
+                              "outputs": ["heldout/front-left-34.png"], "checks": [],
+                              "details": {"view": "front-left-34"}})
         data = stage5_results(self.run)
         bodies = {b["name"]: b for b in data["scores"]["bodies"]}
-        self.assertEqual(bodies["carve"]["heldout_render"], "05-renders/carve/front-left-34.png")
-        self.assertIsNone(bodies["hybrid"]["heldout_render"])
-        self.assertIsNone(bodies["../evil"]["heldout_render"])
+        self.assertEqual(bodies["carve"]["heldout_renders"], {"front-left-34": "05-renders/carve/front-left-34.png"})
+        self.assertEqual(bodies["hybrid"]["heldout_renders"], {})
+        self.assertEqual(bodies["../evil"]["heldout_renders"], {})
         html = (self.run.path / "results.html").read_text()
         self.assertNotIn("<script", html.lower())
         self.assertEqual(html.count("<tr class='heldout'>"), 3)
@@ -290,7 +564,8 @@ class ScoresPageTest(unittest.TestCase):
         self.assertIn("atlas 2048 px", html)
         self.assertIn("src='heldout/front-left-34.png'", html)
         self.assertIn("src='05-renders/carve/front-left-34.png'", html)
-        self.assertEqual(html.count("src='heldout/front-left-34.png'"), 1)  # only beside a body with a render
+        scores_html = html.split("<h2>Scores</h2>", 1)[1]
+        self.assertEqual(scores_html.count("src='heldout/front-left-34.png'"), 1)  # only beside a rendered body
         self.assertNotIn("../evil/", html)
         self.assertIn("<h3>../evil</h3>", html)
         # Missing views of a body are shown as not scored, rows stay in order.
@@ -299,6 +574,57 @@ class ScoresPageTest(unittest.TestCase):
         firsts = [row.split("<td>", 1)[1].split("</td>", 1)[0].split(" ")[0] for row in hybrid.split("<tr")[2:]]
         self.assertEqual(firsts, ["front", "back", "left", "right", "front-left-34"])
         self.assertIn("unseen", hybrid)
+
+    def _record(self, views: dict) -> None:
+        ident = heldout.stage2_identity(self.run)
+        out = {}
+        for name, (status, img, good_hash) in views.items():
+            Image.new("RGB", (8, 8), "white").save(self.run.file(img))
+            sha = heldout.file_sha256(self.run.path / img) if good_hash else "0" * 64
+            out[name] = {"status": status, "files": {"image": img}, "image_sha256": sha, "stage2_identity": ident}
+        self.run.write_stage({"stage": "2h", "name": "heldout", "ok": False, "seconds": 1.0, "cost_usd": 0.0,
+                              "outputs": [], "checks": [], "details": {"views": out}})
+
+    def test_every_accepted_heldout_view(self):
+        # Accepted in the record with a matching image: shown. Accepted but the image changed, in review, or
+        # only on disk (an image and a mask nobody recorded): not shown as held out.
+        self._record({"front-left-30": ("accepted", "heldout/front-left-30.png", True),
+                      "front-right-30": ("accepted", "heldout/front-right-30.png", True),
+                      "front-left-60": ("accepted", "heldout/front-left-60.png", False),
+                      "front-right-60": ("needs review", "heldout/review/front-right-60.png", True)})
+        for rel in ("heldout/front-left-45.png", "heldout/front-left-45-mask.png"):
+            Image.new("RGB", (8, 8), "white").save(self.run.file(rel))
+        for v in ("front-left-30", "front-right-30", "front-left-60", "front-left-45"):
+            Image.new("RGB", (8, 8), "grey").save(self.run.file(f"05-renders/carve/{v}.png"))
+
+        def row(iou):
+            return {"iou": iou, "colour_error": 7.0, "ssim": 0.85, "seen": False, "yaw_deg": 30.0}
+
+        self.run.write_json("05-scores.json", {"bodies": [
+            {"name": "carve", "glb": "04-body/high.glb", "triangles": 1, "atlas": 1024,
+             "views": {"front": {"iou": 0.9}, "front-left-30": row(0.81), "front-right-30": row(0.82),
+                       "front-left-60": row(0.7)}}]})
+        data = stage5_results(self.run)
+        self.assertEqual(data["scores"]["heldout_views"], ["front-left-30", "front-right-30"])
+        self.assertEqual(data["scores"]["other_views"], ["front-left-60"])
+        self.assertEqual(data["scores"]["heldout_images"], {"front-left-30": "heldout/front-left-30.png",
+                                                           "front-right-30": "heldout/front-right-30.png"})
+        self.assertEqual(list(data["scores"]["bodies"][0]["heldout_renders"]), ["front-left-30", "front-right-30"])
+        html = (self.run.path / "results.html").read_text()
+        self.assertEqual(html.count("<tr class='heldout'>"), 2)
+        self.assertIn("front-left-60 (not an accepted held-out view)", html)
+        for v in ("front-left-30", "front-right-30"):
+            self.assertEqual(html.count(f"src='heldout/{v}.png'"), 1)
+            self.assertIn(f"src='05-renders/carve/{v}.png'", html)
+        for v in ("front-left-45", "front-right-60"):
+            self.assertNotIn(v, html.split("<h2>Scores</h2>", 1)[1])
+
+    def test_stale_heldout_record(self):
+        self._record({"front-left-30": ("accepted", "heldout/front-left-30.png", True)})
+        Image.new("RGB", (8, 8), "blue").save(self.run.file("01-cover.png"))  # stage 1 ran again
+        data = stage5_results(self.run)
+        self.assertEqual({s["stage"]: s["status"] for s in data["stages"]}["2h"], "stale: stage 2 ran again")
+        self.assertEqual(heldout.accepted_views(self.run), {})
 
     def test_no_scores_file_no_section(self):
         data = stage5_results(self.run)

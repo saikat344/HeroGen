@@ -72,21 +72,58 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
 
 ## Held-out views, mask method and covers
 
-**Held-out views (stage 2h).** After stage 2 passes, two extra images of the same character in the
-turnaround's A-pose, each its own edit of the cover with the front view as the pose and framing reference:
-`front-left-34` (seen from about 45 degrees front-left, facing image left) and `front-right-34` (front-right,
-facing image right). No building stage reads `heldout/`; the views exist so a body can be scored on views it
-was not built from. Each view is checked against the turnaround: silhouette landmarks are placed in 3D from the
-front and profile views and fitted over yaw, which gives the found yaw and the pose error; facing is three
-votes (the fit, the toes, SAM 3.1 face inside head); and a found yaw within `azimuth_clearance_deg` (10) of a
-building azimuth (`build_azimuths_deg`, the four turnaround views) is rejected. A view is generated up to three
-times and the best generation kept: accepted, needs human review (a check could not decide) or rejected (a
-gated check failed). Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png`
-when accepted, and to `heldout/review/` or `heldout/rejected/` otherwise, so `heldout/<view>.png` only ever
-holds an accepted view. `stage-2h.json` holds each view's status, found yaw and attempts (`details.views`) and
+**Held-out views (stage 2h).** After stage 2 passes, four extra images of the same character in the
+turnaround's A-pose, each its own edit of the cover: `front-left-30`, `front-right-30`, `front-left-60` and
+`front-right-60`, named by their target yaw (front-left views face image left). No building stage reads
+`heldout/`; the views exist so a body can be scored on views it was not built from. Each generation sends the
+cover, a pose reference (the front view, or the nearer profile for turns of 50 degrees or more) and a grey
+mannequin of the turnaround's pose drawn at the requested yaw, both at one shared scale.
+
+Each view is checked against the turnaround: silhouette landmarks are placed in 3D from the front and profile
+views and fitted over yaw. The fit lets the arms be held a few degrees off the A-pose (each hand moves along
+its arm's tangent to the height it is seen at), so arm drift doesn't read as a turn; the pose error is measured
+at the found yaw against the turnaround's own arms. Facing is three votes (the fit, the toes, SAM 3.1 face
+inside head). The stage writes into `stage-2h.json` the building azimuths a body may be built or coloured from
+(`build_azimuths_deg`: 0 to 315 in 45-degree steps, the four turnaround views and the diagonals between them).
+A view is judged on a yaw range: from the drift-robust fit's yaw to the plain fit's (the hands where the
+turnaround has them), widened by 2 degrees on each side, the larger bound of `fit_error_deg` (found minus true
+yaw, -2 to +1 degrees, measured with arms drifted up to 8 degrees on synthetic figures). The whole range must be
+at least `azimuth_clearance_deg` (10) from every building azimuth. That this keeps the true yaw 10 degrees clear
+holds on synthetic outlines; it is not yet measured on real images. The yaw windows are 25-33 degrees for the
+30-degree views and 57-65 for the 60-degree views (the same 10 plus 2 degrees from every building azimuth); up
+to 5 degrees outside needs human review.
+
+Known limitation, measured on synthetic outlines: when a figure's arms are raised 3-8 degrees above the
+turnaround's and both of its hands are also measured 0.01-0.02 of the figure height too low, both fits read
+the turn too small. A 30-degree view drawn 35.5-37 degrees from the front can then pass with its true yaw
+8-9.5 degrees from the 45-degree diagonal instead of 10 (24 of 980 near-diagonal test views; none at 38 or
+beyond, none among the 60-degree views). It stays until the fit's error is measured on real images with known
+yaws.
+
+A view is generated up to four times, stopping at the first accepted generation. The first request is the
+target; each next one is the last request plus the target's |yaw| minus the last generation's found |yaw| (more
+after an under-turn, less after an overshoot), kept within 5-85 degrees, with the nearer profile as the pose
+reference once it reaches 50. After a generation whose facing checks said the other way, or that had no figure
+or turnaround landmarks to measure, the same request is sent again as a new sample. The generation kept is the
+best by status (accepted, else needs human review because a check could not decide, else rejected because a
+gated check failed), then the smaller window miss, then the lower pose error. The gate passes when every
+view is accepted. Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png` when
+accepted, and to `heldout/review/` or `heldout/rejected/` otherwise.
+
+`stage-2h.json` also holds each view's status, found yaw and every attempt with its request, inputs and yaw
+ranges (`details.views`); the turnaround it was made from
+(`stage2_identity`, a hash of the cover, views and masks), the checks it was judged under (`checks_version`, a
+hash of every constant and judging function, so any change to them is noticed) and its image's SHA-256; and
 `"reference": "generated"`: a score against a generated view measures consistency with the generated
-character, not accuracy. When a run folder holds `05-scores.json`, the results page shows its per-body table
-(see `herogen/pipeline/results.py` for the format).
+character, not accuracy. A scorer reads the accepted views from the record (`heldout.accepted_views`: status
+accepted, the current turnaround and a matching image hash), never from the folder layout. New files are
+written to `heldout/.staging/` and swapped in only when the stage finishes; until then the earlier record is
+kept, marked as running. If the stage stops early (an error, a replay miss or the 30-minute time limit) the
+earlier record, calls and files stay, the stopped run is added to `stopped_runs` with its error, calls and
+cost, and `cost_usd` counts both (`run_cost_usd` is the run that made the views). When a run folder holds
+`05-scores.json`, the results page shows its per-body table with a highlighted row, and an image pair beside
+the body's render, for each held-out view the record accepts; other views the scores file names are listed as
+not accepted (see `herogen/pipeline/results.py` for the format).
 
 **Mask method.** `views/meta.json` records how each mask was made: `"mask_method": {"front": "sam-3.1", ...}`
 (`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`. A mask falls back to the threshold only

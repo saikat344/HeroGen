@@ -16,6 +16,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline.results import stage5_results  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder, runs_root  # noqa: E402
+from unittest import mock  # noqa: E402
 
 
 def _record(n, name, ok=True, outputs=(), checks=(), cost=0.0, seconds=1.0, notes="", details=None):
@@ -89,6 +90,36 @@ class ResultsTest(unittest.TestCase):
         for bad in ("", "../x", ".hidden"):
             with self.assertRaises(ValueError):
                 RunFolder(self.root, bad)
+
+
+class WriteJsonTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run = RunFolder(runs_root(Path(self.tmp.name) / "runs"), "r1")
+        self.run.write_json("stage-9.json", {"v": 1})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _left(self):
+        return sorted(p.name for p in self.run.path.iterdir() if p.name.endswith(".tmp"))
+
+    def test_a_failed_write_leaves_the_old_file(self):
+        with self.assertRaises(TypeError):  # not serialisable: fails before the file is touched
+            self.run.write_json("stage-9.json", {"v": object()})
+        with mock.patch("os.replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.run.write_json("stage-9.json", {"v": 2})
+        self.assertEqual(self.run.read_json("stage-9.json"), {"v": 1})
+        self.assertEqual(self._left(), [])
+
+    def test_the_new_file_is_synced_before_it_replaces_the_old(self):
+        order = []
+        real_fsync, real_replace = os.fsync, os.replace
+        with mock.patch("os.fsync", side_effect=lambda fd: (order.append("fsync"), real_fsync(fd))), \
+                mock.patch("os.replace", side_effect=lambda a, b: (order.append("replace"), real_replace(a, b))):
+            self.run.write_json("stage-9.json", {"v": 3})
+        self.assertEqual(order, ["fsync", "replace", "fsync"])  # the file, then the folder
+        self.assertEqual(self.run.read_json("stage-9.json"), {"v": 3})
 
 
 if __name__ == "__main__":

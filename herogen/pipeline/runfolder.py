@@ -42,8 +42,25 @@ class RunFolder:
         return (self.path / rel).exists()
 
     def write_json(self, rel: str, data: Any) -> Path:
+        """Write atomically: a reader sees the old file or the new one, never half of one, and the new one is
+        on disk (file and folder synced) before this returns. A failure leaves the old file as it was."""
         p = self.file(rel)
-        p.write_text(json.dumps(data, indent=2) + "\n")
+        text = json.dumps(data, indent=2) + "\n"  # serialised first: a bad value never touches the file
+        tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, p)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        fd = os.open(p.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         return p
 
     def read_json(self, rel: str) -> Any:
