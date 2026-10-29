@@ -2,7 +2,7 @@
 
 Routes:
   /                          the page (static/index.html), with its Content-Security-Policy; also at /index.html
-  /static/<path>             the page's CSS, JS, SVG icons, JSON tokens and licence texts, subfolders included
+  /static/<path>             the page's CSS, JS, SVG icons, fonts, JSON tokens and licence texts, subfolders included
                              (HTML is never served from here, so the page never comes without its CSP)
   /api/workspace             the runs roots, every run, the runs grouped into characters, and the versions
   /api/runs                  JSON list of every run in every runs root

@@ -120,6 +120,9 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(set(runs), {"r1/pencil-2", "r1/pencil-2-best", "r1/pencil-2-avatar", "r1/other",
                                      "r1/no-sketch", "r2/pencil-2", "r2/pencil-2-redrawn"})
         self.assertEqual((runs["r2/pencil-2"]["root"], runs["r2/pencil-2"]["name"]), ("r2", "pencil-2"))
+        best = runs["r1/pencil-2-best"]
+        self.assertEqual((best["triangles"], best["code"], best["body_dirs"]), (150, None, ["04-body"]))
+        self.assertEqual((runs["r2/pencil-2"]["triangles"], runs["r2/pencil-2"]["body_dirs"]), (None, []))
         self.assertIsNone(self.ws.run_path("r3/pencil-2"))
         self.assertIsNone(self.ws.run_path("r1/../b"))
         self.assertIsNone(self.ws.run_path("pencil-2"))
