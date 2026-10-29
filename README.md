@@ -18,6 +18,7 @@ sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joi
 | 4 game body | Finds the joints from the silhouettes, cuts the mesh into the 15 R15 sections with pivots, shoulder covers, high and low LODs within triangle budgets, turnaround colours baked into one atlas per LOD, and a pose test that measures visible joint gaps | Blender |
 | 5 results | A static results page with every stage's images, checks, time and cost | code |
 | versions | `python3 -m herogen.versions` freezes a run's body and its records as a write-once, hashed version, then lists, verifies and compares versions (per-view scores on seen and held-out views, triangles, gates, joint gaps) | code |
+| 6 Roblox export | An R15 rig model for Roblox Studio, the scripts that put the hero's meshes on it, and step-by-step import instructions (`python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`) | code |
 
 Every stage writes `stage-<n>.json` with its measured checks and stops the run when a gate fails. Stages 3 and 4
 refuse to start unless the previous stage passed (`--force` overrides). The file formats, cameras and checks are
