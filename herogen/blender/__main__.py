@@ -1,5 +1,5 @@
-"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,4] [--mesh-source ...] [--joints ...]` and
-`... synth --run <folder>`."""
+"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,4] [--mesh-source ...] [--joints ...]`,
+`... score --run <folder> [...]` (`herogen.blender.score`) and `... synth --run <folder>`."""
 from __future__ import annotations
 
 import argparse
@@ -30,8 +30,15 @@ def _upstream_problem(run: Path, stage: int) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "score":
+        from .score import main as score_main
+
+        return score_main(argv[1:])
     ap = argparse.ArgumentParser(prog="python3 -m herogen.blender")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("score", help="score bodies on the turnaround and held-out views (same options as "
+                                 "python3 -m herogen.blender.score)")
     r = sub.add_parser("run", help="run stages 3 and/or 4 on a run folder")
     r.add_argument("--run", required=True, type=Path)
     r.add_argument("--stages", default="3,4")
