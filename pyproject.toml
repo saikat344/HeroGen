@@ -9,8 +9,9 @@ dependencies = ["numpy", "pillow"]
 
 [project.optional-dependencies]
 live = ["meta-sam-parser"]
-# SAM 3D Objects and SAM 3D Body on Modal (stage 3 --mesh-source sam3d-objects / --joints sam3d-body).
-remote = ["modal"]
+# SAM 3D Objects and SAM 3D Body on Modal (stage 3 --mesh-source sam3d-objects / --joints sam3d-body); scipy is
+# also needed to replay them, for the hybrid mesh's outline conform and texture fallback.
+remote = ["modal", "scipy"]
 
 [tool.setuptools.packages.find]
 include = ["herogen*"]

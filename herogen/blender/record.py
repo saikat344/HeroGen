@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write a text file in one step (a temporary file in the same folder, then a rename), so a reader never sees
+    a partial file and a failure leaves the previous one."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".part")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def check(name: str, value, threshold=None, passed: bool | None = None, gate: bool = True, **extra) -> dict:
@@ -41,5 +55,5 @@ class StageRecord:
         if extra:
             self.data.update(extra)
         path = self.run / f"stage-{self.data['stage']}.json"
-        path.write_text(json.dumps(self.data, indent=2))
+        write_atomic(path, json.dumps(self.data, indent=2))      # never a partial record
         return self.data
