@@ -16,6 +16,12 @@ from .carve import components
 COVER_RADIUS = 1.8     # in shoulder cut radii (see stage4 for the measurements behind the defaults)
 COVER_OUTSET = 0.03    # studs outside the carved surface
 COVER_INSET = 0.02     # studs inside it (the shell's inner face)
+# The least outset of any outer vertex. A vertex the masks hold at zero outset would sit exactly on the body
+# surface it was taken from, and decimations of one mesh share vertex positions, so it could land on a vertex of
+# its owner section; welding then joins the two shells and the part is no longer manifold (seen on the pencil
+# sketch's carve under roblox-avatar: UpperTorso with 3 non-manifold edges). 0.001 studs is a fifth of a pixel
+# at the views' pixel scale and far above the 1e-6-height weld tolerance.
+COVER_MIN_OUTSET = 0.001
 
 
 def vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -31,7 +37,8 @@ def shell(verts: np.ndarray, faces: np.ndarray, outset: float, inset: float, ins
 
     With `inside` (points -> bool, True where every observed view's mask covers the point), each outer vertex
     takes the largest outset (1, 0.75, 0.5, 0.25 or 0 of it) that stays inside the masks, so the cover thickens
-    only where it faces a camera and never widens a silhouette.
+    only where it faces a camera and never widens a silhouette; no vertex goes out less than `COVER_MIN_OUTSET`,
+    so the shell never shares a point with the surface it covers.
     """
     used = np.unique(faces)
     remap = np.full(len(verts), -1, dtype=np.int64)
@@ -45,7 +52,7 @@ def shell(verts: np.ndarray, faces: np.ndarray, outset: float, inset: float, ins
         for frac in (0.25, 0.5, 0.75, 1.0):
             ok = inside(v + frac * outset * nrm)
             scale = np.where(ok & (scale == frac - 0.25), frac, scale)
-    outer, inner = v + (outset * scale)[:, None] * nrm, v - inset * nrm
+    outer, inner = v + np.maximum(outset * scale, COVER_MIN_OUTSET)[:, None] * nrm, v - inset * nrm
     directed = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
     present = set(map(tuple, directed.tolist()))
     walls = []

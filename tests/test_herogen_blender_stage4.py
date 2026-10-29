@@ -115,6 +115,21 @@ class TestSections(SyntheticBase):
                     sanity = mesh_sanity(secs[name].verts, secs[name].faces, 1e-6 * 5.5)
                     self.assertTrue(sanity["watertight"], (int(i), eps, name, sanity))
 
+    def test_a_cover_never_welds_into_its_owner(self):
+        """Covers shaped from the very mesh that was cut, held at zero outset by the masks: every outer vertex
+        would sit on a vertex of the owner. The owner must still be closed and manifold after welding."""
+        from herogen.blender import covers
+        from herogen.blender.score import mesh_sanity
+
+        secs, _ = split.build_sections(self.verts, self.faces, self.sk, cap="dome", rings=1, ring_points=8)
+        covered, info = covers.add_covers(secs, self.verts, self.faces, owner="UpperTorso", radius=2.5,
+                                          outset=0.06, inside=lambda pts: np.zeros(len(pts), dtype=bool))
+        self.assertEqual(len(info), 2)
+        owner = covered["UpperTorso"]
+        sanity = mesh_sanity(owner.verts, owner.faces, 1e-6 * 5.5)
+        self.assertTrue(sanity["watertight"], sanity)
+        self.assertEqual(sanity["nonmanifold_edges"], 0)
+
     def test_fifteen_closed_sections_with_pivots_inside(self):
         secs, _ = split.build_sections(self.verts, self.faces, self.sk)
         self.assertEqual(list(secs), list(SECTIONS))
