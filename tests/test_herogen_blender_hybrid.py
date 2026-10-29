@@ -496,6 +496,12 @@ class TestStage4HybridBlender(HybridBase):
         bake = sections["texture"]["bake"]
         self.assertIn("texels_source_blend", bake["high"])
         self.assertEqual(set(bake["high_side_trust"]["trust"]), {"left", "right"})
+        # stage 4 again on the carve: the hybrid's comparison atlases must not survive as stale variants
+        rec3 = run_stage3(run, nz=96, timeout=300)
+        self.assertEqual(rec3["mesh_source"], "carve")
+        run_stage4(run, timeout=600)
+        self.assertEqual(sorted(p.name for p in (run / "04-body").glob("atlas-high*.png")), ["atlas-high.png"])
+        self.assertEqual(json.loads((run / "04-body" / "sections.json").read_text())["mesh_source"], "carve")
 
 
 if __name__ == "__main__":
