@@ -86,6 +86,141 @@ page shows its per-body table (see `herogen/pipeline/results.py` for the format)
 GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and
 `pieces_high` / `pieces_low` with each piece's triangles. Covers count in the triangle budgets.
 
+## Versions
+
+A version is one stage 4 body frozen with the records that built and measured it, so a later build can be
+compared with it on the same sketch. `herogen/versions` writes, lists and verifies them:
+
+```bash
+python3 -m herogen.versions freeze --run runs/my-hero --label m1-change [--body 04-body] [--sketch S] \
+    [--milestone M] [--note TEXT] [--by NAME] [--allow-dirty] [--allow-unknown-code] [--store DIR]
+python3 -m herogen.versions list [--sketch S] [--json] [--store DIR]
+python3 -m herogen.versions verify --version V [--json] [--store DIR]
+```
+
+The store is `--store` or `$HEROGEN_VERSIONS`. There is no default, and the folder must already exist. A version
+(`V`) is given as a version folder, as `<sketch>/<label>` in the store, or as a label that only one
+sketch folder holds. A folder whose name starts with `.` (such as an unfinished `.partial-*` freeze) is never
+a version and is refused however it is given. Exit status: 0 done, 1 `verify` found a problem, 2 refused or
+failed. A refusal or failure prints one line on stderr and never a traceback.
+
+**Layout.** Versions are never kept in git.
+
+```
+<store>/<sketch>/<label>/                      one version: flat files plus version.json, read-only
+<store>/<sketch>/05-scores-<series>.json       scores collected by hand for format 0 versions
+<store>/<sketch>/.partial-<label>-<random>/    an unfinished freeze: not a version, safe to delete
+<store>/<sketch>/<label>/ (empty)              an empty claim from an interrupted freeze: safe to remove
+```
+
+Sketch folders and version folders in the store are never symbolic links: a freeze refuses to write through
+one, `<sketch>/<label>` and label references refuse to read through one, and `list` names one as not read.
+
+Labels and sketch folder names are one plain name: `[A-Za-z0-9][A-Za-z0-9_.-]{0,79}`. File names inside a
+version are plain names too (`[A-Za-z0-9][A-Za-z0-9_.-]{0,119}`), so none is a folder, `.`, `..` or an absolute
+path. A freeze refuses to write a `version.json` in which any key or string value names a path. Text is split
+into words at white space and `=`, with opening quotes and brackets stripped. A word names a path when it starts
+at a root (`/` followed by a name, `~` followed by anything, `\\` or a drive such as `C:\`) or has a `..`
+step. Text also names a path when it holds a home prefix (`/Users/`, `/home/` or `\Users\`) anywhere. A lone
+`/` between words ("front / back") and a slash inside a word ("24000/6000") are plain text. `--note`,
+`--milestone` and `--by` are checked the same way before anything is copied.
+
+**What a version holds.** Every file is copied byte for byte. Nothing in a run is changed.
+
+| Files | Taken from |
+| --- | --- |
+| `high.glb` (required), `low.glb`, `sections.json`, every `atlas*.png` | the body folder `<run>/<body>/` (`--body`, default `04-body`; any `04-body-<name>`) |
+| `stage-0.json`, `stage-1.json`, `stage-2.json`, `stage-2h.json` (the held-out decisions), `stage-3.json`, `stage-4.json`, `stage-5.json`, `03-joints.json`, `03-source.glb`, `05-scores.json` | the body folder when it holds its own copy, else the run folder |
+
+A body folder with its own `stage-3.json` (such as `04-body-carve/`) had its own stage 3, so the run folder's
+`03-joints.json` and `03-source.glb`, which belong to the run's other body, are never taken for it. The sketch,
+views, masks and held-out images are not copied. Their SHA-256 is recorded under `inputs` instead. Renders,
+pose renders and `03-mesh.glb` are not part of a version. Only regular files are read: a symbolic link anywhere
+in what is copied or hashed (the file or a folder on its way, such as `04-body/`, `views/` or `heldout/`) is
+refused.
+
+**`version.json`, format 1.**
+
+| Field | Value |
+| --- | --- |
+| `format` | `1` |
+| `label`, `sketch` | the version's folder and its sketch folder |
+| `milestone`, `note` | from `--milestone` and `--note`, else null |
+| `frozen` | when it was frozen, ISO 8601 with seconds and UTC offset |
+| `frozen_by` | `--by`, else the login name, else null |
+| `built` | `stage-4.json` `started` |
+| `profile` | `stage-4.json` `profile.name` (or `profile` when it is a string), else `sections.json` `profile` |
+| `budgets` | `stage-4.json` `profile.budgets` when not null, else `sections.json` `budgets` |
+| `mesh_source`, `joints_source` | the first set value in `sections.json`, then `stage-4.json`, then `stage-3.json` |
+| `code` | `{"commit", "dirty", "consistent"}`, or null when no frozen record carries a stamp. `commit` is the first non-null `code.commit` among `stage-4.json`, `sections.json` and `stage-3.json` (the records that built the body), else null. `dirty` is true when any stamp says true, false when every stamp says false, and null otherwise. `consistent` is true when the stamps name at most one commit |
+| `code_records` | each frozen JSON record's stamp, `{"commit", "dirty"}`, keyed by file name: every record whose `code` is not null, and always `stage-3.json`, `stage-4.json` and `sections.json` when frozen (null when they carry no stamp). A stamp is an object whose `commit` is a string or null and whose `dirty` is true, false or null. Any other shape is refused |
+| `allow_dirty`, `allow_unknown_code` | whether `--allow-dirty` and `--allow-unknown-code` were given |
+| `source` | `run`: the run folder's path relative to the store, with `/` separators, when the run lies inside the store; null otherwise, since a record never holds a path that leaves the store. `run_name`: the run folder's name. `run_records_sha256`: the SHA-256 of every `stage-*.json` in the run folder itself (not its body folders), keyed by name, which identifies the run wherever it lives. `body`: the body folder. `from_body_folder`: the run-level files taken from the body folder |
+| `inputs` | SHA-256 of the run's `00-sketch.png` (`sketch`, or null). `views` and `masks`: `views/<v>.png` and `masks/<v>.png` for front, back, left, right and top. `heldout` and `heldout_masks`: each `heldout/<name>.png` that has a `heldout/<name>-mask.png`, skipping `-mask` and `-raw` images and subfolders |
+| `scores` | `{"file": "05-scores.json", "body", "variants"}`, or null. `body` is the name of this body's entry in the run's scores: the one entry whose `glb` is `<body>/high.glb` and that has no `variant_of`. `variants` are the entries whose `variant_of` names it |
+| `missing` | `files`: expected files the run does not have. Expected are `high.glb`, `low.glb`, `sections.json`, `atlas-high.png`, `atlas-low.png`, stages 0 to 4 and 2h, `03-joints.json`, `03-source.glb` and `05-scores.json`. The low LOD's two files are not expected when `stage-4.json` `profile.lods` leaves out `low`. `03-source.glb` is not expected when the mesh source is `carve` or unknown. `03-joints.json` and `03-source.glb` are not expected for a body folder with its own `stage-3.json`. `stage-5.json` is never expected. `fields`: the fields above that are null although a value was looked for: `code`, `code.commit` (when `code` is set), `profile`, `mesh_source`, `joints_source`, `built`, `inputs.sketch`, `inputs.views`, `inputs.heldout`, and `scores` when `05-scores.json` is frozen but has no entry for this body |
+| `files_sha256`, `files_bytes` | every frozen file's SHA-256 (64 lowercase hex digits) and size, keyed by file name. `version.json` itself is not listed |
+| `immutable` | `true` |
+
+**Format 0.** These are the versions frozen by hand before this tool existed (`v0-*`). They have no `format`
+and keep only `label`, `milestone`, `mesh_source`, `joints` (free text, read as `joints_source`), `profile`
+(free text), `built`, `code` (free text naming the code, not an object), `provenance`, `sketch_run`,
+`files_sha256`, `frozen` (a date) and `immutable`. Readers treat every other field as missing.
+
+**Freeze.** A freeze is refused when:
+
+- the label already exists in the sketch folder (labels are write-once), or an empty claim from an
+  interrupted freeze holds it (the error says so; remove the empty folder and freeze again);
+- the sketch folder or the label in the store is a symbolic link;
+- any frozen record's stamp says `"dirty": true`, whatever its commit, unless `--allow-dirty` is given (stage
+  records, `sections.json` and `05-scores.json` alike);
+- none of `stage-4.json`, `sections.json` and `stage-3.json` names a commit, unless `--allow-unknown-code` is
+  given;
+- a stamp has another shape (a `dirty` that is not true, false or null, or a `commit` that is not a string or
+  null), or a frozen JSON record cannot be parsed;
+- a symbolic link is on the way to anything copied or hashed;
+- the run folder does not exist, or its body folder has no `high.glb`;
+- a label, sketch, body or file name is not a plain name, or a text field names a path (see Layout).
+
+The sketch folder is `--sketch` when given. That is refused when the run has a sketch and the folder already
+holds versions whose `inputs.sketch` differs from its hash. Without `--sketch`, it is the one sketch folder
+whose versions record this run's sketch hash. Without a sketch hash or a match, `--sketch` is required. Two
+matches are refused.
+
+Writing is atomic:
+
+1. Each file is copied into a new `.partial-<label>-<random>/` folder in the sketch folder, never through a
+   symbolic link, hashed as it is written and flushed to disk. A source whose size or modification time changes
+   during its copy is refused.
+2. The records are parsed from those copies, so `version.json` describes exactly the bytes the version holds.
+3. `version.json` is written last.
+4. The files are made read-only (0444).
+5. The label is claimed with `mkdir <label>`, which fails if anything is already there, and the partial folder
+   is renamed onto that empty claim in one step (a rename on POSIX replaces an empty folder, so the claim is
+   what makes it never replace another freeze's). On Windows, where a rename never replaces a folder, it
+   renames directly. The folder is then made read-only (0555).
+
+Any error or interrupt removes the partial folder, the claim, and the sketch folder when this freeze created
+it and it is empty. A process that is killed can leave a `.partial-*` folder, which `list` reports as
+unfinished and every other command refuses. Between the claim and the rename, a kill can leave an empty
+`<label>` folder, which `list` reports as an empty claim and a later freeze of that label names as one. A claim
+made by another freeze while this one runs refuses this one.
+
+After writing, the freeze reads the permission bits back. When the files or the folder are still writable, as on
+a filesystem that ignores permissions (such as some SMB mounts), it completes and prints a warning.
+
+**List** prints each version's sketch and label (the folder's name), milestone, frozen time, profile, mesh and
+joints sources, code commit (or "not stamped") and file count. It also names unfinished freezes, empty claims,
+folders that hold no readable `version.json`, and store folders that are symbolic links. A `version.json`
+whose `label` differs from its folder's name is shown under `label_recorded`.
+
+**Verify** re-hashes every file in `files_sha256` (either format). It is refused when a recorded hash is not a
+SHA-256 hex digest. It passes only when every listed file is a regular file (not a symbolic link) that can be
+read and has its recorded hash, every listed name is a plain file name (unsafe names are reported and never
+opened), the folder holds nothing beyond the listed files and `version.json`, and `version.json`'s `label` (when
+set) is the folder's name. Every problem is reported and none stops the check: a changed, missing, unreadable
+or irregular file, an unlisted file, an unsafe name or a label mismatch.
+
 ## Rules
 
 - No secrets in code, logs or run folders. Model keys come from the environment.
