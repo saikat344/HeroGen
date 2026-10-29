@@ -458,7 +458,7 @@ class ScoresFile(Tmp):
         sections = G.write_glb(self.tmp / "r15.glb", [("UpperTorso", *box(*BODY)), ("LowerTorso.001", *box(*ARM)),
                                                       ("Head", grid_v, grid_f)])
         plain = write_body(self.tmp / "plain.glb", (BODY, ARM))
-        self.assertEqual(S.main(["--run", str(run), "--profile", "roblox", "--body", f"r15={sections}",
+        self.assertEqual(S.main(["--run", str(run), "--profile", "roblox-avatar", "--body", f"r15={sections}",
                                  "--body", f"plain={plain}"]), 0)
         by = {b["name"]: b for b in json.loads((run / "05-scores.json").read_text())["bodies"]}
         checks = {c["name"]: c for c in by["r15"]["profile"]["checks"]}
@@ -467,12 +467,62 @@ class ScoresFile(Tmp):
         self.assertFalse(checks["triangles_Head"]["pass"])
         self.assertIsNone(checks["triangles_LeftArm"]["value"])          # no such meshes: not checked
         self.assertFalse(checks["watertight_parts"]["pass"])             # the head grid is open
-        self.assertFalse(by["r15"]["profile"]["pass"])
+        self.assertIsNone(checks["not_built"]["pass"])                   # listed, not checked
+        self.assertFalse(checks["not_built"]["required"])
+        self.assertIn("DynamicHead", checks["not_built"]["note"])
+        self.assertEqual((by["r15"]["profile"]["pass"], by["r15"]["profile"]["status"]), (False, "fail"))
         plain_checks = {c["name"]: c for c in by["plain"]["profile"]["checks"]}
         self.assertTrue(plain_checks["triangles_total"]["pass"])
-        self.assertTrue(by["plain"]["profile"]["pass"])                  # nothing failed; groups unchecked
+        # nothing failed, but the part groups (unnamed meshes) and the texture (none) could not be measured
+        self.assertIsNone(plain_checks["texture_max_px"]["pass"])
+        self.assertEqual((by["plain"]["profile"]["pass"], by["plain"]["profile"]["status"]), (None, "incomplete"))
         with self.assertRaises(ValueError):
             S.score_body(run, "x", plain, seen=set(), profile="nope")
+        with self.assertRaises(SystemExit):
+            S.main(["--run", str(run), "--profile", "roblox", "--body", f"plain={plain}"])   # old name
+
+    def test_an_avatar_body_within_every_limit_passes(self):
+        """Fifteen closed parts named after the sections, a small texture: every required check is measured and
+        met, so the profile passes; what it does not build is listed but never counts."""
+        from herogen.blender import SECTIONS
+
+        run = make_run(self.tmp)
+        meshes = []
+        for i, name in enumerate(SECTIONS):
+            v, f = box((0.0, 0.0, 0.2 + 0.12 * i), (0.3, 0.2, 0.05))
+            meshes.append((name, v, f, np.tile([0.5, 0.5], (len(v), 1))))
+        p = G.write_glb(self.tmp / "avatar.glb", meshes, texture_png=png(stripe_texture()))
+        entry = S.score_body(run, "avatar", p, profile="roblox-avatar")
+        checks = {c["name"]: c for c in entry["profile"]["checks"]}
+        for name, c in checks.items():
+            if name != "not_built":
+                self.assertTrue(c["pass"], c)
+        self.assertIsNone(checks["not_built"]["pass"])
+        self.assertEqual((entry["profile"]["pass"], entry["profile"]["status"]), (True, "pass"))
+
+    def test_ingame_and_best_profiles(self):
+        run = make_run(self.tmp)
+        d = run / "04-body"
+        d.mkdir()
+        high = write_body(d / "high.glb", (BODY, ARM))
+        write_body(d / "low.glb", (BODY,))
+        lone = write_body(self.tmp / "lone.glb", (BODY,))
+        self.assertEqual(S.main(["--run", str(run), "--profile", "roblox-ingame", "--body", f"h={high}",
+                                 "--body", f"lone={lone}"]), 0)
+        by = {b["name"]: b for b in json.loads((run / "05-scores.json").read_text())["bodies"]}
+        checks = {c["name"]: c for c in by["h"]["profile"]["checks"]}
+        self.assertEqual(by["h"]["budget"], 24000)
+        self.assertEqual((checks["triangles_high"]["value"], checks["triangles_high"]["limit"]), (24, 24000))
+        self.assertEqual((checks["triangles_low"]["value"], checks["triangles_low"]["pass"]), (12, True))
+        self.assertEqual((by["h"]["profile"]["pass"], by["h"]["profile"]["status"]), (True, "pass"))
+        lone_low = {c["name"]: c for c in by["lone"]["profile"]["checks"]}["triangles_low"]
+        self.assertIsNone(lone_low["pass"])                              # no low LOD: reported, not failed
+        self.assertEqual((by["lone"]["profile"]["pass"], by["lone"]["profile"]["status"]), (None, "incomplete"))
+        self.assertEqual(S.main(["--run", str(run), "--profile", "best", "--body", f"h={high}"]), 0)
+        best = json.loads((run / "05-scores.json").read_text())["bodies"]
+        best = next(b for b in best if b["name"] == "h")
+        self.assertEqual(best["profile"], {"name": "best", "checks": [], "pass": True, "status": "pass"})
+        self.assertIsNone(best["budget"])
 
     def test_rescoring_replaces_a_body_and_keeps_the_rest(self):
         run = make_run(self.tmp)

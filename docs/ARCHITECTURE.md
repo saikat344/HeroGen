@@ -234,7 +234,7 @@ Scoring again replaces bodies of the same name and keeps the others. The results
 
 Stage 4 builds the high and low LODs within 24,000 and 6,000 triangles (`TRIANGLES_HIGH_MAX`,
 `TRIANGLES_LOW_MAX`), and gates on them. The scorer applies no budget unless asked: `--budget NAME=N` sets a
-plain total for one body, and `--profile roblox` checks Roblox's character body specification: 10,742
+plain total for one body, and `--profile roblox-avatar` checks Roblox's character body specification: 10,742
 triangles in total; per part group Head 4,000, Torso (`UpperTorso`, `LowerTorso`) 1,750, and each arm and each
 leg (three sections) 1,248, found by mesh name; every part watertight; textures at most 2048 px. A group with no
 mesh of its names is reported with value `null` and not failed.

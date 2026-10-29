@@ -82,7 +82,7 @@ python3 -m herogen.blender score --run runs/my-hero --body other=other-tool.glb
 ```
 
 With no `--body` it scores every stage 4 body in the run. It applies no triangle budget by default; add
-`--profile roblox` to check Roblox's character body limits.
+`--profile roblox-avatar` to check Roblox's character body limits (`--profile roblox-ingame` for the in-game budgets).
 
 ## Lab
 

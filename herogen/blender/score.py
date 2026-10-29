@@ -2,7 +2,7 @@
 a platform's limits.
 
 `python3 -m herogen.blender.score --run <folder> [--body NAME=GLB ...] [--atlas NAME=PNG] [--seen NAME=views]
-[--seen-shape NAME=views] [--frame NAME=contract|fit] [--profile roblox] [--budget NAME=N]
+[--seen-shape NAME=views] [--frame NAME=contract|fit] [--profile PROFILE] [--budget NAME=N]
 [--yaw-range VIEW=LO,HI]` (also
 `python3 -m herogen.blender score ...`) writes `05-scores.json` (the results page shows it) and, per
 body and view, `05-renders/<name>/<view>.png` (the body rendered flat in its own colours, or its silhouette when
@@ -53,9 +53,15 @@ Mesh sanity, per mesh after welding coincident vertices: degenerate triangles, b
 non-manifold edges (used more than twice), edges whose two faces disagree on winding, connected components and
 inside-out closed meshes (negative volume). Self-intersections are not checked.
 
-No triangle budget applies by default. A profile adds a platform's limits as extra checks; `roblox` checks the
-character body specification (total and per part-group triangles, watertight parts, texture size). `--budget`
-sets a plain total for one body.
+No triangle budget applies by default: the default target is the best-quality body. A target profile
+(`herogen.blender.PROFILES`, the same names stage 4 builds to) adds its limits as extra checks: `best` none,
+`roblox-ingame` the high body's 24,000 and the low LOD's 6,000 triangles, `roblox-avatar` the triangle,
+watertight-part and texture limits of Roblox's character body specification (total and per part-group
+triangles, watertight parts, texture size; the rig, attachments, facial animation and cages are listed as not
+built, not checked). A profile passes (`"pass": true`) only when every limit was measured and met: `false` when
+one fails, `null` ("incomplete") when one could not be measured (no low LOD next to the body under
+`roblox-ingame`; meshes not named after the sections, or no texture, under `roblox-avatar`).
+`--budget` sets a plain total for one body.
 """
 from __future__ import annotations
 
@@ -70,6 +76,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import PROFILES as TARGET_PROFILES
 from . import raster
 from .carve import components
 from .glb import Glb, GlbError, load_glb
@@ -93,23 +100,8 @@ MAX_PIXELS_PER_BATCH = 1 << 22
 BODY_DIR = re.compile(r"^04-body(-[A-Za-z0-9][A-Za-z0-9_.-]*)?$")
 VARIANT_ATLAS = re.compile(r"^atlas-high-([A-Za-z0-9][A-Za-z0-9_.-]*)\.png$")
 
-# Platform limits, checked only when asked for. Roblox: the character body specification
-# (create.roblox.com/docs/art/characters/specifications), budgets per asset group of R15 sections.
-PROFILES = {
-    "roblox": {
-        "triangles_total": 10742,
-        "groups": {
-            "Head": (("Head",), 4000),
-            "Torso": (("UpperTorso", "LowerTorso"), 1750),
-            "LeftArm": (("LeftUpperArm", "LeftLowerArm", "LeftHand"), 1248),
-            "RightArm": (("RightUpperArm", "RightLowerArm", "RightHand"), 1248),
-            "LeftLeg": (("LeftUpperLeg", "LeftLowerLeg", "LeftFoot"), 1248),
-            "RightLeg": (("RightUpperLeg", "RightLowerLeg", "RightFoot"), 1248),
-        },
-        "texture_max_px": 2048,
-        "watertight_parts": True,
-    },
-}
+# Target profiles (`herogen.blender.PROFILES`, shared with stage 4), checked only when asked for.
+PROFILES = TARGET_PROFILES
 
 
 # ---------------------------------------------------------------------------
@@ -501,17 +493,43 @@ def body_sanity(glb: Glb) -> dict:
     return total
 
 
-def _check(name: str, value, limit, passed: bool | None, note: str = "") -> dict:
+def _check(name: str, value, limit, passed: bool | None, note: str = "", required: bool = True) -> dict:
+    """A profile check; `passed` None means it could not be measured. `required` False marks a listing (what the
+    profile does not build) that never counts towards the profile's result."""
     out = {"name": name, "value": value, "limit": limit, "pass": passed}
     if note:
         out["note"] = note
+    if not required:
+        out["required"] = False
     return out
 
 
-def profile_checks(glb: Glb, sanity: dict, profile: str, atlas: int | None = None) -> list[dict]:
-    """A platform's limits as checks. Part groups are found by mesh name (a Blender `.001` suffix is ignored);
-    a body whose meshes are not named after the sections gets those checks with value None."""
+def profile_result(checks: list[dict]) -> tuple[bool | None, str]:
+    """A profile's `pass` and `status`: False ("fail") when a required check fails, None ("incomplete") when one
+    could not be measured, True ("pass") only when every required check was measured and met."""
+    req = [c for c in checks if c.get("required", True)]
+    if any(c["pass"] is False for c in req):
+        return False, "fail"
+    if any(c["pass"] is None for c in req):
+        return None, "incomplete"
+    return True, "pass"
+
+
+def profile_checks(glb: Glb, sanity: dict, profile: str, atlas: int | None = None,
+                   triangles_low: int | None = None) -> list[dict]:
+    """A target profile's limits as checks. `best` has none. `roblox-ingame`: the high body (this GLB) and, when
+    known, its low LOD within their budgets. `roblox-avatar`: the total, each part group found by mesh name (a
+    Blender `.001` suffix is ignored; a body whose meshes are not named after the sections gets those checks with
+    value None), watertight parts and the texture size; what the profile does not build is listed, not
+    checked."""
     spec = PROFILES[profile]
+    if profile == "best":
+        return []
+    if "groups" not in spec:
+        hi, lo = spec["lods"]["high"], spec["lods"]["low"]
+        return [_check("triangles_high", glb.triangles, hi, glb.triangles <= hi),
+                _check("triangles_low", triangles_low, lo, None if triangles_low is None else triangles_low <= lo,
+                       "" if triangles_low is not None else "no low LOD next to this body")]
     out = [_check("triangles_total", glb.triangles, spec["triangles_total"],
                   glb.triangles <= spec["triangles_total"])]
     counts: dict[str, int] = {}
@@ -530,7 +548,17 @@ def profile_checks(glb: Glb, sanity: dict, profile: str, atlas: int | None = Non
         out.append(_check("watertight_parts", len(sanity["open_meshes"]), 0, sanity["watertight"],
                           "meshes that are not closed: " + ", ".join(sanity["open_meshes"])
                           if sanity["open_meshes"] else ""))
+    out.append(_check("not_built", None, None, None, "not built, not checked: " + ", ".join(spec["not_built"]),
+                      required=False))
     return out
+
+
+def profile_budget(profile: str | None) -> int | None:
+    """The plain triangle total a profile implies for one GLB (its high body), or None."""
+    if profile is None or profile == "best":
+        return None
+    spec = PROFILES[profile]
+    return spec["triangles_total"] if "groups" in spec else spec["lods"]["high"]
 
 
 # ---------------------------------------------------------------------------
@@ -640,7 +668,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
     if profile is not None and profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(sorted(PROFILES))})")
     if budget is None and profile is not None:
-        budget = PROFILES[profile]["triangles_total"]
+        budget = profile_budget(profile)
     observed = _observed(run)
     colour_seen = set(seen) if seen is not None else observed
     shape_seen = set(seen_shape) if seen_shape is not None else (set(seen) if seen is not None else observed)
@@ -750,9 +778,9 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         entry["atlas_image"] = _display_path(run, atlas)
         entry["variant_of"] = variant_of
     if profile is not None:
-        checks = profile_checks(glb, sanity, profile, atlas_px)
-        entry["profile"] = {"name": profile, "checks": checks,
-                            "pass": all(c["pass"] is not False for c in checks)}
+        checks = profile_checks(glb, sanity, profile, atlas_px, triangles_low)
+        passed, status = profile_result(checks)
+        entry["profile"] = {"name": profile, "checks": checks, "pass": passed, "status": status}
     return entry
 
 
@@ -856,8 +884,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="NAME=front,...: views the body's shape was built from, when they differ from --seen")
     ap.add_argument("--frame", action="append", default=[],
                     help="NAME=contract|fit: how a --body is placed in the turnaround views (default fit)")
-    ap.add_argument("--profile", choices=sorted(PROFILES), default=None,
-                    help="also check a platform's limits (default: none, no triangle budget)")
+    ap.add_argument("--profile", choices=tuple(PROFILES), default=None,
+                    help="also check a target profile's limits: best, roblox-ingame or roblox-avatar "
+                         "(default: none, no triangle budget)")
     ap.add_argument("--budget", action="append", default=[],
                     help="NAME=triangles: a plain total for one body (default: the profile's, else none)")
     ap.add_argument("--yaw-range", action="append", default=[], metavar="VIEW=LO,HI",
