@@ -330,9 +330,7 @@ def resolve_images(dirs, report):
     index = IMAGE_INDEX
     missing = []
     for img in bpy.data.images:
-        if img.type != "IMAGE" or img.packed_file is not None:
-            continue
-        if img.has_data or (img.filepath and os.path.exists(bpy.path.abspath(img.filepath))):
+        if img.type != "IMAGE" or has_pixels(img):
             continue
         keys = [os.path.basename(bpy.path.abspath(img.filepath)).lower(), img.name.lower(),
                 os.path.splitext(img.name)[0].lower()]
@@ -346,9 +344,16 @@ def resolve_images(dirs, report):
     return missing
 
 
+def has_pixels(img):
+    """True when the image's pixels can be read: loaded, packed in the file (packed images load lazily), or
+    on disk."""
+    return bool(img.has_data or img.packed_file is not None
+                or (img.filepath and os.path.exists(bpy.path.abspath(img.filepath))))
+
+
 def _image(spec):
     """An image by datablock name, by file name or stem in the image folders, or by path."""
-    if spec in bpy.data.images and bpy.data.images[spec].has_data:
+    if spec in bpy.data.images and has_pixels(bpy.data.images[spec]):
         return bpy.data.images[spec]
     path = IMAGE_INDEX.get(spec.lower()) or IMAGE_INDEX.get(os.path.basename(spec).lower())
     if path is None and not os.path.exists(spec):
@@ -654,8 +659,7 @@ def main():
     normalise_materials(meshes, JOB.get("material_images", {}), JOB.get("material_vcols", {}), mat_report)
     used = images_feeding_colour(meshes)
     unused_missing = sorted(set(missing_images) - {im.name for im in used})
-    missing_images = sorted(im.name for im in used if not (im.has_data or im.packed_file is not None
-                                                          or os.path.exists(bpy.path.abspath(im.filepath))))
+    missing_images = sorted(im.name for im in used if not has_pixels(im))
     if unused_missing:
         report.append(f"missing images no rendered colour uses: {', '.join(unused_missing)}")
     object_names, rig_names = [o.name for o in meshes], [a.name for a in rigs]

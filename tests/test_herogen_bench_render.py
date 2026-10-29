@@ -100,6 +100,28 @@ BUILD = textwrap.dedent('''
     bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True)
 ''')
 
+# An unrigged box saved as a .blend whose material is a bare legacy colour, with a solid orange image packed
+# into the file but connected to nothing: the case of older asset files, rendered with --image.
+BUILD_BLEND = textwrap.dedent('''
+    import sys
+    import bpy
+
+    out = sys.argv[-1]
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 1.0))
+    box = bpy.context.active_object
+    box.scale = (0.5, 0.3, 1.0)
+    mat = bpy.data.materials.new("Legacy")
+    mat.use_nodes = False
+    mat.diffuse_color = (0.1, 0.1, 0.1, 1.0)
+    box.data.materials.append(mat)
+    img = bpy.data.images.new("Skin", 8, 8)
+    img.pixels = [1.0, 0.5, 0.0, 1.0] * 64
+    img.pack()
+    img.use_fake_user = True
+    bpy.ops.wm.save_as_mainfile(filepath=out)
+''')
+
 TORSO_DEPTH = 0.3
 TORSO_COLOUR = (0.2, 0.7, 0.2)  # linear, as built
 
@@ -110,6 +132,26 @@ def build_figure(path: Path, rigged: bool, cuff: bool = False) -> None:
          "1" if rigged else "0", "cuff" if cuff else "none"], capture_output=True, text=True, timeout=300)
     if proc.returncode != 0 or not path.exists():
         raise RuntimeError(f"building the test figure failed:\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
+
+
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
+class BlendFileTest(unittest.TestCase):
+    def test_packed_image_named_by_override_is_the_base_colour(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset, run = Path(tmp) / "box.blend", Path(tmp) / "run"
+            cmd = [bl.find_blender(), "--background", "--factory-startup", "--python-expr", BUILD_BLEND, "--",
+                   str(asset)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            self.assertTrue(asset.exists(), proc.stdout[-1500:] + proc.stderr[-1500:])
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "96",
+                             "--samples-flat", "4", "--samples-lit", "4", "--image", "Legacy=Skin"])
+            rec = json.loads((run / "stage-2.json").read_text())
+            self.assertEqual(code, 0, json.dumps(rec["checks"]))
+            self.assertEqual(rec["details"]["pose"], "as-shipped")
+            img = np.asarray(Image.open(run / "views" / "front.png").convert("RGB")).astype(int)
+            # the image's stored sRGB bytes (1.0, 0.5, 0.0 -> 255, 128, 0), shown unlit and unchanged
+            np.testing.assert_allclose(img[48, 48], [255, 128, 0], atol=2)
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
