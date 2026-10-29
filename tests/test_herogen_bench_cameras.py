@@ -29,8 +29,11 @@ class AzimuthTest(unittest.TestCase):
 
     def test_view_names_and_roles(self):
         self.assertEqual([view_name(a) for a in (0, 90, 180, 270)], ["front", "left", "back", "right"])
-        self.assertEqual(view_name(25), "az025")
-        self.assertEqual(view_name(335), "az335")
+        names = {a: view_name(a) for a in BUILDING_AZIMUTHS[4:] + EVALUATION_AZIMUTHS}
+        self.assertEqual(names, {45: "front-left-45", 135: "back-left-45", 225: "back-right-45",
+                                 315: "front-right-45", 25: "front-left-25", 335: "front-right-25",
+                                 65: "front-left-65", 295: "front-right-65"})
+        self.assertRegex(view_name(25), r"^front-(left|right)-\d+$")  # what the scorer reads
         cams = CAM.all_cameras(80.0, 512)
         self.assertEqual([c["role"] for c in cams].count("building"), 8)
         self.assertEqual([c["role"] for c in cams].count("evaluation"), 4)
