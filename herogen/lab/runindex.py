@@ -660,6 +660,8 @@ def budget_meters(sec: dict[str, Any] | None) -> dict[str, Any]:
     `groups`: a total and per part group budget (the avatar profile); `lods`: one budget per level of detail (the
     in-game profile and older runs); `none`: the record holds no budget (the best-quality profile). Counts are the
     record's per-LOD totals (`lods.<lod>.triangles`, `triangles_by_group`), else the sum of its sections."""
+    if sec and sec.get("error"):
+        return {"kind": "unreadable", "items": [], "error": sec["error"]}
     if not sec or "sections" not in sec:
         return {"kind": "unknown", "items": []}
     lods = sec.get("lods") or {}

@@ -455,7 +455,8 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("text/html"))
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertIn(b"importmap", body)
-        for name, ctype in [("lab.js", "text/javascript"), ("lab.css", "text/css")]:
+        for name, ctype in [("app.js", "text/javascript"), ("studio.css", "text/css"),
+                            ("icons/box.svg", "image/svg+xml")]:
             status, headers, _ = self.get(f"/static/{name}")
             self.assertEqual(status, 200, name)
             self.assertTrue(headers["Content-Type"].startswith(ctype))
@@ -494,7 +495,7 @@ class ServerTest(unittest.TestCase):
         port = self.server.server_address[1]
         for host in ["evil.example", f"evil.example:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}",
                      f"localhost.evil.example:{port}", f"127.0.0.1:{port}.evil.example", f"0.0.0.0:{port}"]:
-            for path in ["/", "/api/runs", "/api/runs/r1/full", "/runs/r1/full/00-sketch.png", "/static/lab.js"]:
+            for path in ["/", "/api/runs", "/api/runs/r1/full", "/runs/r1/full/00-sketch.png", "/static/app.js"]:
                 status, headers, body = self.raw_response(path, host=host)
                 self.assertEqual(status, 421, (host, path))
                 self.assertEqual(self.strict_json(body), {"error": "421 Misdirected Request"})
@@ -505,7 +506,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, body), (421, b""))
 
     def test_security_headers(self):
-        for path in ["/", "/api/runs", "/runs/r1/full/00-sketch.png", "/static/lab.js", "/nowhere"]:
+        for path in ["/", "/api/runs", "/runs/r1/full/00-sketch.png", "/static/app.js", "/nowhere"]:
             headers = self.get(path)[1]
             self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin", path)
             self.assertEqual(headers["X-Content-Type-Options"], "nosniff", path)
@@ -748,6 +749,9 @@ class PageReferencesTest(unittest.TestCase):
 
     URL = re.compile(r"""(?:https?:)?//[^\s"'`)<>]+""")
 
+    def scripts(self):
+        return {p.name: p.read_text() for p in STATIC_DIR.glob("*.js")}
+
     def test_html_references(self):
         html = (STATIC_DIR / "index.html").read_text()
         importmap = re.search(r"<script type=\"importmap\">(.*?)</script>", html, re.S)
@@ -758,9 +762,10 @@ class PageReferencesTest(unittest.TestCase):
             self.assertTrue(url.startswith(CDN_PREFIX), url)
         # Every module the page loads from the CDN is pinned by its SHA-384 (import-map integrity).
         integrity = json.loads(importmap.group(1))["integrity"]
-        js = (STATIC_DIR / "lab.js").read_text()
+        js = "\n".join(self.scripts().values())
         needed = {imports["three"]} | {imports["three/addons/"] + spec[len("three/addons/"):] for spec in
                                         re.findall(r"""from\s+['"](three/addons/[^'"]+)['"]""", js)}
+        self.assertGreater(len(needed), 2)
         self.assertTrue(needed <= set(integrity), needed - set(integrity))
         for url, digest in integrity.items():
             self.assertTrue(url.startswith(CDN_PREFIX), url)
@@ -771,13 +776,25 @@ class PageReferencesTest(unittest.TestCase):
             self.assertTrue(url.startswith(CDN_PREFIX) or url.startswith("http://www.w3.org/"), url)
         for attr in re.findall(r"""(?:src|href)=["']([^"']+)["']""", html):
             self.assertFalse(re.match(r"^[a-z]+:|^//", attr), attr)
+            if not attr.startswith("#"):
+                self.assertTrue((STATIC_DIR.parent / attr).is_file(), attr)  # every referenced file ships
+        self.assertNotRegex(html, r"<style|style=", "inline styles would need 'unsafe-inline' in the CSP")
 
     def test_scripts_and_styles(self):
-        js = (STATIC_DIR / "lab.js").read_text()
-        for spec in re.findall(r"""^\s*import\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"]""", js, re.M):
-            self.assertTrue(spec == "three" or spec.startswith("three/addons/") or spec.startswith("./"), spec)
-        self.assertFalse(re.search(r"\bimport\s*\(", js), "no dynamic imports")
-        for text in (js, (STATIC_DIR / "lab.css").read_text()):
+        scripts = self.scripts()
+        self.assertIn("app.js", scripts)
+        for name, js in scripts.items():
+            for spec in re.findall(r"""^\s*import\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"]""", js, re.M):
+                ok = spec == "three" or spec.startswith("three/addons/") or spec.startswith("./")
+                self.assertTrue(ok, (name, spec))
+                if spec.startswith("./"):
+                    self.assertTrue((STATIC_DIR / spec[2:]).is_file(), (name, spec))
+            self.assertFalse(re.search(r"\bimport\s*\(", js), f"{name}: no dynamic imports")
+            # Text from a run folder goes on the page as text only.
+            self.assertNotRegex(js, r"\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write", name)
+            self.assertNotRegex(js, r"""setAttribute\(\s*['"]style['"]""", name)  # the CSP refuses style attrs
+        self.assertIn('href="static/fonts/fonts.css"', (STATIC_DIR / "index.html").read_text())
+        for text in [*scripts.values(), *(p.read_text() for p in STATIC_DIR.rglob("*.css"))]:
             for url in self.URL.findall(text):
                 self.assertTrue(url.startswith("http://www.w3.org/"), url)
 
