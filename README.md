@@ -13,7 +13,7 @@ sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joi
 | --- | --- | --- |
 | 0 input | Copies the sketch into a run folder | |
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1 |
-| 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; two held-out 3/4 views for scoring only | Muse Image, SAM 3.1 |
+| 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Carves a mesh from the four view masks and checks its silhouettes against them | Blender 4.5 LTS (headless) |
 | 4 game body | Finds the joints from the silhouettes, cuts the mesh into the 15 R15 sections with pivots, shoulder covers, high and low LODs within triangle budgets, turnaround colours baked into one atlas per LOD, and a pose test that measures visible joint gaps | Blender |
 | 5 results | A static results page with every stage's images, checks, time and cost | code |

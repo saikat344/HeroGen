@@ -35,6 +35,9 @@ def figure_mask(h: int, pose: str = "front", arms: str = "a") -> np.ndarray:
             else:
                 x1, y1 = x0 + sx * 0.02 * h, y0 + 0.36 * h
             d.line([x0, y0, x1, y1], fill=255, width=int(0.05 * h))
+            r = int(0.05 * h) / 2  # round ends, like the capsule arms of the 3D stick figure
+            for x, y in ((x0, y0), (x1, y1)):
+                d.ellipse([x - r, y - r, x + r, y + r], fill=255)
     else:
         sign = 1 if pose == "right" else -1
         tw = int(0.08 * h)

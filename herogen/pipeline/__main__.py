@@ -13,7 +13,7 @@ from pathlib import Path
 
 from herogen.pipeline.client import ModelClient
 from herogen.pipeline.heldout import stage2h_heldout
-from herogen.pipeline.runfolder import RunFolder, runs_root
+from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
 from herogen.pipeline.stages import GateFailed, stage0_input, stage1_cover, stage2_turnaround
 from herogen.pipeline.results import stage5_results
 
@@ -77,10 +77,11 @@ def run_pipeline(
     client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode)
     pipeline = [s for s in stages if s != 5]
     if 2 in pipeline and HELDOUT not in pipeline:
-        pipeline.append(HELDOUT)  # the held-out view follows a passing stage 2
+        pipeline.append(HELDOUT)  # the held-out views follow a passing stage 2
     pipeline.sort(key=_order)
     status = 0
     for n in pipeline:
+        began = now_iso()
         try:
             if n == 0:
                 if sketch is None:
@@ -103,6 +104,9 @@ def run_pipeline(
             break
         except Exception as e:  # noqa: BLE001  (report, stop, still write results)
             print(f"stage {n}: error: {type(e).__name__}: {e}; stopping", file=sys.stderr)
+            rec = run.read_stage(HELDOUT) if n == HELDOUT else None  # type: ignore[arg-type]
+            if rec and rec.get("status") == "error" and str(rec.get("started", "")) >= began:  # this run's
+                print(f"  the error and the calls made are in {run.path / 'stage-2h.json'}", file=sys.stderr)
             status = 1
             break
     if 5 in stages:

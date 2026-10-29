@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -83,10 +83,10 @@ class _Stage:
         img.save(self.run.file(rel), format="PNG")
         self.outputs.append(rel)
 
-    def finish(self) -> dict[str, Any]:
+    def _record(self) -> dict[str, Any]:
         calls = self.client.log.calls[self.calls0 :] if self.client else []
         live = [c for c in calls if not c["cached"]]
-        record = {
+        return {
             "stage": self.n,
             "name": self.name,
             "ok": C.gate_ok(self.checks),
@@ -101,9 +101,24 @@ class _Stage:
             "calls": calls,
             "details": self.details,
         }
+
+    def finish(self, adjust: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Write the record (after ``adjust`` edits it, if given); raise `GateFailed` (after writing) when a
+        gated check failed."""
+        record = self._record()
+        if adjust is not None:
+            adjust(record)
         self.run.write_stage(record)
         if not record["ok"]:
             raise GateFailed(self.n, record)
+        return record
+
+    def fail(self, error: str, status: str = "error") -> dict[str, Any]:
+        """Write the record of a stage that stopped early (``status`` "error") or is still running
+        ("running"): not ok, with ``error`` and every call made so far, so paid calls are never left
+        unrecorded."""
+        record = {**self._record(), "ok": False, "status": status, "error": error}
+        self.run.write_stage(record)
         return record
 
 

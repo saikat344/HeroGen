@@ -19,9 +19,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import client as client_mod  # noqa: E402
-from herogen.pipeline import heldout, imaging, stages  # noqa: E402
+from herogen.pipeline import imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
+from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
 from test_herogen_pipeline_heldout_synth import fake_heldout_image  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
 
@@ -46,10 +47,11 @@ def _decode_data_url(url: str) -> Image.Image:
 class FakeAPI:
     """Stands in for Meta's Model API. Draws every image by code; SAM masks come from thresholding."""
 
-    def __init__(self, sheet_order=("front", "right", "front", "left"), heldout_yaw: float = 45.0,
-                 heldout_pose: str = "a") -> None:
+    def __init__(self, sheet_order=("front", "right", "front", "left"), heldout_yaw: float | None = None,
+                 heldout_pose: str = "a", heldout_gain: float = 1.0) -> None:
         self.sheet_order = sheet_order
-        self.heldout_yaw = heldout_yaw  # how far the held-out figures are turned; negative: the wrong way
+        self.heldout_yaw = heldout_yaw  # held-out turn; None: as requested; negative: the wrong way
+        self.heldout_gain = heldout_gain  # turn drawn / turn requested, when heldout_yaw is None
         self.heldout_pose = heldout_pose  # "a", "down" or "stride" (see test_herogen_pipeline_heldout_synth)
         self.calls: list[str] = []
         self.prompts: list[str] = []
@@ -72,10 +74,11 @@ class FakeAPI:
             img, _ = sheet(order=self.sheet_order)
         elif prompt == stages.TOP_PROMPT:
             img = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))  # not a real top view
-        elif prompt in heldout.PROMPTS.values():
-            # The sheet's stick figure turned in 3D, framed like the pose reference (the last image).
+        elif HELDOUT_REQUEST.search(prompt):
+            # The sheet's stick figure turned in 3D, framed like the turn guide (the last image).
             frame = _decode_data_url(body["images"][-1]["image_url"])
-            img = fake_heldout_image(prompt, self.heldout_yaw, self.heldout_pose, frame=frame)
+            img = fake_heldout_image(prompt, self.heldout_yaw, self.heldout_pose, frame=frame,
+                                     gain=self.heldout_gain)
         else:
             raise AssertionError(f"unexpected prompt {prompt[:40]!r}")
         return {"data": [{"b64_json": _b64png(img)}], "usage": {"input_tokens": 1}}
