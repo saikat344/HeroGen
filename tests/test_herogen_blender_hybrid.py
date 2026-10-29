@@ -496,6 +496,19 @@ class TestStage4HybridBlender(HybridBase):
         bake = sections["texture"]["bake"]
         self.assertIn("texels_source_blend", bake["high"])
         self.assertEqual(set(bake["high_side_trust"]["trust"]), {"left", "right"})
+        # The scorer (numpy) measures the stage 4 body as stage 4's Blender renders do.
+        from herogen.blender import score
+
+        assert score.main(["--run", str(run)]) == 0
+        scores = {b["name"]: b for b in json.loads((run / "05-scores.json").read_text())["bodies"]}
+        self.assertEqual(set(scores), {"hybrid", "hybrid-no-source-fallback", "hybrid-side-trust"})
+        hyb = scores["hybrid"]
+        for v in ("front", "back", "left", "right"):
+            self.assertAlmostEqual(hyb["views"][v]["iou"], chk[f"rest_iou_with_covers_{v}"]["value"], delta=0.003)
+            self.assertAlmostEqual(hyb["views"][v]["colour_error"], chk[f"texture_colour_error_{v}"]["value"],
+                                   delta=1.0)
+            self.assertAlmostEqual(hyb["views"][v]["ssim"], chk[f"texture_ssim_{v}"]["value"], delta=0.03)
+        self.assertEqual((hyb["views"]["left"]["seen_shape"], hyb["views"]["left"]["seen_colour"]), (False, True))
         # stage 4 again on the carve: the hybrid's comparison atlases must not survive as stale variants
         rec3 = run_stage3(run, nz=96, timeout=300)
         self.assertEqual(rec3["mesh_source"], "carve")
