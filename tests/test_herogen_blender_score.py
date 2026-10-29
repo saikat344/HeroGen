@@ -153,9 +153,14 @@ class Projection(unittest.TestCase):
         self.assertLess(S.view_depth(np.array([[1.0, 0.0, 0.0]]), 90.0)[0], 0)
 
     def test_heldout_ranges_follow_the_name(self):
-        self.assertEqual(S.heldout_yaw("front-left-34"), ((15.0, 75.0), 45.0))
+        self.assertEqual(S.heldout_yaw("front-left-34"), ((15.0, 75.0), 45.0))       # the older 3/4 view
         self.assertEqual(S.heldout_yaw("front-right-34"), ((-75.0, -15.0), -45.0))
+        self.assertEqual(S.heldout_yaw("front-left-30"), ((5.0, 55.0), 30.0))        # named by target yaw
+        self.assertEqual(S.heldout_yaw("front-left-60"), ((35.0, 85.0), 60.0))
+        self.assertEqual(S.heldout_yaw("front-right-60"), ((-85.0, -35.0), -60.0))
+        self.assertEqual(S.heldout_yaw("front-left-80"), ((55.0, 89.0), 80.0))
         self.assertEqual(S.heldout_yaw("three-quarter-back"), (S.OTHER_YAW_RANGE, None))
+        self.assertEqual(S.heldout_yaw("front-left-120"), (S.OTHER_YAW_RANGE, None))
 
 
 class Rasterize(unittest.TestCase):
@@ -225,6 +230,43 @@ class HeldoutYaw(Tmp):
         override = S.load_score_views(run, {"front-right-34": (-40.0, -38.0)})
         e2 = S.score_body(run, "c", write_body(self.tmp / "c.glb", (BODY, ARM)), views=override)
         self.assertTrue(e2["views"]["front-right-34"]["yaw_at_range_edge"])
+
+    def test_generated_views_by_target_angle_skip_review_and_rejected(self):
+        run = make_run(self.tmp, yaw_heldout=40.0,
+                       extra_heldout={"front-left-30": 31.0, "front-left-60": 58.0, "front-right-30": -29.0})
+        held = run / "heldout"
+        for sub in ("review", "rejected"):            # views that must never be scored
+            (held / sub).mkdir()
+            for f in ("front-right-60.png", "front-right-60-mask.png"):
+                (held / sub / f).write_bytes((held / "front-left-30.png").read_bytes())
+        (held / "pose-reference.png").write_bytes((held / "front-left-30.png").read_bytes())   # no mask: input
+        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True, "details": {
+            "reference": "generated", "views": {"front-left-30": {"status": "accepted", "found_yaw_deg": 31.0,
+                                                                  "yaw_window_deg": [25.0, 35.0]}}}}))
+        views = S.load_score_views(run)
+        self.assertEqual([v.name for v in views if v.heldout],
+                         ["front-left-30", "front-left-34", "front-left-60", "front-right-30"])
+        e = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)), views=views)
+        for name, target, drawn in (("front-left-30", 30, 31.0), ("front-left-60", 60, 58.0),
+                                    ("front-right-30", -30, -29.0)):
+            row = e["views"][name]
+            self.assertAlmostEqual(row["yaw_deg"], drawn, delta=1.0, msg=name)
+            self.assertGreater(row["iou"], 0.97, name)
+            self.assertIn(f"{target:g}", row["at_fixed_yaw"])
+            self.assertEqual((row["reference"], row["measures"]), ("generated", "consistency"))
+            self.assertFalse(row["seen"])
+        self.assertEqual(e["views"]["front-left-30"]["stage2h"]["found_yaw_deg"], 31.0)
+        self.assertNotIn("stage2h", e["views"]["front-left-60"])
+        path = S.write_scores(run, [e], views)
+        listed = {v["view"]: v for v in json.loads(path.read_text())["views"]}
+        self.assertEqual(listed["front-left-30"]["measures"], "consistency")
+        self.assertNotIn("front-right-60", listed)
+
+    def test_heldout_without_a_record_has_no_reference_label(self):
+        run = make_run(self.tmp)
+        row = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)))["views"][S.HELDOUT_VIEW]
+        self.assertIsNone(row["reference"])
+        self.assertIsNone(row["measures"])
 
     def test_writes_renders_silhouettes_and_diffs(self):
         run = make_run(self.tmp)
