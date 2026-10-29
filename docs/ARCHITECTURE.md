@@ -14,8 +14,9 @@ tested separately.
 | 0 input | `herogen/pipeline` | `00-sketch.png` (copied input) |
 | 1 cover art | `herogen/pipeline` | `01-cover.png` |
 | 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view) |
-| 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only) |
-| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/low.glb`, `04-body/sections.json`, `04-body/pose-renders/*.png` |
+| 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
+| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/low.glb`, `04-body/sections.json`, `04-body/atlas-{high,low}.png`, `04-body/pose-renders/*.png`; for a SAM 3D Objects mesh also the comparison atlases `04-body/atlas-high-{no-source-fallback,side-trust}.png` |
+| scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
 | 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
 
@@ -71,6 +72,172 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
   "checks": []
 }
 ```
+
+## Stage 3: mesh source and joints
+
+`python3 -m herogen.blender run --stages 3 [--mesh-source carve|sam3d-objects] [--joints silhouette|sam3d-body]`.
+
+- `carve` (default): the visual hull of the observed masks, surfaced and smoothed. Its shape is built from every
+  observed view.
+- `sam3d-objects`: SAM 3D Objects reconstructs a textured mesh from `views/front.png` and `masks/front.png` only;
+  it is kept as `03-source.glb`, put in the contract frame using the front view only (facing, a small rotation
+  and perspective fit, an outline conform onto the front mask) and remeshed into one closed manifold surface
+  (`herogen/blender/sam3d_mesh.py`). Its shape is built from the front view alone.
+
+`stage-3.json` records `mesh_source` (what was used), `mesh_source_requested`, `joints_source` and
+`shape_views`, the views the shape was built from. **Every observed view's silhouette IoU is gated, whatever
+the mesh source**, in stage 3 and in stage 4's rest IoU; a view the shape was not built from carries a note
+saying so. Only a derived view (`mask_method` `visual_hull`, made by stage 2 from the others) is reported, not
+gated. The texture gates apply to every observed colour view.
+
+**The hybrid shape fails the side views today.** Built from the front view alone, the SAM 3D Objects mesh does
+not match the side masks: on the pencil-sketch run, silhouette IoU front 0.965, back 0.944, left 0.688, right
+0.691 against the 0.90 gate (the top view, 0.502, is derived there and only reported), so stage 3 fails for
+`--mesh-source sam3d-objects`. The front-only orientation fit is part of it: on the synthetic humanoid, whose
+source mesh is the exact body, it picks a 5 degree pitch the front view cannot tell from none, and the side
+views score 0.62. Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A remote source that fails falls back to the local one
+(`carve`, `silhouette`) and the notes say so; `--no-fallback` stops the stage instead, with a one-line error.
+Every failure of a remote source counts: the call itself, its cached output (an unreadable GLB, a missing file)
+and mapping its result (a mesh that covers no pixel of the front view, say). Stage 3 removes its previous
+`stage-3.json` when it starts and writes each output only once it is complete, so a stage that stops never
+leaves an earlier passed record or a half-written file for stage 4.
+
+Stage 3's gates: the silhouette IoU (at least 0.90) of every observed view, `open_edges` (0: the
+mesh is closed) and, by mesh source, `independent_views` for the carve (at least two of the front-or-back pair,
+the left-or-right pair and the top) or `front_view_present` for `sam3d-objects` (the one view it is built from).
+`triangles` and `non_manifold_edges` (edges shared by more than two triangles) are reported, not gated.
+
+`03-joints.json` holds the joints stage 4 cuts at:
+
+```json
+{
+  "source": "sam3d-body",
+  "units": "studs",
+  "frame": "contract: +Z up, feet at z=0, faces -Y, x/y centred on the figure's bounding box",
+  "joints": {"Neck": [0.0, 0.01, 4.6], "LeftShoulder": [0.6, 0.0, 4.2]},
+  "evidence": {"Neck": "MHR skeleton joint 113 projected; X/Z through the front view mapping; Y mesh mid-depth"},
+  "joint_sources": {"Neck": "sam3d-body", "LeftShoulder": "silhouette (X/Z), mesh (Y)"},
+  "sources": {"sam3d-body": {}, "sam3d-body-y-mhr3d": {}, "silhouette": {}},
+  "distance_to_silhouette": {"Neck": 0.05},
+  "flag_threshold_studs": 0.5,
+  "flagged": [],
+  "y_method": "mesh", "limb_roots": "silhouette", "remote": {"cached": true, "gpu": "A10G",
+    "person_box": [112, 20, 288, 380], "box_source": "front mask bounding box (stage 2)", "detector": null}
+}
+```
+
+With `--joints sam3d-body`, SAM 3D Body's keypoints on the front view give X and Z through the front view's own
+mapping and the mesh's mid-depth gives Y (`herogen/blender/body_joints.py`). Shoulders and hips (`limb_roots`)
+are cut where the outline separates the limb, from the silhouette finder, since the model's anatomical
+shoulder sits inside bulky costume pieces; each joint's source is in `joint_sources`, both finders' joints are
+kept under `sources`, and joints more than 0.5 studs apart are listed in `flagged`. With `--joints silhouette`
+the file holds the silhouette finder's joints only (`"source": "silhouette"`), and stage 4 finds them again
+itself.
+
+## Remote models (SAM 3D Objects, SAM 3D Body)
+
+`herogen/blender/remote/objects.py` and `body.py` are self-contained Modal apps (`herogen-sam3d-objects`,
+`herogen-sam3d-body`); `client.py` is the one client the stages use. Each call's outputs are recorded under
+`<runs>/_cache-remote/<key>/` (the model's output files, `entry.json` with the request, the run log, wall seconds
+and a cost estimate, and `modal.log`, scrubbed of tokens, the Modal workspace name and the home directory).
+The key hashes the runner and the SHA-256 of its source file (`runner_sha`), the model code commit on GitHub
+(`rev`), the Hugging Face weight revisions the runner pins (`weights`: `facebook/sam-3d-objects` and its depth
+model `Ruicheng/moge-vitl`; `facebook/sam-3d-body-dinov3` and its field-of-view model
+`Ruicheng/moge-2-vitl-normal`), MoGe's code commit for SAM 3D Body (`moge`) and the commit of its DINOv3 backbone
+code (`dinov3`; upstream would fetch that code from GitHub's main branch at run time, the image clones it at the
+pinned commit and loads it from there), the renderer, the parameters, SAM 3D Body's person box and its source and
+the optional detector (`bbox`, `box_source`, `detector`) and the SHA-256 of every input image, not the GPU type (a
+CPU run of SAM 3D Body keys separately). A cached entry made by a different runner (another source file, commit or
+weights) is not used; replay names the fields that differ. The runners refuse a checkpoint volume holding another
+revision. Errors are one line; a failed call keeps the scrubbed log tail on the exception, not in the records. A
+GPU with no recorded list price gets an unknown (`null`) cost, not a guess. `--remote replay` (the default) reads
+the cache
+only; `--remote live` runs `modal run` in a subprocess with a timeout and records the result. Configuration is by
+environment, set by the client: `HEROGEN_OBJECTS_GPU`, `HEROGEN_BODY_GPU`, `HEROGEN_OBJECTS_TIMEOUT`,
+`HEROGEN_BODY_TIMEOUT`, and the checkpoint volumes `HEROGEN_OBJECTS_VOLUME` (default `herogen-sam3d-objects-ckpt`)
+and `HEROGEN_BODY_VOLUME` (default `herogen-sam3d-body-ckpt`). The Hugging Face token lives only in the Modal
+secret `huggingface`. Stage records count a replayed call as no new spend. The first live SAM 3D Objects call
+builds its image, which compiles CUDA extensions (13 minutes measured for a rebuild from the requirements
+step on, longer from scratch); build it ahead with `modal run herogen/blender/remote/objects.py::build` (CPU
+only; it also reports that none of the excluded packages can be imported and runs the pytorch3d rasteriser's
+self-test), or give that first call a longer `--remote-timeout`. The SAM 3D Body image's build also fails if a
+package it leaves out can be imported. SAM 3D Body's person box is the bounding box of stage 2's front mask, and
+by default no person detector runs; `--body-detector vitdet` runs upstream's ViTDet detector (detectron2,
+weights under CC BY-SA 3.0, downloaded on first use) instead, with the mask's box used only if it finds nobody.
+The detector is part of the cache key, and `03-joints.json` records it (`remote.detector`) with the box and its
+source (`remote.person_box`, `remote.box_source`) and the runner's code commits (`remote.code`: `rev`, `moge`,
+`dinov3`).
+
+## Scoring: `05-scores.json`
+
+`python3 -m herogen.blender.score --run <folder>` (or `python3 -m herogen.blender score`) scores bodies with
+numpy only, so any GLB can be compared with ours on the same views (`herogen/blender/score.py`; GLBs are read by
+`herogen/blender/glb.py`, the one GLB reader).
+
+- **Bodies.** With no `--body`, every stage 4 body: `04-body-carve/high.glb` as `carve`, `04-body/high.glb` as
+  `carve` or `hybrid` by its mesh source, `04-body-<x>/high.glb` as `<x>`, and each `atlas-high-<variant>.png`
+  next to one as `<name>-<variant>`, the same mesh with that atlas (`variant_of`). `--body NAME=GLB` scores any
+  file, `--atlas NAME=PNG` gives it another atlas.
+- **Views.** The four turnaround views at their contract yaw, and every held-out view: each
+  `heldout/<name>.png` with a matching `heldout/<name>-mask.png` (stage 2h makes `front-left-30`, `front-right-30`,
+  `front-left-60` and `front-right-60`; any other name is scored the same way). The scorer takes the files
+  directly in `heldout/`; it does not consult the accepted views of `stage-2h.json` (see Held-out views).
+- **Placement.** Turnaround views use stage 3's mapping: one pixel scale (the front mask's height over the
+  body's height), u = 0 on each mask's box centre, feet on its bottom edge. Stage 4 bodies are placed as built
+  (`"frame": "contract"`), so a stage 4 body is scored with the same mapping and metric as stage 4's gates;
+  other GLBs by their own bounding box (`"frame": "fit"`). A held-out view's yaw is searched (2 degrees, then
+  0.5 around the best; front-left views 15 to 75 degrees, front-right -75 to -15, other names all the way
+  round), with scale and offset fitted from the mask's box; front-left and front-right views are also measured
+  at a fixed 45 degrees (`at_fixed_yaw`).
+- **Measures, per view.** Silhouette IoU; colour error (mean absolute, 0-255) and grey SSIM between a flat render
+  of the body's own colours (base-colour texture, factor and vertex colours; nearest surface, no lighting) and
+  the view's image, inside both silhouettes as stage 4's texture gates measure them; `seen_shape` (the shape was
+  built from the view), `seen_colour` (the colours were) and `seen` (either), from `sections.json`
+  (`shape_views`, `texture.colour_views`) or `--seen` / `--seen-shape`. A held-out view is never seen.
+- **Per body.** Triangles (and the low LOD's), atlas size, mesh sanity after welding (degenerate triangles,
+  boundary, non-manifold and inconsistently wound edges, components, inside-out closed meshes, the meshes that
+  are not closed; self-intersections are not checked), and the checks of a profile when one is asked for.
+
+```json
+{
+  "scored": "2026-10-29T10:00:00-07:00",
+  "scorer": "herogen.blender.score",
+  "method": {"iou": "...", "colour": "...", "heldout_yaw": "..."},
+  "views": [{"view": "front", "mask": "masks/front.png", "image": "views/front.png", "heldout": false,
+             "yaw_deg": 0.0},
+            {"view": "front-left-34", "mask": "heldout/front-left-34-mask.png", "heldout": true,
+             "image": "heldout/front-left-34.png", "yaw_range": [15.0, 75.0], "fixed_yaw": 45.0}],
+  "bodies": [{
+    "name": "hybrid", "glb": "04-body/high.glb", "mesh_source": "sam3d-objects", "joints_source": "sam3d-body",
+    "triangles": 22768, "triangles_low": 5778, "budget": null, "within_budget": null, "atlas": 1024,
+    "colour_source": "texture", "frame": "contract", "pixels_per_unit": 168.5, "height": 5.5,
+    "shape_views": ["front"], "colour_views": ["back", "front", "left", "right"],
+    "sanity": {"watertight": true, "boundary_edges": 0, "open_meshes": []},
+    "views": {
+      "left": {"iou": 0.70, "colour_error": 14.0, "ssim": 0.62, "pixels": 89000, "yaw_deg": 90.0,
+               "seen": true, "seen_shape": false, "seen_colour": true},
+      "front-left-34": {"iou": 0.63, "colour_error": 39.7, "ssim": 0.14, "pixels": 122000, "yaw_deg": 21.5,
+                        "seen": false, "seen_shape": false, "seen_colour": false, "scale": 0.98,
+                        "yaw_range": [15.0, 75.0], "yaw_at_range_edge": false, "yaw_search": [[15.0, 0.626]],
+                        "at_fixed_yaw": {"45": {"iou": 0.55, "colour_error": 41.5, "ssim": 0.13}}}
+    },
+    "notes": []
+  }]
+}
+```
+
+Scoring again replaces bodies of the same name and keeps the others. The results page and the lab read `name`,
+`glb`, `triangles`, `atlas`, `variant_of`, `mesh_source`, `joints_source`, `triangles_low` and, per view,
+`iou`, `colour_error`, `ssim`, `yaw_deg`, `scale` and `seen`; every other field is additional.
+
+## Triangle budgets
+
+Stage 4 builds the high and low LODs within 24,000 and 6,000 triangles (`TRIANGLES_HIGH_MAX`,
+`TRIANGLES_LOW_MAX`), and gates on them. The scorer applies no budget unless asked: `--budget NAME=N` sets a
+plain total for one body, and `--profile roblox` checks Roblox's character body specification: 10,742
+triangles in total; per part group Head 4,000, Torso (`UpperTorso`, `LowerTorso`) 1,750, and each arm and each
+leg (three sections) 1,248, found by mesh name; every part watertight; textures at most 2048 px. A group with no
+mesh of its names is reported with value `null` and not failed.
 
 ## Held-out views, mask method and covers
 
