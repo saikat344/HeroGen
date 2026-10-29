@@ -1,0 +1,3 @@
+#!/bin/sh
+# Commit messages are public too: enforce the format and scan them for secrets and personal data.
+exec "$(dirname "$0")/run-guard" commit-msg "$1"

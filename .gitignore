@@ -1,0 +1,52 @@
+# Everything committed here is public, including history.
+# The guard (tools/guard/guard.py) blocks most of these too; this file just keeps them out of `git status`.
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+auth.json
+credentials*.json
+secrets/
+
+# Private and raw material
+private/
+raw/
+*.pdf
+*.mp4
+*.mov
+*.m4v
+*.heic
+*.heif
+*.wav
+*.m4a
+
+# Pipeline runs and generated assets (never committed)
+runs/
+herogen/runs/
+_cache*/
+*.glb
+*.gltf
+*.ply
+*.npz
+*.blend
+*.blend1
+*.fbx
+*.obj
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

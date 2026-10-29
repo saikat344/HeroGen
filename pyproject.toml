@@ -1,0 +1,16 @@
+[project]
+name = "herogen"
+version = "0.1.0"
+description = "One hand-drawn character sketch to a measured, game-ready Roblox hero body."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy", "pillow"]
+
+[project.optional-dependencies]
+remote = ["modal"]
+
+[tool.setuptools.packages.find]
+include = ["herogen*"]
+
+[tool.ruff]
+line-length = 110

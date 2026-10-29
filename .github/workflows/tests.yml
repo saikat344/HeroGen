@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pillow
+      - name: Unit tests (Blender tests skip without Blender)
+        run: python3 -m unittest discover -s tests -v
+      - name: Guard
+        run: python3 tools/guard/guard.py tree

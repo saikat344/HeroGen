@@ -1,0 +1,4 @@
+#!/bin/sh
+# Re-checks every commit being pushed (catches commits made with --no-verify or on another machine)
+# and blocks direct pushes to main.
+exec "$(dirname "$0")/run-guard" push

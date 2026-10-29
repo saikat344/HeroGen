@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks secrets, personal data, private material and non-noreply identities before they enter history.
+exec "$(dirname "$0")/run-guard" staged
