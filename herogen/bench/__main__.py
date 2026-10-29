@@ -19,6 +19,14 @@ def _pairs(items: list[str], flag: str) -> dict[str, str]:
     return out
 
 
+def _alpha_modes(items: list[str]) -> dict[str, str]:
+    modes = _pairs(items, "--alpha")
+    bad = {k: v for k, v in modes.items() if v not in ("clip", "opaque")}
+    if bad:
+        raise SystemExit(f"--alpha expects MATERIAL=clip or MATERIAL=opaque, got {bad}")
+    return modes
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m herogen.bench")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -36,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--image", action="append", metavar="MATERIAL=IMAGE[@UVMAP]",
                    help="use this image (file or image name) as the material's base colour, "
                         "optionally through the named UV map")
+    r.add_argument("--alpha", action="append", metavar="MATERIAL=clip|opaque",
+                   help="clip the material's --image texture at alpha 0.5, or keep it opaque (the default "
+                        "for --image overrides and materials without nodes)")
     r.add_argument("--vcol", action="append", metavar="MATERIAL=ATTRIBUTE",
                    help="use this colour attribute as the material's base colour")
     r.add_argument("--image-dir", action="append", type=Path, default=[],
@@ -60,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         rec = render_asset(
             a.asset, a.out, include=a.include, exclude=a.exclude, yaw_deg=a.yaw, pose=a.pose,
             material_images=_pairs(a.image, "--image"), material_vcols=_pairs(a.vcol, "--vcol"),
+            material_alpha=_alpha_modes(a.alpha),
             image_dirs=a.image_dir, bind_unrigged=a.bind_unrigged, size=a.size, height=a.height,
             samples_flat=a.samples_flat, samples_lit=a.samples_lit, device=a.device, timeout=a.timeout,
             overwrite=a.overwrite,
