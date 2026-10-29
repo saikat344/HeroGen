@@ -13,5 +13,8 @@ live = ["meta-sam-parser"]
 [tool.setuptools.packages.find]
 include = ["herogen*"]
 
+[tool.setuptools.package-data]
+"herogen.roblox" = ["templates/*.luau", "templates/*.txt"]
+
 [tool.ruff]
 line-length = 110
