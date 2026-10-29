@@ -30,7 +30,8 @@ except ImportError:  # numpy or Pillow missing
 # Builds a box figure in Blender, facing -Y, arms straight out along X (a T-pose), 2 units tall, with a rig
 # (KayKit-style bone names) whose arm and leg bones carry the boxes, and one colour per part: the character's
 # left arm red, its right arm blue. With "cuff", a yellow box around the left forearm that the rig does not
-# deform. With "turned", the whole figure faces +Y instead (a model exported the other way round). With
+# deform. With "turned", the whole figure faces +Y instead (a model exported the other way round); with
+# "tilted", it is tilted 2 degrees about each axis, so no box edge runs along a pixel row or column. With
 # "nolegs", the leg bones have names that are not limbs, so the rig has arms only.
 # Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none|turned>`.
 BUILD = textwrap.dedent('''
@@ -103,6 +104,8 @@ BUILD = textwrap.dedent('''
             o.parent = arm
     if turned:
         arm.rotation_euler[2] = 3.141592653589793
+    if extra == "tilted":
+        arm.rotation_euler = (0.03490658503988659,) * 3   # 2 degrees about each axis: no edge stays square
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True)
 ''')
@@ -534,6 +537,36 @@ class RegistrationTest(unittest.TestCase):
     def test_coverage_noise_allowance_follows_the_sample_count(self):
         self.assertEqual(self.r.coverage_margin(16), 0.125)
         self.assertEqual(self.r.coverage_margin(64), 0.03125)
+
+
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
+class RegistrationGateTest(unittest.TestCase):
+    """At the size the registration thresholds were measured at, a correct render passes them as gates.
+
+    The box figure is tilted 2 degrees about each axis. Square to the cameras, a long straight edge crosses
+    every pixel along it at the same sub-pixel offset, so the render's sampled coverage and the centre ray
+    differ the same way all along it instead of averaging out: the square figure reads 0.84 px of centroid
+    and 0.0015 to 0.002 of area at 1024 px with no camera error. The 17 delivered runs, organic and blocky
+    alike, reach 0.11 px and 0.00036."""
+
+    def test_a_correct_render_at_1024_passes_both_gates(self):
+        from herogen.bench import render
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asset, run = Path(tmp) / "tilted.glb", Path(tmp) / "run"
+            build_figure(asset, True, "tilted")
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["render", "--asset", str(asset), "--out", str(run), "--size", "1024",
+                             "--samples-flat", "16", "--samples-lit", "2"])
+            rec = json.loads((run / "stage-2.json").read_text())
+        self.assertEqual(code, 0, json.dumps([c for c in rec["checks"] if not c["pass"]]))
+        checks = {c["name"]: c for c in rec["checks"]}
+        for name, limit in (("render_mask_centroid_px", render.CENTROID_MAX_PX),
+                            ("render_mask_area_ratio_dev", render.AREA_RATIO_MAX_DEV)):
+            self.assertTrue(checks[name]["gate"], name)
+            self.assertTrue(checks[name]["pass"], name)
+            self.assertLessEqual(checks[name]["value"], limit, name)
+        self.assertEqual(rec["details"]["yaw_deg"], 0.0)       # 2 degrees snaps to facing -Y
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
