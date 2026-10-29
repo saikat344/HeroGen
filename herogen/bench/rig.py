@@ -29,14 +29,18 @@ LIMB_ROOTS = {
     "arm": ("upperarm", "upper_arm", "arm_upper", "uparm", "up_arm", "arm"),
     "leg": ("upperleg", "upper_leg", "leg_upper", "upleg", "up_leg", "thigh", "leg"),
 }
-# Words that mark a bone as part of a limb (any rig layer: deform, mechanism, control), and words that keep a
-# bone out of it: the shoulder and hip stay where they are.
+# Name tokens (whole words) that mark a bone as part of a limb (any rig layer: deform, mechanism, control),
+# and tokens that keep a bone out of it: the shoulder and hip stay where they are.
 LIMB_PARTS = {
-    "arm": ("arm", "hand", "wrist", "palm", "elbow", "finger", "thumb", "index", "middle", "ring", "pinky",
-            "handslot", "wep"),
-    "leg": ("thigh", "leg", "shin", "calf", "knee", "foot", "ankle", "toe", "heel"),
+    "arm": frozenset(("arm", "upperarm", "lowerarm", "forearm", "uparm", "hand", "hands", "handslot",
+                      "wrist", "palm", "elbow", "finger", "fingers", "thumb", "index", "middle", "ring",
+                      "pinky", "wep")),
+    "leg": frozenset(("leg", "upleg", "upperleg", "lowerleg", "thigh", "shin", "calf", "knee", "foot",
+                      "ankle", "toe", "toes", "toebase", "heel")),
 }
-LIMB_EXCLUDE = {"arm": ("shoulder", "clavicle", "collar", "armor", "armour"), "leg": ("hip", "pelvis")}
+LIMB_EXCLUDE = {"arm": frozenset(("shoulder", "clavicle", "collar", "armor", "armour")),
+                "leg": frozenset(("hip", "hips", "pelvis"))}
+_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 # Base names of the joint at the far end of each limb (its position gives the limb direction).
 LIMB_ENDS = {
     "arm": ("wrist", "hand", "palm"),
@@ -74,16 +78,41 @@ def find_limb_root(names: list[str], limb: str, side: str) -> str | None:
     return min(ranked)[2] if ranked else None
 
 
+def name_tokens(name: str) -> set[str]:
+    """The words of a bone name, split at separators, digits and camelCase, lower-cased:
+    'mixamorig:LeftHandIndex1' -> {'mixamorig', 'left', 'hand', 'index', '1'}."""
+    return {t.lower() for t in _TOKEN.findall(name)}
+
+
 def limb_bones(names: list[str], limb: str, side: str) -> list[str]:
-    """Every bone on `side` whose base name marks it as part of `limb`. Turning these as one rigid group turns
-    the limb even in rigs whose deform bones hang from helper bones rather than from each other."""
+    """Every bone on `side` with a name word that marks it as part of `limb` (whole words, so 'earring' is
+    not a ring finger and 'handle' not a hand). Turning these as one rigid group turns the limb even in rigs
+    whose deform bones hang from helper bones rather than from each other."""
     out = []
     for n in names:
-        s, base = split_name(n)
-        if s != side or any(w in base for w in LIMB_EXCLUDE[limb]):
+        s, _ = split_name(n)
+        words = name_tokens(n)
+        if s != side or words & LIMB_EXCLUDE[limb]:
             continue
-        if any(w in base for w in LIMB_PARTS[limb]):
+        if words & LIMB_PARTS[limb]:
             out.append(n)
+    return out
+
+
+def independent_roots(parents: dict[str, str | None], roots: list[str]) -> list[str]:
+    """The roots with no other root above them: turning a bone turns everything below it, so a root that
+    hangs (through other bones) under another root must not be turned again."""
+    chosen = set(roots)
+    out = []
+    for r in roots:
+        p, above = parents.get(r), False
+        while p is not None:
+            if p in chosen:
+                above = True
+                break
+            p = parents.get(p)
+        if not above:
+            out.append(r)
     return out
 
 

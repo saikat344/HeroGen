@@ -110,7 +110,8 @@ BUILD = textwrap.dedent('''
 # An unrigged box saved as a .blend whose material is a bare legacy colour, with a solid orange image packed
 # into the file but connected to nothing: the case of older asset files, rendered with --image. With
 # "hostile", the file also carries render settings that must not reach the bench's renders: a bright red
-# world, film exposure, a 2:1 pixel aspect and a render border.
+# world, film exposure, a 2:1 pixel aspect and a render border. Both carry a visible text object (geometry
+# the bench skips and must report) and a keyframed box, whose animation the bench must clear.
 BUILD_BLEND = textwrap.dedent('''
     import sys
     import bpy
@@ -128,6 +129,8 @@ BUILD_BLEND = textwrap.dedent('''
     img.pixels = [1.0, 0.5, 0.0, 1.0] * 64
     img.pack()
     img.use_fake_user = True
+    bpy.ops.object.text_add(location=(3.0, 0.0, 0.0))
+    box.keyframe_insert("rotation_euler", frame=1)
     if hostile:
         scene = bpy.context.scene
         scene.world = bpy.data.worlds.new("Sunset")
@@ -197,6 +200,14 @@ class BlendFileTest(unittest.TestCase):
             b = np.asarray(Image.open(hostile / rel).convert("RGB")).astype(int)
             self.assertEqual(a.shape, b.shape, rel)
             self.assertLess(np.abs(a - b).mean(), 1.0, rel)
+
+    def test_skipped_geometry_and_cleared_animation_are_recorded(self):
+        rec, _ = self._run("plain")
+        self.assertEqual(rec["details"]["skipped_geometry"], ["Text (font)"])
+        self.assertTrue(any("cleared object action" in r for r in rec["details"]["blender_report"]))
+        check = next(c for c in rec["checks"] if c["name"] == "skipped_visible_geometry")
+        self.assertEqual(check["value"], 1)
+        self.assertFalse(check["gate"])
 
     def test_logs_name_no_home_folder_or_work_folder(self):
         from herogen.bench.render import HOME_PATH

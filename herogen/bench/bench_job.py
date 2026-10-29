@@ -65,6 +65,28 @@ def load_asset(path):
     return bpy.context.scene
 
 
+SKIPPED_TYPES = ("CURVE", "SURFACE", "META", "FONT", "CURVES", "POINTCLOUD", "VOLUME", "GPENCIL",
+                 "GREASEPENCIL")
+
+
+def skipped_geometry(scene, chosen):
+    """Visible geometry the bench does not render and the true mesh does not contain: non-mesh objects,
+    particle systems (hair) on the chosen meshes, and instancers."""
+    out = []
+    for o in scene.objects:
+        if not o.visible_get() or o.hide_render:
+            continue
+        if o.type in SKIPPED_TYPES:
+            out.append(f"{o.name} ({o.type.lower()})")
+        if o.instance_type != "NONE" and (o.instance_type != "COLLECTION" or o.instance_collection):
+            out.append(f"{o.name} (instances: {o.instance_type.lower()})")
+    for o in chosen:
+        for ps in o.particle_systems:
+            if ps.settings.render_type != "NONE":
+                out.append(f"{o.name} (particles: {ps.name}, {ps.settings.type.lower()})")
+    return out
+
+
 def choose_meshes(scene, include, exclude):
     inc = re.compile(include) if include else None
     exc = re.compile(exclude) if exclude else None
@@ -105,6 +127,25 @@ def deforming_rig(o):
 
 
 # --------------------------------------------------------------------------------------------- rig reset
+
+def clear_animation(scene, report):
+    """Stop object and shape-key animation from moving anything (rigs are reset by `reset_rig`): actions
+    unassigned, NLA tracks and drivers muted. Values stay as the file left them at its current frame."""
+    targets = [(o.name, "object", o) for o in scene.objects if o.type != "ARMATURE"]
+    targets += [(o.name, "shape-key", o.data.shape_keys) for o in scene.objects
+                if o.type == "MESH" and o.data.shape_keys is not None]
+    for name, label, idb in targets:
+        ad = idb.animation_data
+        if ad is None:
+            continue
+        if ad.action is not None:
+            report.append(f"{name}: cleared {label} action {ad.action.name!r}")
+            ad.action = None
+        for track in ad.nla_tracks:
+            track.mute = True
+        for fc in ad.drivers:
+            fc.mute = True
+
 
 def reset_rig(arm, report):
     ad = arm.animation_data
@@ -203,9 +244,12 @@ def limb_group(arm, limb, side, root_name):
 
 
 def group_roots(arm, group):
-    """Bones of the group whose parent is outside it: turning these turns the whole group once."""
+    """Bones of the group whose parent is outside it and that hang under no other such bone: turning these
+    turns the whole group exactly once."""
     g = set(group)
-    return [n for n in group if arm.data.bones[n].parent is None or arm.data.bones[n].parent.name not in g]
+    roots = [n for n in group if arm.data.bones[n].parent is None or arm.data.bones[n].parent.name not in g]
+    parents = {b.name: (b.parent.name if b.parent else None) for b in arm.data.bones}
+    return RIG.independent_roots(parents, roots)
 
 
 def chain_tail(arm, root):
@@ -713,9 +757,11 @@ def main():
     meshes = choose_meshes(scene, JOB.get("include"), JOB.get("exclude"))
     rigs = rigs_of(meshes)
     missing_images = resolve_images(JOB.get("image_dirs", []), report)
+    skipped = skipped_geometry(scene, meshes)
     pose_mode = JOB.get("pose", "auto")
     limbs = []
     if pose_mode != "as-shipped":
+        clear_animation(scene, report)
         for arm in rigs:
             reset_rig(arm, report)
         bpy.context.view_layer.update()
@@ -812,6 +858,7 @@ def main():
         "limbs": limbs,
         "yaw_deg": yaw_deg,
         "facing": facing,
+        "skipped_geometry": skipped,
         "contract_scale": float(contract[0, 0]),
         "triangles": int(len(tris)),
         "vertices": int(len(verts)),
