@@ -14,9 +14,9 @@ Retry policy (`RetryPolicy`):
 
 Shared limiter (`SharedLimiter`): every process that calls with one API key shares one limit on calls in
 flight, kept in a small JSON state file under HEROGEN_LIMITER_DIR (default ~/.cache/herogen/api-limiter),
-named by a SHA-256 prefix of the key (never the key itself) and guarded by an exclusive `flock`. A 429 halves
-the limit (never below 1) and, when its caller starts the wait it was given, holds every process off for that
-wait, at most HOLD_MAX_S (60 s); every
+named by a SHA-256 prefix of the key (never the key itself) and guarded by an exclusive file lock
+(`herogen.pipeline.filelock`). A 429 halves the limit (never below 1) and, when its caller starts the wait it
+was given, holds every process off for that wait, at most HOLD_MAX_S (60 s); every
 SUCCESSES_PER_STEP successful calls since the last 429 raise the limit by one, up to its maximum. A slot whose
 process has died is freed when another process next looks.
 """
@@ -24,7 +24,6 @@ process has died is freed when another process next looks.
 from __future__ import annotations
 
 import email.utils
-import fcntl
 import hashlib
 import json
 import math
@@ -37,6 +36,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
+
+from herogen.pipeline import filelock
 
 RETRY_STATUSES = frozenset({408, 409, 425, 429})
 NEVER_RETRY_5XX = frozenset({501, 505})
@@ -248,7 +249,7 @@ class SharedLimiter:
         self.dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            filelock.lock(fd)
             try:
                 state = json.loads(self.state_path.read_text())
             except (OSError, ValueError):
@@ -271,7 +272,7 @@ class SharedLimiter:
             os.replace(tmp, self.state_path)
             return out
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            filelock.unlock(fd)
             os.close(fd)
 
     def acquire(self, deadline: float) -> tuple[str | None, float]:

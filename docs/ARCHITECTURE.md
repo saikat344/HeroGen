@@ -859,7 +859,8 @@ answer never came back is counted at 0, since its tokens are unknown.
   the call fails at once. A call that fails raises `ApiError`, which stops the stage (see "Mask method").
 - **Shared limit per key:** every process calling with one API key shares one limit on calls in flight, in a
   JSON state file under `HEROGEN_LIMITER_DIR` (default `~/.cache/herogen/api-limiter`) named by a 16-hex-digit
-  SHA-256 prefix of the key, never the key, and guarded by an exclusive `flock`. The limit starts at 4. A 429
+  SHA-256 prefix of the key, never the key, and guarded by an exclusive file lock (`herogen/pipeline/filelock.py`:
+  `flock` on POSIX, `LockFileEx` on Windows). The limit starts at 4. A 429
   halves it (never below 1) and, when its caller starts the wait it was given, holds every process off for that
   wait, at most 60 s (`HOLD_MAX_S`), so a huge or bad wait never blocks the key; a hold read back from the
   state file is cut to 60 s from now too. Every 20
