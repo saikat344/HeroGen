@@ -13,9 +13,10 @@ tested separately.
 | --- | --- | --- |
 | 0 input | `herogen/pipeline` | `00-sketch.png` (copied input) |
 | 1 cover art | `herogen/pipeline` | `01-cover.png` |
-| 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them) and `masks/parts.json` (their record) |
+| 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them), `masks/parts.json` (their record) |
+| 2f face source | `herogen/pipeline` | `views/closeup-{front,left,right}.png` (head close-ups), `views/closeup-<view>-input.png` (the crops sent), `masks/closeup-<view>.png` (footprints), `views/closeup.json` (their record); only for the views whose close-up passed its gates |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
-| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png`, `04-body/pose-renders/*.png`; `04-body/low.glb` and `atlas-low.png` when the profile has a low LOD (`roblox-ingame`); for a SAM 3D Objects mesh also the comparison atlases `04-body/atlas-high-{no-source-fallback,side-trust}.png` |
+| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust` |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
 | 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
@@ -168,13 +169,14 @@ missing rims; the stage 3 mesh and joint placement need correction before cuts c
 that removes an own or neighbouring joint's measurement is rejected and recorded in the trial's
 `unmeasurable_joints` map (joint to reason), without a gap or score. Missing measurements never count as zero.
 
-**Atlases.** All sections of a LOD share one UV atlas: Blender's Smart UV Project unwraps them without margin, and
+**Atlases.** The sections other than the Head share one UV atlas per LOD: Blender's Smart UV Project unwraps them
+without margin, and
 the islands are packed by their concave shapes with a 2-texel gutter. `roblox-ingame` uses 1024 for the high and
 512 for the low LOD. `best` and `roblox-avatar` take the smallest of 1024, 2048 and 4096 that gives at least one
-texel per pixel of the views the colours come from, at the atlas's measured UV fill and the body's surface area
+texel per pixel of the views the colours come from, at the atlas's measured UV fill and those sections' surface area
 (at most 4096 under `best`, 2048 under `roblox-avatar`); `sections.json` records the choice under
-`"texture": {"atlas_choice"}`. A finer atlas only reproduces the views the colours were baked from more exactly:
-on the pencil-sketch figure (1078 px views, 168.5 px per stud), from 1024 to 2048 to 4096 the full-detail carve's
+`"texture": {"atlas_choice"}`. A finer atlas only reproduces the views the colours were baked from more exactly.
+Measurements before giving the Head its own texture: on the pencil-sketch figure (1078 px views, 168.5 px per stud), from 1024 to 2048 to 4096 the full-detail carve's
 front colour error at the view's resolution fell 5.34, 3.06, 1.93, while the held-out view's at a quarter of its
 size, about as large as the body is on a screen, stayed 39.19, 39.35, 39.38 (half a degree of yaw moves it by up
 to 0.09; the hybrid: 38.02, 38.26, 38.31, up to 0.26). Both chose 2048 (229 and 246 texels per stud). UV fill
@@ -247,8 +249,8 @@ grown by 4 px, clipped to the figure, written as `masks/front-face.png` / `masks
 its own file, not a key in `views/meta.json`, because `views/meta.json` is one of the files whose hash ties the
 held-out views to the turnaround (`heldout.IDENTITY_FILES`): writing the part masks changes none of them.
 `python3 -m herogen.pipeline parts --run-id <id> [--live]` adds the part masks to a run made before stage 2
-wrote them, and writes no other file, so its accepted held-out views stay accepted. No stage reads the part
-masks in this version; stages 3 and 4 build exactly as without them.
+wrote them, and writes no other file, so its accepted held-out views stay accepted. Stage 2f reads these masks for its head crops and registration checks. They do not change geometry or
+texture weights.
 
 **Recorded, not gated.** `a_pose_hand_span_over_shoulders` (widest row at 35-60% of the height over the widest
 at 15-25%) is still measured on every sheet, with `gate: false` and a note. Its fixed height bands read hat
@@ -409,6 +411,94 @@ shoulder sits inside bulky costume pieces; each joint's source is in `joint_sour
 kept under `sources`, and joints more than 0.5 studs apart are listed in `flagged`. With `--joints silhouette`
 the file holds the silhouette finder's joints only (`"source": "silhouette"`), and stage 4 finds them again
 itself.
+
+## Stage 4 texture: colour projection
+
+Stage 4 colours each LOD's UV atlas by projecting the observed side views (front, back, left, right; a derived
+top view has no colour of its own) onto the body (`herogen/blender/texture.py`). Each texel's surface point is
+projected into every view; a view's weight is the cosine between the surface normal and the direction to its
+camera, to the power 4, and zero where the point is hidden in that view (a depth map splatted from the texels)
+or outside the view's mask. A SAM 3D Objects body takes its source mesh's own texture where no view faces the
+surface well (best facing cosine below 0.3); without one, such texels average the views that contain them.
+
+**The Head's own texture.** The Head section is unwrapped into its own UV square (the Blender `uv` task's
+`separate`) and baked into its own texture, `atlas-head-<lod>.png`, at 1024 px for the high LOD and 512 for the low
+under every profile. Its islands use the same 2-texel gutter, measured at its own texture size. The other sections
+share `atlas-<lod>.png` at the profile's chosen atlas size. The GLB gives the Head the material
+`HeadTexture` and the rest `BodyAtlas`. Both bakes use one depth map of the whole body, so each texture's surfaces are
+still hidden by the other's. Roblox's texture specification
+(create.roblox.com/docs/art/modeling/texture-specifications) gives 1024 x 1024 as the maximum for a texture map in
+its UV mapping section, and 4096 x 4096 for textures in general. The Marketplace character specification
+(create.roblox.com/docs/art/characters/specifications) caps textures at 2048 x 2048. A 1024 px Head texture is within
+all three. The profiles' `texture_max_px` check counts the Head texture with the atlas: 1024 under `roblox-avatar`'s
+2048 cap.
+
+**Close-ups in the Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
+image is unchanged (its SHA-256) and the view is a colour view. Each footprint is feathered over 3 view pixels and
+cut at the crop box.
+
+Close-ups never replace a view's colour. Inside the footprint, the Head bake adds the close-up's detail to the
+view's colour: the close-up blurred to the texture's density minus the close-up blurred to the view's density. Both
+blurs are Gaussians with sigma 0.42 x close-up pixels per texel (per view pixel); the texel density is texels over
+surface area. So every colour the view shows at its own resolution is kept, and only what lies above it is added;
+where the texture is no finer than the view, nothing changes.
+
+Close-ups go only into the Head texture, and weights and visibility are unchanged.
+`texture.closeups` in `sections.json` records the views used and why others were not. Each Head bake's
+`texture.bake.<lod>.head.closeups` records the texel density and the texels with close-up detail.
+
+On the ground-truth bench (true geometry, per-point projection, faces scored at +-25 and +-65 degrees in a 768 px
+face window), the front and profile close-ups added this way changed face colour error by -3.1% [-6.9, -0.4] on
+the tuning characters and -14.5% [-20.1, -9.5] on the held-out ones. LPIPS changed by -8.4% and -28.5%. Pasting the
+close-up's colour in instead made tuning worse (+20%), since its low-frequency colour drifts from the view's.
+
+## Stage 2f: face source (head close-ups)
+
+A turnaround view gives the face a few dozen pixels. Stage 2f (`herogen/pipeline/facesource.py`) runs after stage 2
+and the held-out views (`python3 -m herogen.pipeline run ...` adds it after a passing stage 2; `--stages 2f` makes
+only the close-ups). For each of the front, left and right views it cuts a square around the head, asks Muse Image
+for a faithful upscale of that crop and registers the result back onto the view. Stage 4 uses the close-ups to
+add detail to the Head's own texture.
+
+- **Crops.**
+  - Front: a square anchored on the front view's SAM `face` box (stage 2's `masks/front-face.png`), from the head
+    box's top (no more than 1.2 face heights above the face) to 0.45 face heights below the chin, at least twice the
+    face size and 1.1 times the head width (capped at three face sizes), with 8% of the side added above. Without a
+    face mask it is the head box grown by 18% on each side, or, for a box much taller than wide, a square of 1.3 head
+    widths sitting on its bottom.
+  - Profiles: the front crop's rows, shifted by the difference between the figure masks' bottom rows (the views
+    share one pixel scale and the feet baseline), centred on the side figure within the top 80% of those rows.
+  - Each crop is resampled to 1024 px (Lanczos; the border colour outside the view).
+- **Close-ups.** One Muse Image edit per view, with frozen prompts: `FC4` for the front, `PC4` for the profiles. The
+  prompt asks for an upscale that looks exactly like the input, with the same framing and angle, flat areas kept
+  flat, and no added shading, texture or detail. A new prompt is a new recipe name, never an edit in place. Each
+  profile also gets one SAM 3.1 `head` call for its footprint.
+- **Registration.** The affine A maps close-up pixels to view pixels. It starts from the crop box. A coarse-to-fine
+  Gauss-Newton fit of a full affine, with gain and bias, then aligns the close-up, blurred to the view's
+  resolution, with the view crop at 512 px, weighted to the head. The fit is kept only when its normalised
+  cross-correlation (NCC) with the view beats the crop box's and it changes the scale by less than 1.6x.
+- **Gates, per view.**
+  - NCC in the view (grey levels, the close-up prefiltered and warped into the view, inside the front's face mask
+    or a profile's head mask) of at least 0.95 for the front and 0.97 for the profiles.
+  - A scale within 1.25x of the crop box's, i.e. no reframing.
+  - The thresholds sit just under the worst of the tuning characters' 104 close-ups: front min 0.968, profiles
+    min 0.987.
+  - A close-up that fails keeps no file; its record says why.
+- **Footprint.** The view's SAM `head` mask grown by 2 px inside the crop box (the figure inside the crop box when
+  there is no head mask).
+- **Never fails a hero.** Any error, such as a Model API failure, a replay miss, a missing input or a bug, is
+  recorded in `stage-2f.json` (`details.fallback`). No close-up is written, earlier ones are removed, and stage 4
+  bakes the plain views. No check of stage 2f is gated. Stage 2f changes no file another stage reads, so the
+  held-out views stay valid.
+- **Record.** `views/closeup.json` (under `views`), and `stage-2f.json` (under `details.closeups`), give per view:
+  - the recipe and the crop box;
+  - A, which start was kept, and both NCCs at 512 px;
+  - the scale ratio, anisotropy and rotation, and the NCC in the view;
+  - `used`, or the reason it was not used;
+  - the SHA-256 of the view it was made from.
+
+  Stage 4 ignores a close-up whose view has changed since.
+- **Cost.** Three Muse Image edits and two SAM 3.1 calls: $0.035 at list price.
 
 ## Remote models (SAM 3D Objects, SAM 3D Body)
 
