@@ -69,6 +69,19 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | --- | --- | --- | --- |
 | `min_side_px` | 0 | the sketch's shorter side in pixels, `>= 256` | reject |
 | `sketch_line_contrast` | 0 | how much darker the darkest lines are than the paper: the median luminance minus its 1st percentile (0-255), `>= 32`. No model call. Lines covering under 1% of the image (5.4% or more on the tuning sketches) and light lines on dark paper measure as faint | reject |
+| `sketch_characters_found` | 1 | SAM 3.1 figure instances (the prompt that found the figure, see Mask method) at least 25% of the largest one's area, `== 1`. None is "no character found in the sketch"; two or more are several characters | reject |
+| `sketch_small_extra_figures` | 1 | the other, smaller figure instances (insets, detail drawings), `<= 0` | warn |
+
+Stage 1 runs its input checks on the sketch before it asks for the cover, so a rejected sketch costs no edit. The
+sketch's figure mask (`01-masks/sketch.png`, compared with the cover) is the largest instance alone, never a union
+with the smaller figures. `details.input` holds the measurements behind the checks (`figure_area_fracs`: each
+instance's area over the largest one's).
+
+How the thresholds were set: on the tuning sketches s001-s045 only, with the unseen sketches s046-s058 kept for
+reporting. The two faint-pencil sketches measure a line contrast of 11 and 12 and the 43 others 85-253. The two
+multiple-character sketches have a second instance at 0.66 and 0.77 of the largest and every other sketch has one
+instance, so the tuning set bounds the character cut only to (0, 0.66]; 0.25 is kept from the diagnosis that
+proposed it.
 
 ## Views and cameras
 
@@ -404,8 +417,8 @@ No mask is ever made another way, and nothing is measured on a mask SAM did not 
   Such an answer is logged as a call (it may be billed) but never cached. The one exception is the held-out face cue: a failed `face` or `head`
   call sends that view to human review, so it can only keep the view from being accepted.
 - No character found in the sketch rejects the input: stage 1 segments the sketch before it asks for the
-  cover, so a sketch SAM finds nothing in costs no edit, and its record has status `"input_rejected"` and the
-  error "no character found in the sketch". Nothing found in a generated image fails that image's gate: the
+  cover, so a sketch SAM finds nothing in costs no edit, and its record has status `"input_rejected"`, the
+  error "no character found in the sketch" and `sketch_characters_found` 0 (see Input checks). Nothing found in a generated image fails that image's gate: the
   cover's `cover_mask_area_frac`, a turnaround sheet's `figures_found` (it is generated again), a held-out
   generation's `figure_mask_sam_coverage` (rejected, measured no further, generated again). Nothing found in
   the drawn top view means it is not used, so the top view is the visual hull.

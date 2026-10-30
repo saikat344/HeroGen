@@ -177,6 +177,16 @@ def method_kind(method: str) -> str:
 SAM_NOTHING_FOUND = f"{SAM_MODEL}:none"  # the method of an empty mask: no prompt in SAM_TEXTS found anything
 
 
+def sam_instances(client: ModelClient, img: Image.Image) -> tuple[list[SamInstance], str]:
+    """SAM 3.1 instances (non-empty masks only) of the first text prompt in SAM_TEXTS that finds something, and
+    that prompt; ([], "") when none does. A Model API failure, a replay miss or a corrupt cache entry raises."""
+    for text in SAM_TEXTS:
+        inst = [i for i in client.segment(img, text) if i.mask.any()]
+        if inst:
+            return inst, text
+    return [], ""
+
+
 def sam_figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str, int]:
     """SAM 3.1 figure mask from the first text prompt in SAM_TEXTS that finds something: (mask, method,
     instance count). When no prompt finds anything the mask is empty and the method SAM_NOTHING_FOUND; the
@@ -184,12 +194,10 @@ def sam_figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, 
     fails its gate). No mask is ever made another way: a Model API failure, a replay miss or a corrupt cache
     entry raises."""
     shape = (img.size[1], img.size[0])
-    for text in SAM_TEXTS:
-        inst = client.segment(img, text)
-        mask = _figure_mask(inst, shape)
-        if mask.sum() > 0:
-            return mask, f"{SAM_MODEL}:{text}", len(inst)
-    return np.zeros(shape, dtype=bool), SAM_NOTHING_FOUND, 0
+    inst, text = sam_instances(client, img)
+    if not inst:
+        return np.zeros(shape, dtype=bool), SAM_NOTHING_FOUND, 0
+    return _figure_mask(inst, shape), f"{SAM_MODEL}:{text}", len(inst)
 
 
 def sam_coverage(sam: np.ndarray, reference: np.ndarray) -> float:
@@ -260,23 +268,31 @@ def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch = _load(run, "00-sketch.png")
     w, h = sketch.size
-    # The sketch is segmented first: a sketch with no character in it is rejected before any paid edit.
-    sketch_mask, sketch_method, n_s = sam_figure_mask(client, sketch)
-    if not sketch_mask.any():
-        st.details = {"mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS)}
-        raise st.reject_input(NO_CHARACTER.format(texts=", ".join(repr(t) for t in SAM_TEXTS)))
+    # The sketch is segmented and its input checks run first: a sketch they reject costs no paid edit.
+    sketch_inst, text = sam_instances(client, sketch)
+    sketch_method = f"{SAM_MODEL}:{text}" if sketch_inst else SAM_NOTHING_FOUND
+    input_checks, input_details = inputs.character_checks(
+        sketch_inst, NO_CHARACTER.format(texts=", ".join(repr(t) for t in SAM_TEXTS)))
+    st.checks = input_checks
+    st.details = {"mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS),
+                  "sam_instances": {"sketch": len(sketch_inst)}, "input": input_details}
+    _finish_input_checks(st)
+    # Only the main (largest) figure is the character; smaller figures were warned about above.
+    sketch_mask = inputs.by_area(sketch_inst)[0].mask
     cover = client.edit_image(COVER_PROMPT, [sketch], size=f"{w}x{h}")
     st.save_image("01-cover.png", cover)
     # An empty cover mask (SAM found nothing in the cover) fails the gated cover_mask_area_frac check.
     cover_mask, cover_method, n_c = sam_figure_mask(client, cover)
     st.save_image("01-masks/sketch.png", imaging.to_mask_image(sketch_mask))
     st.save_image("01-masks/cover.png", imaging.to_mask_image(cover_mask))
-    st.checks, extra = C.cover_checks(sketch_mask, cover_mask)
+    cover_checks, extra = C.cover_checks(sketch_mask, cover_mask)
+    st.checks = input_checks + cover_checks
     st.details = {
         "prompt": COVER_PROMPT,
         "cover_size": list(cover.size),
         "mask_method": {"sketch": sketch_method, "cover": cover_method},
-        "sam_instances": {"sketch": n_s, "cover": n_c},
+        "sam_instances": {"sketch": len(sketch_inst), "cover": n_c},
+        "input": input_details,
         **extra,
     }
     return st.finish()

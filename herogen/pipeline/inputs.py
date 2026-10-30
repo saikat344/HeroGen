@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.pipeline import checks as C
+from herogen.pipeline.client import SamInstance
 
 Check = dict[str, Any]
 
@@ -25,6 +26,12 @@ MIN_SIDE_PX = 256
 # 2.7 from each) the lines are too faint: SAM 3.1 found no `character` in either faint sketch, and Muse Image
 # invented the detail it couldn't see.
 MIN_LINE_CONTRAST = 32
+# Stage 1. A SAM 3.1 instance of the figure prompt at least this share of the largest one's area is another
+# character; a smaller one is an inset or a detail drawing. On the tuning sketches the two multiple-character
+# sketches have a second instance at 0.66 and 0.77 of the largest, and every other sketch has a single instance,
+# so the tuning set only bounds the cut to (0, 0.66]: it holds no small extra figures to place it against. 0.25 is
+# the diagnosis's proposal, measured there and kept unchanged; the unseen concept sheets s046-s058 are the test.
+OTHER_CHARACTER_MIN_FRAC = 0.25
 
 
 def input_check(name: str, value: float, threshold: float, op: str, on_fail: str, message: str,
@@ -78,3 +85,35 @@ def contrast_check(img: Image.Image) -> Check:
         f"the lines are too faint: the darkest lines are only {v:.0f} grey levels darker than the paper and HeroGen "
         f"needs at least {MIN_LINE_CONTRAST}. Darken the lines, or scan or photograph the sketch with more contrast",
     )
+
+
+def by_area(instances: list[SamInstance]) -> list[SamInstance]:
+    """Non-empty instances, largest first."""
+    return sorted((i for i in instances if i.mask.any()), key=lambda i: -int(i.mask.sum()))
+
+
+def character_checks(instances: list[SamInstance], no_character: str) -> tuple[list[Check], dict[str, Any]]:
+    """How many characters SAM 3.1 found in the sketch (``instances``, the figure prompt's): exactly one at least
+    `OTHER_CHARACTER_MIN_FRAC` of the largest one's area, else reject (``no_character`` is the message for none);
+    smaller extra figures warn, since only the largest figure is built."""
+    figs = by_area(instances)
+    fracs = [round(int(i.mask.sum()) / int(figs[0].mask.sum()), 4) for i in figs] if figs else []
+    big = [f for f in fracs if f >= OTHER_CHARACTER_MIN_FRAC]
+    small = [f for f in fracs if f < OTHER_CHARACTER_MIN_FRAC]
+    if not big:
+        msg = no_character
+    else:
+        msg = (f"the sketch shows {len(big)} characters: SAM 3.1 found {len(big) - 1} more at least "
+               f"{OTHER_CHARACTER_MIN_FRAC:.0%} the size of the largest (the next is {big[1]:.0%} of it). "
+               "Draw one character per sketch") if len(big) > 1 else ""
+    checks = [
+        input_check("sketch_characters_found", len(big), 1, "==", "reject", msg,
+                    note=f"figures at least {OTHER_CHARACTER_MIN_FRAC} of the largest one's area"),
+        input_check(
+            "sketch_small_extra_figures", len(small), 0, "<=", "warn",
+            f"besides the main character the sketch has {len(small)} smaller figure{'s' if len(small) > 1 else ''} "
+            f"(each under {OTHER_CHARACTER_MIN_FRAC:.0%} of its size, such as insets or detail drawings); HeroGen "
+            "builds only the largest figure",
+        ),
+    ]
+    return checks, {"figure_area_fracs": fracs}
