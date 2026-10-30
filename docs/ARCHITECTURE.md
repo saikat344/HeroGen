@@ -1019,6 +1019,11 @@ answer never came back is counted at 0, since its tokens are unknown.
   state file is cut to 60 s from now too. Every 20
   successful calls since the last 429 raise it by one, up to 8. A slot held by a process that has died, or
   for longer than 300 s, is freed. The start and maximum are configured, not measured.
+- **Time limit while reading:** the time limit holds during an attempt too. Each socket wait is at most the time
+  left before it (and at most the 240 s socket timeout), and the answer is read one socket read at a time with
+  the time limit checked after each, so a server that trickles bytes can't hold a call past it. An attempt cut
+  off this way ends like a socket timeout (outcome `unknown`, counted in the cost), and no attempt starts once
+  the time limit has passed.
 - **Ledger and logs:** every HTTP attempt is a line in `<cache>/calls-ledger.jsonl`: time, model, endpoint,
   request key, attempt, status, outcome (`ok`, `failed`, `unknown` or `unreadable`), seconds, the wait for a
   call slot and the wait before the next attempt with its reason, and the scrubbed error. Each retry is also a
