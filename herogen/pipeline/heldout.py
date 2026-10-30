@@ -4,11 +4,11 @@ After the turnaround passes, four views are made, each its own edit of the cover
 A-pose, with a pose reference and a mannequin turn guide (see "Three input images" below):
 `front-left-30`, `front-left-60`, `front-right-30` and `front-right-60`, named by their target yaw.
 Front-left views face image left, front-right views image right. The stage writes into its record the
-building azimuths a body may be built or coloured from (the four turnaround views and the diagonals between
-them, every 45 degrees). A view's found yaw comes from Sapiens 2 body keypoints fitted to the turnaround's
+building azimuths the run uses: the four contract views for generated runs, or the building cameras in a
+bench run's `cameras.json`. A view's found yaw comes from Sapiens 2 body keypoints fitted to the turnaround's
 (`herogen/pipeline/keypoints.py`); every true yaw its measured error allows (`FIT_ERROR_DEG`, from renders at
-known yaws) must clear every building azimuth by 10 degrees. The windows are 25-26.3 and 57-65 degrees, and
-generations aim at their middle.
+known yaws) must clear every building azimuth by 10 degrees. The generated windows are 25-35 and 55-65 degrees,
+and generations aim at their middle.
 
 Each view is generated up to four times until it is accepted; the best generation is kept. Its found yaw
 must land in its window; up to 5 degrees outside needs human review. Its image, mask and raw generation go
@@ -66,7 +66,7 @@ import re
 import shutil
 import time
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -172,12 +172,13 @@ def next_request(view: HeldoutView, request_deg: float, found_deg: float | None)
 
 
 # Build/evaluation split. The azimuths a body may be built or coloured from, which this stage writes into its
-# record (`build_azimuths_deg`) for later stages to keep to: the four turnaround views and the four diagonals
-# between them. A held-out view's true yaw must be at least AZIMUTH_CLEARANCE_DEG from every one of them, so a
+# record (`build_azimuths_deg`): the four contract views for generated runs. No pipeline stage builds or
+# colours from their diagonals; bench runs instead use their recorded building cameras. A held-out view's
+# true yaw must be at least AZIMUTH_CLEARANCE_DEG from every one of them, so a
 # score on it never stands in for a score on a view a body was built from. The true yaw isn't known, only the
 # found yaw and the measured error of the fit that found it (`yaw_range`); the whole range of true yaws the
 # found one allows must clear.
-BUILD_AZIMUTHS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
+BUILD_AZIMUTHS_DEG = (0.0, 90.0, 180.0, 270.0)
 AZIMUTH_CLEARANCE_DEG = 10.0
 # Found |yaw| minus true |yaw| of the body-keypoint fit (`keypoints.fit_yaw`: head, torso and legs, scores of at
 # least KP_MIN_SCORE), measured on the bench-gt renders at known yaws, flat and lit, each judged against the
@@ -195,13 +196,37 @@ YAW_WINDOW_HALF_DEG = 5.0
 KP_MIN_SCORE = 0.3
 
 
-def yaw_window(target_deg: float) -> tuple[float, float]:
-    """The accepted |found yaw| range for a target: YAW_WINDOW_HALF_DEG either side, cut back so that every true
-    yaw a found yaw inside it allows (`yaw_range`) is at least AZIMUTH_CLEARANCE_DEG from every building
-    azimuth. With the measured fit error the 30-degree window ends below its target."""
-    lo, hi = target_deg - YAW_WINDOW_HALF_DEG, target_deg + YAW_WINDOW_HALF_DEG
-    for a in BUILD_AZIMUTHS_DEG:
-        if a <= target_deg:
+def building_azimuths(run: RunFolder) -> tuple[float, ...]:
+    """The run's horizontal building views. Top is perpendicular to every held-out camera and adds no yaw
+    constraint. Generated runs use the contract views; bench runs record the views they used in cameras.json.
+    Missing bench camera data is an error, never permission to ignore its diagonals."""
+    if not run.exists("cameras.json"):
+        meta = run.read_json("views/meta.json")
+        if meta.get("reference") == "ground-truth":
+            raise ValueError("a ground-truth run needs cameras.json to identify its building views")
+        return BUILD_AZIMUTHS_DEG
+    data = run.read_json("cameras.json")
+    cameras = {c["view"]: c for c in data["cameras"] if c["role"] == "building"}
+    names = data["building"]
+    if not names or any(n not in cameras for n in names):
+        raise ValueError("cameras.json must identify every building view's camera")
+    azimuths = tuple(sorted({float(cameras[n]["azimuth_deg"]) % 360.0 for n in names}))
+    if not all(math.isfinite(a) for a in azimuths):
+        raise ValueError("building azimuths must be finite")
+    return azimuths
+
+
+def yaw_window(target_deg: float, build_azimuths: tuple[float, ...] = BUILD_AZIMUTHS_DEG
+               ) -> tuple[float, float]:
+    """The accepted |found yaw| range for a signed target: target +/- YAW_WINDOW_HALF_DEG, cut back so every
+    true yaw the measured fit error allows clears this run's building azimuths by AZIMUTH_CLEARANCE_DEG."""
+    sign = 1.0 if target_deg >= 0 else -1.0
+    target = abs(target_deg)
+    lo, hi = target - YAW_WINDOW_HALF_DEG, target + YAW_WINDOW_HALF_DEG
+    for azimuth in build_azimuths:
+        # Unwrap each building camera onto this side, nearest the target (including across yaw zero).
+        a = target + (sign * azimuth - target + 180.0) % 360.0 - 180.0
+        if a <= target:
             lo = max(lo, a + AZIMUTH_CLEARANCE_DEG + FIT_ERROR_DEG[1])
         else:
             hi = min(hi, a - AZIMUTH_CLEARANCE_DEG + FIT_ERROR_DEG[0])
@@ -210,13 +235,17 @@ def yaw_window(target_deg: float) -> tuple[float, float]:
     return lo, hi
 
 
-# Two targets each side, between the front, the diagonal and the profile, named 30 and 60 degrees; `yaw_window`
-# gives the yaws each accepts (25-26.3 and 57-65) and the generations aim at the window's middle (`aim_deg`).
+# Two targets each side, between the front and profile; generated windows are 25-35 and 55-65 degrees.
 VIEWS = tuple(
-    HeldoutView(f"front-{side}-{deg}", sign * deg, yaw_window(deg), -sign)
+    HeldoutView(f"front-{side}-{deg}", sign * deg, yaw_window(sign * deg), -sign)
     for deg in (30, 60) for side, sign in (("left", 1), ("right", -1))
 )
 VIEW_BY_NAME = {v.name: v for v in VIEWS}
+
+
+def view_for_build(view: HeldoutView, build_azimuths: tuple[float, ...]) -> HeldoutView:
+    """Use this run's clearance window for generation, judging and rechecking alike."""
+    return replace(view, window_deg=yaw_window(view.yaw_deg, build_azimuths))
 
 
 # ---- measurements ------------------------------------------------------------------------------------
@@ -490,12 +519,13 @@ def yaw_range(found_deg: float) -> dict[str, Any]:
     return {"found_deg": [found_deg, found_deg], "true_deg": sorted([sign * lo, sign * hi])}
 
 
-def range_clearance(lo_deg: float, hi_deg: float) -> float:
+def range_clearance(lo_deg: float, hi_deg: float, build_azimuths: tuple[float, ...] = BUILD_AZIMUTHS_DEG
+                    ) -> float:
     """Angular distance from the yaw range ``lo_deg``..``hi_deg`` to the nearest building azimuth (0 when one
     is inside it), in degrees."""
-    if any(lo_deg <= (a + 180.0) % 360.0 - 180.0 <= hi_deg for a in BUILD_AZIMUTHS_DEG):
+    if any(math.ceil((lo_deg - a) / 360.0) <= math.floor((hi_deg - a) / 360.0) for a in build_azimuths):
         return 0.0
-    return min(azimuth_clearance(lo_deg), azimuth_clearance(hi_deg))
+    return min(azimuth_clearance(lo_deg, build_azimuths), azimuth_clearance(hi_deg, build_azimuths))
 
 
 def toe_offset_h(mask: np.ndarray) -> float:
@@ -641,9 +671,9 @@ def window_miss(view: HeldoutView, yaw_deg: float) -> float:
     return max(0.0, lo - y, y - hi)
 
 
-def azimuth_clearance(yaw_deg: float) -> float:
+def azimuth_clearance(yaw_deg: float, build_azimuths: tuple[float, ...] = BUILD_AZIMUTHS_DEG) -> float:
     """Angular distance from ``yaw_deg`` to the nearest building azimuth, in degrees."""
-    return min(abs((yaw_deg - a + 180.0) % 360.0 - 180.0) for a in BUILD_AZIMUTHS_DEG)
+    return min(abs((yaw_deg - a + 180.0) % 360.0 - 180.0) for a in build_azimuths)
 
 
 def _vote(value: float | None, limit: float) -> int:
@@ -662,6 +692,7 @@ def view_checks(
     raw_area_frac: float, face: dict[str, Any], profile_face: float | None, *,
     profile_face_error: bool = False, mask_sam_coverage: float | None = None,
     body: KP.BodyModel | None = None, keypoints: dict[str, Any] | None = None, kp_scale: float = 1.0,
+    build_azimuths: tuple[float, ...] = BUILD_AZIMUTHS_DEG,
 ) -> tuple[list[C.Check], dict[str, Any]]:
     """The checks for one held-out view (placed at the shared scale) and the measurements behind them.
 
@@ -675,6 +706,7 @@ def view_checks(
     `sam_coverage`; under C.SAM_COVERAGE_MIN SAM missed the figure, the view is rejected and nothing else is
     measured on its mask (None only for a view recorded before coverage was, whose SAM mask met the same rule).
     """
+    view = view_for_build(view, build_azimuths)
     out = [C.check("figure_area_frac", raw_area_frac, FIGURE_AREA_MIN)]
     if mask_sam_coverage is not None:
         out.append(C.check("figure_mask_sam_coverage", mask_sam_coverage, C.SAM_COVERAGE_MIN,
@@ -703,11 +735,11 @@ def view_checks(
     else:
         found = kfit[f"facing_{side}"]["yaw_deg"]
         rng = yaw_range(found)
-        clearance = range_clearance(*rng["true_deg"])
+        clearance = range_clearance(*rng["true_deg"], build_azimuths)
         lo_t, hi_t = rng["true_deg"]
         out.append(C.check("found_yaw_clear_of_build_azimuths_deg", clearance, AZIMUTH_CLEARANCE_DEG, op=">=",
                            note=f"found yaw {found:+.1f} (body keypoints), true yaw {lo_t:+.1f} to {hi_t:+.1f} "
-                                f"(fit error {list(FIT_ERROR_DEG)}); building azimuths {list(BUILD_AZIMUTHS_DEG)}"))
+                                f"(fit error {list(FIT_ERROR_DEG)}); building azimuths {list(build_azimuths)}"))
         miss = window_miss(view, found)
         lo, hi = view.window_deg
         note = f"found yaw {found:+.1f}, window {lo:.1f}-{hi:.1f}"
@@ -1232,7 +1264,7 @@ def checks_version() -> str:
     sources = [inspect.getsource(f) for f in (
         _runs, _band, _extent, landmarks, arm_slopes, TurnaroundModel, turnaround_model, landmark_errors,
         _rms, fit_yaw, hand_z_morph, yaw_range, range_clearance, azimuth_clearance, window_miss, yaw_window,
-        toe_offset_h, face_offset, _vote, _review, view_checks, view_status, recheck_view, _seen, body_model, C,
+        building_azimuths, view_for_build, toe_offset_h, face_offset, _vote, _review, view_checks, view_status, recheck_view, _seen, body_model, C,
         imaging, KP)]
     digest = hashlib.sha256(json.dumps([consts, sources], sort_keys=True).encode()).hexdigest()[:12]
     return f"c-{digest}"
@@ -1254,6 +1286,7 @@ class _Context:
     profile_face: float | None
     profile_face_error: bool = False  # the profiles' face cue failed on the Model API
     identity: str = ""  # `stage2_identity`
+    build_azimuths: tuple[float, ...] = BUILD_AZIMUTHS_DEG
     legs: GuideLegs | None = None  # the turn guide's legs (`guide_legs`); None: the outline rule
     pose: PoseClient | None = None  # Sapiens 2 keypoints
     turnaround_kp: dict[str, Any] | None = None  # `turnaround_keypoints`
@@ -1324,7 +1357,8 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
         kps = measure_keypoints(ctx.pose, raw, mask) if measurable and ctx.body is not None else None
         checks, measured = view_checks(view, placed, ctx.model, ctx.profile_toe, float(mask.mean()), face,
                                        ctx.profile_face, profile_face_error=ctx.profile_face_error,
-                                       mask_sam_coverage=coverage, body=ctx.body, keypoints=kps, kp_scale=scale)
+                                       mask_sam_coverage=coverage, body=ctx.body, keypoints=kps, kp_scale=scale,
+                                       build_azimuths=ctx.build_azimuths)
         status = view_status(checks)
         tried.append({
             "attempt": attempt,
@@ -1478,7 +1512,8 @@ def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: Turnaround
     rejection always; an
     acceptance unless a gated check now fails). Returns the updated record, its checks and the file moves to
     its new status's folder."""
-    view = VIEW_BY_NAME[name]
+    build_azimuths = building_azimuths(run)
+    view = view_for_build(VIEW_BY_NAME[name], build_azimuths)
     kept = dict(d["attempts"][d["kept_attempt"]])
     rels = {k: heldout_rel(d["files"].get(k)) for k in ("image", "mask", "raw")}
     if None in rels.values():
@@ -1494,7 +1529,7 @@ def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: Turnaround
         kps = {"joints": None, "error": "no keypoints recorded (made before they were measured)"}
     checks, measured = view_checks(view, placed, model, profile_toe, area, face, profile_face,
                                    profile_face_error=profile_face_error, mask_sam_coverage=coverage,
-                                   body=body, keypoints=kps,
+                                   body=body, keypoints=kps, build_azimuths=build_azimuths,
                                    kp_scale=float(kept.get("scale_view_px_per_raw_px", 1.0)))
     machine = view_status(checks)
     image_sha = d.get("image_sha256") or file_sha256(run.path / rels["image"])
@@ -1590,7 +1625,8 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     unknown = [n for n in names if n not in VIEW_BY_NAME]
     if unknown:
         raise ValueError(f"unknown held-out views {unknown}; the views are {[v.name for v in VIEWS]}")
-    chosen = [v for v in VIEWS if v.name in names]
+    build_azimuths = building_azimuths(run)
+    chosen = [view_for_build(v, build_azimuths) for v in VIEWS if v.name in names]
     prev = run.read_stage("2h") or {}  # type: ignore[arg-type]
     prev_views = (prev.get("details") or {}).get("views") or {}
     keep = {n: d for n, d in prev_views.items() if n not in names and n in VIEW_BY_NAME}
@@ -1687,6 +1723,7 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
             profile_face=profile_face,
             profile_face_error=any(f.get("api_error") for f in profile_face_found.values()),
             identity=identity,
+            build_azimuths=build_azimuths,
             legs=legs,
             pose=pose,
         )
@@ -1694,7 +1731,8 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         ctx.body = body_model(ctx.turnaround_kp)
         version = checks_version()
         for name, d in keep.items():
-            if d.get("checks_version") != version:
+            if (d.get("checks_version") != version
+                    or (prev.get("details") or {}).get("build_azimuths_deg") != list(build_azimuths)):
                 new, checks, mv = recheck_view(run, name, d, ctx.model, ctx.profile_toe, profile_face,
                                                ctx.profile_face_error, identity, ctx.body)
                 per_view[name] = {**new, "run_started": per_view[name]["run_started"]}
@@ -1724,7 +1762,7 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         "reference": "generated",
         "reference_note": ("the held-out views are generated images that can invent detail, so a score "
                            "against them measures consistency with the generated character, not accuracy"),
-        "build_azimuths_deg": list(BUILD_AZIMUTHS_DEG),
+        "build_azimuths_deg": list(build_azimuths),
         "azimuth_clearance_deg": AZIMUTH_CLEARANCE_DEG,
         "fit_error_deg": list(FIT_ERROR_DEG),
         "checks_version": checks_version(),
@@ -1840,7 +1878,9 @@ def recheck_heldout(run: RunFolder) -> dict[str, Any]:
         rec["ok"] = C.gate_ok(checks) and not rec.get("error")  # a stopped run's error stays
         rec["outputs"] = [moves.get(o, o) for o in rec.get("outputs", [])]
         rec["details"].update({**_summary(views), "checks_version": checks_version(),
-                               "stage2_identity": identity, "fit_error_deg": list(FIT_ERROR_DEG)})
+                               "stage2_identity": identity, "fit_error_deg": list(FIT_ERROR_DEG),
+                               "build_azimuths_deg": list(building_azimuths(run)),
+                               "azimuth_clearance_deg": AZIMUTH_CLEARANCE_DEG})
         for old in ("yaw_uncertainty_deg", "found_yaw_clearance_deg", "hand_z_sigmas"):
             rec["details"].pop(old, None)
         rec["notes"] = (rec.get("notes", "") + f" Checked again under checks {checks_version()} at "
