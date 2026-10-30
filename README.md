@@ -1,17 +1,19 @@
 # HeroGen
 
 HeroGen turns one hand-drawn character sketch into a game-ready hero body for Roblox, and checks every stage
-with measurements.
+with measurements. Without a sketch, it can draw one from a short text description of the character.
 
 ```
-sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joints → 15-section rigid R15 body → results
+(text prompt → full-body sketch) → sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joints
+→ 15-section rigid R15 body → results
 ```
 
 ## Stages
 
 | Stage | What it does | Models and tools |
 | --- | --- | --- |
-| 0 input | Copies the sketch into a run folder; input checks here and at the start of stage 1 reject an unusable sketch before any image is generated, or warn | |
+| p prompt sketch (optional) | A hand-drawn graphite design image from the user's character brief, then a full-body A-pose edit of it; checked for one figure, a full figure and the same character, with up to three attempts | Muse Image, SAM 3.1, Muse Spark (`muse-spark-1.3`) |
+| 0 input | Copies the sketch (or stage p's full-body image) into a run folder; input checks here and at the start of stage 1 reject an unusable sketch before any image is generated, or warn | |
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1, Muse Spark (`muse-spark-1.3`, the input check for photos of real people) |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Builds a hybrid from SAM 3D Objects and SAM 3D Body joints (default), with an automatic, recorded carve fallback if the hybrid cannot build; `--mesh-source carve --joints silhouette` selects the local path; records observed silhouette overlaps and checks closed edges plus multiview usability with Muse Spark | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
@@ -29,7 +31,7 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - Python 3.11 or newer, with `numpy` and `pillow`.
 - Blender 4.5 LTS for stages 3 and 4 (set `HEROGEN_BLENDER` if it isn't at the default macOS path or on `PATH`).
-- For live model calls in stages 1 and 2: a Meta Model API key in `MODEL_API_KEY` (see `.env.example`), and
+- For live model calls in stages p, 1 and 2: a Meta Model API key in `MODEL_API_KEY` (see `.env.example`), and
   `meta-sam-parser` to decode SAM 3.1 masks (`pip install ".[live]"`).
 - For the SAM 3D sources of stage 3 (`--mesh-source sam3d-objects`, `--joints sam3d-body`): `pip install
   ".[remote]"` (`modal`, and `scipy`, which replaying them needs too). Live calls also need:
@@ -78,7 +80,7 @@ the repository's retry, cache and cost accounting. `--quality replay` requires i
 Model failures stop loudly with a failed record and cost, and never trigger a carve retry. Stage 4 still
 has separate observed rest-IoU and texture gates, so passing stage 3 does not guarantee a finished game body.
 
-Stages 1 and 2 replay model calls from the cache unless `--live` is set. In stage 3, `--remote`
+Stages p, 1 and 2 replay model calls from the cache unless `--live` is set. In stage 3, `--remote`
 controls only SAM 3D calls: they replay from `runs/_cache-remote/` unless `--remote live` is set.
 The body usability question separately defaults to `--quality live`, a paid call; `--quality replay`
 requires every attempted answer in its cache. Tests use cached or mocked calls. A remote source with no
@@ -101,6 +103,20 @@ With no `--body` it scores every stage 4 body in the run. It applies no triangle
 `--profile roblox-ingame` or `--profile roblox-avatar` to check a Roblox profile's limits.
 
 The hosted, invite-only service (sign-in by emailed link, per-user quotas, GLB and Roblox downloads) is `herogen/service`; `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
+
+Starting from a text prompt instead of a sketch:
+
+```bash
+python3 -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-knight --stages 0-2,5 --live
+python3 -m herogen.pipeline prompt "a knight in battered plate armour" --run-id my-knight --live   # stage p alone
+```
+
+Stage p writes `p-design.png`, `p-full-body.png` and every attempt under `p-attempts/`, then stage 0 copies
+`p-full-body.png` as the sketch. The prompt is limited to 300 characters and sits in a bounded slot of the
+design prompt, so it describes the character but can't change the drawing style or the full-body edit. The
+prompt text, models and parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/`
+(`hero-sketch-v1` by default), recorded in `stage-p.json`. The checks, their thresholds and the measurements
+behind them are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
 
 ## Lab
 
@@ -193,7 +209,7 @@ rules, the secrets and variables each GitHub environment needs, and how to roll 
 
 ## Third-party models and libraries
 
-Muse Image and SAM 3.1 are called through Meta's Model API. `meta-sam-parser`, an optional dependency used to
+Muse Image, SAM 3.1 and Muse Spark are called through Meta's Model API. `meta-sam-parser`, an optional dependency used to
 decode SAM 3.1 output, is released by Meta under the SAM License. Blender is GPL-licensed and runs as a separate
 program.
 
