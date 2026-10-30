@@ -765,10 +765,13 @@ sideways shift (head, torso and legs; the arms are left out), separately facing 
   yaws (flat and lit; 21 characters at 25, 45 and 65 degrees and 19 of them turned 5 degrees each way, 592
   views at 20-70 degrees; found minus true |yaw|), is -8.7 to +2.0 degrees at the 5th and 95th percentiles
   (`fit_error_deg`), median -1.0; three characters in long clothes read 4-16 degrees short. A view's true yaw is taken to lie in that range around the found one, and the whole range
-  must be at least `azimuth_clearance_deg` (10) from every building azimuth (`build_azimuths_deg`: 0 to 315 in
-  45-degree steps, the four turnaround views and the diagonals between them). The yaw windows are what that
-  leaves of target ±5: 25-26.3 degrees for the 30-degree views (the target itself is not in it) and 57-65 for
-  the 60-degree views. Up to 5 degrees outside needs human review. Generations aim at the window's middle.
+  must be at least `azimuth_clearance_deg` (10) from every building azimuth (`build_azimuths_deg`): 0/90/180/270
+  for generated runs, since the pipeline builds and colours from the four contract views and top, never
+  the diagonals (top is perpendicular to these horizontal cameras). Bench runs use the building views
+  listed in their `cameras.json`, including any diagonals they actually used. This protects the split from
+  views used to build the body without excluding unused views. The measured error margins and 10-degree
+  separation are unchanged. The yaw windows are what that leaves of target ±5: 25-35 and 55-65 degrees for
+  generated runs; with the bench's usual four diagonals too, 25-26.3 and 57-65 degrees. Up to 5 degrees outside needs human review. Generations aim at the window's middle.
 - **Facing.** Two votes: the fit's side (its error facing the other way minus facing the view's way, at least
   0.003 of the figure height) and SAM 3.1's face inside the head. Facing passes when one says the view's way
   and none the other way; no deciding vote needs review.

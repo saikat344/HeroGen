@@ -396,7 +396,8 @@ def face_offset_at(fig: synth.Figure, yaw: float) -> float:
 
 
 def evaluate(view_name: str, pose: str, yaw: float, figure_kw: dict, pose_kw: dict | None = None,
-             seen_fig: synth.Figure | None = None):
+             seen_fig: synth.Figure | None = None, *,
+             build_azimuths: tuple[float, ...] = heldout.BUILD_AZIMUTHS_DEG):
     """Checks of a synthetic held-out mask drawn at ``yaw`` against the A-pose turnaround of the same figure,
     as stage 2h measures them (SAM's face and head stand-ins are the figure's face and head parts).
     Returns (status, measurements, checks)."""
@@ -410,7 +411,8 @@ def evaluate(view_name: str, pose: str, yaw: float, figure_kw: dict, pose_kw: di
     profile_face = float(np.mean([abs(face_offset_at(t_fig, y)) for y in (90, -90)]))
     face = {"offset": face_offset_at(fig, yaw), "face_found": True, "head_found": True}
     checks, measured = heldout.view_checks(view, seen, model, profile_toe, float(seen.mean()), face,
-                                           profile_face, body=body_of(t_fig), keypoints=keypoints_at(fig, yaw))
+                                           profile_face, body=body_of(t_fig), keypoints=keypoints_at(fig, yaw),
+                                           build_azimuths=build_azimuths)
     return heldout.view_status(checks), measured, checks
 
 
@@ -514,7 +516,7 @@ class HeldoutChecksTest(unittest.TestCase):
 
     def test_a_pose_accepted_in_every_window(self):
         # Drawn across each window; exact keypoints are found to the fit's half-degree grid.
-        drawn = {30: (25, 25.5, 26), 60: (57.5, 59, 61, 63, 65)}
+        drawn = {30: (25, 25.5, 26, 30, 34, 35), 60: (55, 56, 57.5, 59, 61, 63, 65)}
         for fname, fkw in FIGURES.items():
             for view in heldout.VIEWS:
                 for d in drawn[abs(int(view.yaw_deg))]:
@@ -571,7 +573,8 @@ class HeldoutChecksTest(unittest.TestCase):
                 self.assertEqual(m["facing_votes"], {"keypoints": -1, "head": -1})
 
     def test_yaw_just_outside_the_window_needs_review(self):
-        for name, yaw in (("front-left-30", 22), ("front-right-30", -22), ("front-left-60", 67),
+        for name, yaw in (("front-left-30", 22), ("front-right-30", -22), ("front-left-30", 37),
+                          ("front-right-30", -37), ("front-left-60", 67),
                           ("front-right-60", -67)):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["plain"])
             self.assertEqual(status, "needs review", (name, yaw))
@@ -583,21 +586,26 @@ class HeldoutChecksTest(unittest.TestCase):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["plain"])
             self.assertEqual(status, "rejected", (name, yaw))
             self.assertIn("found_yaw_window_miss_deg", _failed(checks))
-        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 5.0)
-        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 7.7)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 3.0)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 0.0)
         self.assertEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -60.0), 0.0)
 
     def test_windows_keep_every_allowed_true_yaw_clear(self):
-        # The windows follow from the measured fit error: the 30-degree one ends below its target.
         self.assertEqual(heldout.FIT_ERROR_DEG, (-8.7, 2.0))
-        self.assertEqual([tuple(round(e, 6) for e in v.window_deg) for v in heldout.VIEWS],
-                         [(25.0, 26.3)] * 2 + [(57.0, 65.0)] * 2)
-        self.assertEqual([round(v.aim_deg, 6) for v in heldout.VIEWS], [25.65, 25.65, 61.0, 61.0])
-        for view in heldout.VIEWS:
-            for edge in view.window_deg:
-                rng = heldout.yaw_range(math.copysign(edge, view.yaw_deg))
-                self.assertGreaterEqual(heldout.range_clearance(*rng["true_deg"]) + 1e-9,
-                                        heldout.AZIMUTH_CLEARANCE_DEG, (view.name, edge))
+        self.assertEqual(heldout.AZIMUTH_CLEARANCE_DEG, 10.0)
+        bench = tuple(float(a) for a in range(0, 360, 45))
+        for azimuths, windows, aims in (
+            (heldout.BUILD_AZIMUTHS_DEG, [(25.0, 35.0)] * 2 + [(55.0, 65.0)] * 2, [30, 30, 60, 60]),
+            (bench, [(25.0, 26.3)] * 2 + [(57.0, 65.0)] * 2, [25.65, 25.65, 61.0, 61.0]),
+        ):
+            views = [heldout.view_for_build(v, azimuths) for v in heldout.VIEWS]
+            self.assertEqual([tuple(round(e, 6) for e in v.window_deg) for v in views], windows)
+            self.assertEqual([round(v.aim_deg, 6) for v in views], aims)
+            for view in views:
+                for edge in view.window_deg:
+                    rng = heldout.yaw_range(math.copysign(edge, view.yaw_deg))
+                    self.assertGreaterEqual(heldout.range_clearance(*rng["true_deg"], azimuths) + 1e-9,
+                                            heldout.AZIMUTH_CLEARANCE_DEG, (view.name, edge))
 
     def test_true_yaw_range_from_the_measured_error(self):
         lo_err, hi_err = heldout.FIT_ERROR_DEG
@@ -610,22 +618,46 @@ class HeldoutChecksTest(unittest.TestCase):
         _, m, _ = evaluate("front-left-30", "a", 26, FIGURES["plain"])
         self.assertEqual(m["true_yaw_range_deg"], heldout.yaw_range(m["found_yaw_deg"])["true_deg"])
 
-    def test_building_azimuths_rejected(self):
+    def test_bench_building_azimuths_rejected(self):
+        bench = tuple(float(a) for a in range(0, 360, 45))
         # Found at or near a building azimuth, or where the measured error lets the true yaw come within
         # AZIMUTH_CLEARANCE_DEG of one: the target 30 itself (its true yaw can be 38.7), and 55-56.5 at 60.
         for name, yaw in (("front-left-30", 0), ("front-left-30", 5), ("front-left-30", 30),
                           ("front-left-30", 42), ("front-right-60", -45), ("front-right-60", -50),
                           ("front-left-60", 55), ("front-left-60", 56.5), ("front-left-60", 85)):
-            status, m, checks = evaluate(name, "a", yaw, FIGURES["clothed"])
+            status, m, checks = evaluate(name, "a", yaw, FIGURES["clothed"], build_azimuths=bench)
             self.assertEqual(status, "rejected", (name, yaw))
             self.assertIn("found_yaw_clear_of_build_azimuths_deg", _failed(checks))
-        self.assertEqual(heldout.azimuth_clearance(-30.0), 15.0)
-        self.assertEqual(heldout.azimuth_clearance(-35.0), 10.0)
-        self.assertEqual(heldout.azimuth_clearance(-81.0), 9.0)
-        self.assertEqual(heldout.azimuth_clearance(178.0), 2.0)
-        self.assertEqual(heldout.range_clearance(30.0, 40.0), 5.0)
-        self.assertEqual(heldout.range_clearance(-50.0, -40.0), 0.0)
-        self.assertEqual(heldout.range_clearance(-34.0, -20.0), 11.0)
+        self.assertEqual(heldout.azimuth_clearance(-30.0, bench), 15.0)
+        self.assertEqual(heldout.azimuth_clearance(-35.0, bench), 10.0)
+        self.assertEqual(heldout.azimuth_clearance(-81.0, bench), 9.0)
+        self.assertEqual(heldout.azimuth_clearance(178.0, bench), 2.0)
+        self.assertEqual(heldout.range_clearance(30.0, 40.0, bench), 5.0)
+        self.assertEqual(heldout.range_clearance(-50.0, -40.0, bench), 0.0)
+        self.assertEqual(heldout.range_clearance(-34.0, -20.0, bench), 11.0)
+
+    def test_generated_clearance_counts_only_contract_views(self):
+        for name, yaw in (("front-left-30", 0), ("front-right-30", -5), ("front-left-60", 75),
+                          ("front-right-60", -85)):
+            status, _, checks = evaluate(name, "a", yaw, FIGURES["clothed"])
+            self.assertEqual(status, "rejected", (name, yaw))
+            self.assertIn("found_yaw_clear_of_build_azimuths_deg", _failed(checks))
+        self.assertEqual(heldout.azimuth_clearance(-30.0), 30.0)
+        self.assertEqual(heldout.range_clearance(30.0, 40.0), 30.0)
+        self.assertEqual(heldout.range_clearance(-50.0, -40.0), 40.0)
+        self.assertEqual(heldout.range_clearance(175.0, 185.0), 0.0)
+
+    def test_bench_clearance_uses_only_that_runs_building_views(self):
+        # This run built from only the left diagonal: the right target stays clear.
+        azimuths = (0.0, 45.0, 90.0, 180.0, 270.0)
+        self.assertAlmostEqual(heldout.yaw_window(30, azimuths)[1], 26.3)
+        self.assertEqual(heldout.yaw_window(-30, azimuths), (25.0, 35.0))
+        for name, yaw, expected in (("front-left-30", 30, "rejected"),
+                                    ("front-right-30", -30, "accepted")):
+            status, _, checks = evaluate(name, "a", yaw, FIGURES["plain"], build_azimuths=azimuths)
+            self.assertEqual(status, expected, (name, _failed(checks)))
+        with self.assertRaisesRegex(ValueError, "no yaw window"):
+            heldout.yaw_window(30, (0.0, 30.0, 90.0))
 
     def test_without_keypoints_the_turn_needs_review(self):
         t_fig = figure("a")

@@ -83,6 +83,55 @@ class HeldoutTest(unittest.TestCase):
         (run / "stage-2h.json").unlink()
         shutil.rmtree(run / "heldout")
 
+    def test_bench_building_cameras_reach_generation_and_recheck(self):
+        from herogen.bench.cameras import camera
+
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2, 5]), 0)
+        run = RunFolder(self.root, "r")
+        # This bench run used one diagonal, rather than the default set of four.
+        cams = [camera(a, "building", 1.0, 512) for a in (0, 45, 90, 180, 270)]
+        cams += [camera(315, "evaluation", 1.0, 512)]
+        run.write_json("cameras.json", {"building": [c["view"] for c in cams if c["role"] == "building"],
+                                        "cameras": cams})
+        azimuths = [0.0, 45.0, 90.0, 180.0, 270.0]
+        self.assertEqual(heldout.building_azimuths(run), tuple(azimuths))
+        rec = heldout.recheck_heldout(run)
+        self.assertEqual(rec["details"]["build_azimuths_deg"], azimuths)
+        left = rec["details"]["views"]["front-left-30"]
+        right = rec["details"]["views"]["front-right-30"]
+        self.assertEqual(left["status"], "rejected")
+        self.assertEqual(right["status"], "accepted")
+        self.assertAlmostEqual(left["yaw_window_deg"][1], 26.3)
+        self.assertEqual(right["yaw_window_deg"], [25.0, 35.0])
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-30"]), 0)
+        rec = self._rec()
+        self.assertEqual(rec["details"]["build_azimuths_deg"], azimuths)
+        attempt = rec["details"]["views"]["front-left-30"]["attempts"][0]
+        self.assertAlmostEqual(attempt["requested_yaw_deg"], 25.65)
+        clearance = next(c for c in attempt["checks"] if c["name"] == "found_yaw_clear_of_build_azimuths_deg")
+        self.assertIn(f"building azimuths {azimuths}", clearance["note"])
+
+    def test_building_views_come_from_the_run_metadata(self):
+        from herogen.bench.cameras import all_cameras
+
+        run = RunFolder(self.root, "cameras")
+        run.write_json("views/meta.json", {"views": ["front", "back", "left", "right", "top"]})
+        self.assertEqual(heldout.building_azimuths(run), (0.0, 90.0, 180.0, 270.0))
+        run.write_json("views/meta.json", {"reference": "ground-truth"})
+        with self.assertRaisesRegex(ValueError, "needs cameras.json"):
+            heldout.building_azimuths(run)
+        cams = all_cameras(1.0, 512)
+        names = [c["view"] for c in cams if c["role"] == "building"]
+        run.write_json("cameras.json", {"building": names, "cameras": cams})
+        self.assertEqual(heldout.building_azimuths(run), tuple(float(a) for a in range(0, 360, 45)))
+        # The explicit list of building views is authoritative even if other cameras remain in the file.
+        run.write_json("cameras.json", {"building": names[:4], "cameras": cams})
+        self.assertEqual(heldout.building_azimuths(run), (0.0, 90.0, 180.0, 270.0))
+        for bad in ([], ["missing-camera"]):
+            run.write_json("cameras.json", {"building": bad, "cameras": cams})
+            with self.assertRaisesRegex(ValueError, "every building view"):
+                heldout.building_azimuths(run)
+
     def test_four_views_follow_stage2(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2, 5]), 0)
         run = self.root / "r"
@@ -94,7 +143,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(rec["details"]["accepted_views"], VIEWS)
         self.assertEqual(rec["details"]["reference"], "generated")
         self.assertIn("consistency", rec["details"]["reference_note"])
-        self.assertEqual(rec["details"]["build_azimuths_deg"], [45.0 * i for i in range(8)])
+        self.assertEqual(rec["details"]["build_azimuths_deg"], [0.0, 90.0, 180.0, 270.0])
         self.assertEqual(rec["details"]["azimuth_clearance_deg"], 10.0)
         self.assertEqual(rec["details"]["fit_error_deg"], [-8.7, 2.0])
         self.assertEqual(rec["details"]["checks_version"], heldout.checks_version())
@@ -294,8 +343,21 @@ class HeldoutTest(unittest.TestCase):
                 self.assertEqual(tried[-1]["pose_reference"], f"views/{view.side}.png")
 
     def test_stride_rejected(self):
-        # Striding legs don't match the turnaround's, so the keypoint turn lands outside every window.
-        self._assert_rejected(FakeAPI(heldout_pose="stride"), "found_yaw_window_miss_deg")
+        # Keep the bench's stricter diagonal windows covered: every striding view is rejected there.
+        with mock.patch.object(heldout, "BUILD_AZIMUTHS_DEG", tuple(45.0 * i for i in range(8))):
+            self._assert_rejected(FakeAPI(heldout_pose="stride"), "found_yaw_window_miss_deg")
+
+    def test_generated_stride_views_are_never_accepted(self):
+        # With the wider generated windows one stride can need review instead of failing the hard gate.
+        self.assertEqual(self._live(FakeAPI(heldout_pose="stride"), "r", [0, 1, 2]), 2)
+        rec = self._rec()
+        self.assertEqual(rec["details"]["accepted_views"], [])
+        for d in rec["details"]["views"].values():
+            self.assertIn(d["status"], ("rejected", "needs review"))
+            self.assertEqual(len(d["attempts"]), heldout.ATTEMPTS)
+            checks = d["attempts"][d["kept_attempt"]]["checks"]
+            miss = next(c for c in checks if c["name"] == "found_yaw_in_window")
+            self.assertFalse(miss["pass"])
 
     def test_arms_down_never_accepted(self):
         self.assertEqual(self._live(FakeAPI(heldout_pose="down"), "r", [0, 1, 2]), 2)
