@@ -17,7 +17,8 @@ such texels average the views that contain them (facing-weighted, ignoring occlu
 Close-ups (the face source, `herogen.pipeline.facesource`, stage 2f): stage 2f may leave sharp close-ups of the
 head for the front, left and right views, each with its affine A (close-up pixels to view pixels) and its footprint
 (`masks/closeup-<view>.png`). `load_closeups` takes the ones `views/closeup.json` marks used whose view image is
-still the one they were made from (its SHA-256), and feathers each footprint over `CLOSEUP_FEATHER_PX` (the
+still the one they were made from (its SHA-256; a record from a stage 2f that fell back gives the note "stage 2f
+fell back: <reason>"), and feathers each footprint over `CLOSEUP_FEATHER_PX` (the
 footprint's alpha stays 1 inside and falls to 0 over about that width outside, never past the crop box). In `bake`,
 a close-up adds detail to its view, it never replaces the view's colour: inside the footprint (alpha-blended at
 its feathered edge) the view's colour gets the close-up at the texture's sampling density minus the close-up at
@@ -95,6 +96,8 @@ def load_closeups(run: Path, vs: ViewSet) -> tuple[dict[str, Closeup], dict]:
         return {}, {"used": [], "notes": [f"{CLOSEUP_RECORD} could not be read"]}
     out: dict[str, Closeup] = {}
     notes: list[str] = []
+    if rec.get("fallback"):
+        notes.append(f"stage 2f fell back: {str(rec['fallback'])[:600]}")
     for name in CLOSEUP_VIEWS:
         r = rec["views"].get(name) or {}
         if not isinstance(r, dict):
