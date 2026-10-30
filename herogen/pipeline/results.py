@@ -33,7 +33,7 @@ EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
 BUILD_VIEWS = ["front", "back", "left", "right"]
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # A record's status when it isn't ok: a stage that stopped early says so (`_Stage.fail`).
-_FAILED = {"error": "error", "running": "did not finish"}
+_FAILED = {"error": "error", "running": "did not finish", "input_rejected": "input rejected"}
 
 
 def _stale_heldout(run: RunFolder, rec: dict[str, Any]) -> bool:

@@ -62,7 +62,8 @@ class FakeAPI:
         self.calls.append(endpoint)
         if endpoint == "responses":
             self.last_sam_image = _decode_data_url(body["input"][0]["content"][1]["image_url"])
-            return {"output": [{"type": "message", "content": [{"type": "output_text", "text": "fake"}]}]}
+            return {"status": "completed",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "fake"}]}]}
         prompt = body["prompt"]
         self.prompts.append(prompt)
         if endpoint == "images/generations":
@@ -184,7 +185,7 @@ class FlowTest(unittest.TestCase):
             if req.get("text") == stages.SAM_TEXTS[0] and req.get("image_sha256") == sha:
                 p.unlink()
         with self.assertRaises(ReplayMiss):
-            stages._sam_or_threshold(ModelClient(cache), sketch)
+            stages.sam_figure_mask(ModelClient(cache), sketch)
         self.assertEqual(self._replay("rep"), 1)
         self.assertFalse((self.root / "rep" / "stage-1.json").exists())
 
@@ -196,7 +197,8 @@ class FlowTest(unittest.TestCase):
         Image.new("L", (3, 3), 255).save(mask)
         self.assertEqual(self._replay("rep"), 1)
 
-    def test_live_sam_failure_falls_back_and_replays(self):
+    def test_live_sam_failure_stops_the_stage_and_is_not_cached(self):
+        # A failed SAM call is neither a fallback to the next prompt nor a cached result.
         api = FakeAPI()
         post = api.post
 
@@ -206,11 +208,13 @@ class FlowTest(unittest.TestCase):
             return post(c, endpoint, body)
 
         api.post = flaky
-        self.assertEqual(self._record(api, "rec"), 0)
-        self.assertEqual(self._replay("rep"), 0)
-        for run in ("rec", "rep"):
-            s1 = json.loads((self.root / run / "stage-1.json").read_text())
-            self.assertEqual(s1["details"]["mask_method"]["sketch"], f"{client_mod.SAM_MODEL}:{stages.SAM_TEXTS[1]}")
+        self.assertEqual(self._record(api, "rec"), 1)
+        s1 = json.loads((self.root / "rec" / "stage-1.json").read_text())
+        self.assertEqual((s1["ok"], s1["status"]), (False, "error"))
+        self.assertIn("HTTP 503", s1["error"])
+        self.assertEqual(api.calls, [])  # it failed on the sketch's first prompt, before any paid edit
+        self.assertEqual(list((self.root / "_cache").glob("*.json")), [])
+        self.assertEqual(self._replay("rep"), 1)
 
     def test_gate_failure_stops_and_still_reports(self):
         api = FakeAPI(sheet_order=("front", "right", "front"))

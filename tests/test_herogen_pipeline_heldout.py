@@ -372,7 +372,7 @@ class HeldoutTest(unittest.TestCase):
             self.assertEqual(heldout.view_status(checks), "needs review")
             self.assertEqual([c["name"] for c in checks if not c["pass"]], ["head_cue_measured"])
 
-    def test_live_api_failure_replays_the_same_way(self):
+    def test_live_face_api_failure_needs_review_and_is_not_cached(self):
         api = FakeAPI()
         post, faces = api.post, []
 
@@ -384,13 +384,17 @@ class HeldoutTest(unittest.TestCase):
             return post(c, endpoint, body)
 
         api.post = flaky
-        live = self._live(api, "r", [0, 1, 2])
-        self.assertEqual(self._replay("r2", [0, 1, 2]), live)
-        a, b = self._rec("r"), self._rec("r2")
-        self.assertEqual([(c["name"], c["value"]) for c in a["checks"]], [(c["name"], c["value"]) for c in b["checks"]])
-        face = b["details"]["views"]["front-left-30"]["attempts"][0]["measured"]["face"]
-        self.assertTrue(face["api_error"])
-        self.assertIn("HTTP 500", face["error"])
+        self.assertEqual(self._live(api, "r", [0, 1, 2]), 0)  # the next generation is accepted
+        rec = self._rec("r")
+        first = rec["details"]["views"]["front-left-30"]["attempts"][0]
+        self.assertTrue(first["measured"]["face"]["api_error"])
+        self.assertIn("HTTP 500", first["measured"]["face"]["error"])
+        self.assertEqual(first["status"], "needs review")  # never accepted without the cue
+        for p in (self.root / "_cache").glob("*.json"):
+            self.assertNotIn("api_error", json.loads(p.read_text()))
+        # The failure is not a result, so a replay has nothing for that call and stops.
+        self.assertEqual(self._replay("r2", [0, 1, 2]), 1)
+        self.assertIn("ReplayMiss", self._rec("r2")["error"])
 
     def test_error_mid_stage_keeps_the_earlier_files(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)

@@ -17,7 +17,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline.client import ClientError, ModelClient  # noqa: E402
 
-_RESPONSE = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "<masks>"}]}]}
+_RESPONSE = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "<masks>"}]}]}
 
 
 class SamPaidResponseTest(unittest.TestCase):

@@ -4,6 +4,9 @@ Modes:
 - ``live``: call Meta's Model API, then save a request summary and the response to the cache.
 - ``replay``: read the cache only. A missing entry raises ``ReplayMiss``; nothing touches the network.
 
+Only results are cached. A call that fails raises ``ApiError`` and leaves no entry, so a replay never repeats
+a failure (an entry an earlier version wrote for a failed call replays as ``ReplayMiss``).
+
 The cache key is a hash of the request (model, endpoint, prompt, parameters and the SHA-256 of every input
 image), so a replay returns exactly what the live call returned for the same inputs. Images are stored as
 PNG files next to a JSON entry; SAM masks are stored decoded (one PNG per instance) so replay needs no mask
@@ -52,8 +55,8 @@ class ReplayMiss(ClientError):
 
 class ApiError(ClientError):
     """The Model API itself failed: an HTTP or network error after the retries, or a response that can't be
-    read. The only failure a caller may treat as an unmeasured result (a SAM call falling back to the
-    threshold mask, say); a replay miss, a missing key or a corrupt cache entry is not one."""
+    read. Never cached as a result, so a replay never repeats it. A stage stops on it; the one caller that
+    records it instead is the held-out face cue, which then sends the view to human review."""
 
 
 @dataclass
@@ -169,9 +172,10 @@ class ModelClient:
         key = request_key(summary)
         entry = self._load(key)
         if entry is not None and "api_error" in entry and self.mode == "replay":
-            # A live call that failed is replayed as the same failure, so a fallback replays too.
-            self.log.add(SAM_MODEL, "segment", key, cached=True)
-            raise ApiError(entry["api_error"])
+            # Written by an earlier version, which cached failed calls. A failed call is not a result, so
+            # replay has nothing to return for this request; a live run asks again.
+            raise ReplayMiss(f"no SAM result cached for key {key} (text={text!r}), only a failed call "
+                             f"({_scrub(str(entry['api_error']))[:200]}); make it again live")
         if entry is not None and "api_error" not in entry:
             self.log.add(SAM_MODEL, "segment", key, cached=True)
             if "instances" not in entry:  # a paid response saved before its masks were decoded
@@ -194,13 +198,12 @@ class ModelClient:
             "metadata": {"include_confidence": "true"},
         }
         started = time.monotonic()
-        try:
-            resp = self._post("responses", body)
-        except ApiError as e:  # recorded so replay reproduces it; a live run asks again
-            self._save_entry(key, {"request": summary, "api_error": str(e)})
-            raise
+        # A failed call raises `ApiError` and is never cached: a failure is not a result to replay.
+        resp = self._post("responses", body)
         # The call is billed now, so log it and keep the raw response before decoding can fail.
         self.log.add(SAM_MODEL, "segment", key, cached=False)
+        # An incomplete or failed response can carry no output, which would read as "nothing found".
+        require_completed("responses", resp, required=True)
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2),
                  "output_text": _output_text(resp)}
         self._save_entry(key, entry)
@@ -229,6 +232,11 @@ class ModelClient:
             raise ReplayMiss(f"no cached {endpoint} response for key {key}")
         started = time.monotonic()
         resp = self._post(endpoint, body)
+        try:
+            require_completed(endpoint, resp, required=False)
+        except ApiError:
+            self.log.add(IMAGE_MODEL, kind, key, cached=False)  # answered, so it may be billed
+            raise
         data = resp.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
             raise ApiError(f"{endpoint}: response has no data[0]")
@@ -309,6 +317,17 @@ class ModelClient:
                 raise ClientError(f"cached mask {inst['mask']} has the wrong size")
             out.append(SamInstance(mask=m, box=tuple(inst["box"]), confidence=inst.get("confidence")))
         return out
+
+
+def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) -> None:
+    """Raise `ApiError` unless the response says it completed: its ``status`` is "completed" (the responses
+    endpoint always sends one, so ``required``; Muse Image sends none, so only a status it does send is
+    checked) and it carries no ``error``. Only a completed response is a result."""
+    status = resp.get("status")
+    if ((required or status is not None) and status != "completed") or resp.get("error"):
+        detail = resp.get("error") or resp.get("incomplete_details")
+        raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
+                       + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
 
 
 def _output_text(resp: dict[str, Any]) -> str:
