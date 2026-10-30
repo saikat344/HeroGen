@@ -30,7 +30,8 @@ assert names, "no prompt versions installed"
 for n in names:
     prompts.load(n)
 prompts.selected("prompt_sketch")
-prompts.selected("same_character")
+cal = prompts.calibration(prompts.selected("same_character"))
+assert cal is not None, "no calibration installed for the default same-character version"
 print("versions found:", ", ".join(names))
 """
 
@@ -88,6 +89,34 @@ class FrozenVersions(unittest.TestCase):
         self.assertTrue(full["prompt"].startswith("Redraw this exact character as a full-body front view."))
 
 
+class Calibration(unittest.TestCase):
+    def test_every_calibration_matches_its_frozen_version(self):
+        files = sorted(prompts.CALIBRATION.glob("*.json"))
+        self.assertTrue(files)
+        for f in files:
+            with self.subTest(file=f.name):
+                v = prompts.load(f.stem)
+                cal = prompts.calibration(v)
+                t = cal["rating_set"]["true_pairs"]
+                self.assertLessEqual(t["added_prop_listed"], t["answers"])
+                self.assertLessEqual(t["same"], t["answers"])
+
+    def test_v2_numbers(self):
+        cal = prompts.calibration(prompts.load("same-character-v2"))
+        self.assertEqual(cal["rating_set"]["true_pairs"]["added_prop_listed"], 15)
+        self.assertEqual(cal["rating_set"]["true_pairs"]["answers"], 32)
+
+    def test_none_without_a_file_and_refused_for_another_hash(self):
+        self.assertIsNone(prompts.calibration(prompts.load("hero-sketch-v1")))
+        src = json.loads((prompts.CALIBRATION / "same-character-v2.json").read_text(encoding="utf-8"))
+        src["version_sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "same-character-v2.json").write_text(json.dumps(src), encoding="utf-8")
+            with mock.patch.object(prompts, "CALIBRATION", Path(d)):
+                with self.assertRaisesRegex(prompts.RegistryError, "another version"):
+                    prompts.calibration(prompts.load("same-character-v2"))
+
+
 class Selection(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v1")
@@ -114,7 +143,7 @@ class Selection(unittest.TestCase):
 
 
 class InstalledPackageTest(unittest.TestCase):
-    """`pip install` of the project ships the prompt versions and defaults (package data)."""
+    """`pip install` of the project ships the prompt versions, defaults and calibrations (package data)."""
 
     def test_installed_package_finds_its_prompt_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
