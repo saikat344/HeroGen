@@ -155,22 +155,50 @@ sheet's. The top view is asked for only when the kept sheet passed.
 - `carve` (default): the visual hull of the observed masks, surfaced and smoothed. Its shape is built from every
   observed view.
 - `sam3d-objects`: SAM 3D Objects reconstructs a textured mesh from `views/front.png` and `masks/front.png` only;
-  it is kept as `03-source.glb`, put in the contract frame using the front view only (facing, a small rotation
-  and perspective fit, an outline conform onto the front mask) and remeshed into one closed manifold surface
-  (`herogen/blender/sam3d_mesh.py`). Its shape is built from the front view alone.
+  it is kept as `03-source.glb`, put in the contract frame and remeshed into one closed manifold surface
+  (`herogen/blender/sam3d_mesh.py`). The front view decides the facing, a small yaw / roll and perspective fit
+  and an outline conform onto the front mask; the pitch, a tilt the front view cannot see, is registered on the
+  observed left and right masks. Its shape is built from the front view alone.
 
-`stage-3.json` records `mesh_source` (what was used), `mesh_source_requested`, `joints_source` and
-`shape_views`, the views the shape was built from. **Every observed view's silhouette IoU is gated, whatever
-the mesh source**, in stage 3 and in stage 4's rest IoU; a view the shape was not built from carries a note
-saying so. Only a derived view (`mask_method` `visual_hull`, made by stage 2 from the others) is reported, not
-gated. The texture gates apply to every observed colour view.
+`stage-3.json` records `mesh_source` (what was used), `mesh_source_requested`, `joints_source` and `shape_views`,
+the views the shape was built from, and `pose_views`, the views the hybrid's pitch was registered on. **Every
+observed view's silhouette IoU is gated, whatever the mesh source**, in stage 3 and in stage 4's rest IoU; a view
+the shape was not built from carries a note saying so, and says when the pitch was registered on it. Only a
+derived view (`mask_method` `visual_hull`, made by stage 2 from the others) is reported, not gated. The texture
+gates apply to every observed colour view.
 
-**The hybrid shape fails the side views today.** Built from the front view alone, the SAM 3D Objects mesh does
-not match the side masks: on the pencil-sketch run, silhouette IoU front 0.965, back 0.944, left 0.688, right
-0.691 against the 0.90 gate (the top view, 0.502, is derived there and only reported), so stage 3 fails for
-`--mesh-source sam3d-objects`. The front-only orientation fit is part of it: on the synthetic humanoid, whose
-source mesh is the exact body, it picks a 5 degree pitch the front view cannot tell from none, and the side
-views score 0.62. Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A remote source that fails falls back to the local one
+**The hybrid's pitch is registered on the side views.** The front silhouette barely reacts to a tilt about X, so a
+fit on it alone drifted towards its limit: on one generated turnaround it chose -18 degrees (front IoU 0.875 at
+pitch 0, 0.896 at -18, before the conform), the conform pulled the front outline back, and the side views showed
+the body tipped over (left 0.186, right 0.185). The orientation now applies the facing and a small yaw about Z
+first, then the pitch about X (the body's side-to-side axis) and the roll about Y (the front view's axis), so both
+mean the same tilt of the body at every facing. The front fit (yaw, roll, perspective correction) runs with the
+pitch held at 0. The pitch is then swept from -30 to 30 degrees in 2 degree steps, scored by the mean
+half-resolution IoU of the left and right masks; every local peak within 0.03 of the best is refined to 1 degree
+and the best is kept if it lies within +-20 degrees. The front fit is then redone with that pitch, before the
+conform and the remesh. The pitch stays 0, with the reason recorded, unless both left and right are observed
+(present, non-empty and not derived; back, top and the held-out views are never used), when the sweep is flat (the
+side IoU varies by less than 0.02), when it is ambiguous (another peak more than 8 degrees away within 0.01 of the
+best) and when the best lies beyond +-20 degrees. No Y offset is fitted or applied: the frame stays centred on the
+bounding box. `mesh.source.pose_fit` in `stage-3.json` records the views used and those excluded with their
+reasons, the status (`fitted` or `fallback`) and reason, `pitch_deg`, `limit_deg`, `y_offset_studs` (0) with a
+note, the sweep (`sweep_half_res`) and its scores at pitch 0 and at the fitted pitch (`side_iou_half_res`: the
+sweep's scores, not the final mesh's); `mesh.source.fit` holds the pitch with the rest of the fit, and
+`pose_views` lists the views the pitch was registered on (none after a fallback). The shape is still built from
+the front view alone (`shape_views` stays `["front"]`).
+
+**Measurements of this fit: to be measured.** The before/after on the 34 hybrid stage-3 records (32 distinct SAM
+3D Objects sources) and on 34 generated turnarounds, the generated turnaround above in Blender, and the synthetic
+humanoid's per-view IoU are to be re-measured on this code. Before it, stage 3 failed on every one of the 34
+records (worst side view median 0.666, front median 0.969).
+
+**Causes that remain, each separate from the pitch.** Bounding-box centring: a part the mesh lacks or places
+differently (a tail, a pack) moves a side mask's box and so the view's centre, which a few degrees of pitch can
+partly offset, so the fitted pitch can follow it. The model's depth: on turnarounds rendered from game models
+(exact masks) the side views stay 0.51-0.73 whatever the pitch, the figure too thin front to back. The remesh: on
+some sources it drops thin parts and the front with them (one source: front 0.952 after the conform, 0.794 after
+the remesh), so the front can move with small changes of pitch.
+Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A remote source that fails falls back to the local one
 (`carve`, `silhouette`) and the notes say so; `--no-fallback` stops the stage instead, with a one-line error.
 Every failure of a remote source counts: the call itself, its cached output (an unreadable GLB, a missing file)
 and mapping its result (a mesh that covers no pixel of the front view, say). Stage 3 removes its previous
