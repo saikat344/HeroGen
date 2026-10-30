@@ -1030,10 +1030,10 @@ answer never came back is counted at 0, since its tokens are unknown.
   generation is never retried on a 409. A Muse Image or SAM 3.1 attempt of unknown outcome is counted at its
   per-image price. A Muse Spark call is priced by the token usage it reports (`client.answer_cost_usd`). A
   count it does not report is taken at its bound: output at `max_output_tokens`, the most the call allows, and
-  input at 0. So an attempt of unknown outcome, which returns no usage, is counted at the output-token cap
-  ($0.01275 for stage p's 3000), and so is an answer with no usage (an incomplete one, say): neither is ever
-  counted at $0. Otherwise a Muse Spark call is handled like a SAM 3.1 call: it is retried on a
-  409, and a 5xx is not counted.
+  input at 0. A 200 answer that failed and is retried is priced from the usage it reports, like any answer;
+  an attempt with no answer (cut off, timed out, unreadable) and an answer with no usage (an incomplete one,
+  say) are counted at the output-token cap ($0.01275 for stage p's 3000), so neither is ever counted at $0.
+  Otherwise a Muse Spark call is handled like a SAM 3.1 call: it is retried on a 409, and a 5xx is not counted.
 
 ## Stage p: prompt to sketch
 
