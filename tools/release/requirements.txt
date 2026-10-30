@@ -1,0 +1,35 @@
+# The deploy's own tools, pinned with their dependencies (pip install -r tools/release/requirements.txt), for the
+# release workflow only. Resolved for Python 3.12 on Linux, as the workflow runs it.
+
+# The Modal CLI, which runs `modal deploy`.
+modal==1.6.3              # Apache-2.0
+
+# Its dependencies.
+aiohappyeyeballs==2.7.1   # PSF-2.0
+aiohttp==3.14.5           # Apache-2.0 AND MIT
+aiosignal==1.4.0          # Apache-2.0
+anyio==4.15.1             # MIT
+attrs==26.1.0             # MIT
+cbor2==6.1.5              # MIT
+certifi==2026.10.23       # MPL-2.0
+click==8.5.0              # BSD-3-Clause
+frozenlist==1.8.0         # Apache-2.0
+grpclib==0.4.9            # BSD-3-Clause
+h2==4.4.1                 # MIT
+hpack==4.2.0              # MIT
+hyperframe==6.1.0         # MIT
+idna==3.20                # BSD-3-Clause
+markdown-it-py==4.2.0     # MIT
+mdurl==0.1.2              # MIT
+multidict==7.2.1          # Apache-2.0
+propcache==0.5.4          # Apache-2.0
+protobuf==7.36.2          # BSD-3-Clause
+Pygments==2.21.0          # BSD-2-Clause
+rich==15.0.0              # MIT
+synchronicity==0.12.7     # Apache-2.0
+toml==0.10.2              # MIT
+types-certifi==2021.10.8.3        # Apache-2.0
+types-toml==0.10.8.20260518       # Apache-2.0
+typing_extensions==4.16.0 # PSF-2.0
+watchfiles==1.3.0         # MIT
+yarl==1.25.1              # Apache-2.0

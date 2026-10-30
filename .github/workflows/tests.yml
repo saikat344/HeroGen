@@ -2,7 +2,11 @@ name: tests
 
 on:
   push:
+    branches: ["**"]
+    # Release tags run these tests through release.yml, which deploys only when they pass.
+    tags-ignore: ["v*"]
   pull_request:
+  workflow_call:
 
 jobs:
   test:
