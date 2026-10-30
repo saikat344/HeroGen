@@ -345,6 +345,151 @@ class TestHeldoutBeside(JobCase):
         self.assertEqual(started, [])
 
 
+class TestLeases(JobCase):
+    """Heartbeats: a worker that is alive keeps its lease however long a copy or a stage takes. One that died loses
+    it LEASE_TTL_S after its last renewal, or, for a job, when the running stage's own lease ends if that is later
+    (the held-out views hold no other lease), so the sweep finds it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unittest import mock
+
+        from herogen.service import worker
+
+        patch = mock.patch.object(worker, "RENEW_EVERY_S", 0.01)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def lease(self, sql, *args):
+        return self.store._one(sql, args)["lease_until"]
+
+    def outlast(self, sql, *args, check, total_s=None):
+        """Advance the clock in steps just under LEASE_TTL_S, `total_s` in all (by default past any lease the
+        stage timeouts alone gave), waiting each time for the heartbeat to renew, then run the sweep and call
+        `check`."""
+        import time as _time
+
+        from herogen.service.worker import LEASE_MARGIN_S, LEASE_TTL_S
+
+        total_s = total_s or self.s.stage_timeout_s + 2 * LEASE_MARGIN_S
+        step = LEASE_TTL_S - 1
+        for _ in range(int(total_s // step) + 1):
+            self.clock.advance(step)
+            deadline = _time.monotonic() + 5
+            while self.lease(sql, *args) < self.clock.t + LEASE_TTL_S - 1:
+                self.assertLess(_time.monotonic(), deadline, "the lease was not renewed")
+                _time.sleep(0.005)
+            self.store.reconcile_stale(self.s.max_attempts)
+            check()
+
+    def heldout(self, job, runner=None, workdir=None):
+        from herogen.service.snapshot import LocalVolume
+        from herogen.service.worker import HeldoutWorkdir, run_heldout
+
+        ctx = make_context(self.s, self.storage, job)
+
+        def workdir_for(claim):
+            cls = workdir or HeldoutWorkdir
+            return cls(ctx, self.tmp / "h" / job["id"], LocalVolume(),
+                       lambda: self.store.side_live(job["id"], "2h", claim))
+
+        return run_heldout(self.store, self.s, job, runner or self.runner, workdir_for)
+
+    def test_a_long_copy_in_does_not_cost_the_held_out_views_their_lease(self):
+        from herogen.service.worker import HeldoutWorkdir
+
+        job = self.new_job()
+        self.store.job_claim(job["id"], "c", 60, 2)
+        test = self
+        sql = "SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'"
+
+        class SlowOpen(HeldoutWorkdir):
+            def open(self):   # copying the user's whole cache in takes longer than the stage timeout
+                test.outlast(sql, job["id"], check=lambda: test.assertEqual(
+                    test.stages(job)["2h"]["state"], "running", "the sweep took a live 2h's lease"))
+                return super().open()
+
+        self.assertEqual(self.heldout(job, workdir=SlowOpen), "passed")
+        row = self.stages(job)["2h"]
+        self.assertEqual((row["state"], row["cost_usd"]), ("passed", 0.0125), "its result and spend are kept")
+
+    def test_a_dead_held_out_worker_loses_its_lease_within_the_ttl(self):
+        from herogen.service.worker import LEASE_TTL_S
+
+        job = self.new_job()
+        self.store.job_claim(job["id"], "c", 60, 2)
+        test = self
+        sql = "SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'"
+
+        class Dies(FakeRunner):
+            def run(self, spec, ctx):
+                test.outlast(sql, job["id"], total_s=LEASE_TTL_S * 2, check=lambda: None)
+                raise SystemExit("the container died")   # nothing after this runs: no record, no more renewals
+
+        with self.assertRaises(SystemExit):
+            self.heldout(job, Dies())
+        until = self.lease(sql, job["id"])
+        self.assertEqual(self.stages(job)["2h"]["state"], "running")
+        self.clock.advance(LEASE_TTL_S - 2)
+        self.store.reconcile_stale(self.s.max_attempts)
+        self.assertEqual(self.lease(sql, job["id"]), until, "nothing renews it any more")
+        self.assertEqual(self.stages(job)["2h"]["state"], "running")
+        self.clock.advance(3)
+        self.store.reconcile_stale(self.s.max_attempts)
+        self.assertEqual(self.stages(job)["2h"]["state"], "unavailable")
+
+    def test_a_long_gap_between_groups_does_not_cost_the_job_its_lease(self):
+        test, job = self, self.new_job()
+        sql = "SELECT lease_until FROM jobs WHERE id=?"
+
+        def execute(j, attempt, group, resume):
+            if group == "blender":   # a slow copy back, a cold start and a slow copy in, past stage 2's lease
+                test.outlast(sql, job["id"], check=lambda: test.assertEqual(
+                    test.store.job_get(job["id"])["state"], "running", "the sweep took a live job's lease"))
+            return self.execute(j, attempt, group, resume)
+
+        self.assertEqual(run_job(self.store, self.s, self.storage, job["id"], "c1", execute), "succeeded")
+        self.assertEqual(self.store.job_get(job["id"])["attempts"], 1)
+
+    def test_a_dead_orchestrator_loses_the_jobs_lease_within_the_ttl(self):
+        from herogen.service.worker import LEASE_TTL_S
+
+        test, job = self, self.new_job()
+        sql = "SELECT lease_until FROM jobs WHERE id=?"
+
+        def execute(j, attempt, group, resume):
+            if group == "blender":
+                test.outlast(sql, job["id"], check=lambda: None)   # stage 2's own lease has run out by now
+                raise SystemExit("the container died")
+            return self.execute(j, attempt, group, resume)
+
+        with self.assertRaises(SystemExit):
+            run_job(self.store, self.s, self.storage, job["id"], "c1", execute)
+        self.clock.advance(LEASE_TTL_S - 2)
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [])
+        self.clock.advance(3)
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "queued")])
+
+    def test_a_dead_orchestrator_mid_stage_holds_the_job_until_the_stages_lease_ends(self):
+        from herogen.service.worker import LEASE_MARGIN_S, LEASE_TTL_S
+
+        class DiesInStage3(FakeRunner):
+            def run(self, spec, ctx):
+                if spec.key == "3":
+                    raise SystemExit("the container died")
+                return super().run(spec, ctx)
+
+        self.runner = DiesInStage3()
+        job = self.new_job()
+        with self.assertRaises(SystemExit):
+            self.go(job)
+        started = self.stages(job)["3"]["started_at"]
+        self.clock.advance(LEASE_TTL_S + 1)
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [], "stage 3's own lease still holds it")
+        self.clock.t = started + self.s.blender_timeout_s + LEASE_MARGIN_S + 1
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "queued")])
+
+
 class TestHeldoutFiles(JobCase):
     """The job's own path and 2h never write the same file."""
 

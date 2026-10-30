@@ -309,6 +309,30 @@ class TestJobs(StoreCase):
         with self.assertRaises(StoreError):
             self.store.side_claim(j["id"], "3", "k", 60)
 
+    def test_renewing_a_lease_extends_it_only_for_its_holder(self):
+        lease = lambda sql, *a: self.store._one(sql, a)["lease_until"]  # noqa: E731
+        j, _ = self.create()
+        self.store.job_claim(j["id"], "c", 60, 2)
+        self.store.job_stage_set(j["id"], 1, "3", "running", lease_s=4000)
+        t = self.clock.t
+        self.assertTrue(self.store.job_renew(j["id"], 1, 600))
+        self.assertEqual(lease("SELECT lease_until FROM jobs WHERE id=?", j["id"]), t + 4000, "a longer lease stays")
+        self.clock.advance(3900)
+        self.assertTrue(self.store.job_renew(j["id"], 1, 600))
+        self.assertEqual(lease("SELECT lease_until FROM jobs WHERE id=?", j["id"]), self.clock.t + 600)
+        self.assertFalse(self.store.job_renew(j["id"], 2, 600), "not the live attempt")
+        self.assertTrue(self.store.side_claim(j["id"], "2h", "k", 600))
+        self.clock.advance(500)
+        self.assertTrue(self.store.side_renew(j["id"], "2h", "k", 600))
+        self.assertFalse(self.store.side_renew(j["id"], "2h", "other", 600), "another claim")
+        self.assertEqual(lease("SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'", j["id"]),
+                         self.clock.t + 600)
+        self.store.job_cancel(j["id"], self.user["id"])
+        self.assertFalse(self.store.job_renew(j["id"], 1, 600), "a canceled job's lease is not renewed")
+        self.assertTrue(self.store.side_renew(j["id"], "2h", "k", 600), "the held-out views run on beside it")
+        self.store.side_finish(j["id"], "2h", "k", "passed")
+        self.assertFalse(self.store.side_renew(j["id"], "2h", "k", 600), "finished")
+
     def test_side_stage_finishing_first_joins_the_jobs_cost(self):
         j, _ = self.create()
         c = self.store.job_claim(j["id"], "c", 60, 2)

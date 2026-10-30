@@ -850,8 +850,12 @@ function is `nonpreemptible`. Instead:
 - Every later update names its attempt, and the store refuses updates from any attempt but the live one; a
   canceled or deleted job's worker stops at the next stage. A stage group that a restarted container starts more
   than twice for one attempt stops before running anything (`group_enter`).
-- Each running stage holds a lease covering its timeout plus 10 minutes. The sweep requeues a job whose lease ran out
-  (its worker died) or fails it when it is out of attempts.
+- Each running stage holds a lease covering its timeout plus 10 minutes, and the orchestrator renews the job's lease
+  every 2 minutes to at least 10 minutes ahead for as long as it runs (`worker.LeaseKeeper`, `store.job_renew`),
+  so no copy in or back, cold start or stage costs a live job its lease, however long it takes. The sweep requeues
+  a job whose lease ran out (its worker died: within 10 minutes of the last renewal, or at the end of the running
+  stage's own lease if that is later) or fails it when it is out of attempts. A container that hangs is stopped
+  by its function's timeout, which ends the renewals.
 - When an attempt ends without its worker recording the stage it was running (a cancel, a delete, or the sweep's
   requeue or failure), the store closes that stage in the same write: "pending" when the job is queued again,
   "canceled" when it was canceled, "failed" otherwise. Only the live attempt may write a stage, so nothing else
@@ -902,8 +906,10 @@ minutes; it never waits for the held-out views.
   and the Roblox bundle are delivered as soon as those finish.
 - 2h runs at most once per job (`store.side_claim`) and is never retried. Whatever happens to it (a failed gate,
   every view rejected, a Model API error, a timeout, a crash, a lost container, a rate or quota limit) is recorded
-  on the 2h stage only, as passed or "unavailable" with a sentence saying the hero is not affected; a lost worker
-  is marked unavailable by the sweep when its lease runs out. It never sets the job's state or error, never
+  on the 2h stage only, as passed or "unavailable" with a sentence saying the hero is not affected. Its lease is
+  renewed the same way from the claim to its record (`store.side_renew`), covering the copy in of the user's cache,
+  the run and the copy back; a lost worker is marked unavailable by the sweep within 10 minutes of its last
+  renewal. It never sets the job's state or error, never
   requeues, retries or refunds it, and never changes whether the job counts toward the quota (its cost is left
   out of the refund decision).
 - Its cost joins the job's recorded cost (`cost_detail.heldout_usd`), at the job's finish if 2h finished first,
