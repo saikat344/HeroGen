@@ -56,6 +56,15 @@ MARGIN_STUDS = 0.045
 REFERENCE_TRIANGLES = 20000
 
 
+class UnmeasurableJoints(ValueError):
+    """A cut has no shared rim between two nonempty sections; its gap is unknown."""
+
+    def __init__(self, reasons: dict[str, str]):
+        self.reasons = reasons
+        detail = "; ".join(f"{j}: {reason}" for j, reason in sorted(reasons.items()))
+        super().__init__(f"cannot measure cut gaps ({detail}); check the stage 3 mesh and joint placement")
+
+
 def joints_of(kind: str) -> tuple:
     return (f"Left{kind}", f"Right{kind}") if kind in SIDED else (kind,)
 
@@ -76,11 +85,28 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
     `joints`, when given)."""
     secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
                                    cut_offsets=offsets)
+    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
+    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+    expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
+    if joints is not None:
+        expected &= joints
+    missing = {}
+    for child, parent in PARENT.items():
+        j = PIVOT_JOINT[child]
+        if parent is None or j not in expected:
+            continue
+        empty = [n for n in (child, parent) if not len(secs[n].faces)]
+        if empty:
+            missing[j] = "empty section " + ", ".join(empty)
+        elif not any(r["neighbour"] == parent and len(r["points"]) for r in secs[child].rims):
+            missing[j] = f"no shared rim between {child} and {parent}"
+    if missing:
+        raise UnmeasurableJoints(missing)
     covered, _ = covers.add_covers(secs, cover_mesh[0], cover_mesh[1], **cover)
     out = {}
     for name, poses in pose_sets.items():
         g = pose.joint_gaps(covered, poses, visible=True, joints=joints)
-        out[name] = {j: max(row.get(j, 0.0) for row in g.values()) for j in g["rest"]}
+        out[name] = {j: max(row[j] for row in g.values()) for j in sorted(expected)}
     return out
 
 
@@ -118,7 +144,11 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
             fr = dict(zip(movable, combo))
             if not any(fr.values()):
                 continue
-            g = worst_gaps(fr, set(own) | set(others))     # only the joints this group's cuts can change
+            try:
+                g = worst_gaps(fr, set(own) | set(others))     # only the joints this group's cuts can change
+            except UnmeasurableJoints as exc:
+                tried.append({"fractions": fr, "unmeasurable_joints": exc.reasons})
+                continue
             worst = max(g[j] for j in own)
             score = worst + NOISE_STUDS * sum(abs(f) for f in fr.values())
             # a move may not open a neighbouring joint (one whose sections it changes) by more than the noise
