@@ -563,9 +563,38 @@ class SharedLimiterTest(unittest.TestCase):
     def _children(self, code: str, n: int = 4) -> None:
         """Run `code` in `n` processes at once (argv: repo root, this test's folder, child number)."""
         root = os.path.dirname(_HERE)
-        procs = [subprocess.Popen([sys.executable, "-c", textwrap.dedent(code), root, self.tmp.name, str(i)])
-                 for i in range(n)]
-        self.assertEqual([p.wait(timeout=120) for p in procs], [0] * n)
+        procs = []
+        try:
+            for i in range(n):
+                procs.append(subprocess.Popen([sys.executable, "-c", textwrap.dedent(code), root,
+                                                self.tmp.name, str(i)]))
+            self.assertEqual([p.wait(timeout=120) for p in procs], [0] * n)
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.terminate()
+            for p in procs:
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+
+    def test_children_timeout_reaps_every_child(self):
+        procs = [mock.Mock() for _ in range(4)]
+        for p in procs:
+            p.poll.return_value = None
+            p.wait.return_value = 0
+        procs[0].wait.side_effect = [subprocess.TimeoutExpired("child", 120), 0]
+        procs[1].wait.side_effect = [subprocess.TimeoutExpired("child", 5), 0]
+        with mock.patch.object(subprocess, "Popen", side_effect=procs), \
+                self.assertRaises(subprocess.TimeoutExpired):
+            self._children("pass")
+        for p in procs:
+            p.terminate.assert_called_once_with()
+            self.assertIn(mock.call(timeout=5), p.wait.call_args_list)
+        procs[1].kill.assert_called_once_with()
+        self.assertEqual(procs[1].wait.call_args_list[-1], mock.call())
 
     def test_processes_never_lose_a_state_update(self):
         # Every read-modify-write of the state file happens under the lock, so none overwrites another's.
@@ -581,14 +610,32 @@ class SharedLimiterTest(unittest.TestCase):
         self.assertEqual((state["n"], state["limit"], state["slots"]), (200, 3, {}))
 
     def test_parallel_ledger_rows_never_interleave(self):
-        # Rows far larger than one write, from four processes at once: each lands whole, on its own line.
+        # Force partial raw writes and yield between them, so only the lock prevents torn rows.
         self._children("""
-            import sys
+            import io, sys, time
             sys.path[:0] = [sys.argv[1]]
-            from herogen.pipeline.client import ModelClient
-            c = ModelClient(sys.argv[2] + "/cache", mode="replay")
+            from herogen.pipeline import client
+
+            class ShortWriteFile(io.FileIO):
+                calls = 0
+                short_writes = 0
+
+                def write(self, data):
+                    n = super().write(data[:4096])
+                    type(self).calls += 1
+                    type(self).short_writes += n < len(data)
+                    time.sleep(0.001)
+                    return n
+
+            def split_open(path, mode):
+                return io.TextIOWrapper(io.BufferedWriter(ShortWriteFile(path, mode)))
+
+            client.open = split_open
+            c = client.ModelClient(sys.argv[2] + "/cache", mode="replay")
             for i in range(40):
                 c._ledger({"child": int(sys.argv[3]), "i": i, "pad": sys.argv[3] * 200000})
+            assert ShortWriteFile.calls > 40, ShortWriteFile.calls
+            assert ShortWriteFile.short_writes >= 40, ShortWriteFile.short_writes
         """)
         rows = [json.loads(line) for line in (Path(self.tmp.name) / "cache" / client_mod.LEDGER).read_text()
                 .splitlines()]
