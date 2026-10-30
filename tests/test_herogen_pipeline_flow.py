@@ -292,6 +292,37 @@ def _two_gates_sheet() -> Image.Image:
     return paint(mask)
 
 
+def _one_legged_back_sheet() -> Image.Image:
+    """Every view right except the back, drawn with one leg: it passes every silhouette gate (same height and
+    width, same profiles, front arms out) but stage 3's carve keeps only what front and back both show."""
+    back = figure_mask(200, "front").copy()
+    back[110:, back.shape[1] // 2:] = False
+    figs = [figure_mask(200, "front"), figure_mask(200, "right"), back, figure_mask(200, "left")]
+    gap = 40
+    mask = np.zeros((280, sum(f.shape[1] for f in figs) + gap * 5), dtype=bool)
+    x = gap
+    for f in figs:
+        mask[240 - f.shape[0] : 240, x : x + f.shape[1]] = f
+        x += f.shape[1] + gap
+    return paint(mask)
+
+
+class CarveCheckFlowTest(_RunsTest):
+    """A sheet stage 3's carve would refuse is generated again, not kept."""
+
+    def test_a_sheet_that_does_not_carve_is_retried(self):
+        good, _ = sheet()
+        api = SheetsAPI([_one_legged_back_sheet(), good])
+        self.assertEqual(self._record(api, "c"), 0)
+        s2 = json.loads((self.root / "c" / "stage-2.json").read_text())
+        first, second = s2["details"]["attempts"]
+        self.assertEqual([c["name"] for c in first["checks"] if not c["pass"] and c.get("gate", True)],
+                         [stages.CARVE_GATE])
+        self.assertIn("worst: front", next(c for c in first["checks"] if c["name"] == stages.CARVE_GATE)["note"])
+        self.assertEqual(s2["details"]["kept_attempt"], 1)
+        self.assertTrue(next(c for c in s2["checks"] if c["name"] == stages.CARVE_GATE)["pass"])
+
+
 class KeepBestSheetTest(_RunsTest):
     """Stage 2 keeps its best sheet (fewest failed gates, then the smallest shortfall), not its last."""
 
