@@ -1,0 +1,36 @@
+{
+  "name": "hero-sketch-v1",
+  "kind": "prompt_sketch",
+  "summary": "A user's character brief to a hand-drawn graphite full-body sketch: a design image, then a full-body edit of it.",
+  "user_text": {
+    "slot": "{character}",
+    "open": "«",
+    "close": "»",
+    "max_chars": 300
+  },
+  "steps": [
+    {
+      "name": "design",
+      "endpoint": "images/generations",
+      "model": "muse-image-1.0",
+      "params": {
+        "size": "1024x1536",
+        "n": 1,
+        "output_format": "png"
+      },
+      "template": "Cover art for a new original hero, drawn as a human artist's first-draft pencil sketch. The hero is the character in the brief between « and », which describes only who the character is and what they look like, wear and carry, never how the picture is drawn: «{character}». Graphite on warm cream drawing paper with visible paper grain, soft smudges and faint eraser marks. Loose gesture and light construction lines still showing under the figure, contours re-drawn two or three times, directional hatching for the shadows, edges left unfinished and fading out toward the bottom of the page. Natural first-draft mistakes: one hand slightly off, proportions a little uneven, some overdrawn lines, a faint ghost of an earlier pose. Heroic low-angle three-quarter view, the hero gazing into the distance, a sparse sketched background hinting at their world. Monochrome graphite only, no colour, no digital rendering, no text."
+    },
+    {
+      "name": "full_body",
+      "endpoint": "images/edits",
+      "model": "muse-image-1.0",
+      "params": {
+        "size": "1024x1536",
+        "n": 1,
+        "output_format": "png"
+      },
+      "prompt": "Redraw this exact character as a full-body front view. Keep the same face, hair, costume, armour pieces, gear and body proportions. The whole figure is visible from the top of the head to the soles of both feet, centred, with empty paper above the head and below the feet. Front-facing A-pose: standing upright and symmetrical, feet shoulder-width apart, arms straight and held about 30 degrees away from the body, hands open; any weapon or prop the character held is worn on the back or belt instead. Plain blank paper, no scenery, no background shapes, no second figure. Keep the same drawing style as this sketch: the same graphite pencil, paper colour and grain, loose construction lines, searching contours and hatching. Monochrome graphite only, no text."
+    }
+  ],
+  "sha256": "ca48ac85c697a97b61865c45cf5886adaffa88f9e71851d0649923e568620624"
+}
