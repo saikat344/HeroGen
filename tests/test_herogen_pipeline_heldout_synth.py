@@ -522,7 +522,7 @@ class HeldoutChecksTest(unittest.TestCase):
                     status, m, checks = evaluate(view.name, "a", y, fkw)
                     self.assertEqual(status, "accepted", (fname, view.name, y, _failed(checks)))
                     self.assertLessEqual(abs(m["found_yaw_deg"] - y), 0.5, (fname, view.name, y))
-                    self.assertEqual(m["facing_votes"], {"landmarks": 1, "toes": 1, "head": 1})
+                    self.assertEqual(m["facing_votes"], {"keypoints": 1, "head": 1})
 
     def test_pose_and_facing_hold_at_every_yaw(self):
         # The pose and facing checks alone, 20-70 degrees: what the thresholds were set from.
@@ -557,7 +557,7 @@ class HeldoutChecksTest(unittest.TestCase):
                 status, m, checks = evaluate(view.name, "a", -view.yaw_deg, fkw)
                 self.assertEqual(status, "rejected", (fname, view.name))
                 self.assertIn("facing_cues_against", _failed(checks))
-                self.assertEqual(m["facing_votes"], {"landmarks": -1, "toes": -1, "head": -1})
+                self.assertEqual(m["facing_votes"], {"keypoints": -1, "head": -1})
 
     def test_yaw_just_outside_the_window_needs_review(self):
         for name, yaw in (("front-left-30", 22), ("front-right-30", -22), ("front-left-60", 67),
@@ -629,7 +629,8 @@ class HeldoutChecksTest(unittest.TestCase):
             checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.3, 0.2,
                                             {"offset": None}, None, body=body, keypoints=kps)
             self.assertEqual(heldout.view_status(checks), "needs review")
-            self.assertEqual(_failed(checks), ["turn_measured"])
+            # Without keypoints neither the turn nor (with no face cue either) the facing can be decided.
+            self.assertEqual(_failed(checks), ["turn_measured", "facing_cues_for"])
             self.assertIn(why, next(c for c in checks if c["name"] == "turn_measured")["note"])
             self.assertIsNone(m["found_yaw_deg"])
         self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.7, None), 25.7)
@@ -696,17 +697,17 @@ class HeldoutChecksTest(unittest.TestCase):
             self.assertLess(f["drift_rms"], f["rms"])
 
     def test_undecided_facing_needs_review(self):
-        # No toe or face cue, and a fit margin below the vote limit: nothing decides the facing.
+        # No face cue, and a keypoint margin below the vote limit: nothing decides the facing.
         t = turnaround(figure("a"))
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
         seen = turned_mask(figure("a"), 26)
-        with mock.patch.object(heldout, "FIT_FACING_MARGIN", 1.0):
+        with mock.patch.object(heldout, "KP_FACING_MARGIN", 1.0):
             checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
                                             {"offset": None}, None, body=body_of(figure("a")),
                                             keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(heldout.view_status(checks), "needs review")
         self.assertEqual(_failed(checks), ["facing_cues_for"])
-        self.assertEqual(m["facing_votes"], {"landmarks": 0, "toes": 0, "head": 0})
+        self.assertEqual(m["facing_votes"], {"keypoints": 0, "head": 0})
 
     def test_unmeasurable_cues_do_not_vote(self):
         t = turnaround(figure("a"))
@@ -715,7 +716,7 @@ class HeldoutChecksTest(unittest.TestCase):
         checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
                                         {"offset": None, "face_found": False}, None, body=body_of(figure("a")),
                                         keypoints=keypoints_at(figure("a"), 26))
-        self.assertEqual(m["facing_votes"], {"landmarks": 1, "toes": 0, "head": 0})
+        self.assertEqual(m["facing_votes"], {"keypoints": 1, "head": 0})
         self.assertEqual(heldout.view_status(checks), "accepted")
 
     def test_no_figure_rejected(self):

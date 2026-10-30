@@ -132,8 +132,7 @@ class HeldoutTest(unittest.TestCase):
             self.assertTrue(view.window_deg[0] <= abs(yaw) <= view.window_deg[1], yaw)  # turned as asked
             self.assertEqual(d["target_yaw_deg"], view.yaw_deg)
             measured = d["attempts"][0]["measured"]
-            self.assertEqual(measured["facing_votes"]["landmarks"], 1)
-            self.assertEqual(measured["facing_votes"]["toes"], 1)
+            self.assertEqual(measured["facing_votes"]["keypoints"], 1)
             # The fake SAM answers "face" and "head" with the whole figure: the head cue can't vote.
             self.assertIsNone(measured["face_turn"])
             checks = {c["name"]: c for c in rec["checks"] if c["name"].startswith(view.name + ".")}
@@ -274,7 +273,7 @@ class HeldoutTest(unittest.TestCase):
     def test_wrong_facing_retries_and_fails_alone(self):
         rec = self._assert_rejected(FakeAPI(heldout_yaw=-30.0), "facing_cues_against")
         votes = rec["details"]["views"]["front-left-30"]["attempts"][0]["measured"]["facing_votes"]
-        self.assertEqual(votes, {"landmarks": -1, "toes": -1, "head": 0})
+        self.assertEqual(votes, {"keypoints": -1, "head": 0})
 
     def test_under_turning_model_is_asked_for_more(self):
         # A model that turns three quarters of what it is asked: each attempt adds the measured shortfall.

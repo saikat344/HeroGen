@@ -36,7 +36,7 @@ earlier record and files stay (the record says why it stopped, with every call m
 Pose and angle are checked camera-aware: silhouette landmarks (hands, head, knees, shins, soles) are placed in
 3D from the front and profile views and projected at every yaw. A fit robust to the arms being held a few
 degrees off the A-pose gives the found yaw; the pose error is measured there against the turnaround's own
-arms. Facing is three independent cues (the fit, the toes, SAM 3.1 face-in-head).
+arms. Facing is two cues: the side the body-keypoint fit prefers, and SAM 3.1 face-in-head.
 
 Scale: the prompt asks for the figure at the size and place of the turn guide, which is built here at the
 same scale as the pose reference (`framing_scale`), so generated pixels are mapped to view pixels by one over
@@ -604,16 +604,16 @@ def turnaround_keypoints(pose: PoseClient, views: dict[str, Image.Image], masks:
 # between needs human review.
 POSE_RMS_PASS = 0.0135
 POSE_RMS_FAIL = 0.020
-# Facing, three cues, each a vote of +1 (the view's way), -1 (the other way) or 0 (can't tell):
-# - landmarks: RMS of the best fit facing the other way minus the best fit facing the view's way. A-pose
-#   +0.0057-0.0060 at yaw 20 rising to +0.018-0.020 at 70; every mirror image is rejected. Generated run:
-#   the earlier 3/4 view, drawn facing right with a stride, measures -0.003 as a front-left view (no vote;
-#   its toes vote against).
-FIT_FACING_MARGIN = 0.004
-# - toes: toe offset (height-normalised) with the view's sign over the profile views' toe offset. A-pose
-#   0.34-0.36 at yaw 20, 0.69-0.71 at 45, 0.93-0.96 at 70; 0 at the front, 0.17-0.21 at 10-12. Generated
-#   turnaround: front and back views 0.00-0.01 of the profiles'.
-TOE_TURN_MIN = 0.25
+# Facing, two cues, each a vote of +1 (the view's way), -1 (the other way) or 0 (can't tell):
+# - keypoints: RMS of the body-keypoint fit facing the other way minus facing the view's way (`keypoints.fit_yaw`,
+#   a fraction of the figure height; the nose, eyes and toes ahead of the body give the side). Bench-gt renders
+#   with the side known: 5th percentile +0.0034 at 25 degrees, +0.0115 at 45, +0.030 at 65; 1 of 217 below 0.
+#   On the labelled bench views (viewlabels-ai-v2, facing label), with the head cue: false rejects 0.02 / 0.04
+#   (30 degrees, tuning / test split) and 0.00 / 0.03 (60), false accepts 0.12 / 0.14 and 0.09 / 0.42 (5 of 12),
+#   against 0.30 / 0.56 and 0.28 / 0.41 false rejects, 0.12 / 0.14 and 0.14 / 0.33 false accepts for the three
+#   cues it replaces. The silhouette fit's margin and the toes are recorded only: the toes alone falsely
+#   rejected 0.28-0.52 of the views facing the right way, and accepted 0.41-0.86 of those facing the wrong way.
+KP_FACING_MARGIN = 0.003
 # - head: SAM 3.1 `face` centroid inside `head`, with the view's sign, over the same offset in the profile
 #   views. Synthetic (a face on the front of the head) 0.19 at yaw 10, 0.37-0.39 at 20, 0.74-0.76 at 45.
 #   Generated turnaround: front 0.008 / 0.19 = 0.04; a body turned 45 degrees with the head left nearly
@@ -718,8 +718,8 @@ def view_checks(
     if face.get("offset") is not None and profile_face is not None:
         face_turn = view.facing * face["offset"] / profile_face
     margin = wrong["plain_rms"] - best["plain_rms"]
-    votes = {"landmarks": _vote(margin, FIT_FACING_MARGIN), "toes": _vote(toe_turn, TOE_TURN_MIN),
-             "head": _vote(face_turn, FACE_TURN_MIN)}
+    kmargin = None if kfit is None else kfit[f"facing_{other}"]["rms"] - kfit[f"facing_{side}"]["rms"]
+    votes = {"keypoints": _vote(kmargin, KP_FACING_MARGIN), "head": _vote(face_turn, FACE_TURN_MIN)}
     against = [k for k, v in votes.items() if v < 0]
     for_ = [k for k, v in votes.items() if v > 0]
     out.append(C.check("facing_cues_against", len(against), 0, op="==",
@@ -741,6 +741,7 @@ def view_checks(
         "azimuth_clearance_deg": clearance,
         "yaw_window_miss_deg": miss,
         "facing_fit_margin": margin,
+        "facing_keypoint_margin": kmargin,
         "toe_offset_h": toe,
         "profile_toe_offset_h": profile_toe,
         "toe_turn": toe_turn,
