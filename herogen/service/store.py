@@ -179,7 +179,7 @@ class Store:
         "job_create", "job_get", "jobs_list", "job_dispatch", "job_claim", "job_current", "job_stage_set",
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
-        "side_claim", "side_live", "side_finish",
+        "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
     })
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
@@ -678,6 +678,16 @@ class Store:
                           (self.clock() + lease_s, stage, job_id))
         return True
 
+    def job_renew(self, job_id: str, attempt: int, lease_s: float) -> bool:
+        """The orchestrator's heartbeat: keep the live attempt's lease at least `lease_s` ahead (a longer stage
+        lease is kept). False once `attempt` is not the live one, and renewing stops."""
+        with self._tx() as c:
+            if self._current(c, job_id, attempt) is None:
+                return False
+            c.execute("UPDATE jobs SET lease_until=MAX(COALESCE(lease_until, 0), ?) WHERE id=?",
+                      (self.clock() + lease_s, job_id))
+        return True
+
     def group_enter(self, job_id: str, attempt: int, group: str, max_entries: int) -> bool:
         """Count a start of one stage group for one attempt. False once it has started more than `max_entries`
         times (Modal starts an input again after its container dies, without limit) or when the attempt is not
@@ -804,6 +814,15 @@ class Store:
             n = c.execute("INSERT INTO job_stages(job_id, stage, state, attempt, started_at, claim, lease_until) "
                           "VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id, stage) DO NOTHING",
                           (job_id, stage, "running", job["attempts"], now, claim, now + lease_s)).rowcount
+        return n == 1
+
+    def side_renew(self, job_id: str, stage: str, claim: str, lease_s: float) -> bool:
+        """A side stage's heartbeat: keep its lease at least `lease_s` ahead while `claim` holds it and it runs.
+        False once it does not (it finished, or the sweep found its lease run out), and renewing stops."""
+        with self._tx() as c:
+            n = c.execute("UPDATE job_stages SET lease_until=MAX(COALESCE(lease_until, 0), ?) WHERE job_id=? AND "
+                          "stage=? AND claim=? AND state='running'",
+                          (self.clock() + lease_s, job_id, stage, claim)).rowcount
         return n == 1
 
     def side_live(self, job_id: str, stage: str, claim: str) -> bool:

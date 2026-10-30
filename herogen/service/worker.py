@@ -5,7 +5,8 @@ attempt and refuses duplicates, then hands each stage group (model, blender, exp
 a function call in this process, on Modal a call to that group's function (`modal_app`). The group runs its
 stages with `run_group`, which before every stage checks that its attempt is still the job's live one (a
 canceled, deleted or superseded attempt stops at the next stage), records the stage as running with a lease
-that covers the stage's timeout, and records the outcome.
+that covers the stage's timeout, and records the outcome. The orchestrator and the held-out views also renew their
+leases while they run (`LeaseKeeper`).
 
 Errors are sorted three ways. A rejection (a gate failed) finishes the job as rejected with the stage's reason.
 A transient error (a timeout, the model service answering 429 or 5xx) queues the job for another attempt while
@@ -22,6 +23,7 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -47,6 +49,42 @@ log = logging.getLogger("herogen.service")
 LEASE_MARGIN_S = 600.0
 CLAIM_LEASE_S = 1800.0      # from the claim to the first stage: covers a cold start of the first group
 GROUP_MAX_ENTRIES = 2
+# Heartbeats (`LeaseKeeper`): while a worker lives it renews its lease every RENEW_EVERY_S to at least LEASE_TTL_S
+# ahead, so no copy, stage or copy back outlasts it however long it takes. Renewing never shortens a longer lease:
+# once the orchestrator dies, the job's lease runs out LEASE_TTL_S after the last renewal, or when the running
+# stage's own lease (its timeout plus LEASE_MARGIN_S) ends if that is later. The held-out views hold no other lease,
+# so theirs runs out LEASE_TTL_S after the last renewal. The TTL allows a few renewals in a row to fail (store busy).
+LEASE_TTL_S = 600.0
+RENEW_EVERY_S = 120.0
+
+
+class LeaseKeeper:
+    """Renew a lease on a background thread while a block of work runs: `with LeaseKeeper(renew, "what"):`.
+    `renew()` extends the lease and returns False once the lease is no longer this worker's (the work finished,
+    was canceled or was taken over), which stops the renewing. A renewal that raises is logged and tried again
+    at the next beat. The thread ends with the block, or with the process when the worker dies."""
+
+    def __init__(self, renew: Callable[[], bool], what: str, every_s: float | None = None) -> None:
+        self.renew, self.what = renew, what
+        self.every_s = RENEW_EVERY_S if every_s is None else every_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._beat, name=f"lease-{what}", daemon=True)
+
+    def _beat(self) -> None:
+        while not self._stop.wait(self.every_s):
+            try:
+                if not self.renew():
+                    return
+            except Exception:
+                log.warning("could not renew the lease of %s; trying again", self.what, exc_info=True)
+
+    def __enter__(self) -> LeaseKeeper:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=60)
 
 
 def event(name: str, **fields: Any) -> None:
@@ -330,38 +368,41 @@ def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRun
     Returns the stage's state, or None when this call had nothing to do."""
     jid = job["id"]
     claim = secrets.token_hex(8)
-    if not store.side_claim(jid, "2h", claim, settings.stage_timeout_s + LEASE_MARGIN_S):
+    if not store.side_claim(jid, "2h", claim, LEASE_TTL_S):
         event("heldout_skipped", job=jid)
         return None
     event("heldout_started", job=jid)
     state, message, seconds, cost = "unavailable", QC_UNAVAILABLE, 0.0, 0.0
-    workdir = workdir_for(claim)
-    try:
-        ctx = workdir.open()
-        out = runner.run(HELDOUT, ctx)
-        seconds, cost = out.seconds, out.cost_usd
-        rec = read_record(ctx.run_dir, HELDOUT.record) or {}
-        if out.state == "passed":
-            state, message = "passed", ""
-        elif out.state == "rejected" and rec.get("status") != "error":
-            message = QC_NOT_ACCEPTED
-        elif out.state == "skipped":
-            message = out.message
-        if out.detail and state != "passed":
-            log.warning("held-out views of %s: %s; output tail:\n%s", jid, out.state, out.detail)
-        workdir.sync()
-    except Exception:
-        log.exception("held-out views of %s stopped", jid)
-    finally:
+    # The lease is renewed from the claim to the record: the copy in (the user's whole cache), the run and the copy
+    # back all count, and none has a fixed bound. The function's own timeout bounds a container that hangs.
+    with LeaseKeeper(lambda: store.side_renew(jid, "2h", claim, LEASE_TTL_S), f"{jid}/2h"):
+        workdir = workdir_for(claim)
         try:
-            workdir.close()
+            ctx = workdir.open()
+            out = runner.run(HELDOUT, ctx)
+            seconds, cost = out.seconds, out.cost_usd
+            rec = read_record(ctx.run_dir, HELDOUT.record) or {}
+            if out.state == "passed":
+                state, message = "passed", ""
+            elif out.state == "rejected" and rec.get("status") != "error":
+                message = QC_NOT_ACCEPTED
+            elif out.state == "skipped":
+                message = out.message
+            if out.detail and state != "passed":
+                log.warning("held-out views of %s: %s; output tail:\n%s", jid, out.state, out.detail)
+            workdir.sync()
         except Exception:
-            log.exception("held-out work folder of %s", jid)
-    total = round(cost + seconds * compute_price_per_s, 6)
-    try:
-        store.side_finish(jid, "2h", claim, state, seconds=seconds, cost_usd=total, message=message)
-    except Exception:
-        log.exception("could not record the held-out views of %s", jid)
+            log.exception("held-out views of %s stopped", jid)
+        finally:
+            try:
+                workdir.close()
+            except Exception:
+                log.exception("held-out work folder of %s", jid)
+        total = round(cost + seconds * compute_price_per_s, 6)
+        try:
+            store.side_finish(jid, "2h", claim, state, seconds=seconds, cost_usd=total, message=message)
+        except Exception:
+            log.exception("could not record the held-out views of %s", jid)
     event("heldout_finished", job=jid, state=state, seconds=seconds, cost_usd=total)
     return state
 
@@ -380,64 +421,68 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
     job, attempt = claim["job"], claim["attempt"]
     event("job_started", job=job_id, attempt=attempt, kind=job["kind"], profile=job["profile"],
           commit=job["code_commit"] or settings.code_commit)
-    t0 = time.monotonic()
-    if volume is not None:
-        volume.reload()
-    run_dir = storage.run_dir(job["user_id"], job_id)
-    resume = resume_index(run_dir, plan_for(job["kind"])) if attempt > 1 else 0
-    if job["kind"] == "sketch" and not storage.input_path(job["user_id"], job_id).is_file():
-        store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0", refund=True,
-                         error_message="The uploaded sketch was not saved.")
-        return "failed"
-    seconds = cost = compute = 0.0
-    for group in GROUPS:
-        try:
-            res = execute(job, attempt, group, resume)
-        except Exception as e:
-            log.exception("group %s of %s failed", group, job_id)
-            res = GroupResult("error", None, "worker_error", "A worker stopped unexpectedly.", True)
-            event("group_crashed", job=job_id, attempt=attempt, group=group, error=type(e).__name__)
-        seconds += res.seconds
-        cost += res.cost_usd
-        compute += res.compute_usd
-        if group == "model" and res.status == "ok" and heldout is not None:
+    # The orchestrator lives for the whole attempt: its heartbeat keeps the job's lease through every copy,
+    # stage, cold start and copy back, and stops when the orchestrator dies, so the sweep then finds the job.
+    with LeaseKeeper(lambda: store.job_renew(job_id, attempt, LEASE_TTL_S), job_id):
+        t0 = time.monotonic()
+        if volume is not None:
+            volume.reload()
+        run_dir = storage.run_dir(job["user_id"], job_id)
+        resume = resume_index(run_dir, plan_for(job["kind"])) if attempt > 1 else 0
+        if job["kind"] == "sketch" and not storage.input_path(job["user_id"], job_id).is_file():
+            store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0", refund=True,
+                             error_message="The uploaded sketch was not saved.")
+            return "failed"
+        seconds = cost = compute = 0.0
+        for group in GROUPS:
             try:
-                heldout(job)
-            except Exception:
-                log.exception("could not start the held-out views of %s", job_id)
-        detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
-                  "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
-                           "list price"}
-        if res.status == "stale":
-            event("job_stale", job=job_id, attempt=attempt, group=group)
-            return (store.job_get(job_id) or {}).get("state")
-        if res.status == "rejected":
-            store.job_finish(job_id, attempt, "rejected", error_code="rejected", error_stage=res.stage,
-                             error_message=res.message, seconds=round(time.monotonic() - t0, 2),
-                             cost_usd=round(cost + compute, 6), cost_detail=detail,
-                             bytes_=_bytes(storage, job, volume))
-            event("job_finished", job=job_id, attempt=attempt, state="rejected", stage=res.stage)
-            return "rejected"
-        if res.status == "error":
-            if res.retry:
-                state = store.job_requeue(job_id, attempt, settings.max_attempts, res.code, res.stage,
-                                          res.message + " It was tried again automatically.")
-            else:
-                store.job_finish(job_id, attempt, "failed", error_code=res.code, error_stage=res.stage,
-                                 error_message=res.message,
-                                 seconds=round(time.monotonic() - t0, 2), cost_usd=round(cost + compute, 6),
-                                 cost_detail=detail, refund=True, bytes_=_bytes(storage, job, volume))
-                state = "failed"
-            event("job_finished" if state != "queued" else "job_requeued", job=job_id, attempt=attempt,
-                  state=state, stage=res.stage, code=res.code)
-            if state == "queued" and redispatch is not None:
-                redispatch(job_id)
-            return state
-    store.job_finish(job_id, attempt, "succeeded", seconds=round(time.monotonic() - t0, 2),
-                     cost_usd=round(cost + compute, 6), cost_detail=detail, bytes_=_bytes(storage, job, volume))
-    event("job_finished", job=job_id, attempt=attempt, state="succeeded", seconds=round(time.monotonic() - t0, 2),
-          cost_usd=round(cost + compute, 6))
-    return "succeeded"
+                res = execute(job, attempt, group, resume)
+            except Exception as e:
+                log.exception("group %s of %s failed", group, job_id)
+                res = GroupResult("error", None, "worker_error", "A worker stopped unexpectedly.", True)
+                event("group_crashed", job=job_id, attempt=attempt, group=group, error=type(e).__name__)
+            seconds += res.seconds
+            cost += res.cost_usd
+            compute += res.compute_usd
+            if group == "model" and res.status == "ok" and heldout is not None:
+                try:
+                    heldout(job)
+                except Exception:
+                    log.exception("could not start the held-out views of %s", job_id)
+            detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
+                      "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
+                               "list price"}
+            if res.status == "stale":
+                event("job_stale", job=job_id, attempt=attempt, group=group)
+                return (store.job_get(job_id) or {}).get("state")
+            if res.status == "rejected":
+                store.job_finish(job_id, attempt, "rejected", error_code="rejected", error_stage=res.stage,
+                                 error_message=res.message, seconds=round(time.monotonic() - t0, 2),
+                                 cost_usd=round(cost + compute, 6), cost_detail=detail,
+                                 bytes_=_bytes(storage, job, volume))
+                event("job_finished", job=job_id, attempt=attempt, state="rejected", stage=res.stage)
+                return "rejected"
+            if res.status == "error":
+                if res.retry:
+                    state = store.job_requeue(job_id, attempt, settings.max_attempts, res.code, res.stage,
+                                              res.message + " It was tried again automatically.")
+                else:
+                    store.job_finish(job_id, attempt, "failed", error_code=res.code, error_stage=res.stage,
+                                     error_message=res.message,
+                                     seconds=round(time.monotonic() - t0, 2), cost_usd=round(cost + compute, 6),
+                                     cost_detail=detail, refund=True, bytes_=_bytes(storage, job, volume))
+                    state = "failed"
+                event("job_finished" if state != "queued" else "job_requeued", job=job_id, attempt=attempt,
+                      state=state, stage=res.stage, code=res.code)
+                if state == "queued" and redispatch is not None:
+                    redispatch(job_id)
+                return state
+        took = round(time.monotonic() - t0, 2)
+        store.job_finish(job_id, attempt, "succeeded", seconds=took, cost_usd=round(cost + compute, 6),
+                         cost_detail=detail, bytes_=_bytes(storage, job, volume))
+        event("job_finished", job=job_id, attempt=attempt, state="succeeded", seconds=took,
+              cost_usd=round(cost + compute, 6))
+        return "succeeded"
 
 
 def _bytes(storage: Storage, job: dict[str, Any], volume) -> int:
