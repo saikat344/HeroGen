@@ -50,6 +50,20 @@ if HAVE_WEB:
     from herogen.service.web import Services, create_app
     from herogen.service.worker import ThreadBackend
 
+    class GatedRunner(FakeRunner):
+        """The fake stages, except that stage 1 waits until `gate` opens (so a job can be caught mid-stage)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate = threading.Event()
+            self.waiting = threading.Event()
+
+        def run(self, spec, ctx):
+            if spec.key == "1":
+                self.waiting.set()
+                self.gate.wait(60)
+            return super().run(spec, ctx)
+
 
 class WebSocket:
     """Just enough of RFC 6455 for the DevTools protocol on localhost: text frames, client-side masking."""
@@ -171,21 +185,6 @@ class Tab:
             urllib.request.urlopen(f"{self.base}/json/close/{self.target['id']}", timeout=10).close()
         except OSError:
             pass
-
-
-class GatedRunner(FakeRunner):
-    """The fake stages, except that stage 1 waits until `gate` opens (so a job can be caught mid-stage)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.gate = threading.Event()
-        self.waiting = threading.Event()
-
-    def run(self, spec, ctx):
-        if spec.key == "1":
-            self.waiting.set()
-            self.gate.wait(60)
-        return super().run(spec, ctx)
 
 
 def free_port() -> int:
