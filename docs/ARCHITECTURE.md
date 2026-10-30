@@ -294,6 +294,8 @@ failed gate; a completed visual rejection retains the model's concrete reason. T
 and question sheet are written to `03-quality/`. Missing sketches, render failures, failed model calls,
 incomplete responses and schema failures stop with `BodyQualityError`, write `ok: false` with an `error`
 and preserved cost, and never retry a different constructor. Structural failures skip the paid question.
+If writing the acceptance record itself fails, the stage still stops with `BodyQualityError` and does not
+retry construction; the CLI reports the storage error even when the record cannot be saved.
 
 The CLI defaults to `--quality live`; `MODEL_API_KEY` must be in the environment. `--quality replay`
 requires the exact cached response and stops on a miss. `--quality-cache` defaults to the run parent's

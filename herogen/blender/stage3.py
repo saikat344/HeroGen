@@ -204,6 +204,11 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
         return _run_stage3(run, mesh_source=mesh_source, joints_source=joints_source,
                            fallback=fallback and mesh_source == "carve", **kwargs)
     except (RemoteError, bl.BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
+        if "body_acceptance" in rec.data:
+            from .body_acceptance import BodyQualityError
+
+            # Storage errors after acceptance starts must not masquerade as construction failures.
+            raise BodyQualityError(f"Body acceptance stopped: {error_text(exc, run)}") from exc
         if not fallback or mesh_source != "sam3d-objects":
             raise
         reason = error_text(exc, run)
