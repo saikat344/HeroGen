@@ -27,6 +27,9 @@ from . import BUILDING_AZIMUTHS, ELEVATION_DEG, EVALUATION_AZIMUTHS, HEIGHT_STUD
 HEIGHT_FILL = 440.0 / 512.0
 WIDTH_FILL = 0.94
 MIN_EVAL_SEPARATION_DEG = 10.0
+# Head close-ups: front, three-quarter, profile and back, the head filling this fraction of the image.
+HEAD_AZIMUTHS = (0, 45, 90, 180, 270, 315)
+HEAD_FILL = 0.8
 
 
 def axes(azimuth_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -53,11 +56,12 @@ def camera_distance(verts: np.ndarray, height: float = HEIGHT_STUDS) -> float:
 
 
 def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGHT_STUDS,
-           distance: float | None = None) -> dict:
+           distance: float | None = None, centre=None) -> dict:
     """One camera, in the dict form `herogen/blender/blender_job.add_camera` reads, with role and mapping.
-    `distance` defaults to what `camera_distance` gives a figure as wide as it is tall."""
+    `distance` defaults to what `camera_distance` gives a figure as wide as it is tall; `centre` (the world
+    point at the image centre) to (0, 0, height / 2)."""
     right, up, forward = axes(azimuth)
-    centre = np.array([0.0, 0.0, height / 2.0])
+    centre = np.array([0.0, 0.0, height / 2.0]) if centre is None else np.asarray(centre, dtype=np.float64)
     if distance is None:
         distance = round(2.0 * height + 1.0, 4)
     return {
@@ -69,7 +73,7 @@ def camera(azimuth: int, role: str, ppu: float, size: int, height: float = HEIGH
         "right": right.round(12).tolist(), "up": up.tolist(), "forward": forward.round(12).tolist(),
         "location": (centre - forward * distance).round(12).tolist(),
         "distance": distance,
-        "image_centre_world": centre.tolist(),
+        "image_centre_world": centre.round(12).tolist(),
         "ortho_scale": size / ppu,
         "resolution": int(size),
         "pixels_per_unit": ppu,
@@ -81,6 +85,26 @@ def all_cameras(ppu: float, size: int, height: float = HEIGHT_STUDS,
     """Building views (the four contract views, then the four diagonals), then the evaluation views."""
     cams = [camera(a, "building", ppu, size, height, distance) for a in BUILDING_AZIMUTHS]
     cams += [camera(a, "evaluation", ppu, size, height, distance) for a in EVALUATION_AZIMUTHS]
+    return cams
+
+
+def head_cameras(points: np.ndarray, size: int, distance: float,
+                 azimuths: tuple[int, ...] = HEAD_AZIMUTHS) -> list[dict]:
+    """Close-ups of the head, named `head-front`, `head-front-left-45` and so on: centred on the bounding-box
+    centre of the head's points, with one pixel scale for every view so the head is `HEAD_FILL` of the image
+    in its widest one."""
+    p = np.asarray(points, dtype=np.float64)
+    centre = (p.min(0) + p.max(0)) / 2.0
+    d = p - centre
+    half = max(float(np.abs(d @ axes(a)[k]).max()) for a in azimuths for k in (0, 1))
+    if not half > 0:
+        raise ValueError("the head region has no size")
+    ppu = round(HEAD_FILL * size / (2.0 * half), 4)
+    cams = []
+    for a in azimuths:
+        cam = camera(a, "head", ppu, size, distance=distance, centre=centre)
+        cam["view"] = "head-" + cam["view"]
+        cams.append(cam)
     return cams
 
 

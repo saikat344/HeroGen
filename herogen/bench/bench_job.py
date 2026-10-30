@@ -4,8 +4,8 @@
 
 One job renders one asset:
 
-1. Load the asset (.glb/.gltf, .fbx or .blend) and choose its mesh objects: the visible ones, or those whose
-   names match `include`, minus those matching `exclude`.
+1. Load the asset (.glb/.gltf/.vrm, .fbx or .blend) and choose its mesh objects: the visible ones, or those
+   whose names match `include`, minus those matching `exclude`.
 2. Rigs: clear actions, mute drivers and bone constraints, return every bone to its rest pose. With
    `bind_unrigged`, meshes the rig does not deform get the weights of the nearest deformed mesh.
 3. Pose: "a-pose" turns each arm so its root-to-end direction points out and 45 degrees down, and each leg
@@ -24,6 +24,12 @@ One job renders one asset:
 
 Writes `<job>.result.json` next to the job file, and `<work>/<view>.npz` (mask, depth) and
 `<work>/<view>-{flat,lit}.png` for the caller to turn into the run folder.
+
+With `dataset` in the job (see `herogen/bench/dataset.py`), the head region is marked on the skin before
+posing (`mark_head`), six head close-ups join the cameras, and every view's labels come from rasterising
+the frozen mesh at the pixel centres (`raster_view`: mask, depth, UV, material, head weight, face flag;
+the same hits as the ray casts). `gt/mesh.npz` and `gt/textures/` are written beside `gt_glb`, and the
+renders go flat views first, then lit, with persistent data and GPU denoising.
 """
 import json
 import math
@@ -41,6 +47,7 @@ JOB = json.loads(open(sys.argv[sys.argv.index("--") + 1]).read())
 sys.path.insert(0, JOB["repo_root"])
 
 from herogen.bench import cameras as CAM  # noqa: E402
+from herogen.bench import raster as RAS  # noqa: E402
 from herogen.bench import rig as RIG  # noqa: E402
 from herogen.bench import texture as TEX  # noqa: E402
 
@@ -57,12 +64,12 @@ def load_asset(path):
         bpy.ops.wm.open_mainfile(filepath=path, load_ui=False)
     else:
         bpy.ops.wm.read_factory_settings(use_empty=True)
-        if ext in (".glb", ".gltf"):
+        if ext in (".glb", ".gltf", ".vrm"):          # a VRM avatar is a binary glTF
             bpy.ops.import_scene.gltf(filepath=path)
         elif ext == ".fbx":
             bpy.ops.import_scene.fbx(filepath=path)
         else:
-            raise ValueError(f"unsupported asset type {ext!r} (use .glb, .gltf, .fbx or .blend)")
+            raise ValueError(f"unsupported asset type {ext!r} (use .glb, .gltf, .vrm, .fbx or .blend)")
     return bpy.context.scene
 
 
@@ -705,23 +712,30 @@ def normalise_materials(meshes, images, vcols, alphas, report):
     return records, samplers
 
 
+def colour_images(mat):
+    """Images a normalised material's base colour depends on (upstream of its flat shader)."""
+    found = set()
+    if mat is None or not mat.use_nodes or "BenchFlat" not in mat.node_tree.nodes:
+        return found
+    stack, seen = [mat.node_tree.nodes["BenchFlat"]], set()
+    while stack:
+        node = stack.pop()
+        if node.name in seen:
+            continue
+        seen.add(node.name)
+        if node.type == "TEX_IMAGE" and node.image is not None:
+            found.add(node.image)
+        for inp in node.inputs:
+            stack.extend(link.from_node for link in inp.links)
+    return found
+
+
 def images_feeding_colour(meshes):
-    """Images the base colour of the given meshes depends on (upstream of each material's flat shader)."""
+    """Images the base colour of the given meshes depends on."""
     found = set()
     for o in meshes:
         for mat in o.data.materials:
-            if mat is None or "BenchFlat" not in mat.node_tree.nodes:
-                continue
-            stack, seen = [mat.node_tree.nodes["BenchFlat"]], set()
-            while stack:
-                node = stack.pop()
-                if node.name in seen:
-                    continue
-                seen.add(node.name)
-                if node.type == "TEX_IMAGE" and node.image is not None:
-                    found.add(node.image)
-                for inp in node.inputs:
-                    stack.extend(link.from_node for link in inp.links)
+            found |= colour_images(mat)
     return found
 
 
@@ -888,6 +902,202 @@ def samplers_cutoff(sampler):
     return sampler.get("cutoff", ALPHA_CUTOFF)
 
 
+# --------------------------------------------------------------------------------------------- dataset mode
+
+HEAD_ATTR = "bench_head"        # per-vertex share of the skin weight that follows the head region
+HEAD_THRESHOLD = 0.5            # a point is in the head region when at least this share follows the head
+HEAD_FALLBACK_STUDS = 1.1       # with no head bone, the close-ups frame this much of the top of the figure
+
+
+def head_weights(meshes, arm, region, deform):
+    """{mesh: per-vertex share of its skin weight that follows the bones in `region`} (1 for a mesh
+    parented to one of those bones)."""
+    out = {}
+    for o in meshes:
+        w = np.zeros(len(o.data.vertices), dtype=np.float32)
+        skinned = bool(o.vertex_groups) and any(m.type == "ARMATURE" and m.object is arm for m in o.modifiers)
+        if skinned:
+            idx = {g.index: g.name for g in o.vertex_groups}
+            for v in o.data.vertices:
+                total = in_head = 0.0
+                for g in v.groups:
+                    name = idx.get(g.group)
+                    if name in deform:
+                        total += g.weight
+                        if name in region:
+                            in_head += g.weight
+                if total > 0:
+                    w[v.index] = in_head / total
+        elif o.parent is arm and o.parent_type == "BONE" and o.parent_bone in region:
+            w[:] = 1.0
+        out[o] = w
+    return out
+
+
+def mark_head(meshes, rigs):
+    """Store on every chosen mesh, as the point attribute `bench_head`, the share of each vertex's skin
+    weight that follows the head region: the rig's head bone and every bone below it, for the first head
+    candidate (`rig.head_candidates`) that at least one vertex mostly follows. The attribute rides through
+    posing and freezing with the vertices. Returns a record of how the region was found."""
+    chosen, tried = None, []
+    for arm in rigs:
+        names = [b.name for b in arm.data.bones]
+        parents = {b.name: (b.parent.name if b.parent else None) for b in arm.data.bones}
+        deform = {b.name for b in arm.data.bones if b.use_deform}
+        for bone in RIG.head_candidates(names, parents, deform):
+            region = set(RIG.below(names, parents, bone))
+            weights = head_weights(meshes, arm, region, deform)
+            tried.append(bone)
+            if any((w >= HEAD_THRESHOLD).any() for w in weights.values()):
+                chosen = (arm, bone, region, weights)
+                break
+        if chosen:
+            break
+    for o in meshes:
+        w = chosen[3][o] if chosen else np.zeros(len(o.data.vertices), dtype=np.float32)
+        attr = o.data.attributes.get(HEAD_ATTR) or o.data.attributes.new(HEAD_ATTR, "FLOAT", "POINT")
+        attr.data.foreach_set("value", w)
+    if chosen is None:
+        why = (f"no vertex mostly follows the head bones ({', '.join(tried)})" if tried
+               else "no rig names a head bone")
+        return {"source": "none", "note": why + ", so there is no head region"}
+    arm, bone, region, _ = chosen
+    return {"source": "rig", "rig": arm.name, "bone": bone, "region_bones": sorted(region),
+            "candidates_tried": tried}
+
+
+def triangle_data(objs):
+    """Per triangle (in `all_triangles` order): its material's index in `materials` (-1 for none), its
+    corners' UVs in the render UV map (zeros on a mesh without UVs) and whether its material is a face
+    material; per vertex, the head weight."""
+    names, index = [], {}
+    tri_mat, tri_uv, head = [], [], []
+    for o in objs:
+        me = o.data
+        me.calc_loop_triangles()
+        n = len(me.loop_triangles)
+        mat_idx = np.empty(n, dtype=np.int64)
+        me.loop_triangles.foreach_get("material_index", mat_idx)
+        loops = np.empty(n * 3, dtype=np.int64)
+        me.loop_triangles.foreach_get("loops", loops)
+        slots = []
+        for m in me.materials:
+            if m is not None and m.name not in index:
+                index[m.name] = len(names)
+                names.append(m.name)
+            slots.append(index[m.name] if m is not None else -1)
+        slots = np.array(slots or [-1], dtype=np.int64)
+        tri_mat.append(slots[np.clip(mat_idx, 0, len(slots) - 1)])
+        layer = next((u for u in me.uv_layers if u.active_render), None)
+        if layer is None and len(me.uv_layers):
+            layer = me.uv_layers[0]
+        uv = np.zeros((n, 3, 2), dtype=np.float64)
+        if layer is not None:
+            flat = np.empty(len(me.loops) * 2, dtype=np.float64)
+            layer.data.foreach_get("uv", flat)
+            uv = flat.reshape(-1, 2)[loops.reshape(-1, 3)]
+        tri_uv.append(uv)
+        w = np.zeros(len(me.vertices), dtype=np.float32)
+        attr = me.attributes.get(HEAD_ATTR)
+        if attr is not None and attr.domain == "POINT":
+            attr.data.foreach_get("value", w)
+        head.append(w)
+    tri_mat = np.concatenate(tri_mat)
+    face = np.array([RIG.is_face_material(nm) for nm in names] + [False], dtype=bool)   # [-1] -> False
+    return {"material": tri_mat, "uv": np.concatenate(tri_uv), "face": face[tri_mat],
+            "head": np.concatenate(head), "materials": names}
+
+
+def head_points(verts, tdata, height):
+    """The points the head close-ups frame, and how they were chosen."""
+    pts = verts[tdata["head"] >= HEAD_THRESHOLD]
+    if len(pts):
+        return pts, "head region"
+    return verts[verts[:, 2] >= height - HEAD_FALLBACK_STUDS], \
+        f"top {HEAD_FALLBACK_STUDS:g} studs of the figure (no head region)"
+
+
+def raster_view(cam, verts, tris, alpha, tdata):
+    """Everything each pixel centre sees, for the dataset: mask, depth, UV in the render UV map, material
+    (0 for none, else its index + 1), head weight (0-255) and the face-material flag. Alpha-clipped texels
+    are seen through, as in `raycast_view`."""
+    tri_s, tri_uv, samplers = alpha
+
+    def keep(t, bary):
+        s = tri_s[t]
+        ok = np.ones(len(t), dtype=bool)
+        for si in np.unique(s[s >= 0]).tolist():
+            pick = s == si
+            sm = samplers[si]
+            if "constant" in sm:
+                ok[pick] = sm["constant"] >= samplers_cutoff(sm)
+                continue
+            uv = (bary[pick][:, :, None] * tri_uv[t[pick]]).sum(1)
+            a = TEX.sample_many(sm["alpha"], uv[:, 0], uv[:, 1], sm["interpolation"], sm["extension"])
+            ok[pick] = a >= samplers_cutoff(sm)
+        return ok
+
+    tri, bary, z = RAS.rasterise(CAM.project(verts, cam), CAM.depth_of(verts, cam), tris, cam["resolution"],
+                                 keep=keep if samplers else None)
+    hit = tri >= 0
+    safe = np.maximum(tri, 0)
+    head = RAS.interpolate(tdata["head"][tris][:, :, None], tri, bary)[..., 0]
+    return {
+        "mask": hit,
+        "depth": z.astype(np.float16),        # studs; about 0.004 apart at the figure's extent
+        "uv": RAS.interpolate(tdata["uv"], tri, bary).astype(np.float16),
+        "material": np.clip(np.where(hit, tdata["material"][safe] + 1, 0), 0, 255).astype(np.uint8),
+        "head": np.clip(np.round(head * 255.0), 0, 255).astype(np.uint8),
+        "face": hit & tdata["face"][safe],
+    }
+
+
+def write_png(img, path):
+    """Save an image's pixels (as stored: no colour conversion) to an 8-bit RGBA PNG; False when the image
+    has no pixels."""
+    if not has_pixels(img):
+        return False
+    w, h = img.size
+    px = np.empty(len(img.pixels), dtype=np.float32)      # reading the pixels loads the image
+    img.pixels.foreach_get(px)
+    if w * h == 0 or len(px) % (w * h):
+        return False
+    px = px.reshape(w * h, len(px) // (w * h))
+    if px.shape[1] == 1:
+        px = np.repeat(px, 3, axis=1)
+    if px.shape[1] == 3:
+        px = np.concatenate([px, np.ones((len(px), 1), dtype=np.float32)], axis=1)
+    out = bpy.data.images.new("BenchTexture", w, h, alpha=True)
+    out.colorspace_settings.name = img.colorspace_settings.name
+    out.pixels.foreach_set(px[:, :4].ravel())
+    out.filepath_raw = path
+    out.file_format = "PNG"
+    out.save()
+    bpy.data.images.remove(out)
+    return True
+
+
+def save_textures(objs, out_dir):
+    """Every image a material's colour reads, saved as PNG in `out_dir`; returns {material: [file names]}."""
+    os.makedirs(out_dir, exist_ok=True)
+    saved, out = {}, {}
+    for o in objs:
+        for mat in o.data.materials:
+            if mat is None or mat.name in out:
+                continue
+            files = []
+            for img in sorted(colour_images(mat), key=lambda i: i.name):
+                if img.name not in saved:
+                    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(img.name)[0]) or "texture"
+                    fname = f"{len(saved):02d}-{stem}.png"
+                    if not write_png(img, os.path.join(out_dir, fname)):
+                        continue
+                    saved[img.name] = fname
+                files.append(saved[img.name])
+            out[mat.name] = files
+    return out
+
+
 def setup_cycles(scene, size, report):
     scene.render.engine = "CYCLES"
     scene.render.use_compositing = False
@@ -1028,6 +1238,8 @@ def main():
     if unused_missing:
         report.append(f"missing images no rendered colour uses: {', '.join(unused_missing)}")
     object_names, rig_names = [o.name for o in meshes], [a.name for a in rigs]
+    dataset = JOB.get("dataset")
+    head_record = mark_head(meshes, rigs) if dataset else None
     frozen = freeze(meshes, yaw, report)
     verts, tris = all_triangles(frozen)
     contract = CAM.contract_matrix(verts.min(0), verts.max(0), JOB["height"])
@@ -1046,14 +1258,32 @@ def main():
 
     size = int(JOB["size"])
     ppu = CAM.choose_ppu(verts, size, JOB["height"])
-    cams = CAM.all_cameras(ppu, size, JOB["height"], CAM.camera_distance(verts, JOB["height"]))
+    distance = CAM.camera_distance(verts, JOB["height"])
+    cams = CAM.all_cameras(ppu, size, JOB["height"], distance)
     work = JOB["work"]
     os.makedirs(work, exist_ok=True)
 
     t1 = time.time()
-    bvh = BVHTree.FromPolygons([tuple(v) for v in verts.tolist()], [tuple(t) for t in tris.tolist()],
-                               epsilon=0.0)
-    for cam in cams:
+    if dataset:
+        tdata = triangle_data(frozen)
+        pts, framing = head_points(verts, tdata, JOB["height"])
+        head_record["framing"] = framing
+        head_record["vertices"] = int((tdata["head"] >= HEAD_THRESHOLD).sum())
+        head_record["centre"] = pts.mean(0).round(4).tolist()      # contract frame, studs
+        cams += CAM.head_cameras(pts, int(dataset["head_size"]), distance)
+        gt_dir = os.path.dirname(gt)
+        np.savez_compressed(os.path.join(gt_dir, "mesh.npz"), vertices=verts.astype(np.float32),
+                            triangles=tris.astype(np.int32), uv=tdata["uv"].astype(np.float32),
+                            material=tdata["material"].astype(np.int16),
+                            head=tdata["head"].astype(np.float16))
+        textures = save_textures(frozen, os.path.join(gt_dir, "textures"))
+        for cam in cams:
+            np.savez_compressed(os.path.join(work, cam["view"] + ".npz"),
+                                **raster_view(cam, verts, tris, alpha, tdata))
+        timings["raster"] = round(time.time() - t1, 2)
+    bvh = None if dataset else BVHTree.FromPolygons([tuple(v) for v in verts.tolist()],
+                                                    [tuple(t) for t in tris.tolist()], epsilon=0.0)
+    for cam in ([] if dataset else cams):
         mask, depth = raycast_view(bvh, cam, verts, tris, alpha)
         extra = {}
         if cam["view"] == "front":
@@ -1061,14 +1291,38 @@ def main():
             extra["geometry_mask"] = raycast_view(bvh, cam, verts, tris, alpha, clip=False)[0] \
                 if alpha[2] else mask
         np.savez_compressed(os.path.join(work, cam["view"] + ".npz"), mask=mask, depth=depth, **extra)
-    timings["raycast"] = round(time.time() - t1, 2)
+    if not dataset:
+        timings["raycast"] = round(time.time() - t1, 2)
 
     t2 = time.time()
     device = setup_cycles(scene, size, report)
     bg = bench_world(scene)
-    for cam in cams:
+    if dataset:
+        # Every flat view, then every lit one: between renders only the camera (and the camera-fixed lights)
+        # move, so with persistent data Cycles keeps the scene instead of rebuilding it for each image.
+        scene.render.use_persistent_data = True
+        if scene.cycles.device == "GPU":
+            scene.cycles.denoising_use_gpu = True       # the CPU denoiser takes most of a lit render's time
+        for shading in ("flat", "lit"):
+            set_shading(frozen, shading)
+            lit = shading == "lit"
+            bg.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+            bg.inputs["Strength"].default_value = 0.35 if lit else 0.0
+            scene.cycles.samples = int(JOB.get("samples_lit" if lit else "samples_flat", 16))
+            scene.cycles.use_denoising = lit
+            for cam in cams:
+                cobj = add_render_camera(cam)
+                scene.camera = cobj
+                scene.render.resolution_x = scene.render.resolution_y = cam["resolution"]
+                lights = lights_for(cam) if lit else []
+                scene.render.filepath = os.path.join(work, f"{cam['view']}-{shading}.png")
+                bpy.ops.render.render(write_still=True)
+                for o in lights + [cobj]:
+                    bpy.data.objects.remove(o, do_unlink=True)
+    for cam in ([] if dataset else cams):
         cobj = add_render_camera(cam)
         scene.camera = cobj
+        scene.render.resolution_x = scene.render.resolution_y = cam["resolution"]
         # flat: emission only, no lights, black world
         set_shading(frozen, "flat")
         bg.inputs["Strength"].default_value = 0.0
@@ -1115,6 +1369,8 @@ def main():
         "timings": timings,
         "report": report,
     }
+    if dataset:
+        result.update(head=head_record, materials_index=tdata["materials"], textures=textures)
     path = sys.argv[sys.argv.index("--") + 1]
     stem = path[: -len(".json")] if path.endswith(".json") else path
     with open(stem + ".result.json", "w") as fh:

@@ -1,4 +1,8 @@
-"""CLI: `python -m herogen.bench render --asset <glb/gltf/fbx/blend> --out <run folder> [options]`."""
+"""CLI:
+
+    python -m herogen.bench render --asset <glb/gltf/vrm/fbx/blend> --out <run folder> [options]
+    python -m herogen.bench dataset --manifest <manifest.json> --out <dataset folder> [options]
+"""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m herogen.bench")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("render", help="render a known 3D character into a ground-truth run folder")
-    r.add_argument("--asset", required=True, type=Path, help="the character: .glb, .gltf, .fbx or .blend")
+    r.add_argument("--asset", required=True, type=Path,
+                   help="the character: .glb, .gltf, .vrm, .fbx or .blend")
     r.add_argument("--out", required=True, type=Path, help="the run folder to write")
     r.add_argument("--pose", default="auto", choices=("auto", "a-pose", "rest", "as-shipped"),
                    help="auto: A-pose when the rig's arms are found, else the rest pose "
@@ -61,7 +66,25 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--timeout", type=float, default=3600.0, help="seconds allowed for the Blender call")
     r.add_argument("--overwrite", action="store_true",
                    help="replace an existing run folder at --out (only one this tool wrote)")
+    d = sub.add_parser("dataset", help="render the characters of a manifest into a training dataset "
+                                       "(resumable: finished characters are skipped)")
+    d.add_argument("--manifest", required=True, type=Path, help="JSON list of characters (see dataset.py)")
+    d.add_argument("--out", required=True, type=Path, help="the dataset folder, one folder per character")
+    d.add_argument("--workers", type=int, default=2, help="Blender processes at once (they share the GPU)")
+    d.add_argument("--split", choices=("train", "heldout"), help="only the characters of this split")
+    d.add_argument("--id", action="append", dest="ids", help="only this character (repeatable)")
+    d.add_argument("--limit", type=int, help="at most this many characters this time")
+    d.add_argument("--retry-failed", action="store_true", help="try characters that failed before again")
+    d.add_argument("--size", type=int, default=DEFAULT_SIZE, help="whole-figure views, square pixels")
+    d.add_argument("--head-size", type=int, default=1024, help="head close-ups, square pixels")
+    d.add_argument("--samples-flat", type=int, default=16)
+    d.add_argument("--samples-lit", type=int, default=64)
+    d.add_argument("--device", choices=("auto", "cpu"), default="auto")
+    d.add_argument("--timeout", type=float, default=1800.0, help="seconds allowed per character")
     a = ap.parse_args(argv)
+
+    if a.cmd == "dataset":
+        return dataset_main(a)
 
     from herogen.blender.bl import BlenderError
 
@@ -87,6 +110,30 @@ def main(argv: list[str] | None = None) -> int:
     if not rec["ok"]:
         print("a ground-truth check failed; see stage-2.json", file=sys.stderr)
     return 0 if rec["ok"] else 1
+
+
+def dataset_main(a) -> int:
+    from .dataset import run_batch
+    from .render import MIN_SAMPLES_FLAT, SIZE_RANGE
+
+    for flag, n in (("--size", a.size), ("--head-size", a.head_size)):
+        if not SIZE_RANGE[0] <= n <= SIZE_RANGE[1]:
+            print(f"error: {flag} must be from {SIZE_RANGE[0]} to {SIZE_RANGE[1]}", file=sys.stderr)
+            return 2
+    if a.samples_flat < MIN_SAMPLES_FLAT or a.samples_lit < 1:
+        print(f"error: --samples-flat must be at least {MIN_SAMPLES_FLAT}, --samples-lit at least 1",
+              file=sys.stderr)
+        return 2
+    try:
+        counts = run_batch(a.manifest, a.out, workers=a.workers, split=a.split, ids=a.ids, limit=a.limit,
+                           retry_failed=a.retry_failed, log=lambda m: print(m, flush=True), size=a.size,
+                           head_size=a.head_size, samples_flat=a.samples_flat, samples_lit=a.samples_lit,
+                           device=a.device, timeout=a.timeout)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(counts))
+    return 0 if counts["failed"] == 0 else 1
 
 
 if __name__ == "__main__":
