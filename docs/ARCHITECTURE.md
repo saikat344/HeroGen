@@ -230,7 +230,8 @@ masks in this version; stages 3 and 4 build exactly as without them.
   it is kept as `03-source.glb`, put in the contract frame and remeshed into one closed manifold surface
   (`herogen/blender/sam3d_mesh.py`). The front view decides the facing, a small yaw / roll and perspective fit
   and an outline conform onto the front mask; the pitch, a tilt the front view cannot see, is registered on the
-  observed left and right masks. Its shape is built from the front view alone.
+  observed left and right masks before conform and remeshing. Depth is registered after remeshing. Its shape
+  is built from the front view alone.
 
 `stage-3.json` records `mesh_source` (what was used), `mesh_source_requested`, `joints_source` and `shape_views`,
 the views the shape was built from, and `pose_views`, the views the hybrid's pitch was registered on. **Every
@@ -251,8 +252,9 @@ and the best is kept if it lies within +-20 degrees. The front fit is then redon
 conform and the remesh. The pitch stays 0, with the reason recorded, unless both left and right are observed
 (present, non-empty and not derived; back, top and the held-out views are never used), when the sweep is flat (the
 side IoU varies by less than 0.02), when it is ambiguous (another peak more than 8 degrees away within 0.01 of the
-best) and when the best lies beyond +-20 degrees. No Y offset is fitted or applied during pitch registration: the frame stays centred on the
-bounding box until the subsequent depth registration. `mesh.source.pose_fit` in `stage-3.json` records the views used and those excluded with their
+best) and when the best lies beyond +-20 degrees. No Y offset is fitted or applied during pitch registration:
+the frame stays centred on the bounding box until depth registration. `mesh.source.pose_fit` in `stage-3.json`
+records the views used and those excluded with their
 reasons, the status (`fitted` or `fallback`) and reason, `pitch_deg`, `limit_deg`, `y_offset_studs` (0) with a
 note, the sweep (`sweep_half_res`) and its scores at pitch 0 and at the fitted pitch (`side_iou_half_res`: the
 sweep's scores, not the final mesh's); `mesh.source.fit` holds the pitch with the rest of the fit, and
@@ -273,16 +275,39 @@ the pitch fit, front refit, conform and remesh, the mesh and the source vertices
 move together along Y. The whole-pixel offset maximises mean silhouette IoU on observed left/right masks and
 the top mask only when drawn, never derived or held out; shape and pitch are unchanged. `stage-3.json` records
 both `mesh.source.pose_fit` and `mesh.source.depth_register`, the latter holding offset in studs and pixels,
-views, and IoU before and after. Before integration, a local 64-source benchmark with pitch locked at zero
-improved worst-observed median from 0.7065 to 0.7319 with depth registration, with 0/64 silhouette passes in
-both variants; that pitch-zero measurement is a proxy, not a measurement of the combined pitch fit.
+views, and IoU before and after. Scoring counts the complete silhouette, including pixels outside the
+observation frame, so clipping cannot improve the objective. The chosen offset is re-rendered in an expanded
+frame; the record reports that verified IoU.
 
-**Causes that remain, each separate from the pitch.** Bounding-box centring: a part the mesh lacks or places
-differently (a tail, a pack) moves a side mask's box and so the view's centre, which a few degrees of pitch can
-partly offset, so the fitted pitch can follow it. The model's depth: on turnarounds rendered from game models
-(exact masks) the side views stay 0.51-0.73 whatever the pitch, the figure too thin front to back. The remesh: on
-some sources it drops thin parts and the front with them (one source: front 0.952 after the conform, 0.794 after
-the remesh), so the front can move with small changes of pitch.
+**Measured pitch fit plus depth registration.** A paired NumPy replay on all 33 offload and 33 scorecard
+source cases uses the actual side-mask pitch fit, front refit, conform and remesh, then compares the same mesh
+with and without depth registration. The two sources missing from the local cache were recovered from the
+stored scorecard runs and matched their original hashes. Median IoUs are:
+
+| Set | Variant | Front | Back | Left | Right | Top | Worst observed | Silhouette/open-edge passes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Offload (33) | pitch fit | 0.96910 | 0.86860 | 0.74350 | 0.73730 | 0.58150 | 0.73330 | 0/33 |
+| Offload (33) | pitch fit + depth | 0.96910 | 0.86860 | 0.76550 | 0.75300 | 0.57145 | 0.74520 | 0/33 |
+| Scorecard (33) | pitch fit | 0.96180 | 0.82170 | 0.74680 | 0.75170 | 0.56055 | 0.71250 | 0/33 |
+| Scorecard (33) | pitch fit + depth | 0.96180 | 0.82170 | 0.76420 | 0.76140 | 0.55400 | 0.71530 | 0/33 |
+| All cases (66) | pitch fit | 0.96555 | 0.83505 | 0.74360 | 0.73925 | 0.57245 | 0.72545 | 0/66 |
+| All cases (66) | pitch fit + depth | 0.96555 | 0.83505 | 0.76435 | 0.76045 | 0.55950 | 0.74090 | 0/66 |
+
+Top medians include derived views (28 offload and 20 scorecard top masks, only two observed, both offload);
+only observed masks enter the worst-view score and the unchanged >=0.90 silhouette gate. The benchmark also
+requires zero open edges, met by every mesh; it does not establish full stage-3 pipeline success. Its final IoUs
+use the original finite observation cameras, while `depth_register` separately records complete-silhouette IoU.
+The 66 cases contain 65 distinct source meshes, with one shared across sets, and are not independent held-out
+samples. Worst-view agreement improves on 50 cases, is equal on 15 and decreases on one at four-decimal input
+precision (scorecard s016, 0.6566 to 0.6565); 19 improve by more than 0.02, and cases below 0.5 fall from 9 to 6.
+Individual views can still lose IoU, as the top medians show. These measurements replace the earlier pitch-zero
+proxy for the combined implementation.
+
+**Causes that remain.** The pitch fit still happens in the bounding-box-centred frame, so missing or misplaced
+tails/packs can bias its pitch before the later depth translation. Translation cannot correct shape: on
+turnarounds rendered from exact model masks the reconstructed side views stay 0.51-0.73 whatever the pitch,
+the figure too thin front to back. The remesh can drop thin parts and front detail (one source: front 0.952
+after conform, 0.794 after remeshing), so the front can move with small changes of pitch.
 Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A remote source that fails falls back to the local one
 (`carve`, `silhouette`) and the notes say so; `--no-fallback` stops the stage instead, with a one-line error.
 Every failure of a remote source counts: the call itself, its cached output (an unreadable GLB, a missing file)

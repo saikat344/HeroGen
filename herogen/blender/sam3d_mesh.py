@@ -40,7 +40,9 @@ top masks (step 7). Derived and held-out views are never used for either registr
    hanging down in the mesh but sweeping back in the drawing, a pack the model left off). The mesh, and the
    source mesh with it, is moved along Y by the whole-pixel offset that maximises the mean silhouette IoU of the
    observed views that see depth (left, right, and the top view when it was drawn rather than derived by stage
-   2); the shape is not changed. Without such a view the offset is 0 and the record says why.
+   2); the shape is not changed. Complete silhouettes, including pixels outside the observation frame, are
+   scored; the selected offset is re-rendered to verify its IoU. Without such a view the offset is 0 and the
+   record says why.
 """
 from __future__ import annotations
 
@@ -476,37 +478,53 @@ DEPTH_VIEWS = {"left": (1, 1), "right": (1, -1), "top": (0, -1)}
 
 def shifted_iou(render: np.ndarray, mask: np.ndarray, axis: int, k: int) -> float:
     """IoU of `mask` with `render` moved `k` whole pixels along image `axis` (0 rows, 1 columns), the pixels moved
-    off the image dropped."""
+    off the image still counted in the union. `render` must contain the complete silhouette."""
     n = render.shape[axis]
     if abs(k) >= n:
-        inter, area = 0, 0
+        inter = 0
     else:
         src = [slice(None), slice(None)]
         dst = [slice(None), slice(None)]
         src[axis] = slice(0, n - k) if k >= 0 else slice(-k, n)
         dst[axis] = slice(k, n) if k >= 0 else slice(0, n + k)
         moved = render[tuple(src)]
-        inter, area = int((moved & mask[tuple(dst)]).sum()), int(moved.sum())
-    union = area + int(mask.sum()) - inter
+        inter = int((moved & mask[tuple(dst)]).sum())
+    union = int(render.sum()) + int(mask.sum()) - inter
     return inter / union if union else 0.0
+
+
+def _silhouette_frame(view: View, verts: np.ndarray, margin: int = 0) -> View:
+    """Pad the observation by integer pixels to contain all projected vertices, preserving its pixel grid."""
+    rows, cols, _ = raster.project(view.name, view.pps, view.cmid, view.vref, verts)
+    low = np.floor([rows.min(), cols.min()]).astype(int) - 1 - margin
+    high = np.ceil([rows.max(), cols.max()]).astype(int) + 1 + margin
+    before = np.maximum(-low, 0)
+    after = np.maximum(high - view.mask.shape, 0)
+    mask = np.pad(view.mask, tuple(zip(before, after)))
+    return View(view.name, mask, view.pps, view.cmid + int(before[1]), view.vref + int(before[0]))
 
 
 def register_depth(verts: np.ndarray, faces: np.ndarray, depth_views: dict[str, View]) -> tuple[float, dict]:
     """The Y offset (studs) that best registers the mesh on `depth_views` (observed views that see Y, keyed by
     name; see the module notes, step 7). Every candidate is a whole number of pixels, so one render per view is
-    shifted instead of re-rendered; ties go to the smallest move. Returns (offset, record)."""
+    shifted with their full area retained; ties go to the smallest move. The chosen offset is re-rendered on a
+    frame containing the complete moved mesh to verify the recorded IoU. Returns (offset, record)."""
     names = [v for v in DEPTH_VIEWS if v in depth_views]
     if not names:
         return 0.0, {"offset_studs": 0.0, "views": [], "note": "no observed view sees depth; offset 0"}
     pps = depth_views[names[0]].pps
-    renders, lo, hi = {}, [], []
+    renders, frames, lo, hi = {}, {}, [], []
     for name in names:
-        view = depth_views[name]
+        view = _silhouette_frame(depth_views[name], verts)
+        frames[name] = view
         r = raster.render_view(view, verts, faces).mask
         axis, sign = DEPTH_VIEWS[name]
         renders[name] = r
         line_r, line_m = np.flatnonzero(r.any(axis=1 - axis)), np.flatnonzero(view.mask.any(axis=1 - axis))
-        if len(line_r) == 0:
+        original = depth_views[name]
+        row0, col0 = int(view.vref - original.vref), int(view.cmid - original.cmid)
+        visible = r[row0:row0 + original.mask.shape[0], col0:col0 + original.mask.shape[1]]
+        if not visible.any() or len(line_m) == 0:
             continue
         # every k (pixels of +Y) at which the moved render and the mask overlap along this axis
         a, b = (line_m[0] - line_r[-1]) * sign, (line_m[-1] - line_r[0]) * sign
@@ -516,7 +534,7 @@ def register_depth(verts: np.ndarray, faces: np.ndarray, depth_views: dict[str, 
         return 0.0, {"offset_studs": 0.0, "views": names, "note": "the mesh covers no pixel of the depth views"}
 
     def mean_iou(k: int) -> float:
-        return float(np.mean([shifted_iou(renders[n], depth_views[n].mask, DEPTH_VIEWS[n][0], DEPTH_VIEWS[n][1] * k)
+        return float(np.mean([shifted_iou(renders[n], frames[n].mask, DEPTH_VIEWS[n][0], DEPTH_VIEWS[n][1] * k)
                               for n in names]))
 
     best_k, best = 0, mean_iou(0)
@@ -524,10 +542,14 @@ def register_depth(verts: np.ndarray, faces: np.ndarray, depth_views: dict[str, 
         sc = mean_iou(k)
         if sc > best + 1e-9:
             best_k, best = k, sc
-    before = {n: round(shifted_iou(renders[n], depth_views[n].mask, 0, 0), 4) for n in names}
-    after = {n: round(shifted_iou(renders[n], depth_views[n].mask, DEPTH_VIEWS[n][0], DEPTH_VIEWS[n][1] * best_k), 4)
-             for n in names}
+    before = {n: round(shifted_iou(renders[n], frames[n].mask, 0, 0), 4) for n in names}
     offset = best_k / pps
+    moved = verts + np.array([0.0, offset, 0.0])
+    after = {}
+    for name in names:
+        # Include both the original silhouette and every pixel through which the chosen move passes.
+        view = _silhouette_frame(depth_views[name], verts, margin=abs(best_k))
+        after[name] = round(iou(raster.render_view(view, moved, faces).mask, view.mask), 4)
     return offset, {"offset_studs": round(offset, 5), "offset_px": best_k, "views": names,
                     "iou_before": before, "iou_after": after,
-                    "method": "whole-pixel Y offset maximising the mean silhouette IoU of these views"}
+                    "method": "whole-pixel Y offset maximising mean complete-silhouette IoU; selected offset re-rendered"}
