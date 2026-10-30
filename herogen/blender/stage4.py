@@ -70,6 +70,14 @@ ATLAS_BEST = 4096
 # 41% / 35%, avatar 51%; carve 58%, 49% / 44%, 58%); on an earlier recording of the hybrid, the in-game high body
 # at 1024 went from front colour error 11.52 and SSIM 0.712 to 10.29 and 0.758.
 UV_GUTTER_PX = 2
+# The Head has its own texture (1024 px on the high body, 512 px on low): the face no longer
+# shares the atlas with the rest of the body, and stage 2f's close-ups are baked into it. Roblox's texture
+# specification (create.roblox.com/docs/art/modeling/texture-specifications) gives 1024 x 1024 as the maximum
+# for a texture map in its UV mapping section (and 4096 x 4096 for textures in general), and the Marketplace
+# character specification (create.roblox.com/docs/art/characters/specifications) caps textures at 2048 x 2048;
+# a 1024 px Head texture is within all three, and the profiles' `texture_max_px` check counts it.
+HEAD_SECTION = "Head"
+HEAD_TEXTURE = dict(ATLAS)
 # Comparison variant only (atlas-high-side-trust.png): weight of a side view that did not shape the mesh. On the
 # pencil figure's hybrid (the pinned runners' results, in-game high body, numpy flat renders, colour error front /
 # left): 1.0 10.0 / 13.4, 0.3 8.7 / 15.7, 0.1 7.8 / 17.8, 0.03 7.2 / 20.0.
@@ -409,7 +417,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     def pack(lods):
         bl.run_job({"tasks": [{"task": "uv", "lods": {k: str(lod_paths[k].resolve()) for k in lods},
                                "out": {k: str(uv_paths[k].resolve()) for k in lods},
-                               "margin": {k: UV_GUTTER_PX / atlas_size[k] for k in lods}}]},
+                               "margin": {k: UV_GUTTER_PX / atlas_size[k] for k in lods},
+                               "separate": [HEAD_SECTION],
+                               "separate_margin": {k: UV_GUTTER_PX / HEAD_TEXTURE[k] for k in lods}}]},
                    work, "stage4-uv", timeout=timeout)
 
     pack(list(lod_paths))
@@ -417,7 +427,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     for lod, b in builds.items():
         if isinstance(b["atlas"], tuple):
             u = np.load(uv_paths[lod])
-            fill, area = _uv_fill(lod_secs[lod], {k.split("__")[0]: u[k] for k in u.files})
+            rest = {n: s for n, s in lod_secs[lod].items() if n != HEAD_SECTION}
+            fill, area = _uv_fill(rest, {k.split("__")[0]: u[k] for k in u.files})
             density = {n: round(float(np.sqrt(fill * n * n / area)), 1) for n in ATLAS_SIZES if n <= b["atlas"][1]}
             size = min((n for n, d in density.items() if d >= vs.pps), default=max(density))
             atlas_choice[lod] = {"rule": "smallest size with at least one texel per view pixel",
@@ -430,32 +441,66 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         pack(repack)
     for lod in builds:
         lod_info[lod]["atlas_size"] = atlas_size[lod]
+    for stale in body.glob("atlas-head-*.png"):
+        stale.unlink()
+    for stale in body.glob("atlas-*-no-closeup.png"):
+        stale.unlink()
     colour_views = texture.observed_colour_views(vs, run)
-    atlas_paths, tex_stats, zbuf = {}, {}, None
+    closeups, closeup_info = texture.load_closeups(run, vs)
+    for name in sorted(closeups.keys() - colour_views.keys()):
+        closeup_info["notes"].append(f"{name}: no observed colour image; not used")
+    closeups = {k: v for k, v in closeups.items() if k in colour_views}
+    closeup_info["used"] = sorted(closeups)
+    if closeups:
+        rec.note("the Head texture takes stage 2f's close-ups of the " + ", ".join(sorted(closeups)) + " view(s)")
+    for n in closeup_info["notes"]:
+        rec.note(f"close-ups: {n}")
+    atlas_paths, head_paths, tex_stats, zbuf = {}, {}, {}, None
     from PIL import Image
     for lod in builds:
         u = np.load(uv_paths[lod])
         uvs = {k.split("__")[0]: u[k] for k in u.files}
         _save_lod(lod_paths[lod], lod_secs[lod], uvs)
         if colour_views:
-            size = atlas_size[lod]
-            atlas, stats, zbuf = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf, source=source)
+            size, head_size = atlas_size[lod], HEAD_TEXTURE[lod]
+            rest = {n: s for n, s in lod_secs[lod].items() if n != HEAD_SECTION}
+            head = {HEAD_SECTION: lod_secs[lod][HEAD_SECTION]}
+            if zbuf is None:         # the whole body's depth, so each texture's sections are hidden by the rest
+                zbuf = texture.depth_maps(colour_views, np.concatenate(
+                    [texture.texel_samples(rest, uvs, size), texture.texel_samples(head, uvs, head_size)]))
+
+            def both(tag: str, **kw) -> tuple:
+                """The atlas and the Head texture of one variant (close-ups only ever in the Head's)."""
+                a, st, _ = texture.bake(rest, uvs, colour_views, size, zbuf, **kw)
+                h, hst, _ = texture.bake(head, uvs, colour_views, head_size, zbuf,
+                                         closeups=closeups if tag != "no-closeup" else None, **kw)
+                return a, h, {**st, "head": hst}
+
+            atlas, head_tex, stats = both("", source=source)
             atlas_paths[lod] = body / f"atlas-{lod}.png"
+            head_paths[lod] = body / f"atlas-head-{lod}.png"
             Image.fromarray(atlas).save(atlas_paths[lod])
+            Image.fromarray(head_tex).save(head_paths[lod])
             tex_stats[lod] = stats
-            if source is not None and lod == "high":
-                # comparison atlases, scored by `score` as variants: no source fallback (its effect), and the
-                # side views down-weighted (they did not shape this mesh, so their colours land on oblique
-                # surfaces at the wrong depth)
-                plain, pstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf)
-                Image.fromarray(plain).save(body / f"atlas-{lod}-no-source-fallback.png")
-                tex_stats[lod + "_no_source_fallback"] = pstats
-                trust = {v: SIDE_TRUST for v in colour_views if v in ("left", "right") and v not in shape_views}
-                if trust:
-                    tr, tstats, _ = texture.bake(lod_secs[lod], uvs, colour_views, size, zbuf, source=source,
-                                                 trust=trust)
-                    Image.fromarray(tr).save(body / f"atlas-{lod}-side-trust.png")
-                    tex_stats[lod + "_side_trust"] = {**tstats, "trust": trust}
+            if lod == "high":
+                # comparison textures, scored by `score` as variants (`atlas-high-<variant>.png` and its Head
+                # texture `atlas-head-high-<variant>.png`): without the close-ups (their effect); for a hybrid
+                # body, no source fallback (its effect), and the side views down-weighted (they did not shape
+                # this mesh, so their colours land on oblique surfaces at the wrong depth)
+                variants = {}
+                if closeups:
+                    variants["no-closeup"] = {"source": source}
+                if source is not None:
+                    variants["no-source-fallback"] = {}
+                    trust = {v: SIDE_TRUST for v in colour_views if v in ("left", "right") and v not in shape_views}
+                    if trust:
+                        variants["side-trust"] = {"source": source, "trust": trust}
+                for tag, kw in variants.items():
+                    a, h, vstats = both(tag, **kw)
+                    Image.fromarray(a).save(body / f"atlas-{lod}-{tag}.png")
+                    Image.fromarray(h).save(body / f"atlas-head-{lod}-{tag}.png")
+                    tex_stats[f"{lod}_{tag.replace('-', '_')}"] = {**vstats, **({"trust": kw["trust"]}
+                                                                                  if "trust" in kw else {})}
 
     # Blender: textured GLBs, rest renders from the contract cameras, pose renders.
     rest_cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
@@ -465,7 +510,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     res = bl.run_job({"tasks": [{
         "task": "body", "lods": {k: str(v.resolve()) for k, v in lod_paths.items()},
         "glb": {lod: str((body / f"{lod}.glb").resolve()) for lod in builds},
-        "atlas": {k: str(v.resolve()) for k, v in atlas_paths.items()},
+        "atlas": {k: {"body": str(v.resolve()), HEAD_SECTION: str(head_paths[k].resolve())}
+                  for k, v in atlas_paths.items()},
         "colors": section_colors(), "poses": pose_jobs, "pose_cameras": pose_cameras(height),
         "pose_dir": str((body / "pose-renders").resolve()), "pose_lod": "high",
         "rest_cameras": rest_cams, "rest_dir": str((body / "rest-renders").resolve())}]},
@@ -500,7 +546,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                   note="parts with a boundary or non-manifold edge after welding: " + ", ".join(not_closed)
                   if not_closed else "every part closed and manifold"))
     if PROFILES[profile].get("texture_max_px"):
-        biggest = max(atlas_size.values())
+        biggest = max(max(atlas_size[lod], HEAD_TEXTURE[lod]) for lod in builds)
         rec.add(check("texture_max_px", biggest, PROFILES[profile]["texture_max_px"],
                       passed=biggest <= PROFILES[profile]["texture_max_px"], rule="<="))
     open_e = {f"{lod}:{n}": _open_edges(s.faces) for lod, ss in lod_secs.items() for n, s in ss.items()}
@@ -627,6 +673,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                     "parts; they are listed under sections.json \"covers\""},
         "texture": {"method": texture.__doc__.strip(), "atlas_sizes": atlas_size, "atlas_choice": atlas_choice,
                     "atlases": {k: str(v.relative_to(run)) for k, v in atlas_paths.items()},
+                    "head_texture_sizes": {lod: HEAD_TEXTURE[lod] for lod in builds},
+                    "head_textures": {k: v.relative_to(run).as_posix() for k, v in head_paths.items()},
+                    "closeups": closeup_info,
                     "colour_views": sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
                     "gates": {"mean_abs_error_max": TEX_ERROR_GATE, "ssim_min": TEX_SSIM_GATE}},
         "rest_iou_with_covers": rest_iou,
@@ -636,6 +685,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     write_atomic(body / "sections.json", json.dumps(sections_json, indent=2))
     rec.data["outputs"] = ([f"04-body/{lod}.glb" for lod in builds] + ["04-body/sections.json"]
                            + [str(v.relative_to(run)) for v in atlas_paths.values()]
+                           + [v.relative_to(run).as_posix() for v in head_paths.values()]
                            + ([str(sheet.relative_to(run))] if sheet else [])
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["pose_renders"]]
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["rest_textured"].values()])
@@ -653,7 +703,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                             {p: max(r.values()) for p, r in gaps_nocover_visible.items()},
                         "max_gap_by_pose_high_geometric_no_covers":
                             {p: max(r.values()) for p, r in gaps_nocover_geometric.items()},
-                        "covers": cover_info, "texture": {"bake": tex_stats, "rest_metrics": tex_metrics},
+                        "covers": cover_info, "texture": sections_json["texture"],
                         "rest_iou_with_covers": rest_iou,
                         "joint_error_synthetic": joint_err, "joint_evidence": sk.evidence}
     return rec.finish()

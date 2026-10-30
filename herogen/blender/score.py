@@ -1,8 +1,8 @@
 """Score bodies against a run's views: silhouette IoU, colour error and SSIM per view, mesh sanity and, optionally,
 a platform's limits.
 
-`python3 -m herogen.blender.score --run <folder> [--body NAME=GLB ...] [--atlas NAME=PNG] [--seen NAME=views]
-[--seen-shape NAME=views] [--frame NAME=contract|fit] [--profile PROFILE] [--budget NAME=N]
+`python3 -m herogen.blender.score --run <folder> [--body NAME=GLB ...] [--atlas NAME=PNG] [--head-atlas NAME=PNG]
+[--seen NAME=views] [--seen-shape NAME=views] [--frame NAME=contract|fit] [--profile PROFILE] [--budget NAME=N]
 [--yaw-range VIEW=LO,HI]` (also
 `python3 -m herogen.blender score ...`) writes `05-scores.json` (the results page shows it) and, per
 body and view, `05-renders/<name>/<view>.png` (the body rendered flat in its own colours, or its silhouette when
@@ -14,8 +14,10 @@ milestones, other tools' outputs); a `version.json` next to a GLB is recorded un
 `label` and plain fields). Without `--body`, every stage 4 body in the run is scored: `04-body-carve/high.glb` as `carve`,
 `04-body/high.glb` as `carve` or `hybrid` by its `sections.json` mesh source, any other `04-body-<x>/high.glb` as
 `<x>`, and each extra atlas a body folder holds (`atlas-high-<variant>.png`) as `<name>-<variant>`: the same mesh
-with that image in place of its textures (`variant_of` names the body). `--atlas NAME=PNG` does the same for a
-`--body`.
+with that image in place of its textures (`variant_of` names the body). A stage 4 body whose Head has its own
+texture (the material `HeadTexture`) keeps it under an atlas variant, unless the folder also holds the variant's
+Head texture (`atlas-head-high-<variant>.png`), which then replaces it. `--atlas NAME=PNG` does the same for a
+`--body` (`--head-atlas NAME=PNG` for its Head texture).
 
 Views. The four turnaround views (`masks/<view>.png`, colours from `views/<view>.png`) at their contract yaw, and
 every held-out view found as `heldout/<name>.png` with `heldout/<name>-mask.png`. No building stage reads
@@ -124,6 +126,7 @@ WELD_REL = 1e-6        # weld tolerance, relative to the body's bounding-box dia
 MAX_PIXELS_PER_BATCH = 1 << 22
 BODY_DIR = re.compile(r"^04-body(-[A-Za-z0-9][A-Za-z0-9_.-]*)?$")
 VARIANT_ATLAS = re.compile(r"^atlas-high-([A-Za-z0-9][A-Za-z0-9_.-]*)\.png$")
+HEAD_MATERIAL = "HeadTexture"     # stage 4's material of the Head's own texture
 
 # Target profiles (`herogen.blender.PROFILES`, shared with stage 4), checked only when asked for.
 PROFILES = TARGET_PROFILES
@@ -627,9 +630,11 @@ def alpha_clip(glb: Glb, faces: np.ndarray) -> AlphaClip | None:
                      {i: float(glb.materials[i].alpha_cutoff) for i in mask_mats}, alpha_tex)
 
 
-def body_colour(glb: Glb, faces: np.ndarray, atlas: np.ndarray | None = None) -> BodyColour | None:
+def body_colour(glb: Glb, faces: np.ndarray, atlas: np.ndarray | None = None,
+                head: np.ndarray | None = None) -> BodyColour | None:
     """The body's colours, or None when it has no material, texture or vertex colour. ``atlas`` replaces every
-    material's base-colour texture (a variant of the same mesh)."""
+    material's base-colour texture but the Head's own (`HEAD_MATERIAL`), which ``head`` replaces (a variant of
+    the same mesh)."""
     fm = glb.merged_face_material()
     uv = glb.merged_uv()
     has_colors = any(m.colors is not None for m in glb.meshes)
@@ -643,7 +648,9 @@ def body_colour(glb: Glb, faces: np.ndarray, atlas: np.ndarray | None = None) ->
     factors = np.array([m.base_color[:3] for m in glb.materials] + [(1.0, 1.0, 1.0)], dtype=np.float64)
     textures: dict[int, np.ndarray] = {}
     for i, m in enumerate(glb.materials):
-        if atlas is not None and (m.image is not None or uv is not None):
+        if m.name == HEAD_MATERIAL and head is not None:
+            textures[i] = head
+        elif atlas is not None and m.name != HEAD_MATERIAL and (m.image is not None or uv is not None):
             textures[i] = atlas
         elif m.image is not None:
             img = glb.image(m.image)
@@ -846,6 +853,7 @@ class BodySpec:
     seen_colour: set | None = None
     meta: dict | None = None         # sections.json next to the GLB, when there is one
     frame: str = "fit"
+    head_atlas: Path | None = None   # replaces the Head's own texture (with `atlas`, a variant)
 
 
 def _observed(run: Path) -> set:
@@ -891,7 +899,9 @@ def discover_bodies(run: Path) -> list[BodySpec]:
         for atlas in sorted(d.glob("atlas-high-*.png")):
             m = VARIANT_ATLAS.match(atlas.name)
             if m:
-                out.append(BodySpec(f"{name}-{m.group(1)}", high, atlas, name, shape, colour, meta, "contract"))
+                head = d / f"atlas-head-high-{m.group(1)}.png"
+                out.append(BodySpec(f"{name}-{m.group(1)}", high, atlas, name, shape, colour, meta, "contract",
+                                    head if head.is_file() else None))
     return out
 
 
@@ -946,6 +956,7 @@ def _save_png(path: Path, img: np.ndarray) -> None:
 def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = None,
                seen_shape: set[str] | None = None, budget: int | None = None, profile: str | None = None,
                views: list[ScoreView] | None = None, atlas: Path | None = None, variant_of: str | None = None,
+               head_atlas: Path | None = None,
                meta: dict | None = None, yaw_range: tuple[float, float] | None = None,
                frame: str = "fit", height: float | None = None, geometry_cache: dict | None = None) -> dict:
     """Score one GLB on the run's views and write its renders; returns its `05-scores.json` entry.
@@ -994,7 +1005,8 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
     glb, pv, pf, reg, clip = cached["glb"], cached["pv"], cached["pf"], cached["reg"], cached["clip"]
     extent = cached["extent"]
     atlas_img = _load_rgb(atlas) if atlas is not None else None
-    colour = body_colour(glb, cached["faces"], atlas_img)
+    head_img = _load_rgb(head_atlas) if head_atlas is not None else None
+    colour = body_colour(glb, cached["faces"], atlas_img, head_img)
     out_dir = run / "05-renders" / name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1051,8 +1063,8 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         _save_png(out_dir / f"{view.name}-diff.png", diff_image(geo["sil"], view.mask))
     sanity = cached["sanity"]
     lods = meta.get("lods") or {}
-    atlas_px = (max(atlas_img.shape[:2]) if atlas_img is not None
-                else max((max(s) for s in glb.image_sizes), default=None))
+    atlas_px = (max((max(img.shape[:2]) for img in colour.textures.values()), default=None)
+                if colour is not None else None)
     low = Path(glb_path).with_name("low.glb") if Path(glb_path).name == "high.glb" else None
     triangles_low = (lods.get("low") or {}).get("triangles")
     if triangles_low is None and low is not None and low.is_file():
@@ -1088,6 +1100,8 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
     if atlas is not None:
         entry["atlas_image"] = _display_path(run, atlas)
         entry["variant_of"] = variant_of
+    if head_atlas is not None:
+        entry["head_atlas_image"] = _display_path(run, head_atlas)
     if profile is not None:
         checks = profile_checks(glb, sanity, profile, atlas_px, triangles_low)
         passed, status = profile_result(checks)
@@ -1197,7 +1211,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--body", action="append", default=[],
                     help="NAME=path/to/body.glb (default: every stage 4 body in the run, with its variants)")
     ap.add_argument("--atlas", action="append", default=[],
-                    help="NAME=atlas.png: score that body with this image in place of its textures")
+                    help="NAME=atlas.png: score that body with this image in place of its textures (all but "
+                         "a Head texture of its own)")
+    ap.add_argument("--head-atlas", action="append", default=[],
+                    help="NAME=head.png: score that body with this image in place of its Head's own texture")
     ap.add_argument("--seen", action="append", default=[],
                     help="NAME=front,back,left,right: views the body was built from, shape and colour "
                          "(default: every observed view)")
@@ -1216,6 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         given = _pairs(a.body, "--body")
         atlases = _pairs(a.atlas, "--atlas")
+        heads = _pairs(a.head_atlas, "--head-atlas")
         seen = {k: _view_set(v) for k, v in _pairs(a.seen, "--seen").items()}
         seen_shape = {k: _view_set(v) for k, v in _pairs(a.seen_shape, "--seen-shape").items()}
         budgets = {k: int(v) for k, v in _pairs(a.budget, "--budget").items()}
@@ -1231,9 +1249,9 @@ def main(argv: list[str] | None = None) -> int:
             ranges[k] = (float(lo), float(hi))
     except ValueError as e:
         ap.error(str(e))
-    for name in set(seen) | set(seen_shape) | set(atlases) | set(frames):
+    for name in set(seen) | set(seen_shape) | set(atlases) | set(heads) | set(frames):
         if name not in given:
-            ap.error(f"--seen/--seen-shape/--atlas/--frame name {name!r} has no --body")
+            ap.error(f"--seen/--seen-shape/--atlas/--head-atlas/--frame name {name!r} has no --body")
     for name, views in list(seen.items()) + list(seen_shape.items()):
         bad = views - set(TURNAROUND)
         if bad:
@@ -1249,7 +1267,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"--yaw-range names views that are not held-out views of this run: {sorted(unknown)}")
     if given:
         specs = [BodySpec(n, Path(p), Path(atlases[n]) if n in atlases else None, None,
-                          seen_shape.get(n), seen.get(n), None, frames.get(n, "fit")) for n, p in given.items()]
+                          seen_shape.get(n), seen.get(n), None, frames.get(n, "fit"),
+                          Path(heads[n]) if n in heads else None) for n, p in given.items()]
     else:
         specs = discover_bodies(a.run)
         if not specs:
@@ -1266,7 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             entry = score_body(a.run, s.name, s.glb, seen=colour_set, seen_shape=shape_set,
                                budget=budgets.get(s.name), profile=a.profile, views=views, atlas=s.atlas,
-                               variant_of=s.variant_of, meta=s.meta, frame=s.frame, geometry_cache=cache)
+                               variant_of=s.variant_of, meta=s.meta, frame=s.frame, geometry_cache=cache,
+                               head_atlas=s.head_atlas)
         except (OSError, GlbError, ValueError) as e:
             print(f"{s.name}: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
