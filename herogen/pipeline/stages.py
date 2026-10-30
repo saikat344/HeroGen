@@ -601,6 +601,12 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     }
     run.write_json("views/meta.json", meta)
     st.outputs.append("views/meta.json")
+    # Front-view part masks (face, head) for the later stages; imported here because parts uses the
+    # held-out module, which imports this one.
+    from herogen.pipeline.parts import write_part_masks
+
+    st.details["part_masks"] = write_part_masks(run, client)
+    st.outputs += [p["file"] for p in st.details["part_masks"].values() if p.get("file")] + ["masks/parts.json"]
     st.details.update({
         "image_size": size,
         "mask_method": meta["mask_method"],

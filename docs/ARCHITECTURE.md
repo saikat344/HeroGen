@@ -13,7 +13,7 @@ tested separately.
 | --- | --- | --- |
 | 0 input | `herogen/pipeline` | `00-sketch.png` (copied input) |
 | 1 cover art | `herogen/pipeline` | `01-cover.png` |
-| 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view) |
+| 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them) and `masks/parts.json` (their record) |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
 | 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png`, `04-body/pose-renders/*.png`; `04-body/low.glb` and `atlas-low.png` when the profile has a low LOD (`roblox-ingame`); for a SAM 3D Objects mesh also the comparison atlases `04-body/atlas-high-{no-source-fallback,side-trust}.png` |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
@@ -147,6 +147,18 @@ shortfall of 1, so a sheet that could not be split into four figures ranks below
 `stage-2.json` lists every attempt with its checks and `rank`, and `details.kept_attempt` names the kept
 one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
 sheet's. The top view is asked for only when the kept sheet passed.
+
+**Part masks.** After the views are cut, SAM 3.1 segments `face` and `head` on `views/front.png`
+(`herogen/pipeline/parts.py`). Each part keeps the most confident instance lying at least half on the front mask
+grown by 4 px, clipped to the figure, written as `masks/front-face.png` / `masks/front-head.png`.
+`masks/parts.json` records, per part, `file` (null when SAM found nothing on the figure), `method`, `instances`,
+`confidence` and `pixels`, or `api_error` and `error` when the Model API failed; the stage goes on either way, and
+`stage-2.json` holds the same record under `details.part_masks`. A replay miss stops the stage. The record is
+its own file, not a key in `views/meta.json`, because `views/meta.json` is one of the files whose hash ties the
+held-out views to the turnaround (`heldout.IDENTITY_FILES`): writing the part masks changes none of them.
+`python3 -m herogen.pipeline parts --run-id <id> [--live]` adds the part masks to a run made before stage 2
+wrote them, and writes no other file, so its accepted held-out views stay accepted. No stage reads the part
+masks in this version; stages 3 and 4 build exactly as without them.
 
 ## Stage 3: mesh source and joints
 

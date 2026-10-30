@@ -147,7 +147,7 @@ class HeldoutTest(unittest.TestCase):
         # Stage 2 itself is unchanged by the held-out views.
         s2 = json.loads((run / "stage-2.json").read_text())
         self.assertNotIn("heldout", json.dumps(s2["outputs"]))
-        self.assertAlmostEqual(s2["cost_usd"], 2 * (IMG + SAM))
+        self.assertAlmostEqual(s2["cost_usd"], 2 * (IMG + SAM) + 2 * SAM)   # + front-view face and head
         res = json.loads((run / "results.json").read_text())
         self.assertEqual([s["stage"] for s in res["stages"]], [0, 1, 2, "2h", 3, 4])
         html = (run / "results.html").read_text()
@@ -427,7 +427,8 @@ class HeldoutTest(unittest.TestCase):
         def flaky(c, endpoint, body):
             if endpoint == "responses" and body["input"][0]["content"][0]["text"] == "face":
                 faces.append(1)
-                if len(faces) == 4:  # after the sketch's (stage 1) and the two profiles': the first held-out view's
+                # Sketch, front part mask, left profile, right profile, then first held-out view.
+                if len(faces) == 5:
                     raise ApiError("responses failed: HTTP 500")
             return post(c, endpoint, body)
 
@@ -669,6 +670,29 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(self._live(FakeAPI(), "r", ["2h"], cache=cache), 0)
         ident = heldout.stage2_identity(RunFolder(self.root, "r"))
         self.assertEqual({d["stage2_identity"] for d in self._rec()["details"]["views"].values()}, {ident})
+
+    def test_parts_backfill_keeps_the_heldout_views(self):
+        # Held-out views accepted, then the part masks added to the run again (as for a run made before stage 2
+        # wrote them; replayed from the cache stage 2 filled): no turnaround file changes, so every view stays.
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = RunFolder(self.root, "r")
+        meta = (run.path / "views/meta.json").read_bytes()
+        before = (heldout.stage2_identity(run), heldout.accepted_views(run))
+        self.assertEqual(sorted(before[1]), sorted(VIEWS))
+        for rel in ("masks/parts.json", "masks/front-face.png", "masks/front-head.png"):
+            (run.path / rel).unlink(missing_ok=True)
+        env = {k: v for k, v in os.environ.items() if k != "MODEL_API_KEY"}
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["parts", "--run-id", "r", "--runs", str(self.root)]), 0)
+        self.assertTrue(run.exists("masks/parts.json"))
+        self.assertEqual((run.path / "views/meta.json").read_bytes(), meta)
+        self.assertEqual((heldout.stage2_identity(run), heldout.accepted_views(run)), before)
+        # Provenance still passes: remaking one view keeps the others, and a recheck keeps them accepted.
+        self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-30"]), 0)
+        self.assertEqual(sorted(heldout.accepted_views(run)), sorted(VIEWS))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["recheck", "--run-id", "r", "--runs", str(self.root)]), 0)
+        self.assertEqual(sorted(heldout.accepted_views(run)), sorted(VIEWS))
 
     def test_kept_views_are_judged_again_under_new_checks(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
