@@ -179,15 +179,14 @@ def identity_checks(
         reasoning_effort=p["reasoning_effort"], max_output_tokens=p["max_output_tokens"],
         image_max_side=p["image_max_side"], jpeg_quality=p["jpeg_quality"],
     )
-    verdict = answer.get("same_character")
-    if verdict not in ("yes", "no"):
-        raise PromptStageError(f"the identity check answered same_character={verdict!r}, not 'yes' or 'no'")
-    changes = {k: [str(x) for x in answer.get(k) or []] for k in ("added_props", "removed_props", "changed_hand")}
+    # compare_images has checked the answer against the version's schema (required fields, types, enums).
+    verdict = answer["same_character"]
+    changes = {k: list(answer[k]) for k in ("added_props", "removed_props", "changed_hand")}
     n_changes = sum(len(v) for v in changes.values())
     checks = [C.check("same_character", 1 if verdict == "yes" else 0, 1, op="==")]
     details: dict[str, Any] = {"answer": answer, "prop_changes": changes}
     if "body_changes" in step["schema"]["schema"]["properties"]:  # versions that ask about the body plan
-        body = [str(x) for x in answer.get("body_changes") or []]
+        body = list(answer["body_changes"])
         details["body_changes"] = body
         checks.append(C.check("body_changes", len(body), 0, op="=="))
     checks.append(C.check("prop_changes_reported", n_changes, 0, op="==", gate=False, note=PROP_NOTE))
