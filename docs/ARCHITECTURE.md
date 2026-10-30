@@ -208,6 +208,17 @@ shortfall of 1, so a sheet that could not be split into four figures ranks below
 one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
 sheet's. The top view is asked for only when the kept sheet passed.
 
+**Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
+stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the
+same joints, arm prior, voxel resolution and smoothing, with the mesh rasterised in numpy instead of rendered
+by Blender; on six stage-3 runs the two agreed to 1e-4 in every view). The worst view's silhouette IoU is gated
+with stage 3's own gate, `IOU_GATE` (0.90), and the note names the worst view and lists every IoU. Views that
+disagree (a staff in one view only, arms angled differently front and back, one leg hidden in the back) carve
+into a body that keeps only what every view shows, which stage 3 refuses; checked here, the sheet is generated
+again instead. A drawn top view is used only if the carve with it still passes the gate (stage 3 carves with
+an observed top view and gates its IoU); otherwise the visual-hull top is used and a note says why, and
+`details.carve_ious_with_drawn_top` records the IoUs that decided it.
+
 **Part masks.** After the views are cut, SAM 3.1 segments `face` and `head` on `views/front.png`
 (`herogen/pipeline/parts.py`). Each part keeps the most confident instance lying at least half on the front mask
 grown by 4 px, clipped to the figure, written as `masks/front-face.png` / `masks/front-head.png`.
