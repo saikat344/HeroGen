@@ -1,9 +1,9 @@
 """Stage 3 mesh source `sam3d-objects`: put SAM 3D Objects' textured GLB into the contract frame.
 
 SAM 3D Objects reconstructs the figure from the front view and its mask alone, as an object seen by a
-perspective camera. The shape and every choice here but one use that same front view; the one exception is the
-pitch, a rigid tilt the front view cannot see, which is registered on the observed left and right masks (step
-3b). Back, top, a view stage 2 derived from the others and the held-out views are never used:
+perspective camera. The shape uses that same front view. The pitch is registered on the observed left and
+right masks (step 3b); after remeshing, placement in depth is registered on the observed left, right and drawn
+top masks (step 7). Derived and held-out views are never used for either registration:
 
 1. Axes: glTF +Y up becomes +Z up (`glb.load_glb`, Blender's import convention). The vertices are welded
    (glTF splits them at UV seams) so the body is one surface; each face keeps its corner UVs into the source
@@ -22,7 +22,7 @@ pitch, a rigid tilt the front view cannot see, which is registered on the observ
    pitch. The pitch stays 0, with the reason recorded, unless both side views are observed (a missing, empty or
    derived mask counts as not), and when the side IoU varies by less than 0.02 over the sweep (flat), another
    peak more than 8 degrees away comes within 0.01 of the best (ambiguous), or the best lies beyond the +-20
-   degree limit. No Y offset is fitted: the frame stays centred on the bounding box (step 4), as each view's u
+   degree limit. No Y offset is fitted at this step: the frame stays centred on the bounding box (step 4), as each view's u
    is centred on its mask's box, and the pitch is chosen in that frame, so a part the mesh lacks or places
    differently (a tail, a pack), which moves a mask's box, can pull the pitch. This registers the model's pose
    only: the side masks never change its shape.
@@ -35,6 +35,12 @@ pitch, a rigid tilt the front view cannot see, which is registered on the observ
    when an odd number of surface crossings lie in front of it), blurred, made well-composed (no diagonal-only
    voxel contacts), surfaced with surface nets and Taubin smoothed like the carve, giving one closed manifold
    surface with the model's shape. The source mesh (with its UVs) is kept for the texture fallback.
+7. Register depth: each view's mask is placed by its own bounding box (`views.py`), so a Y-centred mesh lands
+   off the side masks whenever the mesh and a mask disagree about a part that sets the depth extent (a tail
+   hanging down in the mesh but sweeping back in the drawing, a pack the model left off). The mesh, and the
+   source mesh with it, is moved along Y by the whole-pixel offset that maximises the mean silhouette IoU of the
+   observed views that see depth (left, right, and the top view when it was drawn rather than derived by stage
+   2); the shape is not changed. Without such a view the offset is 0 and the record says why.
 """
 from __future__ import annotations
 
@@ -461,3 +467,67 @@ def remesh(verts: np.ndarray, faces: np.ndarray, height: float, nz: int = REMESH
     return v, f, {"voxel_size_studs": round(voxel, 5), "voxel_resolution": [int(x) for x in occ.shape],
                   "voxels_kept": int(occ.sum()), "voxels_raised_well_composed": raised, "dropped_island_faces": dropped, "blur_sigma_voxels": sigma,
                   "taubin_iterations": smooth_iters, "triangles": int(len(f))}
+
+
+# Views whose image axes include world Y, with the image axis and sign along which +Y moves the figure: left
+# (u = Y, columns), right (u = -Y, columns), top (v = Y, rows run down so +Y moves it up).
+DEPTH_VIEWS = {"left": (1, 1), "right": (1, -1), "top": (0, -1)}
+
+
+def shifted_iou(render: np.ndarray, mask: np.ndarray, axis: int, k: int) -> float:
+    """IoU of `mask` with `render` moved `k` whole pixels along image `axis` (0 rows, 1 columns), the pixels moved
+    off the image dropped."""
+    n = render.shape[axis]
+    if abs(k) >= n:
+        inter, area = 0, 0
+    else:
+        src = [slice(None), slice(None)]
+        dst = [slice(None), slice(None)]
+        src[axis] = slice(0, n - k) if k >= 0 else slice(-k, n)
+        dst[axis] = slice(k, n) if k >= 0 else slice(0, n + k)
+        moved = render[tuple(src)]
+        inter, area = int((moved & mask[tuple(dst)]).sum()), int(moved.sum())
+    union = area + int(mask.sum()) - inter
+    return inter / union if union else 0.0
+
+
+def register_depth(verts: np.ndarray, faces: np.ndarray, depth_views: dict[str, View]) -> tuple[float, dict]:
+    """The Y offset (studs) that best registers the mesh on `depth_views` (observed views that see Y, keyed by
+    name; see the module notes, step 7). Every candidate is a whole number of pixels, so one render per view is
+    shifted instead of re-rendered; ties go to the smallest move. Returns (offset, record)."""
+    names = [v for v in DEPTH_VIEWS if v in depth_views]
+    if not names:
+        return 0.0, {"offset_studs": 0.0, "views": [], "note": "no observed view sees depth; offset 0"}
+    pps = depth_views[names[0]].pps
+    renders, lo, hi = {}, [], []
+    for name in names:
+        view = depth_views[name]
+        r = raster.render_view(view, verts, faces).mask
+        axis, sign = DEPTH_VIEWS[name]
+        renders[name] = r
+        line_r, line_m = np.flatnonzero(r.any(axis=1 - axis)), np.flatnonzero(view.mask.any(axis=1 - axis))
+        if len(line_r) == 0:
+            continue
+        # every k (pixels of +Y) at which the moved render and the mask overlap along this axis
+        a, b = (line_m[0] - line_r[-1]) * sign, (line_m[-1] - line_r[0]) * sign
+        lo.append(min(a, b))
+        hi.append(max(a, b))
+    if not lo:
+        return 0.0, {"offset_studs": 0.0, "views": names, "note": "the mesh covers no pixel of the depth views"}
+
+    def mean_iou(k: int) -> float:
+        return float(np.mean([shifted_iou(renders[n], depth_views[n].mask, DEPTH_VIEWS[n][0], DEPTH_VIEWS[n][1] * k)
+                              for n in names]))
+
+    best_k, best = 0, mean_iou(0)
+    for k in sorted(range(int(min(lo)), int(max(hi)) + 1), key=lambda x: (abs(x), x)):
+        sc = mean_iou(k)
+        if sc > best + 1e-9:
+            best_k, best = k, sc
+    before = {n: round(shifted_iou(renders[n], depth_views[n].mask, 0, 0), 4) for n in names}
+    after = {n: round(shifted_iou(renders[n], depth_views[n].mask, DEPTH_VIEWS[n][0], DEPTH_VIEWS[n][1] * best_k), 4)
+             for n in names}
+    offset = best_k / pps
+    return offset, {"offset_studs": round(offset, 5), "offset_px": best_k, "views": names,
+                    "iou_before": before, "iou_after": after,
+                    "method": "whole-pixel Y offset maximising the mean silhouette IoU of these views"}

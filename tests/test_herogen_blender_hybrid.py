@@ -358,6 +358,86 @@ class TestPitchRegistration(HybridBase):
         self.assertTrue(rec["reason"].startswith("ambiguous"), rec["reason"])
 
 
+@unittest.skipUnless(HAVE_SCIPY, "scipy is required for the hybrid mesh path")
+class TestDepthRegister(HybridBase):
+    """Step 7 of the hybrid mesh: the Y offset registered on the observed views that see depth."""
+
+    def depth_views(self, names=("left", "right")):
+        return {n: self.vs.views[n] for n in names}
+
+    def test_shifted_iou_is_a_zero_filled_shift(self):
+        rng = np.random.default_rng(0)
+        a, b = rng.random((40, 50)) > 0.6, rng.random((40, 50)) > 0.5
+        for axis, k in ((1, 7), (1, -12), (0, 5), (0, -3), (1, 0), (1, 60)):
+            moved = np.zeros_like(a)
+            n = a.shape[axis]
+            if abs(k) < n:
+                src, dst = [slice(None)] * 2, [slice(None)] * 2
+                src[axis] = slice(0, n - k) if k >= 0 else slice(-k, n)
+                dst[axis] = slice(k, n) if k >= 0 else slice(0, n + k)
+                moved[tuple(dst)] = a[tuple(src)]
+            self.assertAlmostEqual(sam3d_mesh.shifted_iou(a, b, axis, k), sam3d_mesh.iou(moved, b), places=12)
+
+    def test_a_known_depth_offset_is_undone(self):
+        pps = self.vs.views["left"].pps
+        for views in (("left", "right"), ("left",), ("right",), ("top",)):
+            v = self.verts + np.array([0.0, 0.3, 0.0])
+            dy, rec = sam3d_mesh.register_depth(v, self.faces, self.depth_views(views))
+            self.assertAlmostEqual(dy, -0.3, delta=1.0 / pps, msg=views)
+            self.assertEqual(rec["views"], list(views))
+            self.assertAlmostEqual(rec["offset_studs"], round(rec["offset_px"] / pps, 5), places=5)
+            for n in views:                 # registered, the views match as well as the unmoved mesh does
+                truth = sam3d_mesh.iou(raster.render_view(self.vs.views[n], self.verts, self.faces).mask,
+                                       self.vs.views[n].mask)
+                self.assertGreater(rec["iou_after"][n], rec["iou_before"][n] + 0.05)
+                self.assertGreater(rec["iou_after"][n], truth - 0.01)
+                moved = raster.render_view(self.vs.views[n], v + np.array([0.0, dy, 0.0]), self.faces).mask
+                self.assertAlmostEqual(sam3d_mesh.iou(moved, self.vs.views[n].mask), rec["iou_after"][n], delta=0.003)
+
+    def test_a_part_the_masks_lack_does_not_move_the_body_off_them(self):
+        # A pack on the mesh's back that the drawing does not have: centring the mesh on its own Y extent moves
+        # the body forward by half the pack's extra depth; the registration puts it back on the side masks.
+        ymax = self.verts[:, 1].max()
+        box = np.array([[x, y, z] for x in (-0.4, 0.4) for y in (ymax - 0.1, ymax + 0.6) for z in (2.5, 3.5)])
+        quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+        bf = np.array([t for q in quads for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3]))]) + len(self.verts)
+        v = np.concatenate([self.verts, box])
+        f = np.concatenate([self.faces, bf])
+        lo, hi = v[:, 1].min(), v[:, 1].max()
+        centre = (lo + hi) / 2 - (self.verts[:, 1].min() + self.verts[:, 1].max()) / 2   # how far the box moved it
+        v = v - np.array([0.0, centre, 0.0])
+        dy, rec = sam3d_mesh.register_depth(v, f, self.depth_views())
+        self.assertGreater(centre, 0.25)
+        self.assertAlmostEqual(dy, centre, delta=2.0 / self.vs.views["left"].pps)
+        for n in ("left", "right"):
+            self.assertGreater(rec["iou_after"][n], rec["iou_before"][n] + 0.05)
+
+    def test_without_a_depth_view_the_offset_is_zero(self):
+        for views in ({}, {"front": self.vs.views["front"], "back": self.vs.views["back"]}):
+            dy, rec = sam3d_mesh.register_depth(self.verts + np.array([0.0, 0.3, 0.0]), self.faces, views)
+            self.assertEqual(dy, 0.0)
+            self.assertEqual(rec["views"], [])
+            self.assertIn("no observed view sees depth", rec["note"])
+
+    def test_a_derived_view_is_not_registered_on(self):
+        from herogen.blender import stage3
+
+        run = self.tmp / "derived-top"
+        synth.write_run(run, synth.humanoid(), size=384, ppu=60.0)
+        meta = json.loads((run / "views" / "meta.json").read_text())
+        meta["mask_method"] = {"top": "visual_hull"}
+        (run / "views" / "meta.json").write_text(json.dumps(meta))
+        vs = views.load_views(run, 5.5)
+        self.assertTrue(stage3._derived(vs, "top"))
+        self.assertFalse(stage3._derived(vs, "left"))
+        cache = self.tmp / "derived-top-cache"
+        self.replay_entries(run, cache)
+        from herogen.blender.record import StageRecord
+
+        _, _, info, _ = stage3._objects_mesh(run, vs, 5.5, rclient.RemoteClient(cache), StageRecord(run, 3, "x"))
+        self.assertEqual(info["depth_register"]["views"], ["left", "right"])
+
+
 class TestBodyJoints(HybridBase):
     def test_mapping_recovers_the_synthetic_joints(self):
         body = synthetic_body_result(self.truth, self.vs.views["front"])
@@ -479,6 +559,18 @@ class TestStage3SourcesWithoutBlender(HybridBase):
         self.assertFalse((run / "03-source.glb").exists())          # kept by run_stage3 once the source is used
         self.assertTrue((stage3.work_dir(run) / "03-source-uv.npz").exists())
         self.assertEqual(info["facing_deg"], 0.0)
+        # step 7: registered on every observed depth view (the synthetic top view is drawn, not derived), and the
+        # source mesh the texture fallback reads moved with the mesh (both were centred on their Y extent)
+        reg = info["depth_register"]
+        self.assertEqual(reg["views"], ["left", "right", "top"])
+        dy = reg["offset_px"] / vs.pps
+        self.assertAlmostEqual((verts[:, 1].min() + verts[:, 1].max()) / 2, dy, places=6)
+        src_v = np.load(stage3.work_dir(run) / "03-source-uv.npz")["verts"]
+        self.assertAlmostEqual((src_v[:, 1].min() + src_v[:, 1].max()) / 2, dy, places=6)
+        for n in reg["views"]:
+            self.assertGreaterEqual(reg["iou_after"][n] + 1e-9, min(reg["iou_before"].values()) - 0.02)
+            self.assertAlmostEqual(sam3d_mesh.iou(raster.render_view(vs.views[n], verts, faces).mask, vs.views[n].mask),
+                                   reg["iou_after"][n], delta=0.002)
         self.assertTrue(info["remote"]["cached"])
         self.assertEqual(rec.data["models"], ["sam-3d-objects"])
         self.assertEqual(rec.data["cost_usd"], 0.0)              # replayed: no new spend
