@@ -69,9 +69,9 @@ class InputRejected(RuntimeError):
 
 
 class GateFailed(RuntimeError):
-    def __init__(self, stage: int, record: dict[str, Any]) -> None:
+    def __init__(self, stage: int | str, record: dict[str, Any], message: str = "") -> None:
         failed = [c["name"] for c in record["checks"] if c.get("gate", True) and not c["pass"]]
-        super().__init__(f"stage {stage} gate failed: {', '.join(failed)}")
+        super().__init__(message or f"stage {stage} gate failed: {', '.join(failed)}")
         self.stage = stage
         self.record = record
 
@@ -79,7 +79,7 @@ class GateFailed(RuntimeError):
 class _Stage:
     """Collects one stage's record and writes `stage-<n>.json`."""
 
-    def __init__(self, run: RunFolder, client: ModelClient | None, n: int, name: str) -> None:
+    def __init__(self, run: RunFolder, client: ModelClient | None, n: int | str, name: str) -> None:
         self.run, self.client, self.n, self.name = run, client, n, name
         self.started = now_iso()
         self.t0 = time.monotonic()
@@ -112,15 +112,15 @@ class _Stage:
             "details": self.details,
         }
 
-    def finish(self, adjust: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    def finish(self, adjust: Callable[[dict[str, Any]], None] | None = None, fail_message: str = "") -> dict[str, Any]:
         """Write the record (after ``adjust`` edits it, if given); raise `GateFailed` (after writing) when a
-        gated check failed."""
+        gated check failed, with ``fail_message`` as its message when given."""
         record = self._record()
         if adjust is not None:
             adjust(record)
         self.run.write_stage(record)
         if not record["ok"]:
-            raise GateFailed(self.n, record)
+            raise GateFailed(self.n, record, fail_message)
         return record
 
     def fail(self, error: str, status: str = "error") -> dict[str, Any]:
@@ -240,12 +240,18 @@ def _finish_input_checks(st: _Stage) -> None:
     st.notes += [f"Warning: {c['message']}." for c in inputs.warnings(st.checks)]
 
 
-def stage0_input(run: RunFolder, sketch_path: Path, label: str = "") -> dict[str, Any]:
+def stage0_input(
+    run: RunFolder, sketch_path: Path, label: str = "", origin: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Copy the sketch into the run. ``origin`` names where a generated sketch came from (stage p and its prompt
+    version), so the run records it."""
     st = _Stage(run, None, 0, "input")
     img = Image.open(sketch_path).convert("RGB")  # re-encoded: drops EXIF and other metadata
     st.save_image("00-sketch.png", img)
     w, h = img.size
     st.details = {"width": w, "height": h, "source_name": Path(sketch_path).name, "label": label}
+    if origin:
+        st.details["origin"] = origin
     if label:
         st.notes.append(f"Input is a {label}.")
     st.checks = [inputs.size_check(w, h), inputs.contrast_check(img)]

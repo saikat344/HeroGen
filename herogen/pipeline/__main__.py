@@ -1,4 +1,6 @@
-"""CLI: `python3 -m herogen.pipeline run <sketch.png> --run-id <id> [--stages 0-2,5] [--live]`.
+"""CLI: `python3 -m herogen.pipeline run <sketch.png> --run-id <id> [--stages 0-2,5] [--live]`, or start from a text
+prompt instead of a sketch with `run --prompt "<character>"` (stage p, then stage 0 takes its full-body image), or
+`prompt "<character>" --run-id <id>` for stage p alone.
 
 Stage 2 is followed by the held-out views (`2h`) when it passes. `--stages 2h` makes only the held-out views
 for a run whose stage 2 already passed, leaving every earlier output untouched; it prints each view's status
@@ -29,19 +31,23 @@ import sys
 from pathlib import Path
 
 from herogen.pipeline import inputs
+from herogen import prompts
 from herogen.pipeline.client import ApiError, ClientError, ModelClient
 from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
+from herogen.pipeline.prompt_sketch import SKETCH as PROMPT_SKETCH
+from herogen.pipeline.prompt_sketch import PromptStageError, stagep_prompt
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
 from herogen.pipeline.stages import GateFailed, InputRejected, stage0_input, stage1_cover, stage2_turnaround
 from herogen.pipeline.results import stage5_results
 
 OWN_STAGES = {0, 1, 2, 5}
 HELDOUT = "2h"
-Stage = int | str  # 0, 1, 2, 5 or "2h"
+PROMPT = "p"
+Stage = int | str  # "p", 0, 1, 2, 5 or "2h"
 
 
 def _order(s: Stage) -> float:
-    return 2.5 if s == HELDOUT else float(s)
+    return {HELDOUT: 2.5, PROMPT: -1.0}.get(s, s)  # type: ignore[arg-type]
 
 STAND_IN_PROMPT = (
     "A rough hand-drawn pencil sketch on plain white paper of a video game hero character, full body, standing, "
@@ -51,14 +57,14 @@ STAND_IN_PROMPT = (
 
 
 def parse_stages(spec: str) -> list[Stage]:
-    """'0-2,5' -> [0, 1, 2, 5]; '2h' -> ['2h']. Only stages this package owns are accepted."""
+    """'0-2,5' -> [0, 1, 2, 5]; '2h' -> ['2h']; 'p,0-2' -> ['p', 0, 1, 2]. Only stages this package owns."""
     out: set[Stage] = set()
     for part in spec.split(","):
         part = part.strip().lower()
         if not part:
             continue
-        if part == HELDOUT:
-            out.add(HELDOUT)
+        if part in (HELDOUT, PROMPT):
+            out.add(part)
         elif "-" in part:
             a, b = (int(x) for x in part.split("-", 1))
             if a > b:
@@ -66,7 +72,7 @@ def parse_stages(spec: str) -> list[Stage]:
             out.update(range(a, b + 1))
         else:
             out.add(int(part))
-    foreign = sorted(s for s in out if s != HELDOUT and s not in OWN_STAGES)
+    foreign = sorted(s for s in out if s not in (HELDOUT, PROMPT) and s not in OWN_STAGES)
     if foreign:
         raise ValueError(f"stages {foreign} are not run by herogen.pipeline (3-4 are herogen/blender)")
     return sorted(out, key=_order)
@@ -92,7 +98,18 @@ def run_pipeline(
     cache: str | None = None,
     label: str = "",
     views: list[str] | None = None,
+    prompt: str | None = None,
+    prompt_version: str | None = None,
 ) -> int:
+    """Run the stages in order. With ``prompt``, stage p draws the sketch and stage 0 copies its full-body image;
+    stage 0 without a sketch path also takes the run's stage p image when stage p passed earlier."""
+    if prompt is not None and sketch is not None:
+        raise ValueError("give a sketch or a prompt, not both")
+    if prompt is not None and PROMPT not in stages:
+        stages = [PROMPT, *stages]
+    if PROMPT in stages and prompt is None:
+        raise ValueError("stage p needs a prompt (--prompt)")
+    version = prompts.selected("prompt_sketch", prompt_version) if PROMPT in stages else None
     root = runs_root(runs)
     run = RunFolder(root, run_id)
     client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode)
@@ -104,10 +121,14 @@ def run_pipeline(
     for n in pipeline:
         began = now_iso()
         try:
-            if n == 0:
+            if n == PROMPT:
+                rec = stagep_prompt(run, client, prompt, version=version)
+            elif n == 0:
                 if sketch is None:
-                    raise ValueError("stage 0 needs a sketch path")
-                rec = stage0_input(run, sketch, label=label)
+                    sketch, label, origin = _prompt_sketch(run, label)
+                    rec = stage0_input(run, sketch, label=label, origin=origin)
+                else:
+                    rec = stage0_input(run, sketch, label=label)
             elif n == 1:
                 rec = stage1_cover(run, client)
             elif n == 2:
@@ -129,6 +150,10 @@ def run_pipeline(
             print(f"stage {n}: input rejected: {e}; stopping", file=sys.stderr)
             status = 3
             break
+        except PromptStageError as e:
+            print(f"stage {n}: error: {e}; stopping", file=sys.stderr)
+            status = 1
+            break
         except Exception as e:  # noqa: BLE001  (report, stop, still write results)
             what = "the Model API failed" if isinstance(e, ApiError) else f"error: {type(e).__name__}"
             print(f"stage {n}: {what}: {e}; stopping", file=sys.stderr)
@@ -141,6 +166,16 @@ def run_pipeline(
         data = stage5_results(run)
         print(f"stage 5 results: {run.path / 'results.html'} (total ${data['total_cost_usd']:.4f} est)")
     return status
+
+
+def _prompt_sketch(run: RunFolder, label: str) -> tuple[Path, str, dict]:
+    """Stage 0's input when no sketch path is given: the full-body image of this run's passing stage p."""
+    rec = run.read_stage(PROMPT)  # type: ignore[arg-type]
+    if not rec or not rec.get("ok") or not run.exists(PROMPT_SKETCH):
+        raise ValueError("stage 0 needs a sketch path, or a passing stage p in this run (--prompt)")
+    version = rec["details"]["prompt_version"]
+    origin = {"stage": PROMPT, "image": PROMPT_SKETCH, "prompt_version": version}
+    return run.path / PROMPT_SKETCH, label or f"sketch drawn from a prompt ({version['name']})", origin
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,6 +210,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     p.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     p.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
+    r.add_argument("--prompt", default=None, help="start from a text prompt instead of a sketch (adds stage p)")
+    r.add_argument("--prompt-version", default=None, help="prompt version for stage p (default: herogen/prompts)")
+    q = sub.add_parser("prompt", help="stage p only: draw a full-body sketch from a text prompt")
+    q.add_argument("text", help="the character, e.g. 'a knight in battered plate armour'")
+    q.add_argument("--run-id", required=True)
+    q.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
+    q.add_argument("--runs", default=None)
+    q.add_argument("--cache", default=None)
+    q.add_argument("--prompt-version", default=None, help="prompt version (default: herogen/prompts)")
     s = sub.add_parser("stand-in", help="draw a stand-in pencil sketch with muse-image-1.0")
     s.add_argument("out", type=Path)
     s.add_argument("--live", action="store_true")
@@ -189,10 +233,14 @@ def main(argv: list[str] | None = None) -> int:
         views = [x.strip() for x in a.views.split(",") if x.strip()] if a.views else None
         if views and HELDOUT not in stages and 2 not in stages:
             ap.error("--views needs stage 2h")
-        return run_pipeline(
-            a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
-            runs=a.runs, cache=a.cache, label=a.label, views=views,
-        )
+        try:
+            return run_pipeline(
+                a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
+                runs=a.runs, cache=a.cache, label=a.label, views=views, prompt=a.prompt,
+                prompt_version=a.prompt_version,
+            )
+        except (ValueError, prompts.RegistryError) as e:
+            ap.error(str(e))
     if a.cmd == "recheck":
         try:
             rec = recheck_heldout(RunFolder(runs_root(a.runs), a.run_id))
@@ -214,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
               f"{'passes' if rec['ok'] else 'does not pass'}")
         _print_heldout(rec)
         return 0
+    if a.cmd == "prompt":
+        try:
+            return run_pipeline(None, a.run_id, [PROMPT], mode="live" if a.live else "replay", runs=a.runs,
+                                cache=a.cache, prompt=a.text, prompt_version=a.prompt_version)
+        except (ValueError, prompts.RegistryError) as e:
+            ap.error(str(e))
     root = runs_root(a.runs)
     client = ModelClient(Path(a.cache) if a.cache else root / "_cache", mode="live" if a.live else "replay")
     if a.cmd == "parts":
