@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release rules for the hosted service: which tag deploys where, and what a deploy needs.
 
+Releases are trunk plus tags: every release tag must point at a commit on main (an ancestor of origin/main).
 A tag `vX.Y.Z-rc.N` deploys the service to the `staging` GitHub environment. A tag `vX.Y.Z` deploys it to
 `production`, and only when the same commit also carries a tag `vX.Y.Z-rc.N` (any N) and the `staging`
 environment has a successful deployment of that commit. Any other tag is refused. X, Y, Z and N are whole numbers
@@ -10,8 +11,8 @@ code.
 Standard library only (the deploy itself runs the Modal CLI from tools/release/requirements.txt).
 
 Usage, from the repository root:
-  release.py plan <tag>            check the tag (and, for production, its rc tag and its staging deployment);
-                                   print the environment
+  release.py plan <tag>            check the tag and that its commit is on origin/main (and, for production,
+                                   its rc tag and its staging deployment); print the environment
   release.py check <tag>           check that the service's Modal app is in the commit, every deploy
                                    setting is set (names what is missing, never a secret's value) and the
                                    custom domain is the base URL's host
@@ -43,6 +44,8 @@ PRODUCTION = "production"
 _NUM = r"(?:0|[1-9][0-9]*)"
 # Matched whole (fullmatch), so a trailing newline is refused too.
 TAG = re.compile(rf"v(?P<version>{_NUM}\.{_NUM}\.{_NUM})(?:-rc\.(?P<rc>{_NUM}))?")
+# The trunk every release tag's commit must be on, as the plan job fetches it.
+MAIN_REF = "refs/remotes/origin/main"
 TAG_FORMAT = "vX.Y.Z-rc.N (staging) or vX.Y.Z (production), where X, Y, Z and N are numbers without leading zeros"
 
 # The service's Modal app (herogen/service/modal_app.py), deployed as a module from the repository root.
@@ -117,6 +120,11 @@ class Git(Protocol):
 
     def tags_at(self, commit: str) -> list[str]: ...
 
+    def on_main(self, commit: str) -> bool:
+        """Whether `commit` is an ancestor of (or is) the tip of MAIN_REF; a ReleaseError when MAIN_REF is
+        unknown."""
+        ...
+
 
 class LocalGit:
     """The repository's own tags, through the git command (the checkout must hold every tag)."""
@@ -138,6 +146,18 @@ class LocalGit:
 
     def tags_at(self, commit: str) -> list[str]:
         return [t for t in self._git("tag", "--points-at", commit).splitlines() if t.strip()]
+
+    def on_main(self, commit: str) -> bool:
+        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{MAIN_REF}^{{commit}}"], cwd=self.cwd,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise ReleaseError(f"{MAIN_REF} is not in this checkout, so a release tag cannot be checked against main. "
+                               "Fetch it first: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main")
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", commit, MAIN_REF], cwd=self.cwd,
+                           capture_output=True, text=True)
+        if r.returncode in (0, 1):
+            return r.returncode == 0
+        raise ReleaseError(f"git merge-base --is-ancestor {commit} {MAIN_REF} failed: {r.stderr.strip()}")
 
 
 def rc_tags_at(tag: Tag, tags: Sequence[str]) -> list[str]:
@@ -297,12 +317,17 @@ class Plan:
 
 
 def plan(name: str, git: Git, deployments: Callable[[], Deployments]) -> Plan:
-    """Where tag `name` deploys. Production is refused unless the tag's commit carries an rc tag of its version
-    and has a successful `staging` deployment. `deployments` is called only for a production tag."""
+    """Where tag `name` deploys. Any tag whose commit is not on main is refused; production is refused unless the
+    tag's commit also carries an rc tag of its version and has a successful `staging` deployment. `deployments` is
+    called only for a production tag."""
     tag = parse_tag(name)
     commit = git.commit_of(tag.name)
     if not commit:
         raise ReleaseError(f"tag {tag.name} is not in this checkout, so its commit is unknown.")
+    if not git.on_main(commit):
+        raise ReleaseError(f"tag {tag.name} points at commit {commit}, which is not on main ({MAIN_REF}). Release "
+                           "tags must point at a commit on main: merge the change into main, then tag a commit on "
+                           "main with a new tag.")
     if tag.is_rc:
         return Plan(tag, commit, ())
     rcs = rc_tags_at(tag, git.tags_at(commit))

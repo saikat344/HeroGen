@@ -1,8 +1,9 @@
 name: release
 
-# A tag vX.Y.Z-rc.N deploys the hosted service to staging; a tag vX.Y.Z deploys it to production, only when the
-# same commit carries a vX.Y.Z-rc.N tag and staging has a successful deployment of that commit. The rules are
-# tools/release/release.py; docs/ARCHITECTURE.md ("Releases") describes the flow and the settings it needs.
+# Release tags must point at a commit on main. A tag vX.Y.Z-rc.N deploys the hosted service to staging; a tag
+# vX.Y.Z deploys it to production, only when the same commit carries a vX.Y.Z-rc.N tag and staging has a
+# successful deployment of that commit. The rules are tools/release/release.py; docs/ARCHITECTURE.md
+# ("Releases") describes the flow and the settings it needs.
 
 on:
   push:
@@ -27,6 +28,9 @@ jobs:
           # Every tag, to find the rc tags on a production tag's commit.
           fetch-depth: 0
           persist-credentials: false
+      # Release tags must point at a commit on main; fetch its tip explicitly so origin/main exists.
+      - name: Fetch main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

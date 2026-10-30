@@ -1,5 +1,5 @@
-"""Release rules (tools/release/release.py): tag format, rc and final tags, the rc check, the staging deployment
-check (with faked GitHub API answers, never the network), deploy settings."""
+"""Release rules (tools/release/release.py): tag format, tags on main, rc and final tags, the rc check, the
+staging deployment check (with faked GitHub API answers, never the network), deploy settings."""
 from __future__ import annotations
 
 import contextlib
@@ -35,11 +35,15 @@ SETTINGS = {
 
 
 class FakeGit:
-    """Tags by commit; commit_of answers for every tag listed."""
+    """Tags by commit; commit_of answers for every tag listed. Every commit is on main but those in `off_main`."""
 
-    def __init__(self, tags: dict[str, list[str]]) -> None:
+    def __init__(self, tags: dict[str, list[str]], off_main: tuple[str, ...] = ()) -> None:
         self.tags = tags
+        self.off_main = off_main
         self.asked: list[str] = []
+
+    def on_main(self, commit: str) -> bool:
+        return commit not in self.off_main
 
     def commit_of(self, tag: str) -> str:
         return next((c for c, ts in self.tags.items() if tag in ts), "")
@@ -175,6 +179,17 @@ class Plan(unittest.TestCase):
             R.plan("v1.4.0", FakeGit({COMMIT: ["v1.4.0", "v1.4.0-rc.1"]}), lambda: api)
         self.assertTrue(str(e.exception).startswith("v1.4.0 cannot deploy to production yet"))
         self.assertIn("Re-run this workflow once it has succeeded", str(e.exception))
+
+    def test_tags_off_main_are_refused(self):
+        for name in ("v1.4.0-rc.1", "v1.4.0"):
+            with self.subTest(name=name):
+                git = FakeGit({COMMIT: ["v1.4.0-rc.1", "v1.4.0"]}, off_main=(COMMIT,))
+                with self.assertRaises(R.ReleaseError) as e:
+                    R.plan(name, git, never)
+                msg = str(e.exception)
+                self.assertIn(f"tag {name} points at commit {COMMIT}, which is not on main", msg)
+                self.assertIn("Release tags must point at a commit on main", msg)
+                self.assertEqual(git.asked, [])
 
     def test_unknown_tag_and_bad_format(self):
         with self.assertRaises(R.ReleaseError) as e:
@@ -585,8 +600,8 @@ class Deploy(RootCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not on PATH")
-class LocalGitTags(unittest.TestCase):
-    """LocalGit on a real repository: lightweight and annotated tags, peeled to their commit."""
+class GitRepoCase(unittest.TestCase):
+    """A throwaway git repository, isolated from the user's and the system's git config."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -606,6 +621,10 @@ class LocalGitTags(unittest.TestCase):
         self.git("commit", "-q", "-m", name)
         return self.git("rev-parse", "HEAD")
 
+
+class LocalGitTags(GitRepoCase):
+    """LocalGit on a real repository: lightweight and annotated tags, peeled to their commit."""
+
     def test_plan_on_real_tags(self):
         first = self.commit("a")
         self.git("tag", "v1.0.0-rc.1")
@@ -613,6 +632,7 @@ class LocalGitTags(unittest.TestCase):
         second = self.commit("b")
         self.git("tag", "-a", "-m", "release", "v1.1.0")
         self.git("tag", "v1.1.0-rc.1", first)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         g = R.LocalGit(self.root)
         self.assertEqual(g.commit_of("v1.0.0"), first)
         self.assertEqual(g.commit_of("v1.1.0"), second)
@@ -623,6 +643,50 @@ class LocalGitTags(unittest.TestCase):
         self.assertEqual(R.plan("v1.1.0-rc.1", g, never).environment, "staging")
         with self.assertRaises(R.ReleaseError):
             R.plan("v1.1.0", g, never)
+
+
+class LocalGitMain(GitRepoCase):
+    """Release tags on a real repository must point at a commit on origin/main."""
+
+    def setUp(self):
+        super().setUp()
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
+        self.base = self.commit("base")
+        self.git("tag", "v1.0.0-rc.1")
+        self.git("update-ref", "refs/remotes/origin/main", "main")
+        self.g = R.LocalGit(self.root)
+
+    def test_commit_on_main_passes(self):
+        self.assertTrue(self.g.on_main(self.base))
+        self.assertEqual(R.plan("v1.0.0-rc.1", self.g, never).environment, "staging")
+
+    def test_side_branch_refused_until_merged(self):
+        self.git("checkout", "-q", "-b", "side")
+        side = self.commit("side")
+        self.git("tag", "v1.1.0-rc.1")
+        self.git("tag", "v1.1.0")
+        self.assertFalse(self.g.on_main(side))
+        for name in ("v1.1.0-rc.1", "v1.1.0"):
+            with self.subTest(name=name):
+                with self.assertRaises(R.ReleaseError) as e:
+                    R.plan(name, self.g, never)
+                self.assertIn(f"tag {name} points at commit {side}, which is not on main", str(e.exception))
+        # Merged later (and main moved on), the same tags pass.
+        self.git("checkout", "-q", "main")
+        self.commit("main-only")
+        self.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+        self.git("update-ref", "refs/remotes/origin/main", "main")
+        self.assertTrue(self.g.on_main(side))
+        self.assertEqual(R.plan("v1.1.0-rc.1", self.g, never).environment, "staging")
+        api = FakeDeployments({7: (side, ["success"])})
+        self.assertEqual(R.plan("v1.1.0", self.g, lambda: api).environment, "production")
+
+    def test_local_main_alone_is_not_origin_main(self):
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        with self.assertRaises(R.ReleaseError) as e:
+            R.plan("v1.0.0-rc.1", self.g, never)
+        self.assertIn("refs/remotes/origin/main is not in this checkout", str(e.exception))
+        self.assertIn("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main", str(e.exception))
 
 
 if __name__ == "__main__":

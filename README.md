@@ -181,9 +181,10 @@ needs `torch` and `pytorch3d`, which only the SAM 3D Objects image installs, so 
 
 ## Releases
 
-Tags deploy the hosted service (`herogen/service`) to Modal through `.github/workflows/release.yml`: `vX.Y.Z-rc.N`
-to staging, then `vX.Y.Z` on the same commit to production once its staging deploy has succeeded, each after the
-tests pass. Any other tag starting with `v` fails. Deploying needs the service code in the tagged commit. The
+Tags on a commit on `main` deploy the hosted service (`herogen/service`) to Modal through
+`.github/workflows/release.yml`: `vX.Y.Z-rc.N` to staging, then `vX.Y.Z` on the same commit to production once
+its staging deploy has succeeded, each after the tests pass. Any other tag starting with `v`, and any tag on a
+commit that is not on `main`, fails. Deploying needs the service code in the tagged commit. The
 rules, the secrets and variables each GitHub environment needs, and how to roll back are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#releases).
 

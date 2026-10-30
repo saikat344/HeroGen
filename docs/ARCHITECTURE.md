@@ -758,6 +758,11 @@ into the tagged commit. A tag on a commit without that file passes the tag check
 first step of the deploy job with `herogen/service/modal_app.py is not in this commit, so there is no service to
 deploy`.
 
+Releases are trunk plus tags: every release tag, rc or final, must point at a commit on `main`, that is, its
+commit is an ancestor of (or is) the tip of `origin/main`. A tag on a commit only on another branch deploys nothing,
+whatever its name; merge the change into `main` and tag a commit there with a new tag. A commit that was on a side
+branch passes once it has been merged into `main`.
+
 | Tag | Deploys to | Only when |
 | --- | --- | --- |
 | `vX.Y.Z-rc.N` | the `staging` GitHub environment | always |
@@ -771,7 +776,10 @@ both work; an annotated tag is read as the commit it points at.
 ### Jobs
 
 1. **plan** checks the tag (`release.py plan <tag>`) and passes the environment, `staging` or `production`, to
-   the deploy job. For a production tag it also:
+   the deploy job. It fetches `main` explicitly
+   (`git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main`) and refuses any tag whose commit is not
+   an ancestor of `origin/main` (`git merge-base --is-ancestor`), naming the tag and the commit; it also refuses
+   when `origin/main` cannot be resolved. For a production tag it also:
    - lists the tags on the tag's commit (`git tag --points-at`, on a checkout holding every tag) and refuses unless
      one is an rc tag of the same version;
    - asks GitHub's deployments API for the `staging` deployments of that commit (`environment=staging`,
