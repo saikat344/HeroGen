@@ -96,7 +96,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertIn("consistency", rec["details"]["reference_note"])
         self.assertEqual(rec["details"]["build_azimuths_deg"], [45.0 * i for i in range(8)])
         self.assertEqual(rec["details"]["azimuth_clearance_deg"], 10.0)
-        self.assertEqual(rec["details"]["fit_error_deg"], [-8.6, 2.1])
+        self.assertEqual(rec["details"]["fit_error_deg"], [-8.7, 2.0])
         self.assertEqual(rec["details"]["checks_version"], heldout.checks_version())
         self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")),
                          {v.name: heldout.view_paths(v)["image"] for v in heldout.VIEWS})

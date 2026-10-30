@@ -583,16 +583,16 @@ class HeldoutChecksTest(unittest.TestCase):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["plain"])
             self.assertEqual(status, "rejected", (name, yaw))
             self.assertIn("found_yaw_window_miss_deg", _failed(checks))
-        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 5.1)
-        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 7.6)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 5.0)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 7.7)
         self.assertEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -60.0), 0.0)
 
     def test_windows_keep_every_allowed_true_yaw_clear(self):
         # The windows follow from the measured fit error: the 30-degree one ends below its target.
-        self.assertEqual(heldout.FIT_ERROR_DEG, (-8.6, 2.1))
+        self.assertEqual(heldout.FIT_ERROR_DEG, (-8.7, 2.0))
         self.assertEqual([tuple(round(e, 6) for e in v.window_deg) for v in heldout.VIEWS],
-                         [(25.0, 26.4)] * 2 + [(57.1, 65.0)] * 2)
-        self.assertEqual([round(v.aim_deg, 6) for v in heldout.VIEWS], [25.7, 25.7, 61.05, 61.05])
+                         [(25.0, 26.3)] * 2 + [(57.0, 65.0)] * 2)
+        self.assertEqual([round(v.aim_deg, 6) for v in heldout.VIEWS], [25.65, 25.65, 61.0, 61.0])
         for view in heldout.VIEWS:
             for edge in view.window_deg:
                 rng = heldout.yaw_range(math.copysign(edge, view.yaw_deg))
@@ -612,7 +612,7 @@ class HeldoutChecksTest(unittest.TestCase):
 
     def test_building_azimuths_rejected(self):
         # Found at or near a building azimuth, or where the measured error lets the true yaw come within
-        # AZIMUTH_CLEARANCE_DEG of one: the target 30 itself (its true yaw can be 38.6), and 55-57 at 60.
+        # AZIMUTH_CLEARANCE_DEG of one: the target 30 itself (its true yaw can be 38.7), and 55-56.5 at 60.
         for name, yaw in (("front-left-30", 0), ("front-left-30", 5), ("front-left-30", 30),
                           ("front-left-30", 42), ("front-right-60", -45), ("front-right-60", -50),
                           ("front-left-60", 55), ("front-left-60", 56.5), ("front-left-60", 85)):
@@ -644,7 +644,7 @@ class HeldoutChecksTest(unittest.TestCase):
             self.assertEqual(_failed(checks), ["turn_measured", "arm_angle_measured", "facing_cues_for"])
             self.assertIn(why, next(c for c in checks if c["name"] == "turn_measured")["note"])
             self.assertIsNone(m["found_yaw_deg"])
-        self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.7, None), 25.7)
+        self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.65, None), 25.65)
 
     def test_arm_drift_does_not_move_the_found_yaw(self):
         # Arms held 5 or 8 degrees higher or lower than the turnaround's: the arms are not in the turn fit.
