@@ -220,6 +220,17 @@ class TestCloseupBake(FaceBase):
         self.assertGreater(stats["closeups"]["texels_with_closeup_detail"], 0)
 
 
+class TestEmptySection(FaceBase):
+    def test_an_empty_section_bakes_a_blank_texture(self):
+        # stage 4 bakes the Head alone: an empty Head must reach stage 4's gates, not stop the bake
+        empty = {"Head": Section("Head", self.verts, np.zeros((0, 3), dtype=np.int64), CENTRE, [], 0)}
+        tex, stats, _ = texture.bake(empty, {"Head": np.zeros((0, 3, 2))}, self.views, 64,
+                                     closeups={"front": closeup()})
+        self.assertEqual(tex.shape, (64, 64, 3))
+        self.assertFalse(tex.any())
+        self.assertEqual(stats["texels_used"], 0)
+
+
 class TestLoadCloseups(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

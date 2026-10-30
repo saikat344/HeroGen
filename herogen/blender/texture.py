@@ -296,6 +296,11 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         pos.append(tri)
         uv.append(uvs[name])
         nrm.append(n / np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None])
+    if not pos:
+        # nothing to bake (an empty section, say the Head of a broken body): a blank texture, so stage 4 reaches
+        # its gates (`sections_non_empty`) and fails there with a clear error instead of here
+        return np.zeros((size, size, 3), dtype=np.uint8), {"texels_used": 0, "atlas_fill": 0.0,
+                                                           "notes": ["no faces to bake"]}, zbuf
     pos, uv, nrm = np.concatenate(pos), np.concatenate(uv), np.concatenate(nrm)
     tidx, p3, tri = _texels(pos, uv, size)
     n3 = nrm[tri]
