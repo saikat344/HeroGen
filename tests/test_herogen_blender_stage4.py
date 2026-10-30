@@ -215,7 +215,7 @@ class TestEndToEndBlender(SyntheticBase):
         from herogen.blender.stage3 import run_stage3
         from herogen.blender.stage4 import run_stage4
 
-        r3 = run_stage3(self.rundir, nz=128, timeout=300)
+        r3 = run_stage3(self.rundir, nz=128, timeout=300, mesh_source="carve", joints_source="silhouette")
         self.assertTrue(r3["ok"], r3["checks"])
         r4 = run_stage4(self.rundir, timeout=600, profile="roblox-ingame")
         self.assertTrue(r4["ok"], r4["checks"])
@@ -269,7 +269,7 @@ class TestEndToEndBlender(SyntheticBase):
 
         run = self.tmp / "cli"
         synth.write_run(run, synth.humanoid(arm_angle_deg=45), size=384, ppu=60.0)
-        self.assertTrue(run_stage3(run, nz=128, timeout=300)["ok"])
+        self.assertTrue(run_stage3(run, nz=128, timeout=300, mesh_source="carve", joints_source="silhouette")["ok"])
         (run / "blender-work" / "03-mesh.npz").unlink()
         root = Path(__file__).resolve().parents[1]
         proc = subprocess.run([sys.executable, "-m", "herogen.blender", "run", "--run", str(run), "--stages", "4",

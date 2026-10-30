@@ -213,9 +213,40 @@ def _body_joints(run: Path, vs, height: float, verts, faces, remote, rec: StageR
 
 
 def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
-               mesh_source: str = "carve", joints_source: str = "silhouette", remote=None,
+               mesh_source: str = "sam3d-objects", joints_source: str = "sam3d-body", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
                body_detector: str | None = None) -> dict:
+    """Build the hybrid by default; a failed hybrid build retries the local carve once, with a reason.
+
+    Quality rejection is a completed build and never triggers another constructor. Spend from a failed
+    attempt remains in the same record. ``fallback=False`` preserves the original build error.
+    """
+    if mesh_source not in MESH_SOURCES or joints_source not in JOINT_SOURCES:
+        raise ValueError(f"mesh_source in {MESH_SOURCES}, joints_source in {JOINT_SOURCES}")
+    (run / "stage-3.json").unlink(missing_ok=True)
+    rec = StageRecord(run, 3, "base mesh")
+    rec.data.update(mesh_source_requested=mesh_source, joints_source_requested=joints_source, fallback=None)
+    kwargs = dict(height=height, nz=nz, timeout=timeout, remote=remote, y_method=y_method,
+                  limb_roots=limb_roots, body_detector=body_detector, rec=rec)
+    from .remote.client import RemoteError
+
+    try:
+        return _run_stage3(run, mesh_source=mesh_source, joints_source=joints_source,
+                           fallback=fallback and mesh_source == "carve", **kwargs)
+    except (RemoteError, bl.BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
+        if not fallback or mesh_source != "sam3d-objects":
+            raise
+        reason = error_text(exc, run)
+        rec.note(f"hybrid build failed ({reason}); fell back to carve and silhouette joints")
+        rec.data["fallback"] = {"from": "sam3d-objects", "to": "carve", "reason": reason}
+        rec.data["checks"] = []
+        return _run_stage3(run, mesh_source="carve", joints_source="silhouette", fallback=False, **kwargs)
+
+
+def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
+               mesh_source: str = "carve", joints_source: str = "silhouette", remote=None,
+               fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
+               body_detector: str | None = None, rec: StageRecord | None = None) -> dict:
     """Stage 3. `mesh_source` "carve" (default) or "sam3d-objects"; `joints_source` "silhouette" (default) or
     "sam3d-body". A remote source that fails falls back to the local one (recorded) unless `fallback` is off.
     `body_detector` "vitdet" lets SAM 3D Body find the person itself (default None: the front mask's box)."""
@@ -231,7 +262,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
             raise ModuleNotFoundError("mesh source sam3d-objects needs scipy (pip install \".[remote]\")")
     # An earlier record must not outlive a run that stops: stage 4 reads only a record this run finished.
     (run / "stage-3.json").unlink(missing_ok=True)
-    rec = StageRecord(run, 3, "base mesh")
+    rec = rec if rec is not None else StageRecord(run, 3, "base mesh")
     vs = load_views(run, height)
     for n in vs.notes:
         rec.note(n)
@@ -353,7 +384,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
                            + (["03-joints.json"] if (run / "03-joints.json").exists() else [])
                            + [f"03-renders/{v}.png" for v in VIEWS if v in vs.views])
     rec.data["mesh_source"] = used_source
-    rec.data["mesh_source_requested"] = mesh_source
+    rec.data.setdefault("mesh_source_requested", mesh_source)
     rec.data["joints_source"] = joints_used
     rec.data["shape_views"] = shape_views
     rec.data["pose_views"] = pose_views
