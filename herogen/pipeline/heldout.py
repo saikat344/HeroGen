@@ -14,8 +14,10 @@ Each view is generated up to four times until it is accepted; the best generatio
 must land in its window; up to 5 degrees outside needs human review. Its image, mask and raw generation go
 to `heldout/<view>.png`, `heldout/<view>-mask.png` and `heldout/<view>-raw.png` when it is accepted, to
 `heldout/review/` when a check could not decide (needs human review), and to `heldout/rejected/` when a gated
-check failed, so `heldout/<view>.png` only ever holds an accepted view. All are on the same square canvas as
-`views/`, at the shared pixel scale. A person decides views with `review_view` (the CLI's `review`
+check failed, so `heldout/<view>.png` only ever holds an accepted view. All are on the square canvas of
+`views/`, at the shared pixel scale, the feet on the front view's baseline; a figure that would pass the top or
+a side is never cut: the square is padded by the same amount on every side (`place_on_canvas`, recorded per
+attempt as `canvas_pad_px`). A person decides views with `review_view` (the CLI's `review`
 command), which moves the files and appends the decision to the record; scoring reads only accepted views.
 `stage2h_heldout(views=...)` remakes some views and keeps the others and their decisions: a kept view must
 come from the current turnaround, and is judged again (`recheck_view`) if the checks changed since; the
@@ -923,23 +925,28 @@ def figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str,
 
 def place_on_canvas(
     raw: Image.Image, mask: np.ndarray, scale: float, size: int, bottom_row: int
-) -> tuple[Image.Image, np.ndarray]:
-    """Crop the figure, scale it by ``scale``, and put it on the ``size`` square: centred horizontally, its
-    lowest row on ``bottom_row`` (the front view's feet). Anything past the canvas is cut off, so an oversized
-    figure measures short rather than being shrunk to fit."""
+) -> tuple[Image.Image, np.ndarray, int]:
+    """Crop the figure, scale it by ``scale``, and put it on the ``size`` square of the turnaround views:
+    centred horizontally, its lowest row on ``bottom_row`` (the front view's feet). A figure that would pass
+    the top or a side of the square is neither cut nor shrunk: the square is padded by the same ``pad`` px
+    on every side, so it stays square and centred, the scale is unchanged, and the views' pixel (x, y) is
+    (x + pad, y + pad) on it. An oversized figure therefore measures its full height. Returns the image, the
+    mask and ``pad`` (0 when the figure fits)."""
     bg = tuple(int(c) for c in imaging.background_colour(np.array(raw)))
-    canvas = Image.new("RGB", (size, size), bg)
-    mcanvas = Image.new("L", (size, size), 0)
     b = imaging.bbox(mask)
     if b is None:
-        return canvas, np.zeros((size, size), dtype=bool)
+        return Image.new("RGB", (size, size), bg), np.zeros((size, size), dtype=bool), 0
     new = (max(1, round((b[2] - b[0]) * scale)), max(1, round((b[3] - b[1]) * scale)))
     crop = raw.crop(b).resize(new, Image.LANCZOS)
     cmask = imaging.to_mask_image(mask[b[1] : b[3], b[0] : b[2]]).resize(new, Image.BILINEAR)
-    at = (int(round(size / 2 - new[0] / 2)), int(bottom_row - new[1]))
-    canvas.paste(crop, at)
-    mcanvas.paste(cmask, at)
-    return canvas, imaging.from_mask_image(mcanvas)
+    x0, y0 = int(round(size / 2 - new[0] / 2)), int(bottom_row - new[1])
+    pad = max(0, -y0, -x0, x0 + new[0] - size, bottom_row - size)
+    side = size + 2 * pad
+    canvas = Image.new("RGB", (side, side), bg)
+    mcanvas = Image.new("L", (side, side), 0)
+    canvas.paste(crop, (x0 + pad, y0 + pad))
+    mcanvas.paste(cmask, (x0 + pad, y0 + pad))
+    return canvas, imaging.from_mask_image(mcanvas), pad
 
 
 _STATUS_DIR = {"accepted": "heldout", "needs review": "heldout/review", "rejected": "heldout/rejected"}
@@ -1103,7 +1110,7 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
         mask, method, coverage = figure_mask(client, raw)
         # Raw px -> input-canvas px (the model may answer at another resolution) -> turnaround px.
         scale = ctx.cover.size[0] / raw.size[0] / framing
-        img, placed = place_on_canvas(raw, mask, scale, ctx.size, ctx.bottom_row)
+        img, placed, pad = place_on_canvas(raw, mask, scale, ctx.size, ctx.bottom_row)
         measurable = coverage >= C.SAM_COVERAGE_MIN
         face = measure_face(client, raw, mask) if measurable else {"offset": None, "error": "no SAM figure"}
         checks, measured = view_checks(view, placed, ctx.model, ctx.profile_toe, float(mask.mean()), face,
@@ -1121,6 +1128,7 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
             "mask_method": method,
             "framing_scale_input_px_per_view_px": round(framing, 5),
             "scale_view_px_per_raw_px": round(scale, 5),
+            "canvas_pad_px": pad,
             "bbox_px": list(imaging.bbox(placed) or ()),
             "measured": measured,
             "checks": checks,
