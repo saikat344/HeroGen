@@ -24,7 +24,6 @@ as outcome "unknown": it may be billed, so the cost estimate counts it.
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import http.client
 import io
@@ -43,7 +42,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from herogen.pipeline import retry
+from herogen.pipeline import filelock, retry
 
 API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
@@ -473,13 +472,9 @@ class ModelClient:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"time": datetime.now().astimezone().isoformat(timespec="milliseconds"), **row},
                           sort_keys=True) + "\n"
-        with open(self.cache_dir / LEDGER, "a") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(line)
-                f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with open(self.cache_dir / LEDGER, "a") as f, filelock.exclusive(f.fileno()):
+            f.write(line)
+            f.flush()
 
     def _load(self, key: str) -> dict[str, Any] | None:
         path = self.cache_dir / f"{key}.json"
