@@ -24,8 +24,8 @@ from herogen.pipeline import __main__ as main_mod
 from herogen.pipeline import client as client_mod
 from herogen.pipeline import retry
 
-# responder(endpoint, body) -> (status, extra headers, JSON payload[, delay in seconds before answering]).
-# Status 0 closes the connection without an answer.
+# responder(endpoint, body) -> (status, extra headers, JSON payload[, delay in seconds before answering[, seconds
+# between 4-byte pieces of the body, to trickle it]]). Status 0 closes the connection without an answer.
 Responder = Callable[[str, dict], tuple]
 
 
@@ -108,7 +108,14 @@ class FakeModelServer:
                 for k, v in extra.items():
                     self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(data)
+                trickle = rest[1] if len(rest) > 1 else 0.0
+                if not trickle:
+                    self.wfile.write(data)
+                    return
+                for i in range(0, len(data), 4):
+                    self.wfile.write(data[i:i + 4])
+                    self.wfile.flush()
+                    time.sleep(trickle)
 
             def log_message(self, *_a: Any) -> None:
                 pass

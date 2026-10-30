@@ -27,7 +27,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import retry  # noqa: E402
 from herogen.pipeline.client import ApiError, ModelClient  # noqa: E402
-from fake_model_server import FakeModelServer, error_body, sam_response  # noqa: E402
+from fake_model_server import FakeModelServer, error_body, no_wait_policy, sam_response  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, _b64png  # noqa: E402
 
 IMAGE = Image.new("RGB", (16, 16), "white")
@@ -389,7 +389,7 @@ class RetryThroughServerTest(unittest.TestCase):
             def __exit__(self, *_a):
                 return False
 
-            def read(self):
+            def read1(self, _n):
                 raise self.error
 
         errors = [ssl.SSLError("bad record mac"), ConnectionAbortedError("aborted"),
@@ -430,7 +430,12 @@ class _OkAnswer:
     def __exit__(self, *_a):
         return False
 
-    def read(self):
+    sent = False
+
+    def read1(self, _n):
+        if self.sent:
+            return b""
+        self.sent = True
         return json.dumps(OK_IMAGE[2]).encode()
 
 
@@ -481,6 +486,32 @@ class WindowsProcessProbeTest(unittest.TestCase):
                 self.assertGreaterEqual(waited, 1)
                 self.assertEqual(list(json.loads(owner.state_path.read_text())["slots"]), [slot])
                 owner.release(slot)
+
+
+class ReadDeadlineTest(unittest.TestCase):
+    """The per-call deadline holds while an answer is being read, not only between attempts."""
+
+    def test_a_trickling_answer_is_cut_off_at_the_deadline(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d) / "cache"
+            limiter = retry.SharedLimiter(Path(d) / "limiter", "k")
+            # Each 4-byte piece comes well within the socket timeout; the whole answer takes about 0.5 s.
+            server = FakeModelServer(lambda e, b: OK_SAM + (0.0, 0.02), DUMMY_KEY)
+            client = ModelClient(cache, mode="live", policy=no_wait_policy(), limiter=limiter)
+            with server.serving(d + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                    mock.patch.dict(client_mod.DEADLINE_S, {client_mod.SAM_MODEL: 0.10}), \
+                    mock.patch.object(client_mod, "TIMEOUT_S", 0.05), self.assertRaises(ApiError) as cm:
+                t0 = time.monotonic()
+                try:
+                    client.segment(IMAGE, "character")
+                finally:
+                    seconds = time.monotonic() - t0  # before the server finishes trickling and shuts down
+            self.assertLess(seconds, 0.3)
+            self.assertIn("TimeoutError", str(cm.exception))
+            self.assertIn("deadline", str(cm.exception))
+            rows = [json.loads(x) for x in (cache / client_mod.LEDGER).read_text().splitlines()]
+            self.assertEqual([(r["attempt"], r["outcome"], r["status"]) for r in rows], [(1, "unknown", None)])
+            self.assertEqual([c.get("outcome") for c in client.log.calls], ["unknown"])  # may be billed: counted
 
 
 class SharedLimiterTest(unittest.TestCase):

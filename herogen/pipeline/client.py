@@ -449,9 +449,12 @@ class ModelClient:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                     "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+                # The deadline holds while an answer is read too: no socket wait outlasts it, and the body is
+                # read in pieces with the deadline checked after each (`_read_body`).
+                timeout = min(TIMEOUT_S, max(0.01, deadline - policy.clock()))
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     status = r.status
-                    raw = r.read().decode("utf-8", "replace")
+                    raw = _read_body(r, policy, deadline, deadline_s).decode("utf-8", "replace")
                 try:
                     parsed = json.loads(raw)
                 except ValueError:
@@ -487,7 +490,7 @@ class ModelClient:
                 or attempt == policy.max_attempts
             wait, why = (0.0, "") if final else policy.wait(attempt - 1, headers)
             left = max(0.0, deadline - policy.clock())
-            gives_up = not final and wait > left
+            gives_up = not final and (wait > left or left <= 0.0)
             # Others on the key are held off only for a wait this call really starts (the limiter caps it again).
             limiter.release(slot, ok=outcome == "ok", rate_limited=status == 429,
                             hold_s=0.0 if final or gives_up else wait)
@@ -508,6 +511,9 @@ class ModelClient:
             raise ApiError(f"{endpoint} failed: {last} (not retried)")
         if attempt == policy.max_attempts:
             raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}")
+        if left <= 0.0:
+            raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the {deadline_s:g} s deadline "
+                           f"has passed")
         raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the next wait would pass the "
                        f"{deadline_s:.0f} s deadline")
 
@@ -553,6 +559,20 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
         detail = resp.get("error") or resp.get("incomplete_details")
         raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
                        + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
+
+
+def _read_body(r: Any, policy: retry.RetryPolicy, deadline: float, deadline_s: float) -> bytes:
+    """A response body, read one socket read at a time (each waits at most the socket timeout), with the call's
+    deadline checked after each: a server that trickles bytes can't hold the call past it. Past the deadline
+    the read stops with `TimeoutError`, like a socket timeout."""
+    pieces: list[bytes] = []
+    while True:
+        piece = r.read1(65536)
+        if not piece:
+            return b"".join(pieces)
+        pieces.append(piece)
+        if policy.clock() > deadline:
+            raise TimeoutError(f"the answer was still arriving at the {deadline_s:g} s deadline")
 
 
 def _error_body(e: urllib.error.HTTPError) -> str:
