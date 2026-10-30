@@ -101,7 +101,11 @@ MIRROR_IOU_MIN = 0.70
 TOP_EXTENT_MIN = 0.80
 # A-pose: the widest span across the hands band (35-60% of the height from the top) over the widest span
 # across the shoulders (15-25%). Measured on generated sheets: arms hanging at the sides 1.21-1.25, arms
-# about 25 degrees out 1.60. 1.5 accepts a moderate A-pose and rejects arms-down.
+# about 25 degrees out 1.60. Recorded, not gated: fixed height bands land on hat brims, big chibi heads,
+# shoulder armour and T-posed arms. It failed 9 of 21 true turnarounds of real game characters (bench-gt:
+# T-pose, chibi, witch hat), 30 of 105 judged-usable generated sheets, and, once stage 2 carves each sheet as
+# stage 3 does (`stages.carve_check`), it rejected 1 sheet that carves and was judged usable while stopping no
+# sheet that was judged unusable (155 labelled attempts, tuning and held-out sketches alike).
 A_POSE_SPREAD_MIN = 1.5
 # Profile depth: a standing figure seen from the side with its arms down or out to the sides measures
 # 0.20-0.28 of its height (measured on four generated sheets); an arm reaching forward measured 0.40.
@@ -146,7 +150,8 @@ def side_view_checks(masks: dict[str, np.ndarray], *, figures_found: int, figure
         check("front_back_width_agreement", agreement([size["front"][0], size["back"][0]]), FRONT_BACK_WIDTH_MIN)
     )
     out.append(check("left_right_mirror_iou", mirror_iou(masks["left"], masks["right"]), MIRROR_IOU_MIN))
-    out.append(check("a_pose_hand_span_over_shoulders", a_pose_spread(masks["front"]), A_POSE_SPREAD_MIN))
+    out.append(check("a_pose_hand_span_over_shoulders", a_pose_spread(masks["front"]), A_POSE_SPREAD_MIN, gate=False,
+                     note="recorded, not gated: fixed height bands misread hats, big heads and T-poses"))
     for v in ("right", "left"):
         w, h = size[v]
         out.append(check(f"{v}_profile_width_over_height", w / h if h else 1.0, SIDE_DEPTH_MAX, op="<="))

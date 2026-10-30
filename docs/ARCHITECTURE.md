@@ -159,6 +159,12 @@ again instead. A drawn top view is used only if the carve with it still passes t
 an observed top view and gates its IoU); otherwise the visual-hull top is used and a note says why, and
 `details.carve_ious_with_drawn_top` records the IoUs that decided it.
 
+**Recorded, not gated.** `a_pose_hand_span_over_shoulders` (widest row at 35-60% of the height over the widest
+at 15-25%) is still measured on every sheet, with `gate: false` and a note. Its fixed height bands read hat
+brims, big chibi heads, shoulder armour and T-posed arms as shoulders: it failed 9 of 21 true turnarounds of
+real game characters and 30 of 105 generated sheets three judges called usable, and next to the carve check it
+stopped no sheet they called unusable.
+
 ## Stage 3: mesh source and joints
 
 `python3 -m herogen.blender run --stages 3 [--mesh-source carve|sam3d-objects] [--joints silhouette|sam3d-body]`.

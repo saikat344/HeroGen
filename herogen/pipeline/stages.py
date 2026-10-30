@@ -479,7 +479,7 @@ def stage2_turnaround(
 CARVE_GATE = "carve_silhouette_iou_min"
 # Every gated check a sheet that splits into four figures is measured on (`attempt_rank` counts a missing one).
 SHEET_GATES = ("figures_found", "height_agreement_4_views", "front_back_width_agreement", "left_right_mirror_iou",
-               "a_pose_hand_span_over_shoulders", "right_profile_width_over_height", "left_profile_width_over_height",
+               "right_profile_width_over_height", "left_profile_width_over_height",
                "view_mask_sam_coverage_min", CARVE_GATE)
 
 

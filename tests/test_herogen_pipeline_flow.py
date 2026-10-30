@@ -305,6 +305,21 @@ def _one_legged_back_sheet() -> Image.Image:
     return paint(mask)
 
 
+class APoseRecordedTest(_RunsTest):
+    """The A-pose span ratio is recorded on every sheet but no longer decides whether a sheet is kept."""
+
+    def test_arms_down_sheet_that_carves_is_kept(self):
+        down, _ = sheet(arms="down")
+        api = SheetsAPI([down])
+        self._record(api, "d")  # stage 2h, which follows, has its own checks; only stage 2 is under test
+        s2 = json.loads((self.root / "d" / "stage-2.json").read_text())
+        self.assertTrue(s2["ok"])
+        self.assertEqual(api.n, 1)
+        ap = next(c for c in s2["checks"] if c["name"] == "a_pose_hand_span_over_shoulders")
+        self.assertEqual((ap["pass"], ap["gate"]), (False, False))
+        self.assertNotIn("a_pose_hand_span_over_shoulders", stages.SHEET_GATES)
+
+
 class CarveCheckFlowTest(_RunsTest):
     """A sheet stage 3's carve would refuse is generated again, not kept."""
 
@@ -331,7 +346,7 @@ class KeepBestSheetTest(_RunsTest):
 
     def test_keeps_the_sheet_with_the_fewest_failed_gates(self):
         unsplit, _ = sheet(order=("front", "right", "front"))
-        one, _ = sheet(arms="down")
+        one = _one_legged_back_sheet()
         sheets = [unsplit, one, _two_gates_sheet(), unsplit]
         code, s2, api = self._sheets(sheets)
         self.assertEqual(code, 2)
@@ -346,16 +361,17 @@ class KeepBestSheetTest(_RunsTest):
         kept = s2["details"]["attempts"][1]
         self.assertEqual([c for c in s2["checks"] if c["name"] in {k["name"] for k in kept["checks"]}], kept["checks"])
         self.assertEqual([c["name"] for c in s2["checks"] if not c["pass"] and c.get("gate", True)],
-                         ["a_pose_hand_span_over_shoulders"])
+                         [stages.CARVE_GATE])
         self.assertEqual(s2["details"]["view_assignment"], kept["assignment"])
         run = self.root / "k"
         self.assertEqual(np.asarray(_img(run / "02-turnaround.png")).tobytes(), np.asarray(one).tobytes())
+        back = imaging.from_mask_image(_img(run / "masks/back.png"))
         front = imaging.from_mask_image(_img(run / "masks/front.png"))
-        self.assertLess(stages.C.a_pose_spread(front), stages.C.A_POSE_SPREAD_MIN)  # attempt 2's front, arms down
+        self.assertLess(back.sum(), front.sum())  # attempt 2's back, one leg hidden
         self.assertNotIn(stages.TOP_PROMPT, api.prompts)
 
     def test_a_tie_keeps_the_earlier_sheet(self):
-        one, _ = sheet(arms="down")
+        one = _one_legged_back_sheet()
         code, s2, _ = self._sheets([one, one, one, one])
         self.assertEqual(code, 2)
         self.assertEqual(s2["details"]["kept_attempt"], 0)
