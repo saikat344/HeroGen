@@ -533,22 +533,33 @@ class HeldoutChecksTest(unittest.TestCase):
                     self.assertEqual(_pose_facing_status(checks), "accepted", (fname, side, yaw))
 
     def test_distorted_poses_never_accepted(self):
+        # Arms hanging (82 degrees below horizontal) or raised nearly level (10), and strides.
+        cases = {"arms down": ("down", {}), "arms raised": ("lowered", dict(arm_deg=80.0)),
+                 **{p: POSES[p] for p in ("stride 8", "stride 12", "stride 25")}}
         for fname, fkw in FIGURES.items():
-            for pname in ("arms 35", "arms down", "stride 8", "stride 12", "stride 25"):
-                pose, pkw = POSES[pname]
+            for pname, (pose, pkw) in cases.items():
                 for view in heldout.VIEWS:
-                    status, _, checks = evaluate(view.name, pose, view.yaw_deg, fkw, pkw)
-                    self.assertNotEqual(status, "accepted", (fname, pname, view.name))
-                    if pname in ("arms 35", "arms down", "stride 25"):
-                        self.assertEqual(status, "rejected", (fname, pname, view.name))
-                        self.assertIn("pose_landmark_rms", _failed(checks))
+                    y = math.copysign(view.aim_deg, view.yaw_deg)
+                    status, m, checks = evaluate(view.name, pose, y, fkw, pkw)
+                    self.assertEqual(status, "rejected", (fname, pname, view.name))
+                    if pname.startswith("arms"):
+                        self.assertIn("arm_angle_near_off_band_deg", _failed(checks), (fname, pname, view.name))
+
+    def test_arms_a_little_off_the_a_pose_pass(self):
+        # The turnaround's arms are 40 degrees below horizontal; 55 (arms 35 from vertical) is still an A-pose.
+        for fname, fkw in FIGURES.items():
+            for view in heldout.VIEWS:
+                y = math.copysign(view.aim_deg, view.yaw_deg)
+                status, m, checks = evaluate(view.name, "lowered", y, fkw, dict(arm_deg=35.0))
+                self.assertEqual(status, "accepted", (fname, view.name, _failed(checks)))
+                self.assertAlmostEqual(m["arm_angles_deg"]["near"], 55.0, delta=0.5)
 
     def test_small_stride_never_accepted(self):
         # An 8-degree stride: the legs no longer match the turnaround's, so the keypoint fit can't place the
         # turn either (it runs to the profile).
         status, m, checks = evaluate("front-left-60", "stride", 61, FIGURES["plain"], dict(stride_deg=8.0))
         self.assertEqual(status, "rejected")
-        self.assertIn("pose_landmark_rms_clear", _failed(checks))
+        self.assertIn("found_yaw_window_miss_deg", _failed(checks))
         self.assertGreater(m["keypoint_fit"]["facing_left"]["rms"], 0.03)
 
     def test_wrong_facing_rejected(self):
@@ -629,8 +640,8 @@ class HeldoutChecksTest(unittest.TestCase):
             checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.3, 0.2,
                                             {"offset": None}, None, body=body, keypoints=kps)
             self.assertEqual(heldout.view_status(checks), "needs review")
-            # Without keypoints neither the turn nor (with no face cue either) the facing can be decided.
-            self.assertEqual(_failed(checks), ["turn_measured", "facing_cues_for"])
+            # Without keypoints neither the turn, the arms nor (with no face cue either) the facing is decided.
+            self.assertEqual(_failed(checks), ["turn_measured", "arm_angle_measured", "facing_cues_for"])
             self.assertIn(why, next(c for c in checks if c["name"] == "turn_measured")["note"])
             self.assertIsNone(m["found_yaw_deg"])
         self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.7, None), 25.7)
