@@ -304,23 +304,26 @@ cover, a pose reference (the front view, or the nearer profile for turns of 50 d
 mannequin of the turnaround's pose drawn at the requested yaw, both at one shared scale. The mannequin takes
 only landmark positions from the turnaround: the torso is the run holding the front figure's centre in each
 torso row (or, in a row parted at the centre, the span of the nearest runs on either side). The legs stand on
-the feet, since a silhouette alone can't tell a leg from a tail, a staff or a cape, but a foot is never one of
-those. Once per run, SAM 3.1 is asked for `foot`, then `shoe`, then `boot` on the turnaround's front view,
+the detected feet, since a silhouette alone can't tell a leg from a tail, a staff or a cape.
+Once per run, SAM 3.1 is asked for `foot`, then `shoe`, then `boot` on the turnaround's front view,
 stopping at the first prompt that finds two feet. A foot is an instance with half its pixels or more on the
 figure and pixels on its sole row (0.98 of the height); overlapping instances count once. Each foot's leg is
-the sole-row run it overlaps most (feet on one run, standing together, split it halfway between them). Each
-leg is then followed up the front outline, row by row, to the knee row (0.71) and on to the hip row (0.52).
-On each row the trace keeps, of the runs overlapping the last one, the one overlapping the leg's own starting
-run most, so a hand, an arm or a tail that touches the leg for some rows and parts again is left behind.
-Legs on one run at the knee row split it at its middle. The hips span from the image-left leg's left edge to
-the image-right leg's right edge, so legs that join below the hip row give the run they join. A tail or a
-staff between the legs, a sword, a hand or a shield beside them, a one-sided cape, backpack or pauldron, and a
-thin leg are therefore never mistaken for legs. Something still touching a leg in the hip row itself (a hand
-resting on the hip, a tail growing from it) is part of that row's run and widens the hips. When no prompt
-finds two feet on the sole row (a long robe hides them), the guide uses the outline rule: the outermost runs
-of the knee and sole rows, and for the hips the hip row's run holding the figure's centre (the span of the
-nearest runs either side when the row is parted there). `stage-2h.json` records which rule drew the guide
-(`details.guide_legs.method`: `sam-3.1:<prompt>` or `outline`), the legs' runs and what each prompt found. A
+the sole-row run it overlaps most, clipped to the detected foot's own columns. That clipped span sets both
+the ankle position and the starting columns for tracing up to the knee row (0.71). On each row the trace
+keeps, of the runs overlapping the last one, the one overlapping its starting columns most, then the last
+run most. The knee run is traced the same way to the hip row (0.52), using the knee's columns. Legs on one
+run at the knee row split it at its middle. The hips span the two traced legs; legs that join below the hip
+row give the run they join.
+
+Foot columns keep a wider prop touching a foot at the sole row from winning merely because the merged
+sole run contains more of the prop than the leg. This is still an outline heuristic: incorrect foot
+segmentation or a prop overlapping the trace's starting columns can misplace a leg. A shield covering the
+knees gives a shared run split at its middle; something still touching a leg in the hip row widens the hips.
+When no prompt finds two usable feet on the sole row (a long robe can hide them), the guide uses the outline
+rule: the outermost runs of the knee and sole rows, and for the hips the hip row's run holding the figure's
+centre (the span of the nearest runs either side when the row is parted there). `stage-2h.json` records which
+rule drew the guide (`details.guide_legs.method`: `sam-3.1:<prompt>` or `outline`), the legs' runs and what
+each prompt found in `details.guide_legs.feet`; an outline fallback records why in `feet.fallback_reason`. A
 SAM failure on the feet stops the stage like any other. A replay of a run recorded before feet were asked
 for misses at the first foot prompt.
 

@@ -191,6 +191,50 @@ class HeldoutTest(unittest.TestCase):
         for view in heldout.VIEWS:
             self.assertTrue((run / heldout.view_paths(view)["image"]).exists())
 
+    def _feet_answer(self, answer):
+        """ModelClient.segment with the foot prompts answered by ``answer(text)``, and the foot prompts asked."""
+        segment, asked = ModelClient.segment, []
+
+        def patched(client, image, text):
+            if text in ("foot", "shoe", "boot"):
+                asked.append(text)
+                return answer(text)
+            return segment(client, image, text)
+
+        return patched, asked
+
+    def test_no_feet_found_records_the_outline_fallback(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        self._fresh_heldout(self.root / "r")
+        segment, asked = self._feet_answer(lambda _text: [])
+        with mock.patch.object(ModelClient, "segment", segment):
+            self.assertEqual(self._live(FakeAPI(), "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh")), 0)
+        rec = self._rec()
+        self.assertTrue(rec["ok"])
+        legs = rec["details"]["guide_legs"]
+        self.assertEqual(legs["method"], "outline")
+        self.assertEqual(legs["feet"]["fallback_reason"], "two usable feet were not found on the sole row")
+        self.assertEqual(asked, ["foot", "shoe", "boot"])
+
+    def test_api_error_on_the_feet_stops_the_stage(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = self.root / "r"
+        self._fresh_heldout(run)
+        before = self._snapshot(run)
+
+        def broken(_text):
+            raise ApiError("responses failed: HTTP 500")
+
+        segment, asked = self._feet_answer(broken)
+        with mock.patch.object(ModelClient, "segment", segment):
+            self.assertEqual(self._live(FakeAPI(), "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh")), 1)
+        rec = self._rec()
+        self.assertEqual((rec["ok"], rec["status"]), (False, "error"))
+        self.assertIn("HTTP 500", rec["error"])
+        self.assertEqual(asked, ["foot"])
+        self.assertEqual({c["kind"] for c in rec["stopped_runs"][-1]["calls"]}, {"segment"})  # no generation
+        self.assertEqual(self._snapshot(run), before)
+
     def test_replay_reproduces_the_record(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
         self.assertEqual(self._replay("r2", [0, 1, 2]), 0)
