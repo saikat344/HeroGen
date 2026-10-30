@@ -64,6 +64,7 @@ jobs:
           HEROGEN_SERVICE_BASE_URL: ${{ vars.HEROGEN_SERVICE_BASE_URL }}
           HEROGEN_SERVICE_EMAIL_FROM: ${{ vars.HEROGEN_SERVICE_EMAIL_FROM }}
           HEROGEN_SERVICE_TERMS_VERSION: ${{ vars.HEROGEN_SERVICE_TERMS_VERSION }}
+          HEROGEN_SERVICE_DOMAIN: ${{ vars.HEROGEN_SERVICE_DOMAIN }}
         run: python3 tools/release/release.py check "$TAG"
       - uses: actions/setup-python@v5
         with:
@@ -81,4 +82,5 @@ jobs:
           HEROGEN_SERVICE_BASE_URL: ${{ vars.HEROGEN_SERVICE_BASE_URL }}
           HEROGEN_SERVICE_EMAIL_FROM: ${{ vars.HEROGEN_SERVICE_EMAIL_FROM }}
           HEROGEN_SERVICE_TERMS_VERSION: ${{ vars.HEROGEN_SERVICE_TERMS_VERSION }}
+          HEROGEN_SERVICE_DOMAIN: ${{ vars.HEROGEN_SERVICE_DOMAIN }}
         run: python3 tools/release/release.py deploy "$TAG"

@@ -12,8 +12,9 @@ Standard library only (the deploy itself runs the Modal CLI from tools/release/r
 Usage, from the repository root:
   release.py plan <tag>            check the tag (and, for production, its rc tag and its staging deployment);
                                    print the environment
-  release.py check <tag>           check that the service's Modal app is in the commit and every deploy
-                                   setting is set (names what is missing, never a value)
+  release.py check <tag>           check that the service's Modal app is in the commit, every deploy
+                                   setting is set (names what is missing, never a secret's value) and the
+                                   custom domain is the base URL's host
   release.py deploy <tag>          check again, then `python -m modal deploy -m herogen.service.modal_app`
 
 `plan` for a production tag reads the repository's deployments from the GitHub API: it needs GITHUB_REPOSITORY
@@ -56,6 +57,7 @@ REQUIRED = (
     ("HEROGEN_SERVICE_BASE_URL", "variable"),
     ("HEROGEN_SERVICE_EMAIL_FROM", "variable"),
     ("HEROGEN_SERVICE_TERMS_VERSION", "variable"),
+    ("HEROGEN_SERVICE_DOMAIN", "variable"),
 )
 # Settings every deploy runs with. The service refuses to deploy in any mode but `production` (staging included:
 # the mode is "not dev", not the environment), and production mode needs a real email provider; `resend` is the
@@ -321,8 +323,13 @@ def plan(name: str, git: Git, deployments: Callable[[], Deployments]) -> Plan:
 
 
 def missing_config(env: Mapping[str, str]) -> list[tuple[str, str]]:
-    """The REQUIRED settings that are unset or blank in `env`, in REQUIRED's order."""
-    return [(n, kind) for n, kind in REQUIRED if not env.get(n, "").strip()]
+    """The REQUIRED settings that are unset or blank in `env`, in REQUIRED's order. A domain list with no entry
+    (only commas and spaces) is blank."""
+    def blank(name: str) -> bool:
+        value = env.get(name, "")
+        return not (domains(value) if name == "HEROGEN_SERVICE_DOMAIN" else value.strip())
+
+    return [(n, kind) for n, kind in REQUIRED if blank(n)]
 
 
 def config_message(missing: Sequence[tuple[str, str]], environment: str) -> str:
@@ -333,18 +340,56 @@ def config_message(missing: Sequence[tuple[str, str]], environment: str) -> str:
     return "\n".join(lines)
 
 
+# A bare host name, as Modal's custom domains take it: no scheme, port or path.
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})+")
+# The base URL on a custom domain: https, the default port, no path.
+BASE_URL = re.compile(r"https://(?P<host>[^/:?#\s]+)/?")
+
+
+def domains(raw: str) -> list[str]:
+    """HEROGEN_SERVICE_DOMAIN as the service reads it (modal_app.py, CUSTOM_DOMAINS): a comma-separated list, each
+    entry stripped, empty entries dropped."""
+    return [d.strip() for d in raw.split(",") if d.strip()]
+
+
+def domain_problems(env: Mapping[str, str]) -> list[str]:
+    """What is wrong with HEROGEN_SERVICE_DOMAIN against HEROGEN_SERVICE_BASE_URL (only once both are set).
+
+    The web function serves on every domain listed, but the service's Host check accepts only the base URL's host
+    (HEROGEN_SERVICE_HOSTS is not passed to the deploy), so the base URL's host must be one of them."""
+    raw_base, raw_domains = env.get("HEROGEN_SERVICE_BASE_URL", "").strip(), env.get("HEROGEN_SERVICE_DOMAIN", "")
+    listed = domains(raw_domains)
+    if not raw_base or not listed:
+        return []
+    problems = [f"HEROGEN_SERVICE_DOMAIN entry {d!r} is not a bare host name (no scheme, port or path), for "
+                "example hero.example.org." for d in listed if not HOST.fullmatch(d)]
+    m = BASE_URL.fullmatch(raw_base)
+    if not m or not HOST.fullmatch(m.group("host")):
+        problems.append(f"HEROGEN_SERVICE_BASE_URL {raw_base!r} must be https://<host> on the custom domain, with "
+                        "no port or path.")
+        return problems
+    host = m.group("host").lower()
+    if host not in [d.lower() for d in listed]:
+        problems.append(f"HEROGEN_SERVICE_BASE_URL's host {host} is not in HEROGEN_SERVICE_DOMAIN "
+                        f"({', '.join(listed)}): the service would answer only on a host its custom domains do not "
+                        "attach. Set HEROGEN_SERVICE_DOMAIN to the base URL's host.")
+    return problems
+
+
 ENTRY_MISSING = (f"{ENTRY_PATH.as_posix()} is not in this commit, so there is no service to deploy. The service "
                  "code (herogen/service) must be merged before a release tag can deploy it.")
 
 
 def check(name: str, env: Mapping[str, str], root: Path) -> Tag:
-    """Whether tag `name` can deploy from `root`: the service's Modal app is there and every setting is set. Every
-    problem is reported at once."""
+    """Whether tag `name` can deploy from `root`: the service's Modal app is there, every setting is set, and the
+    custom domain matches the base URL. Every problem is reported at once."""
     tag = parse_tag(name)
     problems = [] if (root / ENTRY_PATH).is_file() else [ENTRY_MISSING]
     missing = missing_config(env)
     if missing:
         problems.append(config_message(missing, tag.environment))
+    problems += domain_problems(env)
     if problems:
         raise ReleaseError("\n".join(problems))
     return tag
