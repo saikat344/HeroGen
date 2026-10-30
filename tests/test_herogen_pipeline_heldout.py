@@ -149,7 +149,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertNotIn("heldout", json.dumps(s2["outputs"]))
         self.assertAlmostEqual(s2["cost_usd"], 2 * (IMG + SAM) + 2 * SAM)   # + front-view face and head
         res = json.loads((run / "results.json").read_text())
-        self.assertEqual([s["stage"] for s in res["stages"]], [0, 1, 2, "2h", 3, 4])
+        self.assertEqual([s["stage"] for s in res["stages"]], [0, 1, 2, "2h", "2f", 3, 4])
         html = (run / "results.html").read_text()
         for name in VIEWS:  # the page shows all four
             self.assertIn(f"heldout/{name}.png", html)

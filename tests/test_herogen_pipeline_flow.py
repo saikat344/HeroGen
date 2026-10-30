@@ -19,7 +19,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import client as client_mod  # noqa: E402
-from herogen.pipeline import imaging, stages  # noqa: E402
+from herogen.pipeline import facesource, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
@@ -85,6 +85,9 @@ class FakeAPI:
             img, _ = sheet(order=self.sheet_order)
         elif prompt == stages.TOP_PROMPT:
             img = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))  # not a real top view
+        elif prompt in facesource.PROMPTS.values():
+            # a faithful upscale of the head crop (stage 2f)
+            img = _decode_data_url(body["images"][0]["image_url"]).resize((1024, 1024), Image.LANCZOS)
         elif HELDOUT_REQUEST.search(prompt):
             # The sheet's stick figure turned in 3D, framed like the turn guide (the last image).
             frame = _decode_data_url(body["images"][-1]["image_url"])
@@ -190,6 +193,13 @@ class FlowTest(_RunsTest):
         c_rep = [c["value"] for c in json.loads((rep / "stage-2.json").read_text())["checks"]]
         self.assertEqual(c_rec, c_rep)
         self.assertEqual(json.loads((rep / "stage-2.json").read_text())["cost_usd"], 0.0)
+        # stage 2f follows stage 2: the same close-up record on record and on replay, the replay free
+        f_rec = json.loads((run / "stage-2f.json").read_text())
+        f_rep = json.loads((rep / "stage-2f.json").read_text())
+        self.assertTrue(f_rec["ok"])
+        self.assertEqual(f_rec["details"]["used_views"], f_rep["details"]["used_views"])
+        self.assertEqual(f_rep["cost_usd"], 0.0)
+        self.assertEqual(api.prompts.count(facesource.PROMPTS["FC4"]), 1)
 
     def test_reordered_sheet_with_same_facing_profiles(self):
         api = FakeAPI(sheet_order=("front", "front", "right", "right"))
