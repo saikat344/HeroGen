@@ -1,0 +1,238 @@
+{
+  "icons": {
+    "alert-octagon": [
+      "Budget within / over"
+    ],
+    "badge-check": [
+      "View accepted"
+    ],
+    "ban": [
+      "View rejected"
+    ],
+    "box": [
+      "3D body",
+      "Sketch / 3D toggle",
+      "Group: Body (geometry)"
+    ],
+    "check": [
+      "Budget within / over",
+      "Copy path"
+    ],
+    "chevron-down": [
+      "Hero name menu",
+      "Expand / collapse group"
+    ],
+    "chevron-right": [
+      "Expand / collapse group"
+    ],
+    "circle-check": [
+      "Hero status: ready",
+      "Stage passed",
+      "Gate passed / failed / not measured"
+    ],
+    "circle-dashed": [
+      "Stage not run"
+    ],
+    "circle-help": [
+      "Gate passed / failed / not measured"
+    ],
+    "circle-x": [
+      "Hero status: failed",
+      "Gate passed / failed / not measured"
+    ],
+    "coins": [
+      "Cost"
+    ],
+    "columns-2": [
+      "Compare",
+      "Side by side"
+    ],
+    "construction": [
+      "Not built yet"
+    ],
+    "copy": [
+      "Copy path"
+    ],
+    "crosshair": [
+      "Show me (jump to the problem)"
+    ],
+    "eye": [
+      "View needs review"
+    ],
+    "file-image": [
+      "Texture atlas"
+    ],
+    "file-text": [
+      "Stage report"
+    ],
+    "focus": [
+      "Isolate section"
+    ],
+    "gauge": [
+      "Quality tab"
+    ],
+    "git-commit-horizontal": [
+      "Code version"
+    ],
+    "history": [
+      "Versions header"
+    ],
+    "image": [
+      "Sketch / 3D toggle"
+    ],
+    "info": [
+      "Details tab"
+    ],
+    "layers": [
+      "Show all sections"
+    ],
+    "lightbulb": [
+      "Lit / unlit"
+    ],
+    "lightbulb-off": [
+      "Lit / unlit"
+    ],
+    "loader-circle": [
+      "Hero status: working",
+      "Stage running"
+    ],
+    "lock": [
+      "Frozen version"
+    ],
+    "maximize": [
+      "Fullscreen"
+    ],
+    "minimize": [
+      "Fullscreen"
+    ],
+    "moon": [
+      "Theme switch"
+    ],
+    "package": [
+      "Export"
+    ],
+    "palette": [
+      "Artwork",
+      "Group: Artwork"
+    ],
+    "panel-left-close": [
+      "Collapse rail"
+    ],
+    "panel-left-open": [
+      "Collapse rail"
+    ],
+    "pause": [
+      "Play walk cycle"
+    ],
+    "pencil-line": [
+      "Sketch"
+    ],
+    "play": [
+      "Play walk cycle"
+    ],
+    "plus": [
+      "New hero"
+    ],
+    "rotate-3d": [
+      "Orbit"
+    ],
+    "ruler": [
+      "Ground-truth score"
+    ],
+    "scale": [
+      "Consistency score (generated reference)"
+    ],
+    "scan": [
+      "Reset view"
+    ],
+    "sparkles": [
+      "Best quality"
+    ],
+    "sun": [
+      "Theme switch"
+    ],
+    "timer": [
+      "Generation details"
+    ],
+    "triangle-alert": [
+      "Hero status: needs attention",
+      "Stage needs attention"
+    ],
+    "upload": [
+      "Upload sketch"
+    ],
+    "turnaround": [
+      "Views (turnaround)",
+      "Group: Views"
+    ],
+    "heldout": [
+      "Held-out views",
+      "Group: Held-out"
+    ],
+    "cam-front": [
+      "Front"
+    ],
+    "cam-34": [
+      "Three-quarter"
+    ],
+    "cam-side": [
+      "Side"
+    ],
+    "cam-back": [
+      "Back"
+    ],
+    "shade-textured": [
+      "Textured",
+      "Group: Texture"
+    ],
+    "shade-clay": [
+      "Clay"
+    ],
+    "shade-wire": [
+      "Wireframe"
+    ],
+    "shade-sections": [
+      "Sections"
+    ],
+    "pose-rest": [
+      "Rest (A-pose)"
+    ],
+    "pose-walk": [
+      "Walk"
+    ],
+    "pose-arms-up": [
+      "Arms up"
+    ],
+    "pose-crouch": [
+      "Crouch"
+    ],
+    "pose-arms-forward": [
+      "Arms forward"
+    ],
+    "pose-twist": [
+      "Twist"
+    ],
+    "profile-ingame": [
+      "Roblox in-game"
+    ],
+    "profile-avatar": [
+      "Roblox avatar"
+    ],
+    "file-glb": [
+      "GLB file"
+    ],
+    "file-rbxm": [
+      "Roblox model (.rbxm)"
+    ]
+  },
+  "states": {
+    "no-heroes": "Drop a character sketch to start",
+    "drop-active": "Drop your character sketch here",
+    "run-progress": "Creating your character views",
+    "run-failed": "Generation could not finish. Review the reported issue, then retry.",
+    "body-pending": "Build a 3D body to preview it here",
+    "compare-versions": "Create another version to compare",
+    "offline": "Connection unavailable. Check the server and try again."
+  },
+  "accessibility": "For inline button icons use aria-hidden=\"true\" and put the label on the button; icon-only buttons also need a tooltip. Status indicators always include text. External SVGs used as img require alt text."
+}

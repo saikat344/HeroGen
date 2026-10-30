@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HeroGen Lab</title>
+<link rel="icon" type="image/svg+xml" href="static/brand/hg-favicon.svg">
+<link rel="stylesheet" href="static/fonts/fonts.css">
+<link rel="stylesheet" href="static/studio.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  },
+  "integrity": {
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js": "sha384-qlO/ZugKPxAQUAvTlQoo0QECzxJIJySZmCF/DHdb2Xn/hHndFwX/vfUAC9Hbk6LP",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js": "sha384-oxY9vSeh7Mrt5WmhN8xfWoDRnmoW9krEiRBY7vJKaK90jMUidM0fhbUwcblpBgTu",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js": "sha384-jHGXS4+FuVOBnZkNme2ury3Ccg5DWDLYK22xX/WGdZCZsjRM4J+3n6Qc4CXx1Hjf"
+  }
+}
+</script>
+<script type="module" src="static/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#gl">Skip to the 3D view</a>
+<div class="app">
+  <header class="top">
+    <div class="brand"><h1><span class="wm" id="wordmark" aria-hidden="true"></span><span class="sr">HeroGen</span> <span class="studio">Lab</span></h1></div>
+    <div class="hero-id">
+      <label class="sr" for="charSel">Character</label>
+      <select id="charSel" hidden></select>
+      <b id="heroName">Loading…</b><small id="heroSub"></small>
+    </div>
+    <span id="heroStatus" role="status"></span>
+    <div class="spacer"></div>
+    <div class="tgroup"><span class="eyebrow" id="themeL">Theme</span>
+      <div class="seg" id="themeSeg" role="group" aria-labelledby="themeL">
+        <button type="button" data-v="auto" aria-pressed="true">Auto</button><button type="button" data-v="dark" aria-pressed="false">Dark</button><button type="button" data-v="light" aria-pressed="false">Light</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <section class="profile" aria-label="Target profile">
+    <div class="tgroup"><span class="eyebrow" id="profileL">Target profile</span>
+      <div class="seg" id="profileSeg" role="group" aria-labelledby="profileL">
+        <button type="button" data-v="best" aria-pressed="false">Best quality</button>
+        <button type="button" data-v="roblox-ingame" aria-pressed="false">Roblox in-game</button>
+        <button type="button" data-v="roblox-avatar" aria-pressed="false">Roblox avatar</button>
+        <button type="button" data-v="none" aria-pressed="false" hidden>Not recorded</button>
+      </div>
+    </div>
+    <div class="tgroup runpick"><label class="eyebrow" for="runSel">Run</label><select id="runSel"></select></div>
+    <div class="meters" id="meters"></div>
+  </section>
+
+  <div class="work">
+    <section class="panel pipe-panel" aria-labelledby="pipeH">
+      <div class="panel-h"><h2 id="pipeH">Pipeline</h2><span class="faint small" id="pipeRun"></span></div>
+      <ol class="pipe" id="pipe"></ol>
+    </section>
+    <main class="stage" id="stage">
+      <div class="toolbar" id="toolbar">
+        <div class="tgroup"><span class="eyebrow" id="modeL">View</span>
+          <div class="seg" id="modeSeg" role="group" aria-labelledby="modeL">
+            <button type="button" data-v="3d" aria-pressed="true">3D</button><button type="button" data-v="sketch" aria-pressed="false" title="A picture from the run: the sketch, the artwork or a turnaround view">Sketch</button><button type="button" data-v="side" aria-pressed="false">Side by side</button>
+          </div>
+        </div>
+        <div class="tgroup"><span class="eyebrow" id="camL">Camera</span>
+          <div class="seg" id="camSeg" role="group" aria-labelledby="camL">
+            <button type="button" data-v="orbit" aria-pressed="false" title="Turn the body slowly (O)">Orbit</button><button type="button" data-v="front" aria-pressed="false" title="Front (1)">Front</button><button type="button" data-v="q" aria-pressed="true" title="Three-quarter (2)">3/4</button><button type="button" data-v="side" aria-pressed="false" title="Side (3)">Side</button><button type="button" data-v="back" aria-pressed="false" title="Back (4)">Back</button>
+          </div>
+        </div>
+        <div class="tgroup"><span class="eyebrow" id="shadeL">Shading</span>
+          <div class="seg" id="shadeSeg" role="group" aria-labelledby="shadeL">
+            <button type="button" data-v="textured" aria-pressed="true">Textured</button><button type="button" data-v="clay" aria-pressed="false">Clay</button><button type="button" data-v="wire" aria-pressed="false">Wireframe</button><button type="button" data-v="sections" aria-pressed="false">Sections</button>
+          </div>
+        </div>
+        <div class="tgroup"><span class="eyebrow" id="poseL">Pose</span>
+          <div class="seg" id="poseSeg" role="group" aria-labelledby="poseL"></div>
+        </div>
+      </div>
+
+      <div class="viewport" id="vp">
+        <div class="pane imgpane" id="imgpane" hidden><img id="refimg" alt=""><span class="cap" id="imgcap"></span></div>
+        <div class="pane" id="glpane">
+          <canvas id="gl" tabindex="0" aria-label="3D view of the body. Drag or use the arrow keys to turn it, scroll or press plus and minus to zoom, click a section to isolate it, Escape shows every section."></canvas>
+          <canvas id="gizmo" width="168" height="168" aria-hidden="true"></canvas>
+          <div class="vp-load" id="vpload" role="status">Loading…</div>
+          <div class="sec-card" id="secCard" hidden></div>
+        </div>
+      </div>
+
+      <p class="side-cap" id="glcap" role="note" hidden></p>
+      <ul class="legend" id="legend" aria-label="Sections" hidden></ul>
+      <div class="vbar">
+        <div class="stats" id="stats"></div>
+        <div class="imgpick" id="imgpick" hidden>
+          <label class="faint" for="imgSel">Picture</label>
+          <select id="imgSel"></select>
+        </div>
+        <div class="imgpick" id="lodpick">
+          <span class="faint" id="lodL">Detail</span>
+          <div class="seg" id="lodSeg" role="group" aria-labelledby="lodL"><button type="button" data-v="high" aria-pressed="true">High</button><button type="button" data-v="low" aria-pressed="false">Low</button></div>
+          <label class="faint" for="secSel">Section</label>
+          <select id="secSel"><option value="">All sections</option></select>
+        </div>
+      </div>
+    </main>
+
+    <aside class="rail right">
+      <div class="qwrap">
+        <section class="panel" aria-labelledby="qH" id="quality" tabindex="-1">
+          <div class="panel-h"><h2 id="qH">Quality</h2><span class="faint small" id="qProfile"></span></div>
+          <div id="qBody"></div>
+        </section>
+        <section class="panel" aria-labelledby="hoH" id="heldoutPanel" tabindex="-1">
+          <div class="panel-h"><h2 id="hoH">Held-out views</h2><span class="faint small" id="hoSub"></span></div>
+          <div class="ho" id="hoBody"></div>
+        </section>
+      </div>
+    </aside>
+    <section class="panel vers-panel" aria-labelledby="verH">
+      <div class="panel-h"><h2 id="verH">Versions</h2><span class="faint small">pick two to compare</span></div>
+      <div class="versions-wrap" id="versions"></div>
+    </section>
+  </div>
+
+  <div class="lower">
+    <section class="panel" aria-labelledby="dH">
+      <div class="panel-h"><h2 id="dH">Deliverables</h2><span class="faint small" id="dProfile"></span></div>
+      <p class="note">This page only reads the runs; it doesn't start downloads. Copy a path to open the file yourself.</p>
+      <ul class="deliv" id="deliv"></ul>
+    </section>
+    <section class="panel" aria-labelledby="gH">
+      <div class="panel-h"><h2 id="gH">Generation details</h2><span class="faint small">from the stage records</span></div>
+      <div class="tbl-wrap"><table id="genTbl"></table></div>
+      <div class="note" id="genNote"></div>
+    </section>
+  </div>
+
+  <section class="panel" aria-labelledby="cH" id="compare">
+    <div class="panel-h"><h2 id="cH">Compare versions</h2>
+      <div class="seg" id="cmpCam" role="group" aria-label="Compare camera"><button type="button" data-v="front" aria-pressed="false">Front</button><button type="button" data-v="q" aria-pressed="true">3/4</button><button type="button" data-v="side" aria-pressed="false">Side</button><button type="button" data-v="back" aria-pressed="false">Back</button></div>
+    </div>
+    <div id="cmpBody"></div>
+  </section>
+
+  <section class="panel" aria-labelledby="aH" id="about">
+    <div class="panel-h"><h2 id="aH">About</h2></div>
+    <div class="about" id="aboutBody"></div>
+  </section>
+</div>
+</body>
+</html>
