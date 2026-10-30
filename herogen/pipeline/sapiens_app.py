@@ -1,5 +1,9 @@
 """Sapiens 2 pose (Meta) on Modal: 308 named keypoints per image, for stage 2h's checks.
 
+Deploy once per workspace (`modal deploy herogen/pipeline/sapiens_app.py`) so every stage-2h run, local or in the
+hosted service, calls the same warm app; stop it with `modal app stop herogen-sapiens-pose`. Without a deployment,
+`herogen/pipeline/sapiens.py` runs it as an ephemeral app for the length of one stage-2h run.
+
 Imported only by `herogen/pipeline/sapiens.py` in live mode; it needs the `modal` package (`pip install
 herogen[remote]`). The model is Sapiens 2 pose 1B (facebookresearch/sapiens2, the Sapiens2 License, which allows
 commercial use with use restrictions: no biometric processing, no surveillance), run as upstream's top-down pipeline
@@ -22,10 +26,13 @@ WEIGHTS = {"repo": "facebook/sapiens2-pose-1b", "revision": "f5fed8b97b99698d5ee
 CONFIG = ("pose/configs/keypoints308/shutterstock_goliath_3po/"
           "sapiens2_1b_keypoints308_shutterstock_goliath_3po-1024x768.py")
 VOLUME = "herogen-sapiens-runner"
-GPU = "L40S"
+GPU = "L4"  # 24 GB holds the 1B model in fp32 with room for its 1024 x 768 input
 SCALEDOWN_S = 300  # a stage-2h run asks every 20-90 s; the container stays loaded between its calls
+MAX_CONTAINERS = 6  # several stage-2h runs share the deployed app; more calls wait in its queue
+APP_NAME = "herogen-sapiens-pose"
+CLASS_NAME = "Pose"
 
-app = modal.App("herogen-sapiens-pose")
+app = modal.App(APP_NAME)
 weights = modal.Volume.from_name(VOLUME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -64,7 +71,8 @@ def _fetch_weights():
         weights.commit()
 
 
-@app.cls(image=image, volumes={"/weights": weights}, gpu=GPU, timeout=1800, scaledown_window=SCALEDOWN_S)
+@app.cls(image=image, volumes={"/weights": weights}, gpu=GPU, timeout=1800, scaledown_window=SCALEDOWN_S,
+         max_containers=MAX_CONTAINERS)
 class Pose:
     @modal.enter()
     def load(self):
@@ -104,6 +112,13 @@ class Pose:
         torch.cuda.synchronize()
         self.load_s = time.time() - t0
         self.gpu = torch.cuda.get_device_name(0)
+
+    @modal.method()
+    def app_sha256(self) -> str:
+        """This source's SHA-256 prefix, which the client compares with its own before using a deployment."""
+        import hashlib
+        with open(__file__, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:16]
 
     @modal.method()
     def keypoints(self, png: bytes, box: list) -> dict:

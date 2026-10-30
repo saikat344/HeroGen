@@ -120,6 +120,51 @@ class PoseClientTest(unittest.TestCase):
         with mock.patch.object(sapiens.PoseClient, "_open", no_modal), self.assertRaises(sapiens.PoseError):
             c.keypoints(self.img, [0, 0, 64, 64])
 
+    def _open_with(self, deployed_sha):
+        """`PoseClient._open` against a fake modal: a deployment answering ``deployed_sha`` (None: none)."""
+        import types
+
+        ran = []
+
+        class Deployed:
+            class app_sha256:  # noqa: N801
+                @staticmethod
+                def remote():
+                    return deployed_sha
+
+        def from_name(app, cls):
+            if deployed_sha is None:
+                raise LookupError("not deployed")
+            self.assertEqual((app, cls), ("herogen-sapiens-pose", "Pose"))
+            return lambda: Deployed()
+
+        class Run:
+            def __enter__(self):
+                ran.append("enter")
+
+            def __exit__(self, *a):
+                ran.append("exit")
+
+        fake_modal = types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=from_name))
+        fake_app = types.SimpleNamespace(APP_NAME="herogen-sapiens-pose", CLASS_NAME="Pose",
+                                         app=types.SimpleNamespace(run=Run), Pose=lambda: "ephemeral")
+        c = sapiens.PoseClient(self.cache, mode="live")
+        with mock.patch.dict(sys.modules, {"modal": fake_modal, "herogen.pipeline.sapiens_app": fake_app}):
+            c._open()
+        return c, ran
+
+    def test_uses_a_deployment_of_the_same_source(self):
+        c, ran = self._open_with(sapiens.app_pins()["app_sha256"])
+        self.assertIsNot(c._pose, "ephemeral")
+        self.assertEqual(ran, [])
+
+    def test_other_or_no_deployment_runs_ephemerally(self):
+        for sha in ("0" * 16, None):
+            c, ran = self._open_with(sha)
+            self.assertEqual((c._pose, ran), ("ephemeral", ["enter"]))
+            c.close()
+            self.assertEqual(ran, ["enter", "exit"])
+
     def test_pins_follow_the_app(self):
         pins = sapiens.app_pins()
         self.assertEqual(pins["model"], sapiens.POSE_MODEL)
