@@ -117,7 +117,8 @@ base = (modal.Image.debian_slim(python_version=PYTHON)
         .env(IMAGE_ENV))
 web_image = base.add_local_python_source("herogen")
 blender_image = (
-    base.apt_install(*BLENDER_APT)
+    base.pip_install("scipy==1.18.1")   # BSD-3-Clause; hybrid orientation and outline conform
+    .apt_install(*BLENDER_APT)
     .run_commands(
         f"curl -fsSL -o /tmp/blender.tar.xz {BLENDER_URL}",
         f"echo '{BLENDER_SHA256}  /tmp/blender.tar.xz' | sha256sum -c -",
