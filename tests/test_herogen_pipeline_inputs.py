@@ -102,6 +102,55 @@ class InputCheckTest(unittest.TestCase):
         self.assertIn("only 12 grey levels darker than the paper", c["message"])
         self.assertEqual(inputs.contrast_check(paint(fig, colour=(200, 200, 200)))["verdict"], "pass")
 
+    def test_sparse_strokes_do_not_depend_on_page_coverage(self):
+        for ink, value, verdict in ((0, 255, "pass"), (243, 12, "reject"),
+                                    (224, 31, "reject"), (223, 32, "pass")):
+            grey = np.full((1000, 1000), 255, dtype=np.uint8)
+            grey[:, 200:203] = ink
+            grey[:, 800:803] = ink  # two 3 px lines: 0.6% of the page
+            img = Image.fromarray(grey)
+            page = Image.new("L", (3000, 3000), 255)
+            page.paste(img, (1000, 1000))
+            for sketch in (img, page):
+                with self.subTest(ink=ink, size=sketch.size):
+                    c = inputs.contrast_check(sketch)
+                    self.assertEqual((c["value"], c["verdict"]), (value, verdict))
+                    if verdict == "reject":
+                        self.assertIn(f"only {value} grey levels darker than the paper", c["message"])
+
+    def test_one_pixel_wide_strokes_in_every_direction_and_on_edges(self):
+        for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            for y, x in ((50, 50), (0, 50), (50, 0 if dx >= 0 else 99)):
+                grey = np.full((100, 100), 250, dtype=np.uint8)
+                for i in range(20):
+                    grey[y + dy * i, x + dx * i] = 60
+                with self.subTest(direction=(dy, dx), start=(y, x)):
+                    self.assertEqual(inputs.line_contrast(Image.fromarray(grey)), 190)
+
+    def test_dark_specks_do_not_make_faint_strokes_pass(self):
+        grey = np.full((1000, 1000), 250, dtype=np.uint8)
+        grey[100:900, 500:503] = 238
+        grey[200, 100] = 0
+        grey[400, 100:102] = 0
+        c = inputs.contrast_check(Image.fromarray(grey))
+        self.assertEqual((c["value"], c["verdict"]), (12, "reject"))
+        self.assertIn("only 12 grey levels darker than the paper", c["message"])
+
+    def test_a_fractional_contrast_is_not_rounded_up_to_the_threshold(self):
+        with mock.patch.object(inputs, "line_contrast", return_value=31.96):
+            c = inputs.contrast_check(Image.new("L", (256, 256), 255))
+        self.assertEqual((c["value"], c["verdict"]), (31.96, "reject"))
+        self.assertIn("only 31.9 grey levels darker than the paper", c["message"])
+
+    def test_no_supported_dark_strokes_measures_zero(self):
+        for paper in (0, 128, 255):
+            grey = np.full((256, 256), paper, dtype=np.uint8)
+            grey[10, 20:22] = 0
+            c = inputs.contrast_check(Image.fromarray(grey))
+            with self.subTest(paper=paper):
+                self.assertEqual((c["value"], c["verdict"]), (0, "reject"))
+                self.assertIn("only 0 grey levels darker than the paper", c["message"])
+
 
 class _SketchRun(unittest.TestCase):
     """A temporary runs root; runs replay from an empty cache, so any model call would stop the run."""
@@ -142,6 +191,16 @@ class _SketchRun(unittest.TestCase):
 
 
 class Stage0Test(_SketchRun):
+    def test_sparse_black_lines_pass_and_record_their_contrast(self):
+        grey = np.full((1000, 1000), 255, dtype=np.uint8)
+        grey[:, 200:203] = 0
+        grey[:, 800:803] = 0
+        self.assertEqual(self._run(Image.fromarray(grey)), 0)
+        s0 = self._stage(0)
+        c = next(c for c in s0["checks"] if c["name"] == "sketch_line_contrast")
+        self.assertEqual((c["value"], c["verdict"]), (255, "pass"))
+        self.assertEqual(s0["calls"], [])
+
     def test_a_small_sketch_is_rejected(self):
         img = paint(place(figure_mask(150, "front"), (200, 240), (25, 40)), colour=(60, 60, 60))
         self.assertEqual(self._run(img, (0, 1)), 3)
