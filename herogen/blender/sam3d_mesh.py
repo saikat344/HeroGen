@@ -1,8 +1,9 @@
 """Stage 3 mesh source `sam3d-objects`: put SAM 3D Objects' textured GLB into the contract frame.
 
 SAM 3D Objects reconstructs the figure from the front view and its mask alone, as an object seen by a
-perspective camera. Every choice here uses that same front view (never back, left, right, top or the held-out
-view):
+perspective camera. The shape and every choice here but one use that same front view; the one exception is the
+pitch, a rigid tilt the front view cannot see, which is registered on the observed left and right masks (step
+3b). Back, top, a view stage 2 derived from the others and the held-out views are never used:
 
 1. Axes: glTF +Y up becomes +Z up (`glb.load_glb`, Blender's import convention). The vertices are welded
    (glTF splits them at UV seams) so the body is one surface; each face keeps its corner UVs into the source
@@ -10,9 +11,20 @@ view):
 2. Facing: of the four quarter turns about +Z, the one whose front render best matches the front view
    (highest silhouette IoU minus colour error / 100, the source texture rendered flat; a figure and its back
    have near-identical outlines, so the colour decides between them).
-3. Fit: small yaw / pitch / roll and a perspective-to-orthographic correction (the model assumes a
-   perspective camera; points farther from that camera are scaled up about its height so the orthographic
-   front outline matches the drawing), coordinate descent on the front IoU at half resolution.
+3. Fit: small yaw / roll and a perspective-to-orthographic correction (the model assumes a perspective camera;
+   points farther from that camera are scaled up about its height so the orthographic front outline matches the
+   drawing), coordinate descent on the front IoU at half resolution with the pitch held.
+3b. Pitch: a tilt about X barely changes the front outline (foreshortening and the renormalised height move the
+   front IoU by a few hundredths over 20 degrees, enough for a front-only fit to drift towards its limit) but
+   tips the side profile. With the step 3 fit held, the pitch is swept from -30 to 30 degrees in 2 degree
+   steps, scored by the mean IoU of the left and right masks at half resolution, and the peaks refined to 1
+   degree; the front fit is then redone with that pitch. The pitch stays 0, with the reason recorded, when no
+   side view is observed (a missing, empty or derived mask), the side IoU varies by less than 0.02 over the
+   sweep (flat), another peak more than 8 degrees away comes within 0.01 of the best (ambiguous), or the best
+   lies beyond the +-20 degree limit. No Y offset is fitted: the frame stays centred on the bounding box (step
+   4), as each view's u is centred on its mask's box, and the pitch is chosen in that frame, so a part the mesh
+   lacks or places differently (a tail, a pack), which moves a mask's box, can pull the pitch. This registers
+   the model's pose only: the side masks never change its shape.
 4. Normalise: height `height` studs, feet at Z = 0, X/Y centred on the bounding box (the contract frame).
 5. Conform: the front outline is pulled onto the front mask with a smooth 2D displacement field in X/Z
    (silhouette-rim pixels move to the nearest mask edge, outward moves only along the rim's outward normal,
@@ -35,6 +47,15 @@ from .views import View
 
 FACINGS = (0.0, 90.0, 180.0, 270.0)
 FIT_LIMIT_DEG = 20.0
+# Pitch registration on the side views (step 3b).
+POSE_VIEWS = ("left", "right")
+POSE_STEP_DEG = 2.0         # sweep step; the best is refined to half a step
+POSE_MARGIN_DEG = 10.0      # the sweep runs this far past the limit, so a best beyond it is seen, not clipped
+POSE_MIN_RANGE = 0.02       # flat: the side IoU varies by less than this over the whole sweep
+POSE_AMBIGUOUS = 0.01       # ambiguous: another peak this close to the best ...
+POSE_PEAK_SEP_DEG = 8.0     # ... more than this far from it
+POSE_OFFSET_NOTE = ("not fitted: the contract frame centres Y on the figure's bounding box, as the views "
+                    "centre u on each mask's box, and the pitch is fitted in that frame")
 CONFORM_ITERS = 3
 CONFORM_SIGMA_PX = 6.0
 CONFORM_CAP_PX = 30.0
@@ -174,9 +195,121 @@ def conform(verts: np.ndarray, faces: np.ndarray, front: View, iters: int = CONF
                "iterations": iters, "sigma_px": sigma, "cap_px": cap}
 
 
+def pose_views(vs) -> tuple[dict, dict]:
+    """The observed side views (`POSE_VIEWS`) the pitch is registered on, and why each other one is not used. A
+    view stage 2 derived from the others (mask_method "visual_hull") is not an observation; `load_views` lists a
+    missing or empty mask as missing. Held-out views are never in a `ViewSet`."""
+    method = vs.meta.get("mask_method") or {}
+    use, skip = {}, {}
+    for name in POSE_VIEWS:
+        if name not in vs.views:
+            skip[name] = "no usable mask (missing or empty)"
+        elif "visual_hull" in str(method.get(name, "")):
+            skip[name] = f"derived view ({method[name]})"
+        else:
+            use[name] = vs.views[name]
+    return use, skip
+
+
+def fit_pitch(src: SourceMesh, p: dict, sides: dict, height: float, excluded: dict | None = None,
+              scale: float = 0.5) -> tuple[float, dict]:
+    """Register the pitch on the observed side masks (see the module notes, step 3b). Returns the pitch in
+    degrees (0 when the fit is degenerate) and its record."""
+    rec: dict = {"views": sorted(sides), "excluded": dict(excluded or {}), "limit_deg": FIT_LIMIT_DEG,
+                 "y_offset_studs": 0.0, "y_offset_note": POSE_OFFSET_NOTE}
+
+    def fallback(reason: str) -> tuple[float, dict]:
+        rec.update(status="fallback", reason=reason, pitch_deg=0.0)
+        return 0.0, rec
+
+    if not sides:
+        why = "; ".join(f"{k}: {v}" for k, v in sorted(rec["excluded"].items())) or "none given"
+        return fallback(f"no observed side view ({why})")
+    small = {k: _downsample(v.mask, (int(round(v.mask.shape[0] * scale)), int(round(v.mask.shape[1] * scale))))
+             for k, v in sides.items()}
+    cache: dict[float, float] = {}
+
+    def score(pitch: float) -> float:
+        if pitch not in cache:
+            v = _place(src, {**p, "pitch": pitch}, height)
+            cache[pitch] = float(np.mean([iou(raster.render_view(sides[k], v, src.faces, scale).mask, small[k])
+                                          for k in sides]))
+        return cache[pitch]
+
+    span = FIT_LIMIT_DEG + POSE_MARGIN_DEG
+    pts = np.arange(-span, span + 1e-9, POSE_STEP_DEG)
+    curve = {float(pt): score(float(pt)) for pt in pts}
+    rec["sweep_half_res"] = {f"{k:g}": round(s, 4) for k, s in curve.items()}
+    vals = np.array(list(curve.values()))
+    rec["side_iou_half_res"] = {"pitch_0": round(curve[0.0], 4)}
+    if vals.max() - vals.min() < POSE_MIN_RANGE:
+        return fallback(f"flat: the side IoU varies by {vals.max() - vals.min():.4f} over the sweep "
+                        f"(below {POSE_MIN_RANGE})")
+    # every local maximum of the sweep that could be the best, refined to half a step
+    half = POSE_STEP_DEG / 2
+    peaks: dict[float, float] = {}
+    for i, pt in enumerate(pts):
+        if ((i == 0 or vals[i] >= vals[i - 1]) and (i == len(pts) - 1 or vals[i] >= vals[i + 1])
+                and vals[i] > vals.max() - 3 * POSE_AMBIGUOUS):
+            s, q = max((score(float(q)), float(q)) for q in (pt - half, pt, pt + half))
+            peaks[q] = s
+    best = max(peaks, key=peaks.get)
+    s_best = peaks[best]
+    rivals = [q for q in peaks if abs(q - best) > POSE_PEAK_SEP_DEG and peaks[q] > s_best - POSE_AMBIGUOUS]
+    if rivals:
+        return fallback(f"ambiguous: the side IoU peaks at {best:g} and {rivals[0]:g} degrees "
+                        f"({s_best:.4f}, {peaks[rivals[0]]:.4f})")
+    if abs(best) > FIT_LIMIT_DEG:
+        return fallback(f"the best pitch, {best:g} degrees, lies beyond the {FIT_LIMIT_DEG:g} degree limit")
+    rec["side_iou_half_res"]["fitted"] = round(s_best, 4)
+    rec.update(status="fitted", reason=None, pitch_deg=best)
+    return best, rec
+
+
+def _front_fit(src: SourceMesh, front: View, height: float, facing: float, pitch: float,
+               scale: float = 0.5) -> tuple[dict, float, float]:
+    """Yaw, roll and the perspective correction by coordinate descent on the front IoU at `scale` resolution,
+    with the pitch held. Returns the parameters, the IoU at the facing alone and the fitted IoU."""
+    shape = (int(round(front.mask.shape[0] * scale)), int(round(front.mask.shape[1] * scale)))
+    small = _downsample(front.mask, shape)
+
+    def score(p: dict) -> float:
+        return iou(raster.render_view(front, _place(src, p, height), src.faces, scale).mask, small)
+
+    p = {"yaw": facing, "pitch": pitch, "roll": 0.0, "distance": 0.0, "cam_height": 0.0}
+    s0 = score({**p, "pitch": 0.0})
+    # perspective correction: coarse grid first (0 = none)
+    grid = [(0.0, 0.0)] + [(d, h) for d in (1.0, 1.5, 2.0, 3.0, 5.0) for h in (-0.5, 0.0, 0.25, 0.5, 0.75, 1.0)]
+    cand = max(grid, key=lambda dh: score({**p, "distance": dh[0], "cam_height": dh[1]}))
+    p["distance"], p["cam_height"] = cand
+    best_s = score(p)
+    steps = {"yaw": (4, 2, 1), "roll": (4, 2, 1), "distance": (0.5, 0.25, 0.1), "cam_height": (0.25, 0.1, 0.05)}
+    for _ in range(3):
+        changed = False
+        for k, ladder in steps.items():
+            if k in ("distance", "cam_height") and not p["distance"]:
+                continue
+            for st in ladder:
+                for sgn in (-1, 1):
+                    q = dict(p)
+                    q[k] += sgn * st
+                    if k in ("yaw", "roll") and abs(q[k] - (facing if k == "yaw" else 0.0)) > FIT_LIMIT_DEG:
+                        continue
+                    if k == "distance" and q[k] < 0.5:
+                        continue
+                    sc = score(q)
+                    if sc > best_s + 1e-5:
+                        best_s, p, changed = sc, q, True
+        if not changed:
+            break
+    return p, s0, best_s
+
+
 def orient(src: SourceMesh, front: View, front_img: np.ndarray | None, height: float,
-           conform_outline: bool = True) -> tuple[np.ndarray, dict]:
-    """Source mesh -> contract-frame vertices (faces unchanged), using the front view only."""
+           conform_outline: bool = True, sides: dict | None = None,
+           sides_excluded: dict | None = None) -> tuple[np.ndarray, dict]:
+    """Source mesh -> contract-frame vertices (faces unchanged). The front view decides everything but the
+    pitch, which is registered on `sides` (observed side views, from `pose_views`; none: pitch 0)."""
     from .texture import compare
 
     info: dict = {"facing_search": {}}
@@ -197,40 +330,12 @@ def orient(src: SourceMesh, front: View, front_img: np.ndarray | None, height: f
     facing = best[1]
     info["facing_deg"] = facing
 
-    scale = 0.5
-    shape = (int(round(front.mask.shape[0] * scale)), int(round(front.mask.shape[1] * scale)))
-    small = _downsample(front.mask, shape)
-
-    def score(p: dict) -> float:
-        return iou(raster.render_view(front, _place(src, p, height), src.faces, scale).mask, small)
-
-    p = {"yaw": facing, "pitch": 0.0, "roll": 0.0, "distance": 0.0, "cam_height": 0.0}
-    s0 = score(p)
-    # perspective correction: coarse grid first (0 = none)
-    grid = [(0.0, 0.0)] + [(d, h) for d in (1.0, 1.5, 2.0, 3.0, 5.0) for h in (-0.5, 0.0, 0.25, 0.5, 0.75, 1.0)]
-    cand = max(grid, key=lambda dh: score({**p, "distance": dh[0], "cam_height": dh[1]}))
-    p["distance"], p["cam_height"] = cand
-    best_s = score(p)
-    steps = {"yaw": (4, 2, 1), "pitch": (4, 2, 1), "roll": (4, 2, 1), "distance": (0.5, 0.25, 0.1),
-             "cam_height": (0.25, 0.1, 0.05)}
-    for _ in range(3):
-        changed = False
-        for k, ladder in steps.items():
-            if k in ("distance", "cam_height") and not p["distance"]:
-                continue
-            for st in ladder:
-                for sgn in (-1, 1):
-                    q = dict(p)
-                    q[k] += sgn * st
-                    if k in ("yaw", "pitch", "roll") and abs(q[k] - (facing if k == "yaw" else 0.0)) > FIT_LIMIT_DEG:
-                        continue
-                    if k == "distance" and q[k] < 0.5:
-                        continue
-                    sc = score(q)
-                    if sc > best_s + 1e-5:
-                        best_s, p, changed = sc, q, True
-        if not changed:
-            break
+    # the front fit with the pitch held at 0, the pitch registered on the side views, then the front fit again
+    # with that pitch (the front view barely reacts to pitch, so it is not left to choose one)
+    p, s0, best_s = _front_fit(src, front, height, facing, 0.0)
+    pitch, info["pose_fit"] = fit_pitch(src, p, sides or {}, height, sides_excluded)
+    if pitch:
+        p, _, best_s = _front_fit(src, front, height, facing, pitch)
     info["fit"] = {k: round(float(x), 3) for k, x in p.items()}
     info["fit_note"] = "distance 0 = no perspective correction; distance in body heights, cam_height in heights"
     info["front_iou_half_res"] = {"facing_only": round(s0, 4), "fitted": round(best_s, 4)}
