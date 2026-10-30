@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_herogen_body_quality import quality_client
+
 try:
     import numpy as np
     import PIL  # noqa: F401
@@ -82,7 +84,7 @@ class TestStage3Blender(SyntheticBase):
     def test_stage3_silhouette_iou(self):
         from herogen.blender.stage3 import run_stage3
 
-        r3 = run_stage3(self.rundir, nz=128, timeout=300, mesh_source="carve", joints_source="silhouette")
+        r3 = run_stage3(self.rundir, nz=128, timeout=300, mesh_source="carve", joints_source="silhouette", quality_client=quality_client())
         self.assertTrue(r3["ok"], r3["checks"])
         ious = [c["value"] for c in r3["checks"] if c["name"].startswith("silhouette_iou_")]
         self.assertEqual(len(ious), 5)

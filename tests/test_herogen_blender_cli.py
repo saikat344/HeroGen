@@ -110,6 +110,19 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertIn("hybrid export failed", rec["fallback"]["reason"])
         self.assertTrue(rec["ok"])
 
+    def test_quality_model_failure_is_a_clear_stop(self):
+        from unittest import mock
+        from herogen.blender import stage3, synth
+        from herogen.blender.body_acceptance import BodyQualityError
+
+        synth.write_run(self.run, synth.humanoid(), size=256, ppu=40.0)
+        with mock.patch.object(stage3, "run_stage3", side_effect=BodyQualityError("model incomplete")):
+            code, err = self._main("--stages", "3")
+        self.assertEqual(code, 1)
+        self.assertIn("stage 3 stopped:", err)
+        self.assertIn("model incomplete", err)
+        self.assertNotIn("Traceback", err)
+
     def test_quality_rejection_never_retries_carve(self):
         from unittest import mock
         from herogen.blender import stage3

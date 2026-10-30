@@ -1,5 +1,4 @@
-"""Stage 3: base mesh (silhouette carving, or SAM 3D Objects from the front view) and joints, checked by
-silhouette IoU against the masks."""
+"""Stage 3: hybrid body and joints, recorded carve fallback, and multiview visual acceptance."""
 from __future__ import annotations
 
 import json
@@ -12,11 +11,7 @@ from . import HEIGHT_STUDS, VIEWS, bl, carve, joints
 from .record import StageRecord, check
 from .views import load_mask, load_views
 
-# Gate on the worst view's silhouette IoU. Measured on the synthetic humanoid (512 px masks, 440 px figure),
-# worst view: 0.93 at 96 voxels tall, 0.955 at 128, 0.971 at 192 (the default), 0.972 at 256. Shifting a view
-# is absorbed by the bounding-box alignment; one side view drawn 5% too large drops that view to 0.87. On the
-# stage-2 stand-in (generated views that disagree a little) the observed views score 0.91-0.98. 0.90 passes
-# honest disagreement and catches a view that is out of scale with the others.
+# Historical observed-view threshold retained only for silhouette diagnostics.
 IOU_GATE = 0.90
 DEFAULT_NZ = 192
 
@@ -215,7 +210,7 @@ def _body_joints(run: Path, vs, height: float, verts, faces, remote, rec: StageR
 def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
                mesh_source: str = "sam3d-objects", joints_source: str = "sam3d-body", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
-               body_detector: str | None = None) -> dict:
+               body_detector: str | None = None, quality_client=None) -> dict:
     """Build the hybrid by default; a failed hybrid build retries the local carve once, with a reason.
 
     Quality rejection is a completed build and never triggers another constructor. Spend from a failed
@@ -227,7 +222,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     rec = StageRecord(run, 3, "base mesh")
     rec.data.update(mesh_source_requested=mesh_source, joints_source_requested=joints_source, fallback=None)
     kwargs = dict(height=height, nz=nz, timeout=timeout, remote=remote, y_method=y_method,
-                  limb_roots=limb_roots, body_detector=body_detector, rec=rec)
+                  limb_roots=limb_roots, body_detector=body_detector, rec=rec, quality_client=quality_client)
     from .remote.client import RemoteError
 
     try:
@@ -246,7 +241,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
 def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
                mesh_source: str = "carve", joints_source: str = "silhouette", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
-               body_detector: str | None = None, rec: StageRecord | None = None) -> dict:
+               body_detector: str | None = None, rec: StageRecord | None = None, quality_client=None) -> dict:
     """Stage 3. `mesh_source` "carve" (default) or "sam3d-objects"; `joints_source` "silhouette" (default) or
     "sam3d-body". A remote source that fails falls back to the local one (recorded) unless `fallback` is off.
     `body_detector` "vitdet" lets SAM 3D Body find the person itself (default None: the front mask's box)."""
@@ -354,10 +349,7 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
             continue
         rendered = load_mask(renders / f"{v}.png")
         ious[v] = round(iou(rendered, vs.views[v].mask), 4)
-        # A view that stage 2 derived from the others (meta mask_method "visual_hull") is not an observation:
-        # its IoU is reported, not gated (rounding unconstrained arms is expected to shrink it). Every observed
-        # view is gated whatever the mesh source; a view the shape was not built from (sam3d-objects sees only
-        # the front) carries a note saying so.
+        # All observed IoUs remain diagnostics, with construction/registration provenance.
         method_v = str((vs.meta.get("mask_method") or {}).get(v, ""))
         derived = _derived(vs, v)
         unseen = v not in shape_views and not derived
@@ -365,7 +357,7 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
         note = ({"note": f"derived view ({method_v}); not gated"} if derived else
                 {"note": f"shape not built from this view (mesh source {used_source} saw only "
                          f"{', '.join(shape_views)}){posed}"} if unseen else {})
-        rec.add(check(f"silhouette_iou_{v}", ious[v], IOU_GATE, gate=not derived, **note))
+        rec.add(check(f"silhouette_iou_{v}", ious[v], IOU_GATE, gate=False, **note))
     if used_source == "carve":
         # front/back and left/right are mirror silhouettes, so only three directions are independent; the carve
         # needs at least the front-or-back and left-or-right pair.
@@ -396,4 +388,13 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
                             "x centred on the mesh's bounding box (its front outline conformed to the front mask), "
                             "y registered on the observed depth views"),
                         "method": method}
+    from .body_acceptance import assess
+
+    if all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
+        assess(run, verts, faces, rec, client=quality_client)
+    else:
+        rec.note("visual acceptance skipped because the mesh failed structural checks")
+    rec.data["rejection_reasons"] = [
+        f"{c['name']}: {c.get('reason', 'required structural check failed')}"
+        for c in rec.data["checks"] if c.get("gate", True) and not c["pass"]]
     return rec.finish()

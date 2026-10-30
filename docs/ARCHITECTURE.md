@@ -274,11 +274,11 @@ carve check let through.
   is built from the front view alone.
 
 `stage-3.json` records `mesh_source` (what was used), `mesh_source_requested`, `joints_source` and `shape_views`,
-the views the shape was built from, and `pose_views`, the views the hybrid's pitch was registered on. **Every
-observed view's silhouette IoU is gated, whatever the mesh source**, in stage 3 and in stage 4's rest IoU; a view
-the shape was not built from carries a note saying so, and says when the pitch was registered on it. Only a
-derived view (`mask_method` `visual_hull`, made by stage 2 from the others) is reported, not gated. The texture
-gates apply to every observed colour view.
+the views the shape was built from, and `pose_views`, the views the hybrid's pitch was registered on.
+Stage 3 records every observed and derived silhouette IoU against the historical 0.90 threshold with
+`gate: false`. Views not used for shape construction retain their provenance notes. Stage 4 separately
+still gates observed rest IoU and observed colour fidelity; stage-3 acceptance alone does not certify
+that a game body will pass stage 4.
 
 **The hybrid's pitch is registered on the side views.** The front silhouette barely reacts to a tilt about X, so a
 fit on it alone drifted towards its limit: on one generated turnaround it chose -18 degrees (front IoU 0.875 at
@@ -357,10 +357,29 @@ and mapping its result (a mesh that covers no pixel of the front view, say). Sta
 `stage-3.json` when it starts and writes each output only once it is complete, so a stage that stops never
 leaves an earlier passed record or a half-written file for stage 4.
 
-Stage 3's gates: the silhouette IoU (at least 0.90) of every observed view, `open_edges` (0: the
-mesh is closed) and, by mesh source, `independent_views` for the carve (at least two of the front-or-back pair,
-the left-or-right pair and the top) or `front_view_present` for `sam3d-objects` (the one view it is built from).
-`triangles` and `non_manifold_edges` (edges shared by more than two triangles) are reported, not gated.
+Stage 3's gates are `open_edges` (zero), source view availability (`independent_views` at least two for
+carve, or `front_view_present` for the hybrid), and `body_usability`: the frozen Muse Spark multiview
+score must be at least **17.5** (the strict integer response therefore needs at least 18). This cutoff
+comes from tuning labels under the existing gate's false-accept budget, not an interpretation of the
+score as a calibrated probability. The selected visual check uses the original `00-sketch.png` and
+front/left/back/right/+30/-30 degree grey body renders. It applies equally to hybrid and fallback carve.
+The geometric cross-section candidate is available for measurement but is not part of the selected gate.
+`triangles` and `non_manifold_edges` remain diagnostics.
+
+`body_acceptance` in `stage-3.json` records policy `body-usability-v1`, threshold, model, prompt hash,
+view angles, raw score and reason, client call receipts and any error. `rejection_reasons` names every
+failed gate; a completed visual rejection retains the model's concrete reason. The six grey renders
+and question sheet are written to `03-quality/`. Missing sketches, render failures, failed model calls,
+incomplete responses and schema failures stop with `BodyQualityError`, write `ok: false` with an `error`
+and preserved cost, and never retry a different constructor. Structural failures skip the paid question.
+
+The CLI defaults to `--quality live`; `MODEL_API_KEY` must be in the environment. `--quality replay`
+requires the exact cached response and stops on a miss. `--quality-cache` defaults to the run parent's
+`_cache-model`; the hosted service passes its user's existing model cache. The Model API key reaches
+only stage 3 within the Blender group; stage 4 receives no key. Both model and Blender worker containers
+hold the model secret, with the latter using it for stage 3's question. Retry policy and token pricing
+are the pipeline client's, including cost receipts for failed calls. Synthetic runs include a synthetic
+front reference as `00-sketch.png`; construction tests inject strict mocked responses and make no paid calls.
 
 `03-joints.json` holds the joints stage 4 cuts at:
 
@@ -1308,7 +1327,7 @@ function is `nonpreemptible`. Instead:
 
 Stages run as the same commands a person types (`python3 -m herogen.pipeline run`, `python3 -m herogen.blender
 run`), each in a subprocess with a timeout and an environment that holds only what the stage needs:
-`MODEL_API_KEY` reaches the model stages and the held-out views only, and no stage sees the session key or the
+`MODEL_API_KEY` reaches the model stages, stage 3 and the held-out views only, and no stage sees the session key or the
 email key. Options that
 only some versions of a stage CLI have (`--profile`, `--remote-cache`) are passed only when that CLI's `--help`
 lists them. A job that starts from a description first runs stage `p` (`sketchgen.py`): one `muse-image-1.0`
@@ -1593,7 +1612,7 @@ timeouts.
 | Secret (Modal secret) | Variables | Used by |
 | --- | --- | --- |
 | `<app>-web` | `HEROGEN_SESSION_KEY` (at least 32 random bytes), `HEROGEN_EMAIL_API_KEY` | `web`, `admin_command` |
-| `<app>-model` | `MODEL_API_KEY` | `model_stages` |
+| `<app>-model` | `MODEL_API_KEY` | `model_stages`, `blender_stages` (stage 3 only), `heldout_stages` |
 | `<app>-admin` | `HEROGEN_ADMIN_KEY` (at least 32 random bytes) | `StoreService`, `admin_command`: the store's admin methods (invites, allowlist, users, quotas, audit) accept calls only with this key, so the web and worker functions cannot reach them |
 | `huggingface` | `HF_TOKEN` | the SAM 3D apps, only when stage 3 uses them |
 
@@ -1638,7 +1657,7 @@ base URL is the address Modal prints for the `web` function; set it and deploy a
 
 ### Body acceptance measurements
 
-`herogen.blender.body_quality` supplies two measurements without changing stage 3's gate:
+`herogen.blender.body_quality` supplies two acceptance measurements:
 
 - `cross_sections` intersects the mesh at 35%, 45% and 55% of its height. Each score is the XY convex hull's
   area divided by its axis-aligned bounding rectangle's area; their mean is `rectangularity`. A rectangle

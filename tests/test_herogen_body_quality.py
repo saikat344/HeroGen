@@ -1,6 +1,9 @@
 """Synthetic geometry and mocked strict visual responses for body acceptance measurements."""
 import hashlib
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -8,6 +11,16 @@ from PIL import Image
 
 from herogen.blender import body_quality as q
 from herogen.pipeline.client import ClientError
+
+
+def quality_client(score=75):
+    """A strict-schema client substitute for synthetic construction tests; no paid calls."""
+    from herogen.pipeline.client import CallLog
+
+    client = mock.Mock()
+    client.log = CallLog()
+    client.compare_images.return_value = {"usable_probability": score, "reason": "synthetic solid body"}
+    return client
 
 
 def prism(sides=4):
@@ -86,6 +99,67 @@ class VisualTests(unittest.TestCase):
         for im in images.values():
             self.assertEqual(im.size, (48, 48))
             self.assertLess(np.asarray(im).min(), 255)
+
+
+class AcceptanceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = Path(self.tmp.name)
+        Image.new("RGB", (32, 32), "white").save(self.run / "00-sketch.png")
+
+    def test_calibrated_boundary_and_recorded_rejection_reason(self):
+        from herogen.blender.body_acceptance import assess
+        from herogen.blender.record import StageRecord
+
+        for score, accepted in ((17, False), (18, True)):
+            rec = StageRecord(self.run, 3, "base mesh")
+            assess(self.run, *prism(16), rec, client=quality_client(score))
+            result = rec.finish()
+            self.assertEqual(result["ok"], accepted)
+            self.assertEqual(result["checks"][0]["reason"], "synthetic solid body")
+            self.assertTrue((self.run / "03-quality" / "sheet.png").is_file())
+            self.assertEqual(len(result["outputs"]), 7)
+
+    def test_model_error_is_loud_and_preserves_cost_in_failed_record(self):
+        from herogen.blender.body_acceptance import BodyQualityError, assess
+        from herogen.blender.record import StageRecord
+
+        client = quality_client()
+
+        def fail(*args, **kwargs):
+            client.log.add("muse-spark-1.3", "compare", "synthetic", False, cost_usd=0.01)
+            raise ClientError("responses: incomplete")
+
+        client.compare_images.side_effect = fail
+        rec = StageRecord(self.run, 3, "base mesh")
+        rec.data["cost_usd"] = 0.1
+        with self.assertRaisesRegex(BodyQualityError, "incomplete"):
+            assess(self.run, *prism(16), rec, client=client)
+        result = json.loads((self.run / "stage-3.json").read_text())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["cost_usd"], 0.11)
+        self.assertIn("incomplete", result["error"])
+        self.assertIn("muse-spark-1.3", result["models"])
+
+    def test_quality_error_never_retries_another_constructor(self):
+        from herogen.blender.body_acceptance import BodyQualityError
+        from herogen.blender import stage3
+
+        with mock.patch.object(stage3, "_run_stage3", side_effect=BodyQualityError("model failed")) as build:
+            with self.assertRaises(BodyQualityError):
+                stage3.run_stage3(self.run)
+        self.assertEqual(build.call_count, 1)
+
+    def test_missing_sketch_is_a_recorded_error(self):
+        from herogen.blender.body_acceptance import BodyQualityError, assess
+        from herogen.blender.record import StageRecord
+
+        (self.run / "00-sketch.png").unlink()
+        client = quality_client()
+        with self.assertRaises(BodyQualityError):
+            assess(self.run, *prism(16), StageRecord(self.run, 3, "base mesh"), client=client)
+        client.compare_images.assert_not_called()
 
 
 if __name__ == "__main__":

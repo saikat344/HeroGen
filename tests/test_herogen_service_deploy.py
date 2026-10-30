@@ -121,10 +121,11 @@ class TestModalApp(TempDirCase):
         self.assertEqual(secrets["web"], ["herogen-service-web"])
         self.assertEqual(secrets["model_stages"], ["herogen-service-model"])
         self.assertEqual(secrets["heldout_stages"], ["herogen-service-model"])
+        self.assertEqual(secrets["blender_stages"], ["herogen-service-model"])
         self.assertEqual(f["heldout_stages"]["max_containers"], 2, "held-out views yield to the jobs' own work")
         self.assertEqual(secrets["admin_command"], ["herogen-service-web", "herogen-service-admin"])
         self.assertEqual(secrets["StoreService"], ["herogen-service-admin"])
-        for n in ("blender_stages", "export_stages", "run_job", "sweep", "retention"):
+        for n in ("export_stages", "run_job", "sweep", "retention"):
             self.assertEqual(secrets[n], [], f"{n} holds no secret")
         self.assertNotIn("herogen-service-admin", secrets["web"])
         for n in ("run_job", "model_stages", "blender_stages", "export_stages", "heldout_stages"):

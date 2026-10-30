@@ -2,7 +2,7 @@
 
 Each stage runs as the same command a person would type (`python3 -m herogen.pipeline run ...`,
 `python3 -m herogen.blender run ...`), in a subprocess with a timeout and an environment holding only what that
-stage needs (the Model API key reaches the model stages only). Its outcome is read from the stage record it
+stage needs (the Model API key reaches the model stages, stage 3 and held-out views). Its outcome is read from the stage record it
 writes (`stage-<n>.json`, docs/ARCHITECTURE.md): ok means passed, a record with a failed gate means the pipeline
 rejected the sketch (shown to the user with the checks that failed), and no record means an error (logged in
 full, shown as one sentence). Options that only some versions of a stage CLI have (`--profile`, `--remote-cache`)
@@ -74,7 +74,7 @@ REASONS = (
     ("2", "a_pose", "In the front view the arms were not held away from the body."),
     ("2", "top", "The top view did not match the other views."),
     ("2", "", "The four turnaround views did not agree with each other."),
-    ("3", "silhouette_iou", "The 3D shape did not match the views closely enough."),
+    ("3", "body_usability", "The body did not have usable shape and major parts across the rendered views."),
     ("3", "", "The 3D shape could not be built cleanly from the views."),
     ("4", "max_joint_gap", "The body opened gaps at the joints when it was posed."),
     ("4", "triangles", "The body did not fit the triangle budget of the chosen profile."),
@@ -308,6 +308,8 @@ class CliRunner:
                 argv += list(ctx.stage3_args)
                 if "--remote-cache" in help_text:
                     argv += ["--remote-cache", str(ctx.remote_cache_dir)]
+                if "--quality-cache" in help_text:
+                    argv += ["--quality-cache", str(ctx.cache_dir)]
             if spec.key == "4" and "--profile" in help_text:
                 argv += ["--profile", ctx.profile]
             return argv, None
@@ -323,7 +325,7 @@ class CliRunner:
         if why:
             return Outcome("skipped", message=why, code="not_available")
         extra = dict(ctx.env)
-        if spec.group in ("model", "heldout") and self._model_key:
+        if (spec.group in ("model", "heldout") or spec.key == "3") and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
             env = base_env({"HOME": home, **extra})

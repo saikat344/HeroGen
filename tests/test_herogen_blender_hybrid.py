@@ -15,6 +15,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_herogen_body_quality import quality_client
+
 import numpy as np
 from PIL import Image
 
@@ -724,7 +726,7 @@ class TestStage3SourcesWithoutBlender(HybridBase):
         (run / "03-source.glb").write_bytes(b"earlier source")
         with self.assertRaises(rclient.RemoteError):
             run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
-                       remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
+                       remote=rclient.RemoteClient(cache), fallback=False, timeout=300, quality_client=quality_client())
         self.assertFalse((run / "stage-3.json").exists())        # stage 4 cannot pick up the earlier record
         self.assertFalse((run / "03-source.glb").exists())
         self.assertEqual([p.name for p in run.glob("*.part")], [])
@@ -740,16 +742,16 @@ class TestStage3HybridBlender(HybridBase):
         cache = self.tmp / "e2e-cache"
         self.replay_entries(run, cache)
         rec = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
-                         remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
+                         remote=rclient.RemoteClient(cache), fallback=False, timeout=300, quality_client=quality_client())
         self.assertEqual(rec["mesh_source"], "sam3d-objects")
         self.assertEqual(rec["joints_source"], "sam3d-body")
         self.assertEqual(rec["shape_views"], ["front"])
         self.assertEqual(rec["pose_views"], ["left", "right"])
         chk = {c["name"]: c for c in rec["checks"]}
-        self.assertTrue(chk["silhouette_iou_front"]["gate"])
+        self.assertFalse(chk["silhouette_iou_front"]["gate"])
         self.assertGreater(chk["silhouette_iou_front"]["value"], 0.90)
-        for v in ("back", "left", "right"):     # observed views are gated, with a note that the shape never saw them
-            self.assertTrue(chk[f"silhouette_iou_{v}"]["gate"], v)
+        for v in ("back", "left", "right"):     # observed views retain construction provenance
+            self.assertFalse(chk[f"silhouette_iou_{v}"]["gate"], v)
             self.assertIn("shape not built from this view", chk[f"silhouette_iou_{v}"]["note"])
         # The source is the exact upright body: with its pitch registered on the side masks (the shape still
         # comes from the front view alone) the side views pass, and the record says what was fitted on them.
@@ -766,12 +768,12 @@ class TestStage3HybridBlender(HybridBase):
         self.assertIn("03-source.glb", rec["outputs"])
         self.assertEqual(json.loads((run / "03-joints.json").read_text())["source"], "sam3d-body")
         self.assertEqual(rec["cost_usd"], 0.0)
-        # front, back, left and right pass; the observed top view is gated as well and decides the stage (it
-        # also measures the front fit's perspective correction, which the turnaround views barely see)
-        self.assertEqual(rec["ok"], chk["silhouette_iou_top"]["pass"])
+        # Historical silhouette thresholds are diagnostics; visual acceptance decides usability.
+        self.assertTrue(rec["ok"])
+        self.assertEqual(chk["body_usability"]["value"], 75)
         # an empty cache: the remote sources fall back to carve and silhouette, and the record says so
         rec2 = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
-                          remote=rclient.RemoteClient(self.tmp / "empty"), timeout=300)
+                          remote=rclient.RemoteClient(self.tmp / "empty"), timeout=300, quality_client=quality_client())
         self.assertEqual((rec2["mesh_source"], rec2["mesh_source_requested"]), ("carve", "sam3d-objects"))
         self.assertEqual(rec2["joints_source"], "silhouette")
         self.assertIn("fell back", rec2["notes"])
@@ -779,7 +781,7 @@ class TestStage3HybridBlender(HybridBase):
         self.assertEqual(json.loads((run / "03-joints.json").read_text())["source"], "silhouette")
         with self.assertRaises(rclient.ReplayMiss):
             run_stage3(run, nz=96, mesh_source="sam3d-objects", remote=rclient.RemoteClient(self.tmp / "empty"),
-                       fallback=False, timeout=300)
+                       fallback=False, timeout=300, quality_client=quality_client())
 
     def test_corrupt_remote_results_fall_back_cleanly(self):
         """A corrupt cached GLB and an unreadable SAM 3D Body result: stage 3 falls back to the carve and the
@@ -796,7 +798,7 @@ class TestStage3HybridBlender(HybridBase):
         key = rclient.request_key(rclient.body_summary(img, stage3.body_box(vs), stage3.BODY_BOX_SOURCE))
         (cache / key / "joints.json").write_text("{ not json")
         rec = stage3.run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
-                                remote=rclient.RemoteClient(cache), timeout=300)
+                                remote=rclient.RemoteClient(cache), timeout=300, quality_client=quality_client())
         self.assertTrue(rec["ok"])
         self.assertEqual((rec["mesh_source"], rec["joints_source"]), ("carve", "silhouette"))
         self.assertIn("hybrid build failed (sam3d-objects: GlbError", rec["notes"])
@@ -817,8 +819,8 @@ class TestStage4HybridBlender(HybridBase):
         cache = self.tmp / "e2e4-cache"
         self.replay_entries(run, cache)
         rec3 = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
-                          remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
-        self.assertFalse(rec3["ok"])                                  # the side views fail (stage 3 test)
+                          remote=rclient.RemoteClient(cache), fallback=False, timeout=300, quality_client=quality_client())
+        self.assertTrue(rec3["ok"])                                   # mocked visual acceptance, real geometry
         rec4 = run_stage4(run, timeout=600, profile="roblox-ingame")
         chk = {c["name"]: c for c in rec4["checks"]}
         self.assertEqual((rec4["mesh_source"], rec4["joints_source"]), ("sam3d-objects", "sam3d-body"))
@@ -854,7 +856,7 @@ class TestStage4HybridBlender(HybridBase):
             self.assertAlmostEqual(hyb["views"][v]["ssim"], chk[f"texture_ssim_{v}"]["value"], delta=0.03)
         self.assertEqual((hyb["views"]["left"]["seen_shape"], hyb["views"]["left"]["seen_colour"]), (False, True))
         # stage 4 again on the carve: the hybrid's comparison atlases must not survive as stale variants
-        rec3 = run_stage3(run, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette")
+        rec3 = run_stage3(run, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette", quality_client=quality_client())
         self.assertEqual(rec3["mesh_source"], "carve")
         run_stage4(run, timeout=600, profile="roblox-ingame")
         self.assertEqual(sorted(p.name for p in (run / "04-body").glob("atlas-high*.png")), ["atlas-high.png"])
