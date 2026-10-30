@@ -32,7 +32,9 @@ except ImportError:  # numpy or Pillow missing
 # left arm red, its right arm blue. With "cuff", a yellow box around the left forearm that the rig does not
 # deform. With "turned", the whole figure faces +Y instead (a model exported the other way round); with
 # "tilted", it is tilted 2 degrees about each axis, so no box edge runs along a pixel row or column. With
-# "nolegs", the leg bones have names that are not limbs, so the rig has arms only.
+# "nolegs", the leg bones have names that are not limbs, so the rig has arms only. With "headbone", a `head`
+# bone below the spine carries the head box, whose material is named "Face". With "invisible", every material
+# has alpha 0, as some FBX files import.
 # Run with --python-expr, then `-- <out.glb> <1 for rigged, 0 for not> <cuff|none|turned>`.
 BUILD = textwrap.dedent('''
     import sys
@@ -40,7 +42,7 @@ BUILD = textwrap.dedent('''
     import bmesh
 
     out, rigged, extra = sys.argv[-3], sys.argv[-2] == "1", sys.argv[-1]
-    cuff, turned = extra == "cuff", extra == "turned"
+    cuff, turned, headbone = extra == "cuff", extra == "turned", extra == "headbone"
     rename = {"upperleg.l": "post.l", "upperleg.r": "post.r", "foot.l": "base.l", "foot.r": "base.r"}
     name = (lambda n: rename.get(n, n)) if extra == "nolegs" else (lambda n: n)
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -57,6 +59,8 @@ BUILD = textwrap.dedent('''
     ]
     if cuff:
         PARTS.append(("Cuff", (0.95, 0, 1.5), (0.1, 0.2, 0.2), (0.9, 0.8, 0.05), None))
+    if headbone:
+        PARTS[1] = ("Head", (0, 0, 1.8), (0.4, 0.4, 0.4), (0.9, 0.8, 0.6), "head")
     BONES = [  # name, head, tail, parent
         ("spine", (0, 0, 0.9), (0, 0, 1.6), None),
         ("upperarm.l", (0.45, 0, 1.5), (0.75, 0, 1.5), "spine"),
@@ -70,6 +74,8 @@ BUILD = textwrap.dedent('''
         ("upperleg.r", (-0.15, 0, 0.9), (-0.15, 0, 0.0), "spine"),
         ("foot.r", (-0.15, 0, 0.0), (-0.15, -0.1, 0.0), "upperleg.r"),
     ]
+    if headbone:
+        BONES.append(("head", (0, 0, 1.6), (0, 0, 2.0), "spine"))
     arm = None
     if rigged:
         data = bpy.data.armatures.new("Rig")
@@ -91,9 +97,11 @@ BUILD = textwrap.dedent('''
             v.co = (c[0] + v.co.x * s[0], c[1] + v.co.y * s[1], c[2] + v.co.z * s[2])
         bm.to_mesh(me)
         bm.free()
-        mat = bpy.data.materials.new(part + "Mat")
+        mat = bpy.data.materials.new("Face" if headbone and part == "Head" else part + "Mat")
         mat.use_nodes = True
         mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*col, 1.0)
+        if extra == "invisible":
+            mat.node_tree.nodes["Principled BSDF"].inputs["Alpha"].default_value = 0.0
         me.materials.append(mat)
         o = bpy.data.objects.new(part, me)
         bpy.context.scene.collection.objects.link(o)
@@ -855,6 +863,161 @@ class FacingErrorTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("pass --yaw", err)
         self.assertNotIn("Traceback", err)
+
+
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
+class DatasetTest(unittest.TestCase):
+    """A rigged figure with a head bone and an unrigged one rendered as a dataset, and the same rigged figure
+    through the bench's ray-cast masks for comparison."""
+
+    SIZE, HEAD_SIZE = 96, 64
+    HEAD_COLOUR = (0.9, 0.8, 0.6)   # linear, as built
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        build_figure(root / "head.glb", True, "headbone")
+        build_figure(root / "plain.glb", False, "none")
+        build_figure(root / "invisible.glb", True, "invisible")
+        (root / "head.vrm").write_bytes((root / "head.glb").read_bytes())    # a VRM is a binary glTF
+        cls.manifest = root / "manifest.json"
+        cls.manifest.write_text(json.dumps({"characters": [
+            {"id": "head", "asset": "head.glb", "split": "train", "group": "a"},
+            {"id": "plain", "asset": "plain.glb", "split": "heldout", "group": "b", "yaw_deg": 0},
+            {"id": "missing", "asset": "nothing-here.glb", "split": "train", "group": "c"},
+            {"id": "vrm", "asset": "head.vrm", "split": "train", "group": "d"},
+            {"id": "invisible", "asset": "invisible.glb", "split": "train", "group": "e"},
+        ]}))
+        cls.out = root / "dataset"
+        cls.args = ["dataset", "--manifest", str(cls.manifest), "--out", str(cls.out),
+                    "--size", str(cls.SIZE), "--head-size", str(cls.HEAD_SIZE), "--samples-lit", "4",
+                    "--workers", "2"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            cls.code = main(cls.args)
+            cls.bench_code = main(["render", "--asset", str(root / "head.glb"), "--out", str(root / "bench"),
+                                   "--size", str(cls.SIZE), "--samples-lit", "4"])
+        cls.bench = root / "bench"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def sample(self, cid):
+        return json.loads((self.out / cid / "sample.json").read_text())
+
+    def test_layout_and_record(self):
+        self.assertEqual(self.code, 1)                  # the missing asset failed; the others rendered
+        s = self.sample("head")
+        self.assertTrue(s["ok"], {k: v for k, v in s["checks"].items() if not v["ok"]})
+        views = [c["view"] for c in s["cameras"]]
+        self.assertEqual(len(views), 18)
+        self.assertEqual(views[-6:], ["head-front", "head-front-left-45", "head-left", "head-back",
+                                      "head-right", "head-front-right-45"])
+        for v in views:
+            for f in (f"{v}-flat.png", f"{v}-lit.png", f"{v}.npz"):
+                self.assertTrue((self.out / "head" / "views" / f).is_file(), f)
+        size = {c["view"]: c["resolution"] for c in s["cameras"]}
+        self.assertEqual(size["front"], self.SIZE)
+        self.assertEqual(size["head-front"], self.HEAD_SIZE)
+        for f in ("gt/body.glb", "gt/mesh.npz", "logs/render.log"):
+            self.assertTrue((self.out / "head" / f).is_file(), f)
+        self.assertFalse((self.out / "head" / ".work").exists())
+        self.assertNotIn(str(Path.home()), (self.out / "head" / "logs" / "render.log").read_text())
+
+    def test_a_figure_hidden_by_alpha_zero_is_rendered_again_opaque(self):
+        s = self.sample("invisible")
+        self.assertTrue(s["ok"])
+        self.assertEqual(s["alpha_retry"]["materials"], sorted(s["alpha"]))
+        self.assertEqual(set(s["options"]["material_alpha"].values()), {"opaque"})
+        self.assertGreater(s["checks"]["front"]["mask_px"], 100)
+
+    def test_vrm_avatar_loads_as_gltf(self):
+        s = self.sample("vrm")
+        self.assertTrue(s["ok"])
+        self.assertEqual(s["triangles"], self.sample("head")["triangles"])
+
+    def test_failed_character_is_recorded_and_others_go_on(self):
+        failed = json.loads((self.out / "missing" / "failed.json").read_text())
+        self.assertIn("asset missing", failed["error"])
+        self.assertFalse((self.out / "missing" / "sample.json").exists())
+
+    def test_resume_skips_finished_characters(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = main(self.args)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(buf.getvalue().strip().splitlines()[-1])["queued"], 0)
+
+    def test_masks_match_the_bench_ray_casts(self):
+        self.assertEqual(self.bench_code, 0)
+        for view in ("front", "left", "back-right-45", "front-left-25"):
+            with np.load(self.out / "head" / "views" / f"{view}.npz") as arr:
+                mask = arr["mask"]
+                depth = arr["depth"].astype(np.float64)
+            folder = "heldout" if view.endswith(("-25", "-65")) else "masks"
+            name = f"{view}-mask.png" if folder == "heldout" else f"{view}.png"
+            ray = np.asarray(Image.open(self.bench / folder / name).convert("L")) > 127
+            np.testing.assert_array_equal(mask, ray, err_msg=view)
+            ray_depth = np.load(self.bench / ("heldout" if folder == "heldout" else "depth")
+                                / (f"{view}-depth.npy" if folder == "heldout" else f"{view}.npy"))
+            np.testing.assert_allclose(depth[mask], ray_depth[mask], atol=0.01, err_msg=view)
+
+    def test_head_region_and_face_material(self):
+        s = self.sample("head")
+        self.assertEqual(s["head"]["source"], "rig")
+        self.assertEqual(s["head"]["bone"], "head")
+        self.assertIn("Face", s["materials"])
+        # a one-colour box head is no use for learning faces: rendered, checked, and flagged
+        self.assertFalse(s["usable"])
+        self.assertEqual(len(s["unusable_reasons"]), 1)
+        self.assertIn("untextured", s["unusable_reasons"][0])
+        srgb = np.array([(c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055) * 255
+                         for c in self.HEAD_COLOUR])
+        for view in ("front", "head-front", "head-left"):
+            with np.load(self.out / "head" / "views" / f"{view}.npz") as arr:
+                head, face, mask = arr["head"] >= 128, arr["face"], arr["mask"]
+            flat = np.asarray(Image.open(self.out / "head" / "views" / f"{view}-flat.png").convert("RGBA"))
+            self.assertGreater(head.sum(), 20, view)
+            np.testing.assert_array_equal(head, face, err_msg=view)   # the head box is the face material
+            inner = head & (flat[..., 3] == 255)
+            self.assertTrue(np.all(np.abs(flat[inner][:, :3] - srgb) <= 2), view)
+            body = mask & ~head & (flat[..., 3] == 255)
+            self.assertTrue(np.all(np.abs(flat[body][:, :3] - srgb).max(1) > 2), view)
+
+    def test_head_close_ups_frame_the_head(self):
+        s = self.sample("head")
+        cams = {c["view"]: c for c in s["cameras"]}
+        cam = cams["head-front"]
+        # the head box is 0.4 x 0.4 x 0.4 built units, centred at 1.8: its centre is the image centre
+        self.assertEqual(s["head"]["framing"], "head region")
+        with np.load(self.out / "head" / "views" / "head-front.npz") as arr:
+            head = arr["head"] >= 128
+        rows, cols = np.nonzero(head)
+        self.assertLessEqual(abs((rows.min() + rows.max() + 1) / 2 - self.HEAD_SIZE / 2), 1.0)
+        self.assertLessEqual(abs((cols.min() + cols.max() + 1) / 2 - self.HEAD_SIZE / 2), 1.0)
+        # one pixel scale for all six: the cube's widest view (its diagonal, from 45 degrees) fills 80%
+        self.assertLessEqual(abs(rows.max() - rows.min() + 1 - 0.8 * self.HEAD_SIZE / 2 ** 0.5), 1.5)
+        self.assertEqual(cam["role"], "head")
+
+    def test_uv_and_mesh_record(self):
+        s = self.sample("head")
+        mesh = np.load(self.out / "head" / "gt" / "mesh.npz")
+        self.assertEqual(len(mesh["triangles"]), s["triangles"])
+        self.assertEqual(mesh["uv"].shape, (s["triangles"], 3, 2))
+        self.assertAlmostEqual(float(mesh["vertices"][:, 2].max()), 5.5, places=4)
+        with np.load(self.out / "head" / "views" / "front.npz") as arr:
+            uv, mask, mat = arr["uv"].astype(np.float32), arr["mask"], arr["material"]
+        self.assertTrue(np.all((uv[mask] >= -1e-3) & (uv[mask] <= 1 + 1e-3)))
+        self.assertTrue(np.all(mat[mask] >= 1) and np.all(mat[~mask] == 0))
+
+    def test_unrigged_figure_has_no_head_region(self):
+        s = self.sample("plain")
+        self.assertTrue(s["ok"])
+        self.assertEqual(s["head"]["source"], "none")
+        self.assertIn("no head region", s["head"]["framing"])
+        self.assertIn("no head region from the rig", s["unusable_reasons"])
+        self.assertEqual(s["split"], "heldout")
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")

@@ -47,7 +47,7 @@ from .rig import POSE_CONVERGED_DEG
 
 JOB_SCRIPT = Path(__file__).with_name("bench_job.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ASSET_TYPES = (".glb", ".gltf", ".fbx", ".blend")
+ASSET_TYPES = (".glb", ".gltf", ".vrm", ".fbx", ".blend")
 SIZE_RANGE = (32, 8192)         # square image size in pixels
 MARKER = "bench-run.json"        # written first, so even a run that stopped part-way is recognised
 # Everything the bench writes at the top of a run folder; --overwrite clears a folder holding nothing else.
