@@ -761,7 +761,7 @@ deploy`.
 | Tag | Deploys to | Only when |
 | --- | --- | --- |
 | `vX.Y.Z-rc.N` | the `staging` GitHub environment | always |
-| `vX.Y.Z` | the `production` GitHub environment | the same commit also carries a tag `vX.Y.Z-rc.N` (any N) |
+| `vX.Y.Z` | the `production` GitHub environment | the same commit also carries a tag `vX.Y.Z-rc.N` (any N), and the `staging` environment has a successful deployment of that commit |
 | any other tag starting with `v` | nothing: the workflow fails and names the format | |
 
 X, Y, Z and N are whole numbers without leading zeros, and `rc` is lower case: `v1.4.0-rc.1`, `v1.4.0`, `v2.0.10`.
@@ -770,9 +770,18 @@ both work; an annotated tag is read as the commit it points at.
 
 ### Jobs
 
-1. **plan** checks the tag (`release.py plan <tag>`). For a production tag it lists the tags on the tag's commit
-   (`git tag --points-at`, on a checkout holding every tag) and refuses unless one is an rc tag of the same
-   version. It passes the environment, `staging` or `production`, to the deploy job.
+1. **plan** checks the tag (`release.py plan <tag>`) and passes the environment, `staging` or `production`, to
+   the deploy job. For a production tag it also:
+   - lists the tags on the tag's commit (`git tag --points-at`, on a checkout holding every tag) and refuses unless
+     one is an rc tag of the same version;
+   - asks GitHub's deployments API for the `staging` deployments of that commit (`environment=staging`,
+     `sha=<commit>`, following every page up to 20 of 100) and each one's statuses, and refuses unless one of
+     them has a `success` status. A deployment GitHub later marked `inactive`, because a newer one to staging
+     succeeded, still counts. It refuses, saying which, when staging has no deployment of the commit, when one is
+     still queued, pending or in progress (or has no status yet), when none succeeded (it names each one's latest
+     state), and when the API cannot be read: 401, 403, 404, 5xx or any other answer but 200, no answer, an
+     answer that is not a list, a next page on another host, or more than 20 pages. This job alone has the
+     `deployments: read` permission; its token goes to the check step only, and the checkout keeps none.
 2. **test** is `.github/workflows/tests.yml`, called as a reusable workflow: the same unit tests and guard as on
    every branch push. Tags starting with `v` do not start `tests.yml` on their own, so a tag runs the tests once.
 3. **deploy** needs both, and runs in the GitHub environment the plan chose, with that environment's secrets and
@@ -795,8 +804,18 @@ both work; an annotated tag is read as the commit it points at.
 Staging and production are told apart by the Modal app name, `HEROGEN_SERVICE_APP`, set per GitHub environment
 (for example `herogen-service-staging` and `herogen-service`). The service names its app, volumes (`<app>-data`,
 `<app>-meta`, `<app>-legal`) and Modal secrets (`<app>-web`, `<app>-model`, `<app>-admin`) after it, so the two
-share nothing. Each environment has its own Modal token, so they can also be in different Modal workspaces. The
-deploy uses the token's default Modal environment.
+share nothing. Staging is a separate app that also runs in production mode (`HEROGEN_SERVICE_MODE=production`,
+real sign-in mail through Resend); only its name, settings and secrets differ. Each environment has its own Modal
+token, so they can also be in different Modal workspaces. The deploy uses the token's default Modal environment.
+
+Each environment has its own custom domain, set up before its first deploy, so `HEROGEN_SERVICE_BASE_URL` is known
+from the start and the check requires it. Deploying first and then setting the base URL to the address Modal
+prints for the `web` function is not supported by this flow.
+
+The SAM 3D apps that stage 3 can call, `herogen-sam3d-objects` and `herogen-sam3d-body`
+(`herogen/blender/remote/`), have fixed names, so staging and production share them. This flow does not deploy
+them; redeploying either changes it for both environments at once. Per-environment names for them are not built
+yet.
 
 Each GitHub environment needs:
 
@@ -804,7 +823,7 @@ Each GitHub environment needs:
 | --- | --- | --- |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | secret | The Modal API token the deploy runs with |
 | `HEROGEN_SERVICE_APP` | variable | The Modal app name, which prefixes every volume and secret of the service |
-| `HEROGEN_SERVICE_BASE_URL` | variable | The service's public `https://` origin |
+| `HEROGEN_SERVICE_BASE_URL` | variable | The service's public `https://` origin, on the environment's own custom domain |
 | `HEROGEN_SERVICE_EMAIL_FROM` | variable | The sign-in mail's From address, on your own sending domain |
 | `HEROGEN_SERVICE_TERMS_VERSION` | variable | The version of the published terms users accept |
 
@@ -822,22 +841,26 @@ git tag v1.4.0-rc.1 <commit>
 git push origin v1.4.0-rc.1
 ```
 
-A fix for the same version goes on a new commit with the next rc, `v1.4.0-rc.2`. To promote to production, tag the
-commit of the rc that passed on staging with the version alone and push it:
+A fix for the same version goes on a new commit with the next rc, `v1.4.0-rc.2`. To promote to production, wait
+until the rc's staging deploy has succeeded, then tag the same commit with the version alone and push it:
 
 ```bash
 git tag v1.4.0 'v1.4.0-rc.2^{commit}'
 git push origin v1.4.0
 ```
 
-A production tag on a commit without an rc tag of its version fails in **plan** and deploys nothing. Tag that
-commit `v1.4.0-rc.N`, let it deploy to staging, then re-run the failed release run: a re-run checks the tags again.
-The check reads tags only; it does not look at whether the rc's staging deploy passed.
+A production tag fails in **plan** and deploys nothing when its commit has no rc tag of its version or no
+successful staging deployment. Tag that commit `v1.4.0-rc.N` if it has none, let it deploy to staging, then re-run
+the final's failed release run: a re-run reads the tags and the deployments again. An rc and its final pushed
+together deploy staging only: the final's check runs before the rc's staging deploy has succeeded, so it refuses;
+re-run the final's release run once staging is green.
 
-To check a tag after creating it and before pushing it, run the same check in a clone with every tag fetched:
+To check a tag after creating it and before pushing it, run the same check in a clone with every tag fetched. For
+a production tag it reads the deployments too, so it needs the repository and a token that may read them:
 
 ```bash
-python3 tools/release/release.py plan v1.4.0
+python3 tools/release/release.py plan v1.4.0-rc.1
+GITHUB_REPOSITORY=<owner>/<repo> GITHUB_TOKEN=<token> python3 tools/release/release.py plan v1.4.0
 ```
 
 ### Rolling back
@@ -846,10 +869,11 @@ Two ways, both through the same flow:
 
 - **Redeploy an earlier tag.** Re-run the release run of the earlier tag in GitHub Actions ("Re-run all jobs"). It
   checks out that tag's commit, runs its tests and deploys it again with the environment's current settings.
-  GitHub allows re-runs up to 30 days after a run.
-- **Release an earlier commit as a new version.** Tag the earlier commit with a new rc and then its final, for
-  example `v1.4.1-rc.1` and `v1.4.1`, and push them as above. The commit must hold the release workflow and the
-  service code.
+  For a production tag the staging check passes again, since the earlier rc's successful staging deployment is
+  still recorded. GitHub allows re-runs up to 30 days after a run.
+- **Release an earlier commit as a new version.** Tag the earlier commit with a new rc, for example
+  `v1.4.1-rc.1`, and push it; once it has deployed to staging, tag and push its final, `v1.4.1`, as above. The
+  commit must hold the release workflow and the service code.
 
 Neither rolls back data: the `<app>-data` and `<app>-meta` volumes are left as they are, so the earlier code runs
 on whatever the newer code wrote.
