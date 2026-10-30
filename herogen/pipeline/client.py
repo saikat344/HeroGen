@@ -449,12 +449,12 @@ class ModelClient:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                     "Accept": "application/json"})
-                # The deadline holds while an answer is read too: no socket wait outlasts it, and the body is
-                # read in pieces with the deadline checked after each (`_read_body`).
+                # The deadline holds while the answer is read too (status line, headers, body, chunk framing,
+                # trailers): every socket read checks it first and waits at most the time left (`_ReadGuard`).
                 timeout = min(TIMEOUT_S, max(0.01, deadline - policy.clock()))
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with _open(req, timeout, _ReadGuard(deadline, policy.clock, deadline_s)) as r:
                     status = r.status
-                    raw = _read_body(r, policy, deadline, deadline_s).decode("utf-8", "replace")
+                    raw = r.read().decode("utf-8", "replace")
                 try:
                     parsed = json.loads(raw)
                 except ValueError:
@@ -561,18 +561,81 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
                        + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
 
 
-def _read_body(r: Any, policy: retry.RetryPolicy, deadline: float, deadline_s: float) -> bytes:
-    """A response body, read one socket read at a time (each waits at most the socket timeout), with the call's
-    deadline checked after each: a server that trickles bytes can't hold the call past it. Past the deadline
-    the read stops with `TimeoutError`, like a socket timeout."""
-    pieces: list[bytes] = []
-    while True:
-        piece = r.read1(65536)
-        if not piece:
-            return b"".join(pieces)
-        pieces.append(piece)
-        if policy.clock() > deadline:
-            raise TimeoutError(f"the answer was still arriving at the {deadline_s:g} s deadline")
+class _GuardedRaw(io.RawIOBase):
+    """A response's socket stream that checks the call's deadline before every read and lets each read wait at
+    most the time left (and at most `TIMEOUT_S`). http.client reads the status line, headers, body, chunk framing
+    and trailers through it, so no part of a response can hold a call past its deadline."""
+
+    def __init__(self, sock: Any, guard: "_ReadGuard") -> None:
+        super().__init__()
+        self._sock = sock
+        self._raw = sock.makefile("rb", buffering=0)
+        self._guard = guard
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int | None:
+        self._sock.settimeout(self._guard.left())
+        return self._raw.readinto(b)
+
+    def close(self) -> None:
+        if not self.closed:
+            self._raw.close()
+        super().close()
+
+
+class _ReadGuard:
+    """The deadline of one call, applied to every socket read of a response (see `_GuardedRaw`)."""
+
+    def __init__(self, deadline: float, clock: Any, deadline_s: float) -> None:
+        """``clock``: the retry policy's monotonic clock, in which ``deadline`` is given."""
+        self.deadline, self.clock, self.deadline_s = deadline, clock, deadline_s
+
+    def left(self) -> float:
+        """Seconds a socket read may wait: the time left, at most `TIMEOUT_S`. Past the deadline the read stops
+        with `TimeoutError`, like a socket timeout."""
+        left = self.deadline - self.clock()
+        if left <= 0.0:
+            raise TimeoutError(f"the answer was still arriving at the {self.deadline_s:g} s deadline")
+        return min(TIMEOUT_S, left)
+
+    def response(self, sock: Any, *args: Any, **kwargs: Any) -> http.client.HTTPResponse:
+        r = http.client.HTTPResponse(sock, *args, **kwargs)
+        r.fp.close()  # nothing read yet: read through the guarded stream instead
+        r.fp = io.BufferedReader(_GuardedRaw(sock, self))
+        return r
+
+    def connection(self, http_class: Any) -> Any:
+        def make(*args: Any, **kwargs: Any) -> Any:
+            conn = http_class(*args, **kwargs)
+            conn.response_class = self.response
+            return conn
+        return make
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, guard: _ReadGuard) -> None:
+        super().__init__()
+        self._guard = guard
+
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        return super().do_open(self._guard.connection(http_class), req, **kwargs)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, guard: _ReadGuard) -> None:
+        super().__init__()
+        self._guard = guard
+
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        return super().do_open(self._guard.connection(http_class), req, **kwargs)
+
+
+def _open(req: urllib.request.Request, timeout: float, guard: _ReadGuard) -> Any:
+    """``urlopen`` for one attempt, with every read of the response under ``guard``."""
+    opener = urllib.request.build_opener(_GuardedHTTPHandler(guard), _GuardedHTTPSHandler(guard))
+    return opener.open(req, timeout=timeout)
 
 
 def _error_body(e: urllib.error.HTTPError) -> str:

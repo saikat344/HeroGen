@@ -25,7 +25,12 @@ from herogen.pipeline import client as client_mod
 from herogen.pipeline import retry
 
 # responder(endpoint, body) -> (status, extra headers, JSON payload[, delay in seconds before answering[, seconds
-# between 4-byte pieces of the body, to trickle it]]). Status 0 closes the connection without an answer.
+# between pieces[, framing]]]). Status 0 closes the connection without an answer. With a piece time, the answer
+# is written by hand in 4-byte pieces: ``framing`` "length" (the default; the body trickles), "headers" (the
+# status line and headers trickle), "chunked" (chunked transfer coding; every chunk and the trailers trickle),
+# "trailers" (chunked; only the trailers trickle) or "short" (Content-Length claims more than is sent, then the
+# connection closes; nothing trickles).
+FRAMINGS = ("length", "headers", "chunked", "trailers", "short")
 Responder = Callable[[str, dict], tuple]
 
 
@@ -102,20 +107,41 @@ class FakeModelServer:
                     self.connection.close()
                     return
                 data = json.dumps(payload).encode()
+                if len(rest) > 1 and (rest[1] or len(rest) > 2):
+                    self._write_by_hand(status, extra, data, rest[1], rest[2] if len(rest) > 2 else "length")
+                    return
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 for k, v in extra.items():
                     self.send_header(k, v)
                 self.end_headers()
-                trickle = rest[1] if len(rest) > 1 else 0.0
-                if not trickle:
-                    self.wfile.write(data)
-                    return
-                for i in range(0, len(data), 4):
-                    self.wfile.write(data[i:i + 4])
-                    self.wfile.flush()
-                    time.sleep(trickle)
+                self.wfile.write(data)
+
+            def _write_by_hand(self, status: int, extra: dict, data: bytes, piece_s: float, framing: str) -> None:
+                assert framing in FRAMINGS, framing
+                self.close_connection = True
+                chunked = framing in ("chunked", "trailers")
+                head = [f"HTTP/1.1 {status} OK", "Content-Type: application/json", "Connection: close"]
+                head += ["Transfer-Encoding: chunked" if chunked else
+                         f"Content-Length: {len(data) + (50 if framing == 'short' else 0)}"]
+                head += [f"{k}: {v}" for k, v in extra.items()]
+                parts: list[tuple[bytes, bool]] = [("\r\n".join(head).encode() + b"\r\n\r\n", framing == "headers")]
+                if chunked:
+                    for i in range(0, len(data), 4):
+                        piece = data[i:i + 4]
+                        parts.append((b"%x\r\n" % len(piece) + piece + b"\r\n", framing == "chunked"))
+                    parts.append((b"0\r\n", False))
+                    parts.append((b"X-Trailer: " + b"t" * 200 + b"\r\n\r\n", True))
+                else:
+                    parts.append((data, framing == "length"))
+                for part, slow in parts:
+                    pieces = [part[i:i + 4] for i in range(0, len(part), 4)] if slow else [part]
+                    for piece in pieces:
+                        self.wfile.write(piece)
+                        self.wfile.flush()
+                        if slow:
+                            time.sleep(piece_s)
 
             def log_message(self, *_a: Any) -> None:
                 pass
