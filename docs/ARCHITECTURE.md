@@ -15,7 +15,7 @@ tested separately. A run can also start from a text prompt: stage p draws the sk
 | 0 input | `herogen/pipeline` | `00-sketch.png` (copied input, or `p-full-body.png` when the run started from a prompt) |
 | 1 cover art | `herogen/pipeline` | `01-cover.png` |
 | 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them), `masks/parts.json` (their record) |
-| 2f face source | `herogen/pipeline` | `views/closeup-{front,left,right}.png` (head close-ups), `views/closeup-<view>-input.png` (the crops sent), `masks/closeup-<view>.png` (footprints), `views/closeup.json` (their record); only for the views whose close-up passed its gates |
+| 2f face source | `herogen/pipeline` | `views/closeup-{front,left,right}.png` (head close-ups), `views/closeup-<view>-input.png` (the crops sent), `masks/closeup-<view>.png` (footprints), only for the views whose close-up passed its gates; `views/closeup.json` (the record, always, with each view's reason when it is not used) |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
 | 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust` |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
@@ -515,8 +515,9 @@ add detail to the Head's own texture.
 - **Footprint.** The view's SAM `head` mask grown by 2 px inside the crop box (the figure inside the crop box when
   there is no head mask).
 - **Never fails a hero.** Any error, such as a Model API failure, a replay miss, a missing input or a bug, is
-  recorded in `stage-2f.json` (`details.fallback`). No close-up is written, earlier ones are removed, and stage 4
-  bakes the plain views. No check of stage 2f is gated. Stage 2f changes no file another stage reads, so the
+  recorded in `stage-2f.json` and `views/closeup.json` (`fallback`). No close-up image is written, earlier ones
+  are removed, and stage 4 bakes the plain views. `views/closeup.json` is written in every case, so stage 4's
+  record can say why a view has no close-up. No check of stage 2f is gated. Stage 2f changes no file another stage reads, so the
   held-out views stay valid.
 - **Record.** `views/closeup.json` (under `views`), and `stage-2f.json` (under `details.closeups`), give per view:
   - the recipe and the crop box;
