@@ -247,7 +247,9 @@ def fit_pitch(src: SourceMesh, p: dict, sides: dict, height: float, excluded: di
     curve = {float(pt): score(float(pt)) for pt in pts}
     rec["sweep_half_res"] = {f"{k:g}": round(s, 4) for k, s in curve.items()}
     vals = np.array(list(curve.values()))
-    rec["side_iou_half_res"] = {"pitch_0": round(curve[0.0], 4)}
+    rec["side_iou_half_res"] = {"pitch_0": round(curve[0.0], 4),
+                                "note": "sweep scores (source placed by the step 3 fit, before the front refit, "
+                                        "conform and remesh); the final side IoU is in the stage checks"}
     if vals.max() - vals.min() < POSE_MIN_RANGE:
         return fallback(f"flat: the side IoU varies by {vals.max() - vals.min():.4f} over the sweep "
                         f"(below {POSE_MIN_RANGE})")
@@ -267,7 +269,7 @@ def fit_pitch(src: SourceMesh, p: dict, sides: dict, height: float, excluded: di
                         f"({s_best:.4f}, {peaks[rivals[0]]:.4f})")
     if abs(best) > FIT_LIMIT_DEG:
         return fallback(f"the best pitch, {best:g} degrees, lies beyond the {FIT_LIMIT_DEG:g} degree limit")
-    rec["side_iou_half_res"]["fitted"] = round(s_best, 4)
+    rec["side_iou_half_res"]["fitted"] = round(s_best, 4)    # the sweep's score, before the refit and conform
     rec.update(status="fitted", reason=None, pitch_deg=best)
     return best, rec
 
