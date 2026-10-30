@@ -1,0 +1,82 @@
+{
+  "name": "same-character-v1",
+  "kind": "same_character",
+  "summary": "Asks a vision model whether a full-body edit shows the same character as its design, and which props changed.",
+  "steps": [
+    {
+      "name": "compare",
+      "endpoint": "responses",
+      "model": "muse-spark-1.3",
+      "params": {
+        "reasoning_effort": "low",
+        "max_output_tokens": 3000,
+        "image_max_side": 1024,
+        "image_format": "jpeg",
+        "jpeg_quality": 90
+      },
+      "prompt": "You compare two pencil drawings for a game tool. Image 1 (the first image) is a character design. Image 2 (the second image) is meant to redraw the same character as a full-body, front-facing A-pose. These differences are expected and are not changes: the pose, camera angle, framing and how much of the body is visible; lines, shading and paper; parts hidden in image 1 now being drawn; and a weapon or prop that was held in a hand now worn on the back or belt. Decide whether image 2 shows the same character as image 1: the same kind of person or creature, the same face and hair or headgear, and the same costume and armour pieces. Then list the weapons and carried props you can see in each image (swords, guns, staffs, shields, bags, and so on; not clothing). A prop is added when image 2 has it and image 1 shows no such prop at all; removed when image 1 has it and image 2 shows it nowhere, worn or held. Judge only what you see. Reply with JSON only.",
+      "schema": {
+        "name": "same_character",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "same_character": {
+              "type": "string",
+              "enum": [
+                "yes",
+                "no"
+              ]
+            },
+            "differences": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "props_image_1": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "props_image_2": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "added_props": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "removed_props": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "changed_hand": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "same_character",
+            "differences",
+            "props_image_1",
+            "props_image_2",
+            "added_props",
+            "removed_props",
+            "changed_hand"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "sha256": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9"
+}
