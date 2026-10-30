@@ -748,6 +748,112 @@ All Muse Image and SAM 3.1 calls go through `herogen/pipeline/client.py`; the po
   that failed, and, for a Muse Image generation (paid and not idempotent), any 5xx but 503. A Muse Image
   generation is never retried on a 409.
 
+## Releases
+
+Tags deploy the hosted service (`herogen/service`) to Modal through `.github/workflows/release.yml`. The
+rules are `tools/release/release.py`, tested in `tests/test_tools_release.py`; the workflow only calls it.
+
+A release deploys the service's Modal app, `herogen/service/modal_app.py`, so it needs the service code merged
+into the tagged commit. A tag on a commit without that file passes the tag check and the tests, then fails at the
+first step of the deploy job with `herogen/service/modal_app.py is not in this commit, so there is no service to
+deploy`.
+
+| Tag | Deploys to | Only when |
+| --- | --- | --- |
+| `vX.Y.Z-rc.N` | the `staging` GitHub environment | always |
+| `vX.Y.Z` | the `production` GitHub environment | the same commit also carries a tag `vX.Y.Z-rc.N` (any N) |
+| any other tag starting with `v` | nothing: the workflow fails and names the format | |
+
+X, Y, Z and N are whole numbers without leading zeros, and `rc` is lower case: `v1.4.0-rc.1`, `v1.4.0`, `v2.0.10`.
+`v1.4`, `v1.4.0-rc1`, `v1.4.0-RC.1`, `v01.4.0` and `v1.4.0-beta.1` are refused. Lightweight and annotated tags
+both work; an annotated tag is read as the commit it points at.
+
+### Jobs
+
+1. **plan** checks the tag (`release.py plan <tag>`). For a production tag it lists the tags on the tag's commit
+   (`git tag --points-at`, on a checkout holding every tag) and refuses unless one is an rc tag of the same
+   version. It passes the environment, `staging` or `production`, to the deploy job.
+2. **test** is `.github/workflows/tests.yml`, called as a reusable workflow: the same unit tests and guard as on
+   every branch push. Tags starting with `v` do not start `tests.yml` on their own, so a tag runs the tests once.
+3. **deploy** needs both, and runs in the GitHub environment the plan chose, with that environment's secrets and
+   variables. Deploys to one environment run one at a time: a running deploy is never cancelled, and a deploy
+   waiting behind it is replaced by a newer one that starts waiting. Its steps:
+   - before anything is installed, checks that `herogen/service/modal_app.py` is in the commit and that every
+     setting below is set (`release.py check <tag>`). It fails the job with every problem at once: the missing
+     file, and each missing or blank setting by name, as a secret or a variable. Values are never printed;
+   - installs the Modal CLI pinned with its dependencies in `tools/release/requirements.txt`;
+   - `release.py deploy <tag>` checks the same again, then runs
+     `python -m modal deploy -m herogen.service.modal_app --tag <tag>`, so each Modal deployment is tagged with its
+     release tag. The service bakes every `HEROGEN_SERVICE_*` variable of the deploying shell into its image, so
+     of those the deploy gets only the four variables below and two fixed ones; any other `HEROGEN_SERVICE_*`
+     variable in the job is removed. The fixed ones: `HEROGEN_SERVICE_MODE=production` (the service refuses to
+     deploy in any other mode; staging deploys use it too) and `HEROGEN_SERVICE_EMAIL_PROVIDER=resend` (production
+     mode needs a real email provider, and Resend is the only one the service has).
+
+### Staging and production
+
+Staging and production are told apart by the Modal app name, `HEROGEN_SERVICE_APP`, set per GitHub environment
+(for example `herogen-service-staging` and `herogen-service`). The service names its app, volumes (`<app>-data`,
+`<app>-meta`, `<app>-legal`) and Modal secrets (`<app>-web`, `<app>-model`, `<app>-admin`) after it, so the two
+share nothing. Each environment has its own Modal token, so they can also be in different Modal workspaces. The
+deploy uses the token's default Modal environment.
+
+Each GitHub environment needs:
+
+| Name | Kind | What it is |
+| --- | --- | --- |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | secret | The Modal API token the deploy runs with |
+| `HEROGEN_SERVICE_APP` | variable | The Modal app name, which prefixes every volume and secret of the service |
+| `HEROGEN_SERVICE_BASE_URL` | variable | The service's public `https://` origin |
+| `HEROGEN_SERVICE_EMAIL_FROM` | variable | The sign-in mail's From address, on your own sending domain |
+| `HEROGEN_SERVICE_TERMS_VERSION` | variable | The version of the published terms users accept |
+
+The service also needs, in Modal, before the first deploy of an app: the secrets `<app>-web`
+(`HEROGEN_SESSION_KEY`, `HEROGEN_EMAIL_API_KEY`), `<app>-model` (`MODEL_API_KEY`) and `<app>-admin`
+(`HEROGEN_ADMIN_KEY`), and the terms and privacy documents on the `<app>-legal` volume. The release flow does not
+create them.
+
+### Cutting a release
+
+Tag the commit to release as the first rc of a new version and push the tag; it deploys to staging:
+
+```bash
+git tag v1.4.0-rc.1 <commit>
+git push origin v1.4.0-rc.1
+```
+
+A fix for the same version goes on a new commit with the next rc, `v1.4.0-rc.2`. To promote to production, tag the
+commit of the rc that passed on staging with the version alone and push it:
+
+```bash
+git tag v1.4.0 'v1.4.0-rc.2^{commit}'
+git push origin v1.4.0
+```
+
+A production tag on a commit without an rc tag of its version fails in **plan** and deploys nothing. Tag that
+commit `v1.4.0-rc.N`, let it deploy to staging, then re-run the failed release run: a re-run checks the tags again.
+The check reads tags only; it does not look at whether the rc's staging deploy passed.
+
+To check a tag after creating it and before pushing it, run the same check in a clone with every tag fetched:
+
+```bash
+python3 tools/release/release.py plan v1.4.0
+```
+
+### Rolling back
+
+Two ways, both through the same flow:
+
+- **Redeploy an earlier tag.** Re-run the release run of the earlier tag in GitHub Actions ("Re-run all jobs"). It
+  checks out that tag's commit, runs its tests and deploys it again with the environment's current settings.
+  GitHub allows re-runs up to 30 days after a run.
+- **Release an earlier commit as a new version.** Tag the earlier commit with a new rc and then its final, for
+  example `v1.4.1-rc.1` and `v1.4.1`, and push them as above. The commit must hold the release workflow and the
+  service code.
+
+Neither rolls back data: the `<app>-data` and `<app>-meta` volumes are left as they are, so the earlier code runs
+on whatever the newer code wrote.
+
 ## Rules
 
 - No secrets in code, logs or run folders. Model keys come from the environment.
