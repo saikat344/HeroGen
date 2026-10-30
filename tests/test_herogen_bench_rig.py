@@ -34,6 +34,17 @@ class NameTest(unittest.TestCase):
             "thigh.R": ("R", "thigh"),
             "Bip01 L UpperArm": ("L", "upperarm"),
             "spine": (None, "spine"),
+            "J_Bip_L_UpperArm": ("L", "upperarm"),
+            "J_Bip_R_UpperLeg": ("R", "upperleg"),
+            "J_Bip_C_Head": (None, "head"),
+            "Bip001 L UpperArm_010": ("L", "upperarm"),
+            "CC_Base_L_Thigh_05": ("L", "thigh"),
+            "mixamorig_LeftUpLeg_Armature": ("L", "upleg"),
+            "mixamorig:Head_Armature": (None, "head"),
+            "Character1_LeftUpLeg_02": ("L", "upleg"),
+            "QuickRigCharacter_RightArm": ("R", "arm"),
+            "Upper Arm R_7": ("R", "upper_arm"),
+            "Head_08": (None, "head"),
         }
         for name, want in cases.items():
             self.assertEqual(RIG.split_name(name), want, name)
@@ -44,6 +55,16 @@ class NameTest(unittest.TestCase):
         self.assertEqual(RIG.find_limb_root(kaykit, "leg", "L"), "upperleg.l")
         self.assertIsNone(RIG.find_limb_root(kaykit, "arm", "R"))
         self.assertEqual(RIG.find_limb_end(kaykit, "arm", "L"), "wrist.l")
+
+    def test_vrm_limbs(self):
+        vrm = ["J_Bip_C_Hips", "J_Bip_L_Shoulder", "J_Bip_L_UpperArm", "J_Bip_L_LowerArm", "J_Bip_L_Hand",
+               "J_Bip_L_Index1", "J_Bip_L_UpperLeg", "J_Bip_L_LowerLeg", "J_Bip_L_Foot", "J_Sec_L_Bust1"]
+        self.assertEqual(RIG.find_limb_root(vrm, "arm", "L"), "J_Bip_L_UpperArm")
+        self.assertEqual(RIG.find_limb_end(vrm, "arm", "L"), "J_Bip_L_Hand")
+        self.assertEqual(RIG.find_limb_root(vrm, "leg", "L"), "J_Bip_L_UpperLeg")
+        self.assertEqual(RIG.find_limb_end(vrm, "leg", "L"), "J_Bip_L_Foot")
+        self.assertEqual(sorted(RIG.limb_bones(vrm, "arm", "L")),
+                         ["J_Bip_L_Hand", "J_Bip_L_Index1", "J_Bip_L_LowerArm", "J_Bip_L_UpperArm"])
 
     def test_mixamo_shin_is_not_taken_for_the_thigh(self):
         mixamo = ["mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftForeArm"]
@@ -145,6 +166,55 @@ class GeometryTest(unittest.TestCase):
         self.assertAlmostEqual(RIG.angle_from_vertical([0.0, 0.0, -1.0]), 0.0)
         self.assertAlmostEqual(RIG.angle_below_horizontal([1.0, 0.0, -1.0]), 45.0)
         self.assertAlmostEqual(RIG.angle_from_vertical([math.sin(0.1), 0, -math.cos(0.1)]), math.degrees(0.1))
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy is required")
+class HeadTest(unittest.TestCase):
+    def test_head_bone_names(self):
+        cases = [
+            ({"Hips": None, "Spine": "Hips", "Neck": "Spine", "Head": "Neck", "HeadTop_End": "Head"}, "Head"),
+            ({"mixamorig:Hips": None, "mixamorig:Neck": "mixamorig:Hips", "mixamorig:Head": "mixamorig:Neck",
+              "mixamorig:HeadTop_End": "mixamorig:Head"}, "mixamorig:Head"),
+            ({"J_Bip_C_Hips": None, "J_Bip_C_Neck": "J_Bip_C_Hips", "J_Bip_C_Head": "J_Bip_C_Neck"},
+             "J_Bip_C_Head"),
+            ({"root": None, "chest": "root", "head": "chest", "forehead": "head"}, "head"),
+            ({"root": None, "DEF-spine": "root", "DEF-spine.005": "DEF-spine",
+              "DEF-spine.006": "DEF-spine.005"},
+             "DEF-spine.006"),
+            ({"root": None, "Forehead": "root", "Eye_L": "root"}, None),
+        ]
+        for parents, want in cases:
+            self.assertEqual(RIG.find_head(list(parents), parents), want, parents)
+
+    def test_a_deforming_head_wins_over_a_control(self):
+        parents = {"root": None, "head": "root", "DEF-head": "root", "DEF-jaw": "DEF-head"}
+        self.assertEqual(RIG.find_head(list(parents), parents, deform={"DEF-head", "DEF-jaw"}), "DEF-head")
+
+    def test_rigify_head_control_is_not_the_skin(self):
+        parents = {"root": None, "head": "root", "DEF-spine.005": "root", "DEF-spine.006": "DEF-spine.005",
+                   "ORG-spine.006": "root"}
+        self.assertEqual(RIG.find_head(list(parents), parents, deform={"DEF-spine.005", "DEF-spine.006"}),
+                         "DEF-spine.006")
+
+    def test_every_head_candidate_in_order(self):
+        # a helper beside the real head: both are offered, the caller keeps the one the skin follows
+        parents = {"root": None, "neck": "root", "head_ref.x": "neck", "head_scale_fix.x": "neck",
+                   "jaw": "head_scale_fix.x"}
+        self.assertEqual(RIG.head_candidates(list(parents), parents), ["head_ref.x", "head_scale_fix.x"])
+        self.assertEqual(RIG.head_candidates(list(parents), parents, deform={"head_scale_fix.x", "jaw"}),
+                         ["head_scale_fix.x", "head_ref.x"])
+        self.assertEqual(RIG.head_candidates(["root"], {"root": None}), [])
+
+    def test_head_region_is_the_bone_and_everything_below(self):
+        parents = {"Hips": None, "Neck": "Hips", "Head": "Neck", "Jaw": "Head", "Eye.L": "Head",
+                   "Hair1": "Jaw", "Hand.L": "Hips"}
+        self.assertEqual(sorted(RIG.below(list(parents), parents, "Head")), ["Eye.L", "Hair1", "Head", "Jaw"])
+
+    def test_face_materials(self):
+        for name in ("Face", "MTL_Eyes", "EyeBrow", "mouth_inside", "Teeth.001", "M_FaceSkin"):
+            self.assertTrue(RIG.is_face_material(name), name)
+        for name in ("Surface", "Interface", "Body", "Hair", "Skin", "Eyewear"):
+            self.assertFalse(RIG.is_face_material(name), name)
 
 
 if __name__ == "__main__":
