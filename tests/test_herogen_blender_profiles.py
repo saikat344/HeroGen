@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_herogen_body_quality import quality_client
+
 import numpy as np
 
 from herogen.blender import AVATAR_GROUPS, DEFAULT_PROFILE, PROFILES, SECTIONS, bl, synth
@@ -84,7 +86,7 @@ class ProfilesEndToEnd(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="herogen-profiles-"))
         cls.rundir = cls.tmp / "run"
         synth.write_run(cls.rundir, synth.humanoid(), size=384, ppu=60.0)
-        assert run_stage3(cls.rundir, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette")["ok"]
+        assert run_stage3(cls.rundir, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette", quality_client=quality_client())["ok"]
         cls.stage3_triangles = int(np.load(cls.rundir / "blender-work" / "03-mesh.npz")["faces"].shape[0])
 
     @classmethod

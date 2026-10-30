@@ -216,7 +216,7 @@ def render_views(fig: Figure, masks: dict, centres: dict, size: int, ppu: float)
 
 
 def write_run(run: Path, fig: Figure | None = None, size: int = 512, ppu: float = 80.0) -> dict:
-    """Write a synthetic stage-2 output (masks, colour views painted with `paint`, meta) plus
+    """Write a synthetic stage-2 output (masks, colour views painted with `paint`, meta), front reference sketch and
     `synthetic/truth.json`."""
     fig = fig or humanoid()
     masks, centres = render_masks(fig, size, ppu)
@@ -231,6 +231,7 @@ def write_run(run: Path, fig: Figure | None = None, size: int = 512, ppu: float 
             Image.fromarray(colours[view]).save(run / "views" / f"{view}.png")
         else:
             save_mask(run / "views" / f"{view}.png", m)
+    Image.fromarray(colours["front"]).save(run / "00-sketch.png")
     (run / "views" / "meta.json").write_text(json.dumps(
         {"pixels_per_unit": ppu, "height_units": 5.5, "image_size": size}, indent=2))
     # The pipeline's frame is centred on the figure's X/Y bounding box (see views.py); shift the truth into it.

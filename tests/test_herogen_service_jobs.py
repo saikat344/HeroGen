@@ -737,7 +737,7 @@ class TestStageCommands(TempDirCase):
 
     def test_commands_follow_the_stage_clis(self):
         r = CliRunner(python="py")
-        r._flags["herogen.blender"] = "usage: --run --stages --profile PROFILE --remote-cache DIR"
+        r._flags["herogen.blender"] = "usage: --run --stages --profile PROFILE --remote-cache DIR --quality-cache DIR"
         ctx = self.ctx()
         specs = {s.key: s for s in PLAN}
         argv, stdin = r.command(specs["0"], ctx, {}, self.tmp)
@@ -749,6 +749,7 @@ class TestStageCommands(TempDirCase):
         argv, _ = r.command(specs["3"], ctx, {}, self.tmp)
         self.assertIn("sam3d-objects", argv)
         self.assertEqual(argv[argv.index("--remote-cache") + 1], str(ctx.remote_cache_dir))
+        self.assertEqual(argv[argv.index("--quality-cache") + 1], str(ctx.cache_dir))
         argv, _ = r.command(specs["4"], ctx, {}, self.tmp)
         self.assertEqual(argv[argv.index("--profile") + 1], "roblox-avatar")
         r._flags["herogen.blender"] = "usage: --run --stages"
@@ -786,6 +787,20 @@ class TestStageCommands(TempDirCase):
         with mock.patch.object(pstages, "stage2_turnaround", side_effect=RuntimeError("x")), \
                 mock.patch("sys.stderr"):
             self.assertEqual(pipestage.main(args), 1)
+
+    def test_model_key_reaches_stage3_but_not_stage4_or_export(self):
+        from unittest import mock
+        import subprocess
+
+        runner = CliRunner(python="py", model_api_key="synthetic-key")
+        runner._flags["herogen.blender"] = "--quality-cache"
+        specs = {s.key: s for s in PLAN}
+        for key in ("1", "3", "4", "6"):
+            with mock.patch.object(runner, "available", return_value=None), \
+                    mock.patch("herogen.service.runner.subprocess.run",
+                               return_value=subprocess.CompletedProcess([], 1, "", "")) as execute:
+                runner.run(specs[key], self.ctx())
+            self.assertEqual("MODEL_API_KEY" in execute.call_args.kwargs["env"], key in ("1", "3"))
 
     def test_stage_env_holds_no_secrets(self):
         from herogen.service.runner import base_env
