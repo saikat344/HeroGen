@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.pipeline import checks as C
+from herogen.pipeline import imaging
 from herogen.pipeline.client import SamInstance
 
 Check = dict[str, Any]
@@ -35,8 +36,14 @@ OTHER_CHARACTER_MIN_FRAC = 0.25
 # Stage 1. Body parts are found with these SAM 3.1 prompts on the sketch, and belong to the main figure when at
 # least ON_FIGURE_MIN of their area lies on its mask (on the tuning sketches a part on the figure measures
 # 0.93-1.0 and one on another character 0.0).
-FOOT_TEXT, LEG_TEXT = "foot", "leg"
+FOOT_TEXT, LEG_TEXT, FACE_TEXT, HEAD_TEXT = "foot", "leg", "face", "head"
 ON_FIGURE_MIN = 0.5
+# Facing: the SAM 3.1 `face` centroid's offset from the `head` centroid, over the head's box width (`face_offset`,
+# the held-out views' face cue), on the main figure. On the tuning sketches the two side-view sketches measure
+# -0.30 (s040) and +0.43 (s045); every other sketch where it could be measured is within 0.157 (s033),
+# three-quarter sketches included. Over 0.23, the middle of that gap, the sketch is likely a side view. Two side
+# views are too few to reject on, so it warns.
+FACE_TURN_MAX = 0.23
 # Feet: no `foot` on the main figure means the feet can't be seen. On the tuning sketches every sketch whose
 # figure SAM found has at least one foot on it except five: the two cropped at the knees (s008, s041), where
 # `leg` finds two legs on the figure, and the two robes that hide the feet (s016, s031) and the side view s045,
@@ -144,3 +151,45 @@ def feet_check(feet: int, legs: int | None) -> Check:
            "the feet and legs")
     return input_check("sketch_feet_on_figure", feet, 1, ">=", "reject" if cropped else "warn", msg,
                        note="without feet: reject when legs are found on the figure (cropped), else warn")
+
+
+def best_instance(instances: list[SamInstance], within: np.ndarray | None = None) -> SamInstance | None:
+    """The most confident instance (largest when no confidence), keeping only those mostly on ``within``."""
+    keep = [i for i in instances if i.mask.any()]
+    if within is not None:
+        keep = [i for i in keep if (i.mask & within).sum() >= 0.5 * i.mask.sum()]
+    if not keep:
+        return None
+    return max(keep, key=lambda i: (i.confidence if i.confidence is not None else 0.0, int(i.mask.sum())))
+
+
+def face_offset(face: np.ndarray, head: np.ndarray) -> float:
+    """Which way the head is turned: (face centroid x - head centroid x) / head box width; + is image
+    right."""
+    hb = imaging.bbox(head)
+    if hb is None or not face.any():
+        return 0.0
+    fx = float(np.nonzero(face)[1].mean())
+    hx = float(np.nonzero(head)[1].mean())
+    return (fx - hx) / max(1, hb[2] - hb[0])
+
+
+def facing_check(face: SamInstance | None, head: SamInstance | None) -> tuple[Check, dict[str, Any]]:
+    """Is the sketch a side view? |`face_offset`| of the face (at least half inside the head) within the head, at
+    most `FACE_TURN_MAX`, else warn. With no face or head found on the figure (a full helmet, a back view) it is
+    not measured: the check's value is null and its verdict "not_measured", which neither warns nor stops."""
+    name, threshold, op = "sketch_face_offset_in_head", FACE_TURN_MAX, "<="
+    reason = ("no head found on the figure" if head is None else "no face found on the figure" if face is None else
+              "the face is not inside the head" if (face.mask & head.mask).sum() < 0.5 * face.mask.sum() else "")
+    if reason:
+        return ({"name": name, "value": None, "threshold": threshold, "op": op, "pass": True, "gate": False,
+                 "verdict": "not_measured", "note": f"not measured: {reason}"}, {"face_offset": None})
+    off = face_offset(face.mask, head.mask)
+    side = "right" if off > 0 else "left"
+    check = input_check(
+        name, abs(off), threshold, op, "warn",
+        f"the face is turned to the image {side} ({abs(off):.2f} of the head's width off its centre; over "
+        f"{threshold} reads as a side view). HeroGen builds from a front view, so it may have to invent the front; "
+        "a front-facing sketch works best",
+    )
+    return check, {"face_offset": round(off, 4)}

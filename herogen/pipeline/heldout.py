@@ -74,9 +74,8 @@ from PIL import Image, ImageDraw
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
-from herogen.pipeline.client import (
-    IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss, SamInstance,
-)
+from herogen.pipeline.client import IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss
+from herogen.pipeline.inputs import FACE_TEXT, HEAD_TEXT, best_instance, face_offset
 from herogen.pipeline.runfolder import RunFolder, now_iso
 from herogen.pipeline.stages import _load, _Stage, degraded_masks, method_kind, sam_coverage, sam_figure_mask
 
@@ -512,30 +511,6 @@ def toe_offset_h(mask: np.ndarray) -> float:
     return imaging.facing_offset(mask) * w / h
 
 
-def _best(instances: list[SamInstance], within: np.ndarray | None = None) -> SamInstance | None:
-    """The most confident instance (largest when no confidence), keeping only those mostly on ``within``."""
-    keep = [i for i in instances if i.mask.any()]
-    if within is not None:
-        keep = [i for i in keep if (i.mask & within).sum() >= 0.5 * i.mask.sum()]
-    if not keep:
-        return None
-    return max(keep, key=lambda i: (i.confidence if i.confidence is not None else 0.0, int(i.mask.sum())))
-
-
-def face_offset(face: np.ndarray, head: np.ndarray) -> float:
-    """Which way the head is turned: (face centroid x - head centroid x) / head box width; + is image
-    right."""
-    hb = imaging.bbox(head)
-    if hb is None or not face.any():
-        return 0.0
-    fx = float(np.nonzero(face)[1].mean())
-    hx = float(np.nonzero(head)[1].mean())
-    return (fx - hx) / max(1, hb[2] - hb[0])
-
-
-FACE_TEXT, HEAD_TEXT = "face", "head"
-
-
 def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> dict[str, Any]:
     """SAM 3.1 `face` and `head` on the raw image; the offset of the face inside the head, or None when
     either is not found on the figure (a full helmet, say).
@@ -548,8 +523,8 @@ def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> d
     out: dict[str, Any] = {"face_found": False, "head_found": False, "offset": None}
     near = imaging.dilate(figure, 4)
     try:
-        face = _best(client.segment(raw, FACE_TEXT), near)
-        head = _best(client.segment(raw, HEAD_TEXT), near)
+        face = best_instance(client.segment(raw, FACE_TEXT), near)
+        head = best_instance(client.segment(raw, HEAD_TEXT), near)
     except ApiError as e:  # anything else (a replay miss, a corrupt cache entry, a bug) is raised
         out["error"] = f"{type(e).__name__}: {e}"[:300]
         out["api_error"] = True

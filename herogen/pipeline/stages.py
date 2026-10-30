@@ -276,7 +276,13 @@ def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
         prompts.append(inputs.LEG_TEXT)
         legs = inputs.parts_on(client.segment(sketch, inputs.LEG_TEXT), figure)
     checks = [inputs.feet_check(feet, legs)]
-    return checks, {"sam_prompts": prompts, "feet_on_figure": feet, "legs_on_figure": legs}
+    near = imaging.dilate(figure, 4)  # as the held-out views' face cue
+    prompts += [inputs.FACE_TEXT, inputs.HEAD_TEXT]
+    face = inputs.best_instance(client.segment(sketch, inputs.FACE_TEXT), near)
+    head = inputs.best_instance(client.segment(sketch, inputs.HEAD_TEXT), near)
+    facing, facing_details = inputs.facing_check(face, head)
+    checks.append(facing)
+    return checks, {"sam_prompts": prompts, "feet_on_figure": feet, "legs_on_figure": legs, **facing_details}
 
 
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:

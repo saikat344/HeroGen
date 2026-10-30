@@ -72,22 +72,31 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | `sketch_characters_found` | 1 | SAM 3.1 figure instances (the prompt that found the figure, see Mask method) at least 25% of the largest one's area, `== 1`. None is "no character found in the sketch"; two or more are several characters | reject |
 | `sketch_small_extra_figures` | 1 | the other, smaller figure instances (insets, detail drawings), `<= 0` | warn |
 | `sketch_feet_on_figure` | 1 | SAM 3.1 `foot` instances on the main figure (at least half their area on its mask), `>= 1`. With none, SAM 3.1 `leg` is asked too | reject when legs are found on the figure (it is cropped); warn when none are (a long robe hides the lower body) |
+| `sketch_face_offset_in_head` | 1 | how far the face is turned: the SAM 3.1 `face` centroid's offset from the `head` centroid over the head's box width (the held-out views' face cue), on the most confident face and head mostly on the main figure, `abs <= 0.23` (`details.input.face_offset` keeps the sign, + is image right). With no head or face on the figure, or a face mostly outside the head, the value is null and the verdict `"not_measured"`, which neither warns nor stops | warn |
 
 Stage 1 runs its input checks on the sketch before it asks for the cover, so a rejected sketch costs no edit. The
 body-part checks are measured only on a sketch with exactly one character, and their prompts are listed in
-`details.input.sam_prompts`, with the counts behind them (`feet_on_figure`, `legs_on_figure`: null when not asked). The
-sketch's figure mask (`01-masks/sketch.png`, compared with the cover) is the largest instance alone, never a union
-with the smaller figures. `details.input` holds the measurements behind the checks (`figure_area_fracs`: each
-instance's area over the largest one's).
+`details.input.sam_prompts` (`foot`, `leg` only when no foot is found, `face`, `head`), with the counts behind them
+(`feet_on_figure`, `legs_on_figure`: null when not asked). The sketch's figure mask (`01-masks/sketch.png`,
+compared with the cover) is the largest instance alone, never a union with the smaller figures. `details.input`
+holds the measurements behind the checks (`figure_area_fracs`: each instance's area over the largest one's).
 
 How the thresholds were set: on the tuning sketches s001-s045 only, with the unseen sketches s046-s058 kept for
 reporting. The two faint-pencil sketches measure a line contrast of 11 and 12 and the 43 others 85-253. The two
 multiple-character sketches have a second instance at 0.66 and 0.77 of the largest and every other sketch has one
 instance, so the tuning set bounds the character cut only to (0, 0.66]; 0.25 is kept from the diagnosis that
 proposed it.
+
 Every tuning sketch whose figure SAM found has a foot on it except five: the two cropped at the knees (s008, s041),
 where `leg` finds two legs on the figure, and the two robes hiding the feet (s016, s031) and the side view s045,
 where it finds none.
+
+The two side-view sketches have a face offset of -0.30 (s040) and +0.43 (s045), and every other sketch where it
+could be measured is within 0.157 (s033), three-quarter sketches included; 0.23 is the middle of that gap. Two side
+views are too few to reject on, so the check warns.
+
+Besides the figure prompt, the input checks make 3 or 4 SAM 3.1 calls on the sketch ($0.0075-0.01 at list price).
+A run recorded without them has no cache entries for those calls, so replaying its stage 1 stops on a replay miss.
 
 ## Views and cameras
 
