@@ -56,7 +56,7 @@ class FakeAPI:
         self.sheet_order = sheet_order
         self.heldout_yaw = heldout_yaw  # held-out turn; None: as requested; negative: the wrong way
         # Turn drawn / turn requested, when heldout_yaw is None. 0.98 by default: the prompt asks for whole
-        # degrees, so the 30-degree views' aim of 25.7 is asked as 26, and the window ends at 26.4.
+        # degrees, so the 30-degree views' aim of 25.65 is asked as 26, and the window ends at 26.3.
         self.heldout_gain = heldout_gain
         self.heldout_pose = heldout_pose  # "a", "down" or "stride" (see test_herogen_pipeline_heldout_synth)
         self.calls: list[str] = []

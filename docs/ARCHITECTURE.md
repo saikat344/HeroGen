@@ -762,12 +762,12 @@ A generation's joints, scaled into turnaround pixels by the framing scale, are f
 sideways shift (head, torso and legs; the arms are left out), separately facing image left and right:
 
 - **Turn.** The found yaw is the fit's on the view's side. Its error, measured on the bench-gt renders at known
-  yaws (21 characters, flat and lit, 25, 45 and 65 degrees, 217 views; found minus true |yaw|), is -8.6 to +2.1
-  degrees at the 5th and 95th percentiles (`fit_error_deg`), median -1.0; three characters in long clothes read
-  4-16 degrees short. A view's true yaw is taken to lie in that range around the found one, and the whole range
+  yaws (flat and lit; 21 characters at 25, 45 and 65 degrees and 19 of them turned 5 degrees each way, 592
+  views at 20-70 degrees; found minus true |yaw|), is -8.7 to +2.0 degrees at the 5th and 95th percentiles
+  (`fit_error_deg`), median -1.0; three characters in long clothes read 4-16 degrees short. A view's true yaw is taken to lie in that range around the found one, and the whole range
   must be at least `azimuth_clearance_deg` (10) from every building azimuth (`build_azimuths_deg`: 0 to 315 in
   45-degree steps, the four turnaround views and the diagonals between them). The yaw windows are what that
-  leaves of target ±5: 25-26.4 degrees for the 30-degree views (the target itself is not in it) and 57.1-65 for
+  leaves of target ±5: 25-26.3 degrees for the 30-degree views (the target itself is not in it) and 57-65 for
   the 60-degree views. Up to 5 degrees outside needs human review. Generations aim at the window's middle.
 - **Facing.** Two votes: the fit's side (its error facing the other way minus facing the view's way, at least
   0.003 of the figure height) and SAM 3.1's face inside the head. Facing passes when one says the view's way

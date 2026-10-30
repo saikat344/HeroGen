@@ -7,7 +7,7 @@ Front-left views face image left, front-right views image right. The stage write
 building azimuths a body may be built or coloured from (the four turnaround views and the diagonals between
 them, every 45 degrees). A view's found yaw comes from Sapiens 2 body keypoints fitted to the turnaround's
 (`herogen/pipeline/keypoints.py`); every true yaw its measured error allows (`FIT_ERROR_DEG`, from renders at
-known yaws) must clear every building azimuth by 10 degrees. The windows are 25-26.4 and 57.1-65 degrees, and
+known yaws) must clear every building azimuth by 10 degrees. The windows are 25-26.3 and 57-65 degrees, and
 generations aim at their middle.
 
 Each view is generated up to four times until it is accepted; the best generation is kept. Its found yaw
@@ -180,13 +180,15 @@ def next_request(view: HeldoutView, request_deg: float, found_deg: float | None)
 BUILD_AZIMUTHS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 AZIMUTH_CLEARANCE_DEG = 10.0
 # Found |yaw| minus true |yaw| of the body-keypoint fit (`keypoints.fit_yaw`: head, torso and legs, scores of at
-# least KP_MIN_SCORE), measured on the bench-gt renders at known yaws: 21 characters, flat and lit, each judged
-# against its own front and profile renders as the turnaround, at 25, 45 and 65 degrees either side (217 views).
-# The 5th and 95th percentiles; the median is -1.0. The low tail comes from three characters (a long coat, a long
-# dress, a sci-fi suit) whose turn the fit reads 4-16 degrees short at every angle. The silhouette fit (`fit_yaw`)
-# on the same views is off by 14 degrees or more on one view in ten, against 6 for this one. Not measured on
-# generated images, which have no known yaw.
-FIT_ERROR_DEG = (-8.6, 2.1)
+# least KP_MIN_SCORE), measured on the bench-gt renders at known yaws, flat and lit, each judged against the
+# character's own front and profile renders as the turnaround: 21 characters at 25, 45 and 65 degrees either side,
+# and 19 of them rendered again turned 5 degrees each way (20, 30, 40, 50, 60 and 70), 592 views at 20-70 degrees.
+# The 5th and 95th percentiles; the median is -1.0, and per angle the 5th percentile runs from -5.0 (70 degrees)
+# to -12.0 (20). The low tail comes from three characters (a long coat, a long dress, a sci-fi suit) whose turn the
+# fit reads 4-16 degrees short at every angle. The silhouette fit (`fit_yaw`) is off by 14 degrees or more on one
+# view in ten at 25, 30, 60 and 65 degrees, against 3.4-7.2 for this one. Not measured on generated images, which
+# have no known yaw.
+FIT_ERROR_DEG = (-8.7, 2.0)
 YAW_WINDOW_HALF_DEG = 5.0
 # Body keypoints (Sapiens 2) scoring less are left out of every keypoint fit (on the same renders, 0.5 instead
 # reads the turn no better: 6.5 degrees off at the 90th percentile against 6.2).
@@ -209,7 +211,7 @@ def yaw_window(target_deg: float) -> tuple[float, float]:
 
 
 # Two targets each side, between the front, the diagonal and the profile, named 30 and 60 degrees; `yaw_window`
-# gives the yaws each accepts (25-26.4 and 57.1-65) and the generations aim at the window's middle (`aim_deg`).
+# gives the yaws each accepts (25-26.3 and 57-65) and the generations aim at the window's middle (`aim_deg`).
 VIEWS = tuple(
     HeldoutView(f"front-{side}-{deg}", sign * deg, yaw_window(deg), -sign)
     for deg in (30, 60) for side, sign in (("left", 1), ("right", -1))
