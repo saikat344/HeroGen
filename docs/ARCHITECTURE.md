@@ -231,6 +231,12 @@ held-out views to the turnaround (`heldout.IDENTITY_FILES`): writing the part ma
 wrote them, and writes no other file, so its accepted held-out views stay accepted. No stage reads the part
 masks in this version; stages 3 and 4 build exactly as without them.
 
+**Recorded, not gated.** `a_pose_hand_span_over_shoulders` (widest row at 35-60% of the height over the widest
+at 15-25%) is still measured on every sheet, with `gate: false` and a note. Its fixed height bands read hat
+brims, big chibi heads, shoulder armour and T-posed arms as shoulders: it failed 9 of 21 true turnarounds of
+real game characters and 30 of 105 generated sheets three judges called usable, and next to the carve check it
+stopped no sheet they called unusable.
+
 ## Stage 3: mesh source and joints
 
 `python3 -m herogen.blender run --stages 3 [--mesh-source carve|sam3d-objects] [--joints silhouette|sam3d-body]`.

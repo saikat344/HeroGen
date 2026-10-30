@@ -111,10 +111,13 @@ class SideViewChecksTest(unittest.TestCase):
         self.assertGreater(by["a_pose_hand_span_over_shoulders"]["value"], C.A_POSE_SPREAD_MIN)
         self.assertTrue(C.gate_ok(checks), checks)
 
-    def test_arms_down_fails_a_pose(self):
+    def test_arms_down_a_pose_ratio_is_recorded_not_gated(self):
         checks = C.side_view_checks(view_set(arms="down"), figures_found=4)
         by = {c["name"]: c for c in checks}
         self.assertFalse(by["a_pose_hand_span_over_shoulders"]["pass"])
+        self.assertFalse(by["a_pose_hand_span_over_shoulders"]["gate"])
+        self.assertIn("not gated", by["a_pose_hand_span_over_shoulders"]["note"])
+        self.assertTrue(C.gate_ok(checks), checks)
 
     def test_mismatched_views_fail(self):
         v = view_set()
