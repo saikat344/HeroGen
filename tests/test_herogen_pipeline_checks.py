@@ -133,7 +133,7 @@ class SideViewChecksTest(unittest.TestCase):
         self.assertEqual([c["name"] for c in checks], ["figures_found"])
         self.assertFalse(C.gate_ok(checks))
 
-    def test_arm_reaching_forward_fails_profile_depth(self):
+    def test_arm_reaching_forward_profile_depth_is_recorded_not_gated(self):
         v = view_set()
         m = v["right"].copy()
         ys, xs = np.nonzero(m)
@@ -141,6 +141,8 @@ class SideViewChecksTest(unittest.TestCase):
         v["right"] = m
         by = {c["name"]: c for c in C.side_view_checks(v, figures_found=4)}
         self.assertFalse(by["right_profile_width_over_height"]["pass"])
+        self.assertFalse(by["right_profile_width_over_height"]["gate"])
+        self.assertTrue(by["left_profile_width_over_height"]["pass"])
 
 
 class TopChecksTest(unittest.TestCase):
