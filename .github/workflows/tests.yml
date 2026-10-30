@@ -14,8 +14,45 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install numpy pillow
-      - name: Unit tests (Blender tests skip without Blender)
-        run: python3 -m unittest discover -s tests -v
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      # Every pip package the tests use, pinned. Blender (stages 3 and 4, and the benchmark renders), Lune and
+      # luau-compile are not pip packages and are not installed here, so the tests that need them skip; the
+      # "Skipped tests" step lists every skipped test with its reason.
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          python3 -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/unittest.log"
+      - name: Skipped tests
+        if: always()
+        run: |
+          python3 - "$RUNNER_TEMP/unittest.log" <<'EOF'
+          import collections, os, re, sys
+          from pathlib import Path
+
+          log = Path(sys.argv[1])
+          if not log.exists():
+              print("no unittest log: the test step did not run")
+              sys.exit(0)
+          skip = re.compile(r"^(\S+) \((\S+)\) \.\.\. skipped '(.*)'$")
+          by_reason = collections.defaultdict(list)
+          for line in log.read_text(errors="replace").splitlines():
+              m = skip.match(line)
+              if m:
+                  by_reason[m.group(3)].append(m.group(2))
+          total = sum(len(v) for v in by_reason.values())
+          out = [f"{total} skipped test(s)"]
+          md = [f"### {total} skipped test(s)", "", "| Tests | Reason |", "| ---: | --- |"]
+          for reason, tests in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+              out.append(f"\n{len(tests)} skipped: {reason}")
+              out += [f"  {t}" for t in tests]
+              md.append(f"| {len(tests)} | {reason.replace('|', chr(92) + '|')} |")
+          print("\n".join(out))
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write("\n".join(md) + "\n")
+          EOF
       - name: Guard
         run: python3 tools/guard/guard.py tree
