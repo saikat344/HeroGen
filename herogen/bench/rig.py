@@ -1,9 +1,11 @@
 """Finding a humanoid's arms and legs from bone names, and the A-pose targets (pure Python + numpy).
 
 Rigs name bones many ways: `upperarm.l` (KayKit), `arm-left` (Kenney), `upper_arm.L` / `DEF-upper_arm.L.001`
-(Rigify), `mixamorig:LeftArm` (Mixamo), `Arm_L`, `arm_upper_L`. A name is split into a side (the character's
-left or right, Blender's `.L` convention) and a base with prefixes, the side token and numeric suffixes
-removed.
+(Rigify), `mixamorig:LeftArm` (Mixamo), `J_Bip_L_UpperArm` (VRM), `Bip001 L UpperArm` (3ds Max),
+`CC_Base_L_Thigh` (Character Creator), `Character1_LeftUpLeg` (HumanIK), `Upper Arm L`, `Arm_L`,
+`arm_upper_L`; glTF exports may add a node number (`Head_08`) or the armature's name (`Head_Armature`). A name
+is split into a side (the character's left or right, Blender's `.L` convention) and a base with prefixes,
+the side token and numeric suffixes removed.
 """
 from __future__ import annotations
 
@@ -17,11 +19,14 @@ POSE_CONVERGED_DEG = 0.01  # a limb counts as posed when its direction is this c
 POSE_STEPS = 8             # turns allowed to get there
 A_POSE_LEG_DEG = 5.0    # each leg 5 degrees out from vertical seen from the front ("slightly apart")
 
-_PREFIX = re.compile(r"^(?:[a-z0-9_]*:|def[-_.]|org[-_.]|mch[-_.]|bip0?1[ _]?|b_|bn_)+")
-_NUMBERED = re.compile(r"([._]\d{1,3})+$")
+_PREFIX = re.compile(r"^(?:[a-z0-9_]*:|def[-_.]|org[-_.]|mch[-_.]|bip0*1_?|cc_base_|mixamorig\d*_|"
+                     r"(?:quickrig)?character\d*_|b_|bn_)+")
+_OBJECT_SUFFIX = re.compile(r"_armature$")    # glTF exports may append the armature object's name
+_NUMBERED = re.compile(r"([._]\d{1,4})+$")    # `.001`, and glTF exports' node numbers (`Head_08`)
 _SIDE_SUFFIX = re.compile(r"(?:[._\- ])(l|r|left|right)$")
 _SIDE_PREFIX = re.compile(r"^(l|r|left|right)(?:[._\- ])")
 _SIDE_WORD = re.compile(r"(left|right)")
+_VRM = re.compile(r"^j_(?:bip|adj|sec)_([lcr])_")    # VRoid / VRM: J_Bip_L_UpperArm, J_Bip_C_Head
 
 # Base names of the bone that starts each limb, best first. `arm` / `leg` alone are last because Mixamo calls
 # the shin `LeftLeg` (its thigh is `LeftUpLeg`), so a plain `leg` only counts when nothing better exists.
@@ -50,9 +55,13 @@ LIMB_ENDS = {
 
 def split_name(name: str) -> tuple[str | None, str]:
     """(side, base) with side 'L', 'R' or None, e.g. 'DEF-upper_arm.L.001' -> ('L', 'upper_arm')."""
-    s = _NUMBERED.sub("", name.strip().lower())
+    s = _NUMBERED.sub("", re.sub(r"\s+", "_", name.strip().lower()))
+    s = _NUMBERED.sub("", _OBJECT_SUFFIX.sub("", s))
     s = _PREFIX.sub("", s)
     side = None
+    m = _VRM.match(s)
+    if m:
+        return (None if m.group(1) == "c" else m.group(1).upper()), s[m.end():].strip("._- ")
     m = _SIDE_SUFFIX.search(s)
     if m:
         side, s = m.group(1)[0].upper(), s[: m.start()]
@@ -193,3 +202,60 @@ def rotation_between(a, b) -> np.ndarray:
     k = v / s
     kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
     return np.eye(3) + s * kx + (1.0 - c) * (kx @ kx)
+
+
+# The head: the topmost bone with the word "head" in its name, or Rigify's head (`spine.006`) where nothing is
+# so named; it and every bone below it (jaw, eyes, hair, hat) make the head region.
+HEAD_WORD = "head"
+RIGIFY_HEAD = re.compile(r"(?:^|[-_.:])spine\.006$", re.IGNORECASE)
+# Material name words that mark a face material.
+FACE_WORDS = frozenset(("face", "facial", "eye", "eyes", "eyeball", "iris", "pupil", "sclera", "cornea",
+                        "brow", "brows", "eyebrow", "eyebrows", "lash", "lashes", "eyelash", "eyelashes",
+                        "mouth", "lip", "lips", "teeth", "tooth", "tongue"))
+
+
+def find_head(names: list[str], parents: dict[str, str | None], deform: set[str] | None = None) -> str | None:
+    """The bone that carries the head: the first of `head_candidates`, or None."""
+    found = head_candidates(names, parents, deform)
+    return found[0] if found else None
+
+
+def head_candidates(names: list[str], parents: dict[str, str | None],
+                    deform: set[str] | None = None) -> list[str]:
+    """Bones that may carry the head, best first: those named with the whole word `head` (`Head`,
+    `mixamorig:Head`, `J_Bip_C_Head`; not `forehead`) and not hanging below another such bone, deform bones
+    first, then shorter names. Rigify's `DEF-spine.006` when no bone is so named, or when none of those
+    deforms the skin and it does. A rig may also carry a helper (`head_ref`) beside the real head; the caller
+    takes the first candidate the skin actually follows."""
+    named = [n for n in names if HEAD_WORD in name_tokens(n) and split_name(n)[0] is None]
+    rigify = [n for n in names if RIGIFY_HEAD.search(n)]
+    if not named or (deform is not None and not set(named) & deform and set(rigify) & deform):
+        # Rigify names its head control `head` but deforms the skin with `DEF-spine.006`
+        named = [n for n in rigify if deform is None or n in deform] or rigify
+    chosen = set(named)
+    top = []
+    for n in named:
+        p = parents.get(n)
+        while p is not None and p not in chosen:
+            p = parents.get(p)
+        if p is None:
+            top.append(n)
+    return sorted(top, key=lambda n: (deform is not None and n not in deform, len(n), n))
+
+
+def below(names: list[str], parents: dict[str, str | None], root: str) -> list[str]:
+    """`root` and every bone that hangs below it."""
+    out = []
+    for n in names:
+        p = n
+        while p is not None and p != root:
+            p = parents.get(p)
+        if p == root:
+            out.append(n)
+    return out
+
+
+def is_face_material(name: str) -> bool:
+    """True when a material's name has a word that marks it as part of the face ('Face', 'MTL_Eyes',
+    'EyeBrow'; not 'Surface' or 'Interface')."""
+    return bool(name_tokens(name) & FACE_WORDS)
