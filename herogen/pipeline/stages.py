@@ -13,7 +13,7 @@ from PIL import Image
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging, inputs
 from herogen.pipeline.client import (
-    COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, SamInstance, call_cost,
+    COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ClientError, ModelClient, SamInstance, call_cost,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
 
@@ -136,13 +136,17 @@ class _Stage:
         return InputRejected(self.n, self.fail(error, status="input_rejected"))
 
 
-def _stopping_on_api_error(body: Callable[[], dict[str, Any]], st: _Stage) -> dict[str, Any]:
-    """Run a stage's ``body``. A Model API failure (`ApiError`, after the client's retries) stops the stage:
-    its record is written with the error and every call made so far, and the error is raised."""
+def _stopping_on_client_error(body: Callable[[], dict[str, Any]], st: _Stage) -> dict[str, Any]:
+    """A client failure stops the stage. API failures and errors after an uncached call write every call and
+    its cost before propagating, including paid answers that fail validation. A cache-only or local failure
+    with no uncached call propagates without replacing a record."""
     try:
         return body()
-    except ApiError as e:
-        st.fail(f"the Model API failed: {e}"[:800])
+    except ClientError as e:
+        calls = st.client.log.calls[st.calls0:] if st.client else []
+        if isinstance(e, ApiError) or any(not c["cached"] for c in calls):
+            what = "the Model API failed" if isinstance(e, ApiError) else "the model client failed"
+            st.fail(f"{what}: {e}"[:800])
         raise
 
 
@@ -268,7 +272,7 @@ NO_CHARACTER = ("no character found in the sketch: SAM 3.1 found nothing for any
 
 def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     st = _Stage(run, client, 1, "cover_art")
-    return _stopping_on_api_error(lambda: _stage1(st, run, client), st)
+    return _stopping_on_client_error(lambda: _stage1(st, run, client), st)
 
 
 def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
@@ -478,7 +482,7 @@ def stage2_turnaround(
     run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4
 ) -> dict[str, Any]:
     st = _Stage(run, client, 2, "turnaround")
-    return _stopping_on_api_error(lambda: _stage2(st, run, client, height_units, attempts), st)
+    return _stopping_on_client_error(lambda: _stage2(st, run, client, height_units, attempts), st)
 
 
 # Stage 3's carve of a sheet's views, gated by stage 3's own silhouette-IoU gate (see `carve_check`).

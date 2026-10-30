@@ -61,6 +61,8 @@ PHOTO_JUDGE: dict[str, Any] = {
     },
 }
 PHOTO_JUDGE_SHA256 = "80bd2cbcdb54ae9a4355bf84bfb66b02b06365e2367eb4c7ffeef392f909335a"
+# Keep the existing output limit explicit: it also prices an attempt whose output usage is missing.
+PHOTO_MAX_OUTPUT_TOKENS = 3000
 
 # Stage 0. Muse Image works from the sketch's pixels; a side under 256 px leaves too little to keep.
 MIN_SIDE_PX = 256
@@ -266,14 +268,16 @@ def photo_judge_sha256(judge: dict[str, Any] | None = None) -> str:
 
 def judge_photo(client: ModelClient, img: Image.Image) -> dict[str, Any]:
     """Muse Spark's answer to the frozen `PHOTO_JUDGE` question about ``img``. Refuses to run a judge whose
-    content no longer matches its pinned hash."""
+    content no longer matches its pinned hash. The shared question path prices reported usage and bounds
+    missing output usage at `PHOTO_MAX_OUTPUT_TOKENS`; a refused call propagates to the stage."""
     actual = photo_judge_sha256()
     if actual != PHOTO_JUDGE_SHA256:
         raise RuntimeError(f"the frozen photo judge {PHOTO_JUDGE['name']} was changed (hash {actual[:12]} != "
                            f"{PHOTO_JUDGE_SHA256[:12]}); a changed judge needs a new name and hash")
     j = PHOTO_JUDGE
     return client.compare_images(j["prompt"], [img], schema=j["schema"], model=j["model"],
-                                 reasoning_effort=j["reasoning_effort"], image_max_side=j["image_max_side"])
+                                 reasoning_effort=j["reasoning_effort"], image_max_side=j["image_max_side"],
+                                 max_output_tokens=PHOTO_MAX_OUTPUT_TOKENS)
 
 
 def photo_check(answer: dict[str, Any]) -> tuple[Check, dict[str, Any]]:
