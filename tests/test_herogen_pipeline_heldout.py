@@ -379,7 +379,7 @@ class HeldoutTest(unittest.TestCase):
         def flaky(c, endpoint, body):
             if endpoint == "responses" and body["input"][0]["content"][0]["text"] == "face":
                 faces.append(1)
-                if len(faces) == 3:  # the first held-out view's face call
+                if len(faces) == 4:  # after the sketch's (stage 1) and the two profiles': the first held-out view's
                     raise ApiError("responses failed: HTTP 500")
             return post(c, endpoint, body)
 

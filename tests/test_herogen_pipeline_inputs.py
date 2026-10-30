@@ -283,8 +283,8 @@ class Stage1FeetTest(_SketchRun):
         self.assertEqual(s1["status"], "input_rejected")
         self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "reject")
         self.assertIn("the figure looks cropped", s1["error"])
-        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "leg"])
-        self.assertEqual(api.sam_texts[-2:], ["foot", "leg"])
+        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "leg", "face", "head"])
+        self.assertEqual(api.sam_texts[-4:], ["foot", "leg", "face", "head"])
         self.assertNotIn("images/edits", api.calls)
 
     def test_no_feet_or_legs_warn(self):
@@ -299,6 +299,77 @@ class Stage1FeetTest(_SketchRun):
         api = PromptAPI()
         self.assertEqual(self._live(paint(two_figures(400), colour=(60, 60, 60)), api), 3)
         self.assertNotIn("foot", api.sam_texts)
+
+
+def head_and_face(fig: np.ndarray, turn: float) -> tuple[np.ndarray, np.ndarray]:
+    """The figure's head (the round top 12%, above the shoulders) and a face inside it, shifted by ``turn`` of the
+    head's width."""
+    head = fig.copy()
+    ys = np.flatnonzero(fig.any(axis=1))
+    head[ys[0] + int(0.12 * (ys[-1] - ys[0])):] = False
+    hy, hx = np.nonzero(head)
+    w = hx.max() - hx.min() + 1
+    cx, cy = (hx.max() + hx.min()) / 2 + turn * w, (hy.max() + hy.min()) / 2
+    face = box_mask(fig.shape, int(cx - 0.1 * w), int(cy - 0.1 * w), int(cx + 0.1 * w), int(cy + 0.1 * w)) & head
+    return head, face
+
+
+class FacingTest(unittest.TestCase):
+    def test_offsets(self):
+        fig = place(figure_mask(400, "front"), (600, 560), (100, 80))
+        for turn, verdict in ((0.0, "pass"), (0.15, "pass"), (-0.15, "pass"), (0.3, "warn"), (-0.3, "warn")):
+            head, face = head_and_face(fig, turn)
+            c, det = inputs.facing_check(inst(face), inst(head))
+            self.assertEqual(c["verdict"], verdict, turn)
+            self.assertAlmostEqual(det["face_offset"], turn, delta=0.03)
+            self.assertGreaterEqual(c["value"], 0)
+        head, face = head_and_face(fig, -0.3)
+        c, _ = inputs.facing_check(inst(face), inst(head))
+        self.assertIn("turned to the image left", c["message"])
+        self.assertEqual(c["gate"], False)
+
+    def test_not_measured(self):
+        fig = place(figure_mask(400, "front"), (600, 560), (100, 80))
+        head, face = head_and_face(fig, 0.0)
+        for f, h, why in ((inst(face), None, "no head"), (None, inst(head), "no face"),
+                          (inst(box_mask(fig.shape, 0, 500, 20, 520)), inst(head), "not inside the head")):
+            c, det = inputs.facing_check(f, h)
+            self.assertEqual((c["value"], c["verdict"], c["pass"], c["gate"]), (None, "not_measured", True, False))
+            self.assertIn(why, c["note"])
+            self.assertIsNone(det["face_offset"])
+
+
+class Stage1FacingTest(_SketchRun):
+    def setUp(self):
+        super().setUp()
+        self.img = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+
+    def _parts(self, turn):
+        return {"foot": lambda fig: [bottom(fig, 0.04)], "head": lambda fig: [head_and_face(fig, turn)[0]],
+                "face": lambda fig: [head_and_face(fig, turn)[1]]}
+
+    def test_a_side_view_warns_and_the_run_goes_on(self):
+        api = PromptAPI(self._parts(0.35))
+        self.assertEqual(self._live(self.img, api), 0)
+        s1 = self._stage(1)
+        self.assertTrue(s1["ok"])
+        self.assertEqual(self._verdicts(s1)["sketch_face_offset_in_head"], "warn")
+        self.assertIn("warning: the face is turned to the image right", self.err)
+        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "face", "head"])
+        self.assertIn("images/edits", api.calls)
+
+    def test_a_front_view_passes(self):
+        self.assertEqual(self._live(self.img, PromptAPI(self._parts(0.0))), 0)
+        s1 = self._stage(1)
+        self.assertEqual(self._verdicts(s1)["sketch_face_offset_in_head"], "pass")
+        self.assertEqual(inputs.warnings(s1["checks"]), [])
+        self.assertNotIn("warning", self.err)
+
+    def test_no_face_is_not_measured(self):
+        api = PromptAPI({**self._parts(0.0), "face": lambda fig: []})
+        self.assertEqual(self._live(self.img, api), 0)
+        c = next(c for c in self._stage(1)["checks"] if c["name"] == "sketch_face_offset_in_head")
+        self.assertEqual((c["value"], c["verdict"]), (None, "not_measured"))
 
 
 if __name__ == "__main__":

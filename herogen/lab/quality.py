@@ -26,6 +26,7 @@ LABELS = {
     "sketch_characters_found": "Characters found in the sketch",
     "sketch_small_extra_figures": "Smaller extra figures in the sketch",
     "sketch_feet_on_figure": "Feet found on the sketched figure",
+    "sketch_face_offset_in_head": "Sketch faces the front (face offset in the head)",
     "sketch_mask_area_frac": "Figure found in the sketch (area share)",
     "cover_mask_area_frac": "Figure found in the artwork (area share)",
     "aspect_agreement": "Artwork keeps the sketch proportions",
