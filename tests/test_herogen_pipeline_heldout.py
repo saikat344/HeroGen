@@ -776,12 +776,41 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(self._live(FakeAPI(), "r", ["2h"]), 1)
         self.assertFalse((self.root / "r/stage-2h.json").exists())
 
-    def test_oversized_figure_is_cut_not_shrunk(self):
+    def test_oversized_figure_is_padded_not_cut_or_shrunk(self):
         raw = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))
         mask = imaging.threshold_mask(raw)
-        _, placed = heldout.place_on_canvas(raw, mask, 2.0, 300, 290)  # a 400 px figure on a 300 px canvas
-        h = imaging.box_size(imaging.bbox(placed))[1]
-        self.assertEqual(h, 290)  # cut at the top edge, so the height check sees 290 / 400
+        w, h = imaging.box_size(imaging.bbox(mask))
+        img, placed, pad = heldout.place_on_canvas(raw, mask, 2.0, 300, 290)  # 400 px tall on a 300 px canvas
+        self.assertEqual(pad, 400 - 290)  # just enough above the feet for the whole figure
+        self.assertEqual(img.size, (300 + 2 * pad, 300 + 2 * pad))
+        self.assertEqual(placed.shape, (300 + 2 * pad, 300 + 2 * pad))
+        b = imaging.bbox(placed)
+        self.assertEqual(imaging.box_size(b), (2 * w, 2 * h))  # the full figure at exactly the scale asked
+        self.assertEqual(b[1], 0)
+        self.assertEqual(b[3], 290 + pad)  # the feet on the baseline, moved by the pad
+        self.assertLessEqual(abs((b[0] + b[2]) / 2 - (150 + pad)), 0.5)  # centred on the padded square
+        self.assertEqual(img.getpixel((5, img.size[1] - 5)), (250, 250, 250))  # padded with the background
+
+    def test_wide_figure_is_padded_at_the_sides(self):
+        wide = np.zeros((100, 260), dtype=bool)
+        wide[30:70, 30:230] = True  # 200 px wide, 40 tall
+        raw = paint(wide)
+        mask = imaging.threshold_mask(raw)
+        _, placed, pad = heldout.place_on_canvas(raw, mask, 1.0, 150, 140)
+        self.assertEqual(pad, 25)  # 200 px centred on 150 passes each side by 25
+        b = imaging.bbox(placed)
+        self.assertEqual((b[0], b[2]), (0, 200))
+        self.assertEqual(imaging.box_size(b), (200, 40))
+        self.assertEqual(b[3], 140 + pad)
+
+    def test_figure_that_fits_is_not_padded(self):
+        raw = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))
+        mask = imaging.threshold_mask(raw)
+        img, placed, pad = heldout.place_on_canvas(raw, mask, 1.0, 300, 290)
+        self.assertEqual((pad, img.size, placed.shape), (0, (300, 300), (300, 300)))
+        b = imaging.bbox(placed)
+        self.assertEqual(b[3], 290)
+        self.assertEqual(imaging.box_size(b), imaging.box_size(imaging.bbox(mask)))
 
 
 def _scores():

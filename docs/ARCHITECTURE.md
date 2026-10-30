@@ -303,6 +303,15 @@ turnaround's A-pose, each its own edit of the cover: `front-left-30`, `front-rig
 cover, a pose reference (the front view, or the nearer profile for turns of 50 degrees or more) and a grey
 mannequin of the turnaround's pose drawn at the requested yaw, both at one shared scale.
 
+The prompt asks for the figure at the mannequin's size and place, so a generation's pixels map to the views'
+pixels by one over the shared framing scale (times the input width over the generated width). The generated
+figure is placed at that scale on the square canvas of `views/`, centred, its feet on the front view's
+baseline. A figure drawn taller or wider than the canvas allows is neither cut nor shrunk: the square is padded
+by the same number of pixels on every side, so it stays square and centred and the views' pixel (x, y) sits at
+(x + pad, y + pad). Each attempt records the pad as `canvas_pad_px`, 0 when the figure fits. Its own height is
+never used to scale it, so `height_agreement_front` (at least 0.95 of the front view's height, both ways)
+measures whether the model drew the figure at the guide's size.
+
 Each view is checked against the turnaround: silhouette landmarks are placed in 3D from the front and profile
 views and fitted over yaw. The fit lets the arms be held a few degrees off the A-pose (each hand moves along
 its arm's tangent to the height it is seen at), so arm drift doesn't read as a turn; the pose error is measured
