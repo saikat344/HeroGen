@@ -23,7 +23,9 @@ from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import inputs, stages  # noqa: E402
 from herogen.pipeline.__main__ import run_pipeline  # noqa: E402
 from herogen.pipeline.client import ModelClient, SamInstance  # noqa: E402
-from fake_model_server import is_question  # noqa: E402
+from herogen.pipeline.results import collect  # noqa: E402
+from herogen.pipeline.runfolder import RunFolder  # noqa: E402
+from fake_model_server import FakeModelServer, is_question, no_wait_policy, question_answer  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
 
@@ -488,6 +490,133 @@ class Stage1PhotoTest(_SketchRun):
         self.assertEqual(s1["checks"][0]["verdict"], "pass")
         self.assertEqual(api.calls[0], "question")
         self.assertEqual(s1["details"]["input"]["photo"]["image_kind"], "drawing_or_artwork")
+
+class PhotoCostTest(unittest.TestCase):
+    def test_photo_question_passes_its_output_cap_explicitly(self):
+        client = mock.Mock()
+        inputs.judge_photo(client, Image.new("RGB", (16, 16), "white"))
+        self.assertEqual(client.compare_images.call_args.kwargs["max_output_tokens"], 3000)
+
+    def test_photo_answers_use_reported_usage_or_the_output_cap(self):
+        for usage, expected in ((None, 3000 * 4.25 / 1e6),
+                                ({"input_tokens": 1200}, (1200 * 1.25 + 3000 * 4.25) / 1e6),
+                                ({"input_tokens": 1200, "output_tokens": 150},
+                                 (1200 * 1.25 + 150 * 4.25) / 1e6)):
+            with self.subTest(usage=usage), tempfile.TemporaryDirectory() as d:
+                seen = []
+                response = question_answer(PHOTO)
+                response.pop("usage")
+                if usage is not None:
+                    response["usage"] = usage
+
+                def answer(endpoint, body):
+                    seen.append(body)
+                    return 200, {}, response
+
+                server = FakeModelServer(answer, DUMMY_KEY)
+                client = ModelClient(Path(d) / "cache", mode="live", policy=no_wait_policy())
+                with server.serving(d + "/limiter"), \
+                        mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}):
+                    result = inputs.judge_photo(client, Image.new("RGB", (16, 16), "white"))
+                self.assertEqual(result, PHOTO)
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(seen[0]["max_output_tokens"], 3000)
+                self.assertAlmostEqual(client.log.cost_usd(), round(expected, 6))
+                entry = json.loads(next((Path(d) / "cache").glob("*.json")).read_text())
+                self.assertEqual(entry["cost_usd"], round(expected, 6))
+                self.assertGreater(entry["cost_usd"], 0)
+                replay = ModelClient(Path(d) / "cache", mode="replay")
+                self.assertEqual(inputs.judge_photo(replay, Image.new("RGB", (16, 16), "white")), PHOTO)
+                self.assertEqual(replay.log.cost_usd(), 0)
+
+    def test_retried_photo_answer_keeps_each_attempts_cost(self):
+        with tempfile.TemporaryDirectory() as d:
+            success = question_answer(PHOTO)
+            success.pop("usage")
+            failed = {"status": "failed", "error": {"code": "server_error"},
+                      "usage": {"input_tokens": 1200, "output_tokens": 150}}
+            answers = [failed, success]
+            server = FakeModelServer(lambda endpoint, body: (200, {}, answers.pop(0)), DUMMY_KEY)
+            client = ModelClient(Path(d) / "cache", mode="live", policy=no_wait_policy())
+            with server.serving(d + "/limiter"), \
+                    mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                    self.assertLogs("herogen.pipeline.client", "WARNING"):
+                self.assertEqual(inputs.judge_photo(client, Image.new("RGB", (16, 16), "white")), PHOTO)
+            self.assertEqual(server.count("responses"), 2)
+            self.assertEqual([c["cost_usd"] for c in client.log.calls],
+                             [round((1200 * 1.25 + 150 * 4.25) / 1e6, 6), round(3000 * 4.25 / 1e6, 6)])
+
+
+class Stage1PhotoCostTest(_SketchRun):
+    def test_a_nonconforming_photo_answer_keeps_the_billed_cost(self):
+        image = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+        path = Path(self.tmp.name) / "sketch.png"
+        image.save(path)
+        cases = (("missing", None, 3000 * 4.25 / 1e6),
+                 ("reported", {"input_tokens": 1200, "output_tokens": 150},
+                  (1200 * 1.25 + 150 * 4.25) / 1e6))
+        for name, usage, expected in cases:
+            with self.subTest(usage=usage):
+                root = self.root / name
+                response = question_answer({**PHOTO, "image_kind": "unknown"})
+                response["usage"] = usage
+                server = FakeModelServer(lambda endpoint, body: (200, {}, response), DUMMY_KEY)
+                with server.serving(str(root / "limiter")), \
+                        mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    code = run_pipeline(path, "r", [0, 1, 2, 5], mode="live", runs=str(root))
+                self.assertEqual(code, 1)
+                self.assertEqual(server.count("responses"), 1)
+                record = json.loads((root / "r" / "stage-1.json").read_text())
+                self.assertEqual((record["ok"], record["status"]), (False, "error"))
+                self.assertIn("does not match schema", record["error"])
+                self.assertEqual(record["cost_usd"], round(expected, 6))
+                self.assertEqual(record["calls"][0]["cost_usd"], record["cost_usd"])
+                self.assertFalse((root / "r" / "stage-2.json").exists())
+                self.assertEqual(collect(RunFolder(root, "r"))["total_cost_usd"], round(expected, 6))
+
+    def test_a_photo_without_usage_records_a_nonzero_cost(self):
+        response = question_answer(PHOTO)
+        response.pop("usage")
+        server = FakeModelServer(lambda endpoint, body: (200, {}, response), DUMMY_KEY)
+        image = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+        path = Path(self.tmp.name) / "sketch.png"
+        image.save(path)
+        with server.serving(str(self.root / "limiter")), \
+                mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = run_pipeline(path, "r", [0, 1, 2], mode="live", runs=str(self.root))
+        self.assertEqual(code, 3)
+        record = self._stage(1)
+        self.assertEqual(record["status"], "input_rejected")
+        self.assertEqual(record["cost_usd"], round(3000 * 4.25 / 1e6, 6))
+        self.assertEqual(record["calls"][0]["cost_usd"], record["cost_usd"])
+        self.assertEqual(server.count("responses"), 1)
+        self.assertFalse((self.root / "r" / "stage-2.json").exists())
+
+    def test_a_refused_photo_call_stops_before_other_model_calls(self):
+        image = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+        post = ModelClient._post
+        models = []
+
+        def refuse_unpriced(client, endpoint, body, **kwargs):
+            models.append(kwargs["model"])
+            if kwargs["model"] != client_mod.TEXT_MODEL:
+                raise AssertionError("another model call followed the refused photo question")
+            kwargs.pop("usage_cost_usd", None)
+            return post(client, endpoint, body, **kwargs)
+
+        error = io.StringIO()
+        path = Path(self.tmp.name) / "sketch.png"
+        image.save(path)
+        with mock.patch.object(ModelClient, "_post", refuse_unpriced), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error):
+            code = run_pipeline(path, "r", [0, 1, 2], mode="live", runs=str(self.root))
+        self.assertEqual(code, 1)
+        self.assertEqual(models, [client_mod.TEXT_MODEL])
+        self.assertIn("unknown outcome", error.getvalue())
+        self.assertFalse((self.root / "r" / "01-cover.png").exists())
+        self.assertFalse((self.root / "r" / "stage-2.json").exists())
 
 
 if __name__ == "__main__":
