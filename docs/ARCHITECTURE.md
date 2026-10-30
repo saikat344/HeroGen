@@ -482,10 +482,13 @@ add detail to the Head's own texture.
   - A close-up that fails keeps no file; its record says why.
 - **Footprint.** The view's SAM `head` mask grown by 2 px inside the crop box (the figure inside the crop box when
   there is no head mask).
-- **Never fails a hero.** Any error, such as a Model API failure, a replay miss, a missing input or a bug, is
-  recorded in `stage-2f.json` and `views/closeup.json` (`fallback`). No close-up image is written, earlier ones
-  are removed, and stage 4 bakes the plain views. `views/closeup.json` is written in every case, so stage 4's
-  record can say why a view has no close-up. No check of stage 2f is gated. Stage 2f changes no file another stage reads, so the
+- **Never fails a hero, but never quietly.** Any error of its own, such as a Model API failure after the client's
+  retries, a missing input or a bug, is recorded in `stage-2f.json` and `views/closeup.json` (`fallback`). No
+  close-up image is written, earlier ones are removed, and stage 4 bakes the plain views. The CLI prints the
+  fallback to stderr ("warning: stage 2f face source fell back: <reason>"), its stage line says it fell back, and
+  stage 4 notes "stage 2f fell back: <reason>" in its record. `views/closeup.json` is written in every case, so
+  stage 4's record can also say why a view has no close-up. A replay miss (no cached answer when replaying) is a
+  broken cache or run, not a model failure: it stops the run with a non-zero exit, as in every other stage. No check of stage 2f is gated. Stage 2f changes no file another stage reads, so the
   held-out views stay valid.
 - **Record.** `views/closeup.json` (under `views`), and `stage-2f.json` (under `details.closeups`), give per view:
   - the recipe and the crop box;

@@ -2,7 +2,8 @@
 
 Stage 2 is followed by the held-out views (`2h`) and the face source (`2f`, `herogen.pipeline.facesource`: sharp
 head close-ups for stage 4's Head texture) when it passes. `--stages 2f` makes only the close-ups, for a run whose
-stage 2 already passed; stage 2f never stops the run (a failure is recorded and stage 4 bakes the plain views).
+stage 2 already passed; stage 2f's own failures never stop the run (the failure is recorded, printed to stderr, and
+stage 4 bakes the plain views), but a replay miss does, as in every other stage.
 `--stages 2h` makes only the held-out views
 for a run whose stage 2 already passed, leaving every earlier output untouched; it prints each view's status
 (accepted, needs review or rejected), found yaw and file. `--views front-left-60,front-right-60` makes only
@@ -119,8 +120,13 @@ def run_pipeline(
                 rec = stage2_turnaround(run, client)
             elif n == FACE_SOURCE:
                 rec = stage2f_face_source(run, client)
-                used = rec["details"].get("used_views") or []
-                print(f"stage {n} {rec['name']}: close-ups used for {', '.join(used) or 'no view'}")
+                fallback = rec["details"].get("fallback")
+                if fallback:
+                    print(f"stage {n} {rec['name']}: fell back to the plain views ({fallback})")
+                    print(f"warning: stage {n} {rec['name']} fell back: {fallback}", file=sys.stderr)
+                else:
+                    used = rec["details"].get("used_views") or []
+                    print(f"stage {n} {rec['name']}: close-ups used for {', '.join(used) or 'no view'}")
                 continue
             else:
                 rec = stage2h_heldout(run, client, views=views)

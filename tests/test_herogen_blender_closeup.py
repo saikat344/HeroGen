@@ -276,6 +276,13 @@ class TestLoadCloseups(unittest.TestCase):
         self.assertEqual(cus, {})
         self.assertIn("another front view", info["notes"][0])
 
+    def test_a_fallback_is_noted(self):
+        reason = "ApiError: images/edits failed: HTTP 500 " + "x" * 700
+        (self.run / "views" / "closeup.json").write_text(json.dumps({"views": {}, "fallback": reason[:600]}))
+        cus, info = texture.load_closeups(self.run, self.vs)
+        self.assertEqual(cus, {})
+        self.assertEqual(info["notes"], [f"stage 2f fell back: {reason[:600]}"])
+
     def test_rejected_views_keep_their_reason(self):
         self.write()
         _, info = texture.load_closeups(self.run, self.vs)
