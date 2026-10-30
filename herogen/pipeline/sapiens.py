@@ -1,9 +1,9 @@
 """Sapiens 2 pose keypoints for stage 2h, through a record/replay cache like the Model API's.
 
 Modes:
-- ``live``: run `herogen/pipeline/sapiens_app.py` on Modal (an ephemeral app, opened on the first uncached call
-  and kept for the client's life, so the model loads once per stage-2h run; `close` stops it), then save the
-  result to the cache. A failed or timed-out try (CALL_TIMEOUT_S) is tried again after RETRY_WAIT_S; when every
+- ``live``: call `herogen/pipeline/sapiens_app.py` on Modal: its deployed app when one runs the same source, else
+  an ephemeral app opened on the first uncached call and kept for the client's life (the model loads once per
+  stage-2h run; `close` stops it). The result is saved to the cache. A failed or timed-out try (CALL_TIMEOUT_S) is tried again after RETRY_WAIT_S; when every
   try fails, `PoseError`.
 - ``replay``: read the cache only. A missing entry raises `ReplayMiss`; nothing touches the network.
 
@@ -116,8 +116,20 @@ class PoseClient:
         raise PoseError(f"{POSE_MODEL} failed on every try: {' | '.join(errors)}")
 
     def _open(self) -> None:
+        """The deployed app (`modal deploy herogen/pipeline/sapiens_app.py`) when there is one, else an ephemeral
+        run of the same app. A deployment made from other source is not used: its results would not match the
+        cache key."""
+        import modal
+
         from herogen.pipeline import sapiens_app
 
+        try:
+            pose = modal.Cls.from_name(sapiens_app.APP_NAME, sapiens_app.CLASS_NAME)()
+            if pose.app_sha256.remote() == self._pins["app_sha256"]:
+                self._pose = pose
+                return
+        except Exception:  # noqa: BLE001  (not deployed, or deployed without the method: run it ephemerally)
+            pass
         self._app = sapiens_app.app.run()
         self._app.__enter__()
         self._pose = sapiens_app.Pose()
