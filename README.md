@@ -78,10 +78,12 @@ the repository's retry, cache and cost accounting. `--quality replay` requires i
 Model failures stop loudly with a failed record and cost, and never trigger a carve retry. Stage 4 still
 has separate observed rest-IoU and texture gates, so passing stage 3 does not guarantee a finished game body.
 
-Without `--live` (stages 1 and 2) or `--remote live` (stage 3), model calls replay from the cache
-(`runs/_cache-remote/` for the SAM 3D calls), which is how the tests run; a remote source with no cached result
-falls back to the carve or the silhouette joints and says so in `stage-3.json` (`--no-fallback` makes it an
-error).
+Stages 1 and 2 replay model calls from the cache unless `--live` is set. In stage 3, `--remote`
+controls only SAM 3D calls: they replay from `runs/_cache-remote/` unless `--remote live` is set.
+The body usability question separately defaults to `--quality live`, a paid call; `--quality replay`
+requires every attempted answer in its cache. Tests use cached or mocked calls. A remote source with no
+cached result falls back to the carve or the silhouette joints and says so in `stage-3.json`
+(`--no-fallback` makes it an error).
 
 The scorer takes any GLB, so bodies made by other tools from the same sketch are scored on the same views,
 including the held-out ones:
