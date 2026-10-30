@@ -151,6 +151,21 @@ class AcceptanceTests(unittest.TestCase):
                 stage3.run_stage3(self.run)
         self.assertEqual(build.call_count, 1)
 
+    def test_acceptance_record_error_never_retries_construction(self):
+        from herogen.blender.body_acceptance import BodyQualityError
+        from herogen.blender import stage3
+
+        def attempt(run, **kwargs):
+            if kwargs["mesh_source"] == "sam3d-objects":
+                kwargs["rec"].data["body_acceptance"] = {"error": "model incomplete"}
+                raise OSError("could not save failed acceptance record")
+            return {"ok": True, "mesh_source": "carve"}
+
+        with mock.patch.object(stage3, "_run_stage3", side_effect=attempt) as build:
+            with self.assertRaisesRegex(BodyQualityError, "could not save"):
+                stage3.run_stage3(self.run)
+        self.assertEqual(build.call_count, 1)
+
     def test_missing_sketch_is_a_recorded_error(self):
         from herogen.blender.body_acceptance import BodyQualityError, assess
         from herogen.blender.record import StageRecord
