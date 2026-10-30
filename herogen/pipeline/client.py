@@ -18,7 +18,8 @@ Live calls follow the retry policy and the shared per-key limiter in `herogen.pi
 attempt is appended to ``<cache>/calls-ledger.jsonl`` (model, endpoint, request key, status, outcome, time
 taken, wait before the next attempt; never a header or the key). An attempt that may have reached the model
 without an answer coming back (it timed out or was cut off on our side) is recorded there and in the call log
-as outcome "unknown": it may be billed, so the cost estimate counts it.
+as outcome "unknown": it may be billed, so the cost estimate counts it (a Muse Spark attempt, priced by
+tokens, at its output-token cap, since no usage came back).
 """
 
 from __future__ import annotations
@@ -55,13 +56,14 @@ PRICE_PER_IMAGE_USD = {IMAGE_MODEL: 0.01, SAM_MODEL: 2.50 / 1000.0}
 PRICE_PER_MTOK_USD = {TEXT_MODEL: (1.25, 4.25)}
 COST_BASIS = (
     "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image; "
-    "muse-spark-1.3 $1.25/$4.25 per million input/output tokens, 0 for a call whose answer never came back)"
+    "muse-spark-1.3 $1.25/$4.25 per million input/output tokens)"
 )
 
 ENV_KEY = "MODEL_API_KEY"
 TIMEOUT_S = 240.0  # socket timeout of one attempt
 # Per-call deadline over all attempts and waits. One SAM call has sat on an open connection for about 4 minutes
-# before answering, so a deadline allows a slow attempt plus retries.
+# before answering, so a deadline allows a slow attempt plus retries. A Muse Spark comparison is a responses
+# call like SAM's and has its deadline.
 DEADLINE_S = {SAM_MODEL: 600.0, IMAGE_MODEL: 900.0, TEXT_MODEL: 600.0}
 LEDGER = "calls-ledger.jsonl"
 
@@ -100,7 +102,8 @@ class CallLog:
     def add(self, model: str, kind: str, key: str, cached: bool, outcome: str = "",
             cost_usd: float | None = None) -> None:
         """``outcome`` "unknown": the call may have reached the model but no answer came back (counted in the
-        cost, since it may be billed). ``cost_usd``: the cost of a token-priced call, from its usage."""
+        cost, since it may be billed). ``cost_usd``: the call's own estimate (token-priced models), used in
+        place of the per-image price."""
         call: dict[str, Any] = {"model": model, "kind": kind, "key": key, "cached": cached}
         if outcome:
             call["outcome"] = outcome
@@ -173,7 +176,8 @@ def _scrub(text: str) -> str:
 
 
 class ModelClient:
-    """Muse Image generate/edit and SAM 3.1 text-prompt segmentation, through one record/replay cache."""
+    """Muse Image generate/edit, SAM 3.1 text-prompt segmentation and Muse Spark image comparison, through one
+    record/replay cache."""
 
     def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
                  policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None) -> None:
@@ -188,9 +192,13 @@ class ModelClient:
 
     # ---- public calls -------------------------------------------------------------------------------
 
-    def generate_image(self, prompt: str, *, size: str = "1024x1024") -> Image.Image:
+    def generate_image(self, prompt: str, *, size: str = "1024x1024", attempt: int = 0) -> Image.Image:
+        """Muse Image generation. ``attempt`` > 0 asks again for the same request (a new sample, its own cache key);
+        the API takes no seed, so a new sample is the only way to draw again."""
         body = {"model": IMAGE_MODEL, "prompt": prompt, "n": 1, "size": size, "output_format": "png"}
-        summary = {"endpoint": "images/generations", **body}
+        summary: dict[str, Any] = {"endpoint": "images/generations", **body}
+        if attempt:
+            summary["attempt"] = attempt
         return self._image_call("images/generations", body, summary, kind="generate")
 
     def edit_image(
@@ -281,6 +289,7 @@ class ModelClient:
         max_output_tokens: int = 3000,
         image_max_side: int = 1024,
         jpeg_quality: int = 90,
+        attempt: int = 0,
     ) -> dict[str, Any]:
         """A Responses API call with images and a strict JSON schema; returns the parsed JSON object.
 
@@ -299,6 +308,8 @@ class ModelClient:
             "reasoning_effort": reasoning_effort,
             "max_output_tokens": max_output_tokens,
         }
+        if attempt:
+            summary["attempt"] = attempt
         key = request_key(summary)
         entry = self._load(key)
         if entry is not None:
@@ -320,9 +331,12 @@ class ModelClient:
                                 "schema": schema["schema"]}},
         }
         started = time.monotonic()
-        resp = self._post("responses", body, model=model, kind="compare", key=key)
+        # An attempt of unknown outcome has no usage to price, so it is counted at its output-token cap.
+        resp = self._post("responses", body, model=model, kind="compare", key=key,
+                          unknown_cost_usd=token_cost_usd(model, {"output_tokens": max_output_tokens}))
         cost = token_cost_usd(model, resp.get("usage"))
         self.log.add(model, "compare", key, cached=False, cost_usd=cost)
+        # An incomplete answer (out of output tokens, say) is a failure, not a result: raised and never cached.
         require_completed("responses", resp, required=True)
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2), "status": resp.get("status"),
                  "output_text": _output_text(resp), "usage": resp.get("usage"), "cost_usd": round(cost, 6)}
@@ -377,10 +391,20 @@ class ModelClient:
         self.log.add(IMAGE_MODEL, kind, key, cached=False)
         return img
 
-    def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str) -> dict[str, Any]:
+    def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str,
+              unknown_cost_usd: float | None = None) -> dict[str, Any]:
         """POST to the Model API under the retry policy and the shared limiter (`herogen.pipeline.retry`),
         each attempt a line in the ledger and each retry a logged warning. Raises `ApiError` when the
-        attempts or the deadline run out, or at once on a status that is never retried."""
+        attempts or the deadline run out, or at once on a status that is never retried.
+
+        ``unknown_cost_usd``: what an attempt of unknown outcome is counted at, required for a token-priced
+        model (it has no per-image price); other models are counted at their per-image price."""
+        if model in PRICE_PER_MTOK_USD and unknown_cost_usd is None:
+            raise ClientError(f"a {model} call needs the cost to count for an attempt of unknown outcome")
+
+        def unknown_outcome() -> None:  # the attempt may have reached the model: logged, counted in the cost
+            self.log.add(model, kind, key, cached=False, outcome="unknown", cost_usd=unknown_cost_usd)
+
         api_key = os.environ.get(ENV_KEY, "").strip()
         if not api_key:
             raise ClientError(f"{ENV_KEY} is not set; live mode needs it in the environment")
@@ -415,18 +439,18 @@ class ModelClient:
                 outcome = "ok" if isinstance(parsed, dict) else "unreadable"
                 last = f"HTTP {status}" if outcome == "ok" else f"HTTP {status}: the response is not a JSON object"
                 if outcome == "unreadable":  # answered, so it may be billed
-                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+                    unknown_outcome()
                 as_http = retry.failed_answer_status(parsed) if outcome == "ok" else None
                 if as_http is not None:  # answered "failed" for a transient reason: retried like that status
                     last = f"HTTP {status} with status 'failed' ({_scrub(json.dumps(parsed.get('error')))[:200]})"
                     status, outcome = as_http, "failed"
-                    self.log.add(model, kind, key, cached=False, outcome="unknown")  # answered: may be billed
+                    unknown_outcome()  # answered: may be billed
             except urllib.error.HTTPError as e:
                 status, headers = e.code, dict(e.headers.items()) if e.headers else {}
                 last = f"HTTP {e.code}: {_error_body(e)}"
                 if retry.maybe_billed(status, paid_edit=paid_edit):  # a gateway error after generating, maybe
                     outcome = "unknown"
-                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+                    unknown_outcome()
             except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
                 sending = isinstance(e, urllib.error.URLError)
                 reason = e.reason if sending else e
@@ -436,7 +460,7 @@ class ModelClient:
                 # so may one that timed out or was cut off while sending.
                 if not sending or isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError)):
                     outcome = "unknown"
-                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+                    unknown_outcome()
                 last = _scrub(f"{type(reason).__name__}: {reason}")[:300]
             seconds = policy.clock() - started
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \

@@ -8,9 +8,9 @@ Retry policy (`RetryPolicy`):
   is ignored) plus 0-1 s of jitter when it sent one; else the largest rate-limit reset header it sent (`retry-after-ms`, `ratelimit-reset`,
   `x-ratelimit-reset`, `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens`) plus the same jitter; else
   full-jitter exponential backoff, a random time between 0 and min(60 s, 2 s x 2^n) before retry n + 1.
-- Limits: at most 8 attempts within a per-call deadline (10 minutes for SAM 3.1, 15 for Muse Image), separate
-  from each attempt's socket timeout. A wait that would end past the deadline is not started; the call fails
-  at once.
+- Limits: at most 8 attempts within a per-call deadline (10 minutes for SAM 3.1 and Muse Spark, 15 for Muse
+  Image), separate from each attempt's socket timeout. A wait that would end past the deadline is not started;
+  the call fails at once.
 
 Shared limiter (`SharedLimiter`): every process that calls with one API key shares one limit on calls in
 flight, kept in a small JSON state file under HEROGEN_LIMITER_DIR (default ~/.cache/herogen/api-limiter),
