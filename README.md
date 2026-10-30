@@ -1,17 +1,19 @@
 # HeroGen
 
 HeroGen turns one hand-drawn character sketch into a game-ready hero body for Roblox, and checks every stage
-with measurements.
+with measurements. Without a sketch, it can draw one from a short text description of the character.
 
 ```
-sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joints → 15-section R15 body → results
+(text prompt → full-body sketch) → sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joints
+→ 15-section R15 body → results
 ```
 
 ## Stages
 
 | Stage | What it does | Models and tools |
 | --- | --- | --- |
-| 0 input | Copies the sketch into a run folder | |
+| p prompt sketch (optional) | A hand-drawn graphite design image from the user's character brief, then a full-body A-pose edit of it; checked for one figure, a full figure and the same character, with up to three attempts | Muse Image, SAM 3.1, Muse Spark (`muse-spark-1.3`) |
+| 0 input | Copies the sketch (or stage p's full-body image) into a run folder | |
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1 |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Carves a mesh from the four view masks and checks its silhouettes against them | Blender 4.5 LTS (headless) |
@@ -28,7 +30,7 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - Python 3.11 or newer, with `numpy` and `pillow`.
 - Blender 4.5 LTS for stages 3 and 4 (set `HEROGEN_BLENDER` if it isn't at the default macOS path or on `PATH`).
-- For live model calls in stages 1 and 2: a Meta Model API key in `MODEL_API_KEY` (see `.env.example`), and
+- For live model calls in stages p, 1 and 2: a Meta Model API key in `MODEL_API_KEY` (see `.env.example`), and
   `meta-sam-parser` to decode SAM 3.1 masks (`pip install ".[live]"`).
 
 ## Running
@@ -38,6 +40,20 @@ python3 -m herogen.pipeline run sketch.png --run-id my-hero --live
 python3 -m herogen.blender run --run runs/my-hero --stages 3,4
 python3 -m herogen.pipeline run sketch.png --run-id my-hero --stages 5
 ```
+
+Starting from a text prompt instead of a sketch:
+
+```bash
+python3 -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-knight --stages 0-2,5 --live
+python3 -m herogen.pipeline prompt "a knight in battered plate armour" --run-id my-knight --live   # stage p alone
+```
+
+Stage p writes `p-design.png`, `p-full-body.png` and every attempt under `p-attempts/`, then stage 0 copies
+`p-full-body.png` as the sketch. The prompt is limited to 300 characters and sits in a bounded slot of the
+design prompt, so it describes the character but can't change the drawing style or the full-body edit. The
+prompt text, models and parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/`
+(`hero-sketch-v1` by default), recorded in `stage-p.json`. The checks, their thresholds and the measurements
+behind them are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
 
 Without `--live`, model calls replay from the cache, which is how the tests run.
 
@@ -115,7 +131,7 @@ changing the code they cover. CI prints every skipped test and its reason after 
 
 ## Third-party models and libraries
 
-Muse Image and SAM 3.1 are called through Meta's Model API. `meta-sam-parser`, an optional dependency used to
+Muse Image, SAM 3.1 and Muse Spark are called through Meta's Model API. `meta-sam-parser`, an optional dependency used to
 decode SAM 3.1 output, is released by Meta under the SAM License. Blender is GPL-licensed and runs as a separate
 program.
 
