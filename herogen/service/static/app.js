@@ -156,6 +156,13 @@ async function preview(url) {
   catch (e) { show('#previewWrap', false); console.warn('preview unavailable', e); }
 }
 
+// Keep polling while the job is queued or running, and after it only while a stage beside it (the quality check)
+// still runs. A job's own stage never keeps a finished job polling: one that shows as running there is a stale
+// row, and polling would never end.
+function polls(j) {
+  return j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.side && s.state === 'running');
+}
+
 async function openJob(id) {
   clearTimeout(S.timer);
   S.current = id;
@@ -163,9 +170,7 @@ async function openJob(id) {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (S.current !== id) return;
     renderJob(j);
-    // Keep polling while the job runs, and while its quality check (beside the job) is still running after it.
-    const busy = j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.state === 'running');
-    if (busy) S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
+    if (polls(j)) S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
   } catch (e) { banner(e.message); }
 }
 

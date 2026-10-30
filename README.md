@@ -171,6 +171,11 @@ the tests use. Three tools are not pip packages, and the tests that need them sk
 CI installs `requirements-test.txt` but none of the three, so those tests skip there; run them locally before
 changing the code they cover. CI prints every skipped test and its reason after the test run.
 
+The service page's browser tests (`tests/test_herogen_service_e2e.py`) drive a headless Chrome over the DevTools
+protocol and skip unless `E2E_CDP_PORT` names its remote-debugging port; the module's docstring shows how to start
+one. They also need uvicorn (`herogen/service/requirements-dev.txt`). CI installs neither uvicorn nor a browser,
+so they skip there; run them locally before changing the service page.
+
 The hybrid mesh tests need `scipy`, which `requirements-test.txt` includes. The pytorch3d rasteriser's test
 needs `torch` and `pytorch3d`, which only the SAM 3D Objects image installs, so it skips everywhere else.
 

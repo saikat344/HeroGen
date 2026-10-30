@@ -355,6 +355,47 @@ class TestJobs(StoreCase):
         self.assertEqual((out["state"], out["counts_quota"]), ("canceled", 1))
         self.assertFalse(self.store.job_current(k["id"], 1), "a canceled job's worker stops")
 
+    def running(self, stage="1"):
+        """A job whose attempt 1 is running `stage`, with stage 0 passed and the held-out views running beside."""
+        j, _ = self.create(key=new_id("j")[2:])
+        self.store.job_claim(j["id"], "c", 60, 2)
+        self.store.job_stage_set(j["id"], 1, "0", "passed", seconds=1.0)
+        self.store.job_stage_set(j["id"], 1, stage, "running", lease_s=60)
+        self.store.side_claim(j["id"], "2h", "side", 3600)
+        return j["id"]
+
+    def states(self, job_id):
+        return {r["stage"]: r["state"] for r in self.store.job_stages(job_id)}
+
+    def test_an_attempt_that_ends_without_its_worker_closes_its_running_stage(self):
+        # Only the live attempt may write a stage, so a stage left running when the attempt ended some other way
+        # used to stay running for good, and the page polled every 3 s forever.
+        a = self.running()
+        self.store.job_cancel(a, self.user["id"])
+        self.assertEqual(self.states(a), {"0": "passed", "1": "canceled", "2h": "running"},
+                         "the held-out views run on beside the job until they finish or their lease runs out")
+        b = self.running()
+        self.store.job_delete(b, self.user["id"])
+        self.assertEqual(self.states(b)["1"], "canceled")
+        c = self.running()
+        self.clock.advance(61)
+        self.store.reconcile_stale(2)
+        self.assertEqual((self.store.job_get(c)["state"], self.states(c)["1"]), ("queued", "pending"),
+                         "requeued: the stage runs again on the next attempt")
+        self.store.job_claim(c, "c2", 60, 2)
+        self.store.job_stage_set(c, 2, "1", "running", lease_s=60)
+        self.clock.advance(61)
+        self.store.reconcile_stale(2)
+        self.assertEqual((self.store.job_get(c)["state"], self.states(c)["1"]), ("failed", "failed"))
+        d = self.running()
+        self.assertEqual(self.store.job_requeue(d, 1, 1, "timeout", "1", "slow"), "failed")
+        self.assertEqual(self.states(d)["1"], "failed")
+        e = self.running("3")
+        self.store.user_delete(self.user["id"])
+        self.assertEqual(self.states(e)["3"], "canceled")
+        for job in (a, b, c, d, e):
+            self.assertNotIn("running", [s for k, s in self.states(job).items() if k != "2h"], job)
+
     def test_jobs_are_private_to_their_owner(self):
         j, _ = self.create()
         other = make_user(self.store, "bob@example.com")
