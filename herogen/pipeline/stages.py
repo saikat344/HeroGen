@@ -240,7 +240,7 @@ def stage0_input(run: RunFolder, sketch_path: Path, label: str = "") -> dict[str
     st.details = {"width": w, "height": h, "source_name": Path(sketch_path).name, "label": label}
     if label:
         st.notes.append(f"Input is a {label}.")
-    st.checks = [inputs.size_check(w, h)]
+    st.checks = [inputs.size_check(w, h), inputs.contrast_check(img)]
     _finish_input_checks(st)
     return st.finish()
 
