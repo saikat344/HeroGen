@@ -100,7 +100,7 @@ class SavedTopFlowTest(unittest.TestCase):
         self.top = imaging.top_from_hull(*(self.masks[n] for n in ("front", "back", "right", "left")))
         self.checked = []
 
-    def _flow(self, score, drawn=None, *, extra_checks=(), expected_failure=False):
+    def _flow(self, score, drawn=None, *, extra_checks=(), expected_failure=False, attempts=4, side_checks=None):
         def square(*_):
             return 96, {n: {"mask": m.copy(), "image": self.image.copy(), "mask_method": "sam-3.1"}
                         for n, m in self.masks.items()}
@@ -120,17 +120,17 @@ class SavedTopFlowTest(unittest.TestCase):
                 mock.patch.object(stages, "assign_views", return_value=({}, {})), \
                 mock.patch.object(stages, "square_views", side_effect=square), \
                 mock.patch.object(stages, "orient_sides", return_value=([], [], {})), \
-                mock.patch.object(stages.C, "side_view_checks", side_effect=lambda *a, **kw:
-                                  side_view_checks(*a, **kw) + list(extra_checks)), \
+                mock.patch.object(stages.C, "side_view_checks", side_effect=side_checks or (lambda *a, **kw:
+                                  side_view_checks(*a, **kw) + list(extra_checks))), \
                 mock.patch.object(stages, "model_top_view", return_value=drawn) as tops, \
                 mock.patch("herogen.pipeline.parts.write_part_masks", return_value={}), \
                 mock.patch.object(stage3, "carve_view_ious", side_effect=measure):
             if expected_failure:
                 with self.assertRaises(stages.GateFailed) as caught:
-                    stages.stage2_turnaround(self.run, self.client)
+                    stages.stage2_turnaround(self.run, self.client, attempts=attempts)
                 result = caught.exception.record
             else:
-                result = stages.stage2_turnaround(self.run, self.client)
+                result = stages.stage2_turnaround(self.run, self.client, attempts=attempts)
         return result, edits.call_count, tops.call_count
 
     def _assert_saved_check(self, result):
@@ -178,6 +178,31 @@ class SavedTopFlowTest(unittest.TestCase):
         failed = {c["name"] for c in result["checks"] if c["gate"] and not c["pass"]}
         self.assertEqual(failed, {stages.CARVE_GATE, "height_agreement_4_views"})
         self.assertNotIn("does not fail stage 2", result["notes"])
+
+    def test_carve_only_sheet_outranks_smaller_non_carve_failure(self):
+        side_view_checks = stages.C.side_view_checks
+        heights = iter([stages.C.HEIGHT_AGREE_MIN - 0.0001, 1.0, 0.8])
+
+        def side_checks(*args, **kwargs):
+            height = next(heights)
+            return [stages.C.check(c["name"], height, c["threshold"])
+                    if c["name"] == "height_agreement_4_views" else c
+                    for c in side_view_checks(*args, **kwargs)]
+
+        result, edits, tops = self._flow(
+            lambda vs, call: {n: 0.95 if call == 1 else 0.8 for n in vs.views},
+            attempts=3, side_checks=side_checks,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual((edits, tops), (3, 1))
+        attempts = result["details"]["attempts"]
+        self.assertEqual([a["rank"]["failed_gates"] for a in attempts], [1, 1, 2])
+        self.assertLess(attempts[0]["rank"]["shortfall"], attempts[1]["rank"]["shortfall"])
+        self.assertEqual([a["rank"]["fails_non_carve_gate"] for a in attempts], [True, False, True])
+        self.assertEqual(result["details"]["kept_attempt"], 1)
+        check = self._assert_saved_check(result)
+        self.assertEqual((check["pass"], check["gate"]), (False, False))
+        self.assertIn("carve fallback would be refused", result["notes"])
 
     def test_carve_exception_is_propagated(self):
         def score(*_):
