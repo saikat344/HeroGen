@@ -1635,3 +1635,26 @@ the `<app>-meta` volume directly, so they run while the store is down, and every
 Staging is the same with `HEROGEN_SERVICE_APP=herogen-service-staging` (its own secrets
 `herogen-service-staging-web`, `-model` and `-admin`, and its own volumes) and its own base URL. Without a custom domain the
 base URL is the address Modal prints for the `web` function; set it and deploy again.
+
+### Body acceptance measurements
+
+`herogen.blender.body_quality` supplies two measurements without changing stage 3's gate:
+
+- `cross_sections` intersects the mesh at 35%, 45% and 55% of its height. Each score is the XY convex hull's
+  area divided by its axis-aligned bounding rectangle's area; their mean is `rectangularity`. A rectangle
+  scores 1 and a finely tessellated ellipse approaches pi/4. Missing or degenerate sections return no score.
+  This descriptor measures cross-section shape independently of observed-view silhouette agreement; it
+  is not a universal anatomical rule.
+- `visual_score` asks Muse Spark 1.3 whether the body is a usable base for the sketch. The frozen prompt's
+  SHA-256 is `8e054e5d6ba4b8efb4316878ed01c4f9c33eb3d889b5d6edc91f0781ad1ad38c`.
+  A 1280x688 sheet shows the sketch followed by front, left, back, right, +30 and -30 degree grey views.
+  The two oblique views are not construction or registration views. Grey renders use smooth two-sided
+  Lambert shading, an orthographic scale shared across all views, 512px tiles, white background, no
+  simplification and no per-view stretching. The scale fits the widest cardinal/30/60 degree direction.
+  The strict schema returns integer `usable_probability` (0–100) and a nonempty `reason`. The call uses
+  `ModelClient.compare_images`, low reasoning effort, 1200 maximum output tokens, 1280 maximum image
+  side and JPEG quality 90. The client's cache, retry policy, attempt ledger and token prices apply.
+  Model errors, missing views, invalid responses and a changed prompt hash raise; none supplies a pass.
+
+Neither measurement alone asserts topology, rigging or export quality. Acceptance thresholds belong to
+an explicitly calibrated policy, separate from these measurement functions.
