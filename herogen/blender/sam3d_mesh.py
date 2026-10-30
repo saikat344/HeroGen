@@ -90,11 +90,14 @@ def load_source(path) -> SourceMesh:
 
 
 def rotation(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """Source -> contract frame: the yaw about +Z (the facing and the small fitted yaw) first, then the pitch
+    about +X (the body's side-to-side axis once it faces -Y) and the roll about +Y (the front view's axis), so
+    pitch and roll mean the same tilt of the body whatever the facing."""
     a, b, c = (math.radians(x) for x in (yaw, pitch, roll))
     rz = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
     rx = np.array([[1, 0, 0], [0, math.cos(b), -math.sin(b)], [0, math.sin(b), math.cos(b)]])
     ry = np.array([[math.cos(c), 0, math.sin(c)], [0, 1, 0], [-math.sin(c), 0, math.cos(c)]])
-    return rz @ rx @ ry
+    return ry @ rx @ rz
 
 
 def normalise(v: np.ndarray, height: float) -> np.ndarray:

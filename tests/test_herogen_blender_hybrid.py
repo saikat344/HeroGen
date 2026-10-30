@@ -189,12 +189,17 @@ class TestSourceMesh(HybridBase):
 class TestPitchRegistration(HybridBase):
     """The pitch is registered on the observed left/right masks: the front view cannot see it."""
 
-    def oriented(self, name: str, pitch_deg: float, sides=True):
+    def oriented(self, name: str, pitch_deg: float, sides=True, yaw_deg: float = 0.0, colour: bool = False):
         p = self.tmp / f"{name}.glb"
-        self.source_glb(p, yaw_deg=0.0, pitch_deg=pitch_deg)
+        self.source_glb(p, yaw_deg=yaw_deg, pitch_deg=pitch_deg)
         src = sam3d_mesh.load_source(p)
         use, skip = sam3d_mesh.pose_views(self.vs) if sides else ({}, {})
-        v, info = sam3d_mesh.orient(src, self.vs.views["front"], None, 5.5, sides=use, sides_excluded=skip)
+        f = self.vs.views["front"]
+        img = None
+        if colour:                             # the front view is red: the colour decides front from back
+            img = np.zeros(f.mask.shape + (3,))
+            img[f.mask] = (220, 30, 30)
+        v, info = sam3d_mesh.orient(src, f, img, 5.5, sides=use, sides_excluded=skip)
         return src, v, info
 
     def side_iou(self, v, faces) -> dict:
@@ -226,6 +231,28 @@ class TestPitchRegistration(HybridBase):
         self.assertIn("no observed side view", info0["pose_fit"]["reason"])
         for k, s in self.side_iou(v0, src0.faces).items():
             self.assertLess(s, 0.80, k)
+
+    def test_an_upright_source_stays_upright_at_every_facing(self):
+        # the same upright body as the model might return it turned a quarter turn at a time: the pitch is
+        # about the body's own side-to-side axis and the roll about the front view's, whatever the facing
+        src0, v0, _ = self.oriented("facing-0", 0.0, colour=True)
+        base = self.side_iou(v0, src0.faces)
+        for yaw in (0.0, 90.0, 180.0, 270.0):
+            src, v, info = self.oriented(f"facing-{int(yaw)}", 0.0, yaw_deg=yaw, colour=True)
+            self.assertEqual(info["facing_deg"], (360.0 - yaw) % 360.0, yaw)
+            self.assertEqual(info["pose_fit"]["status"], "fitted", yaw)
+            self.assertLessEqual(abs(info["fit"]["pitch"]), 1.0, yaw)
+            self.assertLessEqual(abs(info["fit"]["roll"]), 1.0, yaw)
+            for k, s in self.side_iou(v, src.faces).items():
+                self.assertAlmostEqual(s, base[k], delta=0.01, msg=f"{yaw} {k}")
+
+    def test_a_leaning_source_at_a_quarter_turn_has_its_lean_recovered(self):
+        src, v, info = self.oriented("lean-90", 12.0, yaw_deg=90.0, colour=True)
+        self.assertEqual(info["facing_deg"], 270.0)
+        self.assertLessEqual(abs(info["fit"]["pitch"] - -12.0), 1.5)       # the lean, in the body's frame
+        self.assertLessEqual(abs(info["fit"]["roll"]), 1.5)
+        for k, s in self.side_iou(v, src.faces).items():
+            self.assertGreater(s, 0.90, k)
 
     def test_pose_views_skip_derived_and_missing_side_masks(self):
         kept = {k: v for k, v in self.vs.views.items() if k != "right"}
