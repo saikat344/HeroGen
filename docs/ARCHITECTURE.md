@@ -162,6 +162,12 @@ carve's waist up half a radius, knees a quarter radius down and ankles half a ra
 gate gap 0.127 to 0.116). The worst gaps left are at joints it does not move: the hybrid's left hip (0.28 in
 walk_a) and the carve's right shoulder (0.156 in arms_across).
 
+The cut search requires a nonempty child and parent section and a nonempty shared rim for every joint it
+measures. An unmeasurable baseline stops stage 4 with an error naming the joints and the empty sections or
+missing rims; the stage 3 mesh and joint placement need correction before cuts can be chosen. A candidate move
+that removes an own or neighbouring joint's measurement is rejected and recorded in the trial's
+`unmeasurable_joints` map (joint to reason), without a gap or score. Missing measurements never count as zero.
+
 **Atlases.** All sections of a LOD share one UV atlas: Blender's Smart UV Project unwraps them without margin, and
 the islands are packed by their concave shapes with a 2-texel gutter. `roblox-ingame` uses 1024 for the high and
 512 for the low LOD. `best` and `roblox-avatar` take the smallest of 1024, 2048 and 4096 that gives at least one
