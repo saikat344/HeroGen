@@ -200,14 +200,23 @@ through the grid; geometric 187 s and 3.0 s) and on the 22,768-triangle in-game 
 ## Turnaround sheet (stage 2)
 
 Stage 2 asks Muse Image for a sheet of four views up to four times, stopping at the first sheet whose gated
-checks all pass. It keeps the best sheet, not the last: the fewest failed gated checks, then the smallest summed
-shortfall (`checks.shortfall`: how far each failed value is past its threshold, as a fraction of the
-threshold); a tie keeps the earlier sheet. A gate a sheet was never measured on counts as failed with a
-shortfall of 1, so a sheet that could not be split into four figures ranks below every sheet that could.
-`stage-2.json` lists every attempt with its checks and `rank`, and `details.kept_attempt` names the kept
+checks all pass. It keeps the best sheet: fully passing sheets first, then sheets failing only the carve
+check, then sheets failing any other gate. Within each group it prefers the fewest failed gated checks,
+then the smallest summed shortfall (`checks.shortfall`: how far each failed value is past its threshold,
+as a fraction of the threshold); a tie keeps the earlier sheet. A gate a sheet was never measured on counts
+as failed with a shortfall of 1, so a sheet that could not be split into four figures ranks below every sheet
+that could.
+`stage-2.json` lists every attempt with its checks and `rank` (`fails_non_carve_gate`, `failed_gates`,
+`shortfall`, compared in that order), and `details.kept_attempt` names the kept
 one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
 sheet's. A top view is requested for an attempt whose non-carve side gates pass, even if its preliminary
-carve fails, so every such attempt is ranked on the masks that would be saved.
+carve fails, so every such attempt is ranked on the masks that would be saved. Each top request makes one
+Muse Image edit call and one or two SAM 3.1 calls. Four eligible attempts therefore make four top requests,
+but the prompt and cover are identical: the client caches the image and its SAM masks. With an initially
+empty cache, the top requests together need one paid Muse edit and one or two paid SAM calls (besides the
+sheet and part-mask calls); later attempts reuse those results and scale them to their own sides. Top checks
+and the final carve can change retrying and the kept sheet, and a top API error stops the stage; deferring top requests until
+after selection would change those outcomes.
 
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the

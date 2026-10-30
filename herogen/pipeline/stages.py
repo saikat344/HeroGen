@@ -615,10 +615,14 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             **top_details,
             "checks": side_checks,
         })
-        # Keep the best sheet, not the last: fewest failed gates, then the smallest summed shortfall; a tie
-        # keeps the earlier one.
-        rank = C.attempt_rank(side_checks, SHEET_GATES)
-        tried[-1]["rank"] = {"failed_gates": rank[0], "shortfall": rank[1]}
+        # Prefer sheets that can pass with an advisory carve. Within each group keep the fewest failed
+        # gates, then the smallest summed shortfall; a tie keeps the earlier one.
+        non_carve_rank = C.attempt_rank(
+            [c for c in side_checks if c["name"] != CARVE_GATE],
+            tuple(n for n in SHEET_GATES if n != CARVE_GATE),
+        )
+        rank = (non_carve_rank[0] > 0, *C.attempt_rank(side_checks, SHEET_GATES))
+        tried[-1]["rank"] = {"fails_non_carve_gate": rank[0], "failed_gates": rank[1], "shortfall": rank[2]}
         if not kept or rank < kept[0]:
             kept = (rank, attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks,
                     top, top_raw, top_details, top_notes)
@@ -636,8 +640,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         **top_details,
     }
     if len(tried) > 1:
-        st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (fewest failed "
-                        "gates, then the smallest shortfall).")
+        st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (sheets with "
+                        "no non-carve gate failures first, then fewest failed gates, then smallest shortfall).")
     # Attempts retain their gated measurements for retries and ranking. Only the kept stage record can
     # become advisory, after retrying is over, and only when no other gated check failed.
     st.checks = [dict(c) for c in side_checks + orient]
