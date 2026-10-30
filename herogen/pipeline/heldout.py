@@ -67,7 +67,7 @@ import time
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -773,9 +773,29 @@ def _aligned_profile(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return both if both.any() else left
 
 
+def _row_at(mask: np.ndarray, frac: float) -> int:
+    """The row ``frac`` of the figure height down from the top of ``mask``'s figure."""
+    b = imaging.bbox(mask)
+    return b[1] + min(int(frac * (b[3] - b[1])), b[3] - b[1] - 1)
+
+
+def central_run(row: np.ndarray, cx: float) -> tuple[float, float]:
+    """The body's run in a torso row: the run holding the figure's centre ``cx``. When the row is parted at
+    the centre, the span from the nearest run left of it to the nearest run right of it (never an outer run,
+    which is a hand or an arm); one side only when the other is empty; ``cx`` +-1 when the row is empty."""
+    rr = _runs(row)
+    hit = [r for r in rr if r[0] <= cx <= r[1]]
+    if hit:
+        return hit[0]
+    lefts, rights = [r for r in rr if r[1] <= cx], [r for r in rr if r[0] > cx]
+    if not lefts and not rights:
+        return cx - 1, cx + 1
+    return (lefts[-1] if lefts else rights[0])[0], (rights[0] if rights else lefts[-1])[1]
+
+
 def _two(runs: list[tuple[int, int]], fallback: tuple[float, float]) -> tuple[tuple[float, float], ...]:
-    """The image-left and image-right leg's run in a row: the outer two runs, one run split at its middle
-    (legs together, or a long coat), or ``fallback`` split when the row is empty."""
+    """The outline rule for a leg row: the outer two runs, one run split at its middle (legs together, or a
+    long coat), or ``fallback`` split when the row is empty."""
     if len(runs) >= 2:
         return runs[0], runs[-1]
     a, b = runs[0] if runs else fallback
@@ -783,8 +803,116 @@ def _two(runs: list[tuple[int, int]], fallback: tuple[float, float]) -> tuple[tu
     return (a, m), (m, b)
 
 
-def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_deg: float
-                  ) -> tuple[list[Shape], int]:
+@dataclass(frozen=True)
+class GuideLegs:
+    """Where the turn guide's legs are in the front view (x px): the hips' run, and the image-left and
+    image-right leg's run at the knee and sole rows. ``method``: how they were found (`guide_legs`)."""
+
+    ROWS: ClassVar[dict[str, float]] = {"hip": 0.52, "knee": 0.71, "sole": 0.98}  # fractions from the top
+    hips: tuple[float, float]
+    knees: tuple[tuple[float, float], tuple[float, float]]
+    soles: tuple[tuple[float, float], tuple[float, float]]
+    method: str
+
+
+def legs_from_outline(front: np.ndarray) -> GuideLegs:
+    """The legs when no feet were found: the outermost runs of the knee and sole rows (`_two`) and, for the
+    hips, the hip row's run holding the figure box's centre (the span of the nearest runs either side of it
+    when the row is parted there; `central_run`)."""
+    fb = imaging.bbox(front)
+    hips = central_run(front[_row_at(front, GuideLegs.ROWS["hip"])], (fb[0] + fb[2]) / 2)
+    knees, soles = (_two(_runs(front[_row_at(front, GuideLegs.ROWS[n])]), hips) for n in ("knee", "sole"))
+    return GuideLegs(hips=hips, knees=knees, soles=soles, method="outline")
+
+
+def _overlap(p: tuple[float, float], q: tuple[float, float]) -> float:
+    return min(p[1], q[1]) - max(p[0], q[0])
+
+
+def _trace_leg(mask: np.ndarray, run: tuple[float, float], r_from: int, r_to: int) -> tuple[float, float]:
+    """Follow one leg's ``run`` of row ``r_from`` up the outline to row ``r_to``. On each row above, of the
+    runs overlapping the last one, the one overlapping ``run`` itself most (then the last one), so where a
+    hand, an arm, a tail or the other leg joins the leg for some rows and parts from it again, the trace goes
+    on up the part over the leg's own columns; a row with no overlapping run keeps the last. Two legs that
+    join into the pelvis below ``r_to`` both end on the run they join."""
+    a, b = run
+    for r in range(r_from - 1, r_to - 1, -1):
+        over = [q for q in _runs(mask[r]) if q[0] < b and q[1] > a]
+        if over:
+            a, b = max(over, key=lambda q: (_overlap(q, run), _overlap(q, (a, b))))
+    return a, b
+
+
+def legs_from_feet(front: np.ndarray, feet: list[np.ndarray], method: str) -> GuideLegs | None:
+    """The legs anchored on two detected feet (full-size masks, image-left first): each foot's leg is the
+    sole-row run its pixels in that row overlap most (two feet on one run, standing together, split it
+    halfway between them). Each leg is followed up the outline (`_trace_leg`) to the knee row and on to the
+    hip row; legs on one run at the knee row split it at its middle; the hips span from the image-left
+    leg's left edge to the image-right leg's right edge (the run both reach, when they join below the hip
+    row). ``method`` is recorded with them. None when a foot has no pixel on a run of the sole row."""
+    rows = {n: _row_at(front, f) for n, f in GuideLegs.ROWS.items()}
+    sole_runs = _runs(front[rows["sole"]])
+    picked = []
+    for foot in feet:
+        cols = np.flatnonzero(foot[rows["sole"]] & front[rows["sole"]])
+        if cols.size == 0:
+            return None
+        lo, hi = int(cols[0]), int(cols[-1]) + 1
+        over = [(min(q[1], hi) - max(q[0], lo), q) for q in sole_runs if q[0] < hi and q[1] > lo]
+        if not over:
+            return None
+        picked.append((max(over)[1], (lo, hi)))
+    (run_l, foot_l), (run_r, foot_r) = picked
+    if run_l == run_r:  # standing with the feet together: split the run between the two feet
+        m = (foot_l[1] + foot_r[0]) / 2
+        soles = ((run_l[0], m), (m, run_l[1]))
+    else:
+        soles = (run_l, run_r)
+    knees = tuple(_trace_leg(front, run, rows["sole"], rows["knee"]) for run in soles)
+    if knees[0] == knees[1]:
+        a, b = knees[0]
+        knees = ((a, (a + b) / 2), ((a + b) / 2, b))
+    legs = [_trace_leg(front, run, rows["knee"], rows["hip"]) for run in knees]
+    hips = (min(a for a, _ in legs), max(b for _, b in legs))
+    return GuideLegs(hips=hips, knees=knees, soles=soles, method=method)
+
+
+def find_feet(client: ModelClient, img: Image.Image, figure: np.ndarray,
+              texts: tuple[str, ...] = ("foot", "shoe", "boot")) -> tuple[list[np.ndarray], dict[str, Any]]:
+    """SAM 3.1 feet on a turnaround front view: each prompt of ``texts`` in turn until one finds two feet.
+    A foot is an instance mostly on the figure (half its pixels or more within 4 px of it) with pixels on the
+    figure's sole row (0.98 of the height); of overlapping instances (IoU 0.5 or more) the more confident
+    is kept, then the two most confident, image-left first. Returns the feet ([] when no prompt found two)
+    and what each prompt found. A Model API failure is raised, so the stage stops (a replay of a run made
+    before feet were asked for misses here)."""
+    near = imaging.dilate(figure, 4)
+    sole = _row_at(figure, GuideLegs.ROWS["sole"])
+    found: dict[str, Any] = {}
+    for text in texts:
+        keep = [i for i in client.segment(img, text) if i.mask.any()
+                and (i.mask & near).sum() >= 0.5 * i.mask.sum() and (i.mask[sole] & figure[sole]).any()]
+        keep.sort(key=lambda i: -(i.confidence if i.confidence is not None else 0.0))
+        feet: list[SamInstance] = []
+        for inst in keep:
+            if all(imaging.iou(inst.mask, f.mask) < 0.5 for f in feet):
+                feet.append(inst)
+        found[text] = [{"box": list(f.box), "confidence": f.confidence} for f in feet]
+        if len(feet) >= 2:
+            two = sorted(feet[:2], key=lambda i: float(np.nonzero(i.mask)[1].mean()))
+            return [f.mask for f in two], {"prompt": text, "found": found}
+    return [], {"prompt": None, "found": found}
+
+
+def guide_legs(front: np.ndarray, feet: list[np.ndarray], prompt: str | None = None) -> GuideLegs:
+    """The guide's legs: anchored on the feet SAM found (`legs_from_feet`; method ``sam-3.1:<prompt>``), as a
+    silhouette alone can't tell a leg from a tail, a staff or a cape, but a foot is never one of those.
+    Without two feet on the sole row, the outline rule (`legs_from_outline`; method ``outline``)."""
+    legs = legs_from_feet(front, feet, f"{SAM_MODEL}:{prompt}") if len(feet) == 2 else None
+    return legs if legs is not None else legs_from_outline(front)
+
+
+def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_deg: float,
+                  legs: GuideLegs | None = None) -> tuple[list[Shape], int]:
     """The mannequin's shapes at ``yaw_deg`` in turnaround px (u relative to the front figure's centre) and
     the front figure's height; see `turn_guide`."""
     c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
@@ -796,13 +924,14 @@ def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_de
     arm_y = float(np.median([sum(_extent(r[None, :])) / 2 for r in rows if r.any()]))
 
     def runs_at(mask: np.ndarray, frac: float) -> list[tuple[int, int]]:
-        b = imaging.bbox(mask)
-        return _runs(mask[b[1] + min(int(frac * (b[3] - b[1])), b[3] - b[1] - 1)])
+        return _runs(mask[_row_at(mask, frac)])
+
+    legs = legs or legs_from_outline(front)
+    hip_row, knee_row, sole_row = (GuideLegs.ROWS[n] for n in ("hip", "knee", "sole"))
+    hips = legs.hips
 
     def central(frac: float) -> tuple[float, float]:
-        rr = runs_at(front, frac)
-        hit = [r for r in rr if r[0] <= cx <= r[1]]
-        return hit[0] if hit else (rr[0] if rr else (cx - 1, cx + 1))
+        return hips if frac == hip_row else central_run(front[_row_at(front, frac)], cx)
 
     def depth(frac: float) -> tuple[float, float]:
         rr = runs_at(profile, frac)
@@ -820,7 +949,7 @@ def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_de
     shapes.append(("ellipse", [(hu - half, 0.0), (hu + half, 0.12)], 0.0))
     shapes.append(("dot", [(u((hx0 + hx1) / 2, pd0), 0.06)], 0.6 * lw))  # the nose: the face's side
     edges_l, edges_r = [], []
-    for frac in (0.14, 0.2, 0.3, 0.4, 0.52):
+    for frac in (0.14, 0.2, 0.3, 0.4, hip_row):
         a, b = central(frac)
         p0, p1 = depth(frac)
         m = u((a + b) / 2, (p0 + p1) / 2)
@@ -833,15 +962,15 @@ def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_de
         hand = (u(hand_x, arm_y), 1.0 - hand_z)
         shapes.append(("line", [(u(shoulder_x, arm_y), 0.2), hand], lw))
         shapes.append(("dot", [hand], lw))
-    hips = central(0.52)
-    knees, soles = _two(runs_at(front, 0.71), hips), _two(runs_at(front, 0.98), hips)
-    ky = sum(depth(0.71)) / 2
-    toe_y, heel_y = depth(0.98)
+    knees, soles = legs.knees, legs.soles
+    ky = sum(depth(knee_row)) / 2
+    toe_y, heel_y = depth(sole_row)
     hip_xs = (hips[0] + 0.25 * (hips[1] - hips[0]), hips[0] + 0.75 * (hips[1] - hips[0]))
     for hip_x, (ka, kb), (sa, sb) in zip(hip_xs, knees, soles, strict=True):
         ankle = (u((sa + sb) / 2, ky), 0.94)
         heel = (u((sa + sb) / 2, heel_y), 0.985)
-        shapes.append(("line", [(u(hip_x, arm_y), 0.52), (u((ka + kb) / 2, ky), 0.71), ankle], 1.3 * lw))
+        leg = [(u(hip_x, arm_y), hip_row), (u((ka + kb) / 2, ky), knee_row), ankle]
+        shapes.append(("line", leg, 1.3 * lw))
         shapes.append(("line", [ankle, heel], lw))
         shapes.append(("line", [heel, (u((sa + sb) / 2, toe_y), 0.985)], 1.1 * lw))
     return shapes, h
@@ -855,18 +984,19 @@ def guide_width(shapes: list[Shape]) -> float:
 
 
 def turn_guide(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_deg: float, size: tuple[int, int],
-               scale: float | None = None) -> tuple[Image.Image, int]:
+               scale: float | None = None, legs: GuideLegs | None = None) -> tuple[Image.Image, int]:
     """A plain grey mannequin of the turnaround's pose seen at ``yaw_deg``, on a white canvas of ``size``,
     centred, at ``scale`` canvas px per turnaround px (default `framing_scale` for the front figure and the
     mannequin). Returns the image and the figure's height on it (the front figure's height times the scale).
 
     Only landmark positions come from the turnaround, never its outline: the head (an ellipse, its width
     from the front view and its depth from the profile, with a small nose on the face side), the torso (the
-    body's central run per row as an ellipse), the arms (straight from the shoulders to the hand landmarks,
-    in the frontal plane), the legs (hips to the knee and ankle runs; one run split in two when the legs
-    touch) and the feet (heel to toe from the profiles' soles), each projected with u = x cos + y sin.
+    body's central run per row as an ellipse, `central_run`, down to the hips), the arms (straight from the
+    shoulders to the hand landmarks, in the frontal plane), the legs (from the hips to the knee and sole
+    runs of ``legs``, `guide_legs`, by default the outline rule; one run split in two when the legs touch)
+    and the feet (heel to toe from the profiles' soles), each projected with u = x cos + y sin.
     """
-    shapes, h = _guide_shapes(front, left, right, yaw_deg)
+    shapes, h = _guide_shapes(front, left, right, yaw_deg, legs)
     if scale is None:
         fw = imaging.box_size(imaging.bbox(front))[0]
         scale = framing_scale(h, [fw, guide_width(shapes)], size)
@@ -1026,6 +1156,7 @@ class _Context:
     profile_face: float | None
     profile_face_error: bool = False  # the profiles' face cue failed on the Model API
     identity: str = ""  # `stage2_identity`
+    legs: GuideLegs | None = None  # the turn guide's legs (`guide_legs`); None: the outline rule
 
 
 def _inputs(view: HeldoutView, ctx: _Context, request_deg: float
@@ -1035,16 +1166,17 @@ def _inputs(view: HeldoutView, ctx: _Context, request_deg: float
     reference = "profile" if request_deg >= PROFILE_REFERENCE_FROM_DEG else "front"
     name = view.side if reference == "profile" else "front"
     m = ctx.masks
-    shapes, _ = _guide_shapes(m["front"], m["left"], m["right"], -view.facing * request_deg)
+    shapes, _ = _guide_shapes(m["front"], m["left"], m["right"], -view.facing * request_deg, ctx.legs)
     widths = [imaging.box_size(b)[0] for b in (imaging.bbox(x) for x in m.values()) if b is not None]
     k = framing_scale(ctx.front_h, widths + [guide_width(shapes)], ctx.cover.size)
     ref, _ = pose_reference(ctx.views[name], m[name], ctx.cover.size, k)
-    guide, _ = turn_guide(m["front"], m["left"], m["right"], -view.facing * request_deg, ctx.cover.size, k)
+    guide, _ = turn_guide(m["front"], m["left"], m["right"], -view.facing * request_deg, ctx.cover.size, k,
+                          ctx.legs)
     return view_prompt(view, request_deg, reference), [ctx.cover, ref, guide], k, reference
 
 
 # Overall time limit for one stage 2h run. Each Model API call can retry within its own deadline (client
-# DEADLINE_S: 10 minutes for SAM 3.1, 15 for Muse Image), and a run makes up to 16 generations and 52 SAM calls;
+# DEADLINE_S: 10 minutes for SAM 3.1, 15 for Muse Image), and a run makes up to 16 generations and 55 SAM calls;
 # a typical live run takes 7-12 minutes. The limit is checked before each generation, so the generation in
 # flight finishes first.
 TIME_LIMIT_S = 1800.0
@@ -1421,6 +1553,9 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     deadline = None if time_limit_s is None else st.t0 + time_limit_s
     try:
         profile_face, profile_face_found = _profile_face(client, run)
+        front_view = _load(run, "views/front.png")
+        feet, feet_found = find_feet(client, front_view, front)
+        legs = guide_legs(front, feet, feet_found["prompt"])
         ctx = _Context(
             cover=cover,
             views={v: _load(run, f"views/{v}.png") for v in masks},
@@ -1435,6 +1570,7 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
             profile_face=profile_face,
             profile_face_error=any(f.get("api_error") for f in profile_face_found.values()),
             identity=identity,
+            legs=legs,
         )
         version = checks_version()
         for name, d in keep.items():
@@ -1473,6 +1609,8 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         "profile_toe_offset_h": round(ctx.profile_toe, 4),
         "profile_face_offset": None if profile_face is None else round(profile_face, 4),
         "profile_face": _rounded(profile_face_found),
+        "guide_legs": {"method": legs.method, "hips": list(legs.hips), "knees": [list(k) for k in legs.knees],
+                       "soles": [list(k) for k in legs.soles], "feet": feet_found},
         "inputs": ("the cover; a pose reference (views/front.png, or the nearer profile once the request "
                    f"reaches {PROFILE_REFERENCE_FROM_DEG:.0f} degrees) and a mannequin turn guide at the "
                    "requested yaw, both centred on a canvas the cover's size at one scale (the figure "
