@@ -1,0 +1,20 @@
+# Everything pip can install for the test suite, pinned with its dependencies, for tests and CI only
+# (pip install -r requirements-test.txt). Blender, Lune and luau-compile are not pip packages; the tests that
+# need them skip when they are missing.
+
+# The pipeline.
+numpy==2.5.4              # BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+pillow==12.3.0            # MIT-CMU
+
+# The hosted service's web tests: Starlette, its form parser and its test client.
+starlette==1.8.0          # BSD-3-Clause
+python-multipart==0.0.32  # Apache-2.0
+httpx2==2.13.1            # BSD-3-Clause
+
+# Their dependencies.
+anyio==4.15.1             # MIT
+h11==0.16.0               # MIT
+httpcore2==2.13.1         # BSD-3-Clause
+idna==3.20                # BSD-3-Clause
+truststore==0.10.5        # MIT
+typing_extensions==4.16.0 # PSF-2.0
