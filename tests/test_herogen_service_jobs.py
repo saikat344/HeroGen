@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
@@ -390,6 +391,100 @@ class TestHeldoutFiles(JobCase):
         wd.sync()
         self.assertFalse(ctx.run_dir.exists(), "a deleted run folder is never brought back")
         wd.close()
+
+
+class TestDeleteDuringCopyBack(JobCase):
+    """A delete that lands between a copy back's check and its commit never brings the hero's files back."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        import shutil
+
+        from test_herogen_service_store import SimVolume
+
+        self.job = self.new_job()
+        self.started = []
+        self.assertEqual(self.go(self.job, heldout=self.started.append), "succeeded")
+        self.shared = self.tmp / "shared"
+        shutil.copytree(self.s.data_dir, self.shared)
+        self.vol_worker = SimVolume(self.shared, self.tmp / "view-worker")
+        self.vol_web = SimVolume(self.shared, self.tmp / "view-web")
+        self.vol_worker.reload()
+        self.vol_web.reload()
+        self.st_worker, self.st_web = Storage(self.tmp / "view-worker"), Storage(self.tmp / "view-web")
+
+    def web(self, delete_account: bool):
+        def act():
+            self.vol_web.reload()
+            if delete_account:
+                self.store.user_delete(self.user["id"])
+                self.st_web.delete_user(self.user["id"])
+            else:
+                self.store.job_delete(self.job["id"], self.user["id"])
+                self.st_web.delete_job(self.user["id"], self.job["id"])
+            self.vol_web.commit()
+        return act
+
+    def run_2h(self, runner):
+        from herogen.service.worker import HeldoutWorkdir, run_heldout
+
+        ctx = make_context(self.s, self.st_worker, self.started[0])
+        return run_heldout(self.store, self.s, self.started[0], runner, lambda claim: HeldoutWorkdir(
+            ctx, self.tmp / "work", self.vol_worker, lambda: self.store.side_live(self.job["id"], "2h", claim)))
+
+    def files(self, under: Path) -> list[str]:
+        return sorted(p.relative_to(under).as_posix() for p in under.rglob("*") if p.is_file()) if under.exists() else []
+
+    def test_hero_deleted_while_2h_commits(self):
+        self.vol_worker.before_commit = self.web(delete_account=False)
+        self.run_2h(FakeRunner())
+        run = self.shared / "users" / self.user["id"] / "runs" / self.job["id"]
+        # The simulated Volume commits files, not empty folders, so the check is on files.
+        self.assertEqual(self.files(run), [], "no file of the deleted hero comes back")
+
+    def test_account_deleted_while_2h_commits(self):
+        class AddsCache(FakeRunner):
+            def run(self, spec, ctx):
+                if spec.key == "2h":
+                    ctx.cache_dir.mkdir(parents=True, exist_ok=True)
+                    (ctx.cache_dir / "new-entry.json").write_text("{}")
+                return super().run(spec, ctx)
+
+        self.vol_worker.before_commit = self.web(delete_account=True)
+        self.run_2h(AddsCache())
+        user = self.shared / "users" / self.user["id"]
+        self.assertEqual(self.files(user), [], "no run file and no cache entry comes back")
+        purge(self.store, self.s, Storage(self.shared))
+        self.assertEqual(self.files(user), [])
+
+    def test_the_jobs_own_copy_back_is_undone_too(self):
+        job = self.new_job()
+        claim = self.store.job_claim(job["id"], "c", 60, 2)
+        ctx = make_context(self.s, self.st_worker, claim["job"])
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        self.vol_worker.reload()
+        wd = CopyWorkdir(ctx, self.tmp / "main", self.vol_worker, lambda: True,
+                         still_wanted=lambda: (self.store.job_get(job["id"]) or {}).get("deleted_at") is None)
+        loc = wd.open()
+        (loc.run_dir / "stage-3.json").write_text("{}")
+
+        def delete():
+            self.vol_web.reload()
+            self.store.job_delete(job["id"], self.user["id"])
+            self.st_web.delete_job(self.user["id"], job["id"])
+            self.vol_web.commit()
+
+        self.vol_worker.before_commit = delete
+        wd.sync()
+        run = self.shared / "users" / self.user["id"] / "runs" / job["id"]
+        self.assertEqual(self.files(run), [])
+        wd.close()
+
+    def test_nothing_is_undone_when_nothing_was_deleted(self):
+        self.run_2h(FakeRunner())
+        run = self.shared / "users" / self.user["id"] / "runs" / self.job["id"]
+        self.assertIn("stage-2h.json", self.files(run))
+        self.assertIn("heldout/front-left-34.png", self.files(run))
 
 
 class TestSweep(JobCase):
