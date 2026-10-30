@@ -33,10 +33,11 @@ New files are staged and swapped in only when the stage finishes; until then, an
 earlier record and files stay (the record says why it stopped, with every call made). Only scoring reads
 `heldout/` (see docs/ARCHITECTURE.md, "Held-out views").
 
-Pose and angle are checked camera-aware: silhouette landmarks (hands, head, knees, shins, soles) are placed in
-3D from the front and profile views and projected at every yaw. A fit robust to the arms being held a few
-degrees off the A-pose gives the found yaw; the pose error is measured there against the turnaround's own
-arms. Facing is two cues: the side the body-keypoint fit prefers, and SAM 3.1 face-in-head.
+Pose and angle are checked camera-aware from Sapiens 2 body keypoints: the turnaround's joints are placed in 3D
+from its front view and profiles and fitted to the view's over yaw (head, torso and legs; `keypoints.fit_yaw`),
+which gives the found yaw; each arm's angle below horizontal, which the turn doesn't change, gives the A-pose
+check. Facing is two cues: the side the keypoint fit prefers, and SAM 3.1 face-in-head. The silhouette landmark
+fit is still recorded, as information.
 
 Scale: the prompt asks for the figure at the size and place of the turn guide, which is built here at the
 same scale as the pose reference (`framing_scale`), so generated pixels are mapped to view pixels by one over
@@ -591,19 +592,21 @@ def turnaround_keypoints(pose: PoseClient, views: dict[str, Image.Image], masks:
 # 35 degrees, arms hanging, legs striding 8, 12 and 25 degrees (40 cases each).
 # `python3 tests/test_herogen_pipeline_heldout_synth.py` prints the table; ranges below are its min and max.
 #
-# Pose: RMS landmark error (`landmark_errors`, against the turnaround's own arms) at the found yaw, as a
-# fraction of the figure height. A-pose 0.0024-0.0116 (40 of 40 accepted, found yaw 0-2 degrees under the
-# drawn yaw); arms lowered to 35 degrees 0.027-0.052, hanging 0.039-0.110, stride 8 degrees 0.018-0.054,
-# 12 degrees 0.016-0.070, 25 degrees 0.036-0.120 (none accepted: 192 rejected, 8 of the smallest strides
-# need review). Arms drifted 5 degrees from the turnaround's: 0.011-0.017 (at the targets and window
-# edges); 8 degrees 0.016-0.024. Generated runs: an earlier 3/4 view (a stride with lowered arms, drawn
-# facing right) measured 0.030 as a front-right view and 0.034 as a front-left one with the plain fit (never
-# less at the found yaw), rejected either way; on the run in the "Three input images" note, generations
-# with the arms raised a little over the turnaround's measure 0.0136-0.0142 at the found yaw (0.0116-0.0133
-# at the plain fit's yaw, which absorbed the arms into the turn). Up to 0.0135 passes, above 0.020 fails,
-# between needs human review.
-POSE_RMS_PASS = 0.0135
-POSE_RMS_FAIL = 0.020
+# A-pose: each arm's angle below horizontal (`keypoints.arm_drop_deg`: how far the wrist hangs below the shoulder
+# over the arm's length in the front view, which a turn about the vertical axis doesn't change). The nearer arm
+# (the view's side) must be found and inside ARM_DROP_DEG; the farther one too when both its shoulder and wrist
+# score at least ARM_FAR_MIN_SCORE (at 60 degrees it is often hidden). Set on the tuning split of the labelled
+# bench views (viewlabels-ai-v2, A-pose label; tuning s001-s028 and s044-s045, test s029-s043): false rejects
+# 0.02 / 0.13 (30 degrees, tuning / test) and 0.00 / 0.14 (60), false accepts 0.60 / 0.67 (30: 10 and 3 views
+# labelled not A-pose, mostly at ordinary arm angles, so for other reasons) and 0.07 / 0.03 (60), against
+# 0.84 / 0.81 and 0.88 / 0.86 false rejects, 0.00 / 0.00 and 0.07 / 0.03 false accepts for the silhouette
+# landmark RMS it replaces. On the bench-gt renders (every arm posed at 45 degrees) 8-10% of views fall outside
+# the band (stylised figures whose wrist keypoints miss), none of them by a wide margin.
+ARM_DROP_DEG = (35.0, 72.0)
+ARM_FAR_MIN_SCORE = 0.5
+# The keypoints' whole-pose RMS at the found yaw (`keypoints.pose_rms`, arms and legs, across and up) is recorded
+# but not judged: no threshold separated the labelled views (at 0.06 of the height it falsely rejected 0.25 of
+# A-pose views and accepted 0.50-0.78 of the others). The silhouette landmark fit (`fit_yaw`) is recorded too.
 # Facing, two cues, each a vote of +1 (the view's way), -1 (the other way) or 0 (can't tell):
 # - keypoints: RMS of the body-keypoint fit facing the other way minus facing the view's way (`keypoints.fit_yaw`,
 #   a fraction of the figure height; the nose, eyes and toes ahead of the body give the side). Bench-gt renders
@@ -686,9 +689,6 @@ def view_checks(
     fit = fit_yaw(model, seen)
     side, other = ("left", "right") if view.facing < 0 else ("right", "left")
     best, wrong = fit[f"facing_{side}"], fit[f"facing_{other}"]
-    out.append(C.check("pose_landmark_rms", best["rms"], POSE_RMS_FAIL, op="<=",
-                       note=f"at the found yaw {best['yaw_deg']:+.0f}; worst landmark: {best['worst']}"))
-    out.append(_review(C.check("pose_landmark_rms_clear", best["rms"], POSE_RMS_PASS, op="<=")))
     kseen = _seen(keypoints, kp_scale)
     kfit = KP.fit_yaw(body, kseen) if body is not None and kseen is not None else None
     found = None
@@ -711,6 +711,19 @@ def view_checks(
         note = f"found yaw {found:+.1f}, window {lo:.1f}-{hi:.1f}"
         out.append(C.check("found_yaw_window_miss_deg", miss, YAW_WINDOW_REVIEW_DEG, op="<=", note=note))
         out.append(_review(C.check("found_yaw_in_window", miss, 0.0, op="<=", note=note)))
+    arms = arm_angles(body, kseen, side)
+    lo_a, hi_a = ARM_DROP_DEG
+    if arms["near"] is None:
+        out.append(_review(C.check("arm_angle_measured", 0.0, 1.0, op="==",
+                                   note=f"the {side} (nearer) arm's shoulder or wrist was not found")))
+    for which in ("near", "far"):
+        a = arms[which]
+        if a is not None:
+            out.append(C.check(f"arm_angle_{which}_off_band_deg", max(0.0, lo_a - a, a - hi_a), 0.0, op="<=",
+                               note=f"{which}er arm {a:.0f} degrees below horizontal; "
+                                    f"A-pose band {lo_a:.0f}-{hi_a:.0f}"))
+    kpose = (KP.pose_rms(KP.pose_residuals(body, kseen, found))
+             if found is not None and body is not None and kseen is not None else None)
 
     toe = toe_offset_h(heldout)
     toe_turn = view.facing * toe / profile_toe if profile_toe > 0.01 else None
@@ -733,6 +746,8 @@ def view_checks(
     measured = {
         "found_yaw_deg": found,
         "keypoint_fit": kfit,
+        "arm_angles_deg": arms,
+        "keypoint_pose_rms": kpose,
         "keypoints": keypoints,
         "fit": fit,
         "hand_z_morph": {"view": hand_z_morph(heldout, seen), "front": model.hand_z_morph,
@@ -740,7 +755,7 @@ def view_checks(
         "true_yaw_range_deg": rng["true_deg"] if rng else None,
         "azimuth_clearance_deg": clearance,
         "yaw_window_miss_deg": miss,
-        "facing_fit_margin": margin,
+        "facing_fit_margin": margin,  # the silhouette fit's (information only)
         "facing_keypoint_margin": kmargin,
         "toe_offset_h": toe,
         "profile_toe_offset_h": profile_toe,
@@ -761,6 +776,20 @@ def _rounded(v: Any) -> Any:
     if isinstance(v, list):
         return [_rounded(x) for x in v]
     return v
+
+
+def arm_angles(body: KP.BodyModel | None, seen: dict[str, tuple[float, float, float]] | None, side: str
+               ) -> dict[str, float | None]:
+    """`keypoints.arm_drop_deg` of the nearer arm (``side``, the view's side) and of the farther one, which counts
+    only when its shoulder and wrist both score at least ARM_FAR_MIN_SCORE; None for an arm not measured."""
+    out: dict[str, float | None] = {"near": None, "far": None}
+    if body is None or seen is None:
+        return out
+    other = "right" if side == "left" else "left"
+    out["near"] = KP.arm_drop_deg(body, seen, side)
+    if all(seen.get(f"{other}_{j}", (0, 0, 0))[2] >= ARM_FAR_MIN_SCORE for j in ("shoulder", "wrist")):
+        out["far"] = KP.arm_drop_deg(body, seen, other)
+    return out
 
 
 def view_status(checks: list[C.Check]) -> str:
@@ -1311,7 +1340,7 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
             "measured": measured,
             "checks": checks,
         })
-        fit = (measured.get("fit") or {}).get(f"facing_{view.side}", {})
+        fit = (measured.get("keypoint_fit") or {}).get(f"facing_{view.side}", {})
         miss = measured.get("yaw_window_miss_deg")
         key = (_RANK[status], 99.0 if miss is None else miss, fit.get("rms", 9.0))
         if not kept or key < kept[0]:

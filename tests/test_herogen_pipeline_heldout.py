@@ -305,20 +305,16 @@ class HeldoutTest(unittest.TestCase):
             d = rec["details"]["views"][view.name]
             self.assertEqual(len(d["attempts"]), heldout.ATTEMPTS)
             failed = [c["name"] for c in d["attempts"][d["kept_attempt"]]["checks"] if not c["pass"]]
-            self.assertIn("pose_landmark_rms_clear", failed)
-            # The coarse fake figure's arms hang half hidden at 60 degrees (0.0199, just inside review); the
-            # synthetic-humanoid tests reject every arms-down pose.
-            if abs(view.yaw_deg) == 30:
-                self.assertEqual(d["status"], "rejected")
-                self.assertIn("pose_landmark_rms", failed)
+            self.assertEqual(d["status"], "rejected")
+            self.assertIn("arm_angle_near_off_band_deg", failed)
 
     def test_front_on_view_is_not_held_out(self):
         self._assert_rejected(FakeAPI(heldout_yaw=0.0), "found_yaw_clear_of_build_azimuths_deg")
 
     def test_grey_zone_view_needs_review(self):
-        # The fake A-pose fits to about 0.011; with the pass limit below that, every generation lands between
-        # pass and fail (the synthetic tests cover which real poses do).
-        with mock.patch.object(heldout, "POSE_RMS_PASS", 0.005):
+        # The fake draws no face, so the keypoints are the only facing cue; with their margin out of reach no cue
+        # decides the facing and every generation needs review.
+        with mock.patch.object(heldout, "KP_FACING_MARGIN", 1.0):
             self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 2)
         run = self.root / "r"
         rec = self._rec()
@@ -331,7 +327,7 @@ class HeldoutTest(unittest.TestCase):
             self.assertTrue((run / d["files"]["image"]).exists())
             self.assertFalse((run / heldout.view_paths(view)["image"]).exists())
             failed = [c["name"] for c in rec["checks"] if c["name"].startswith(view.name) and not c["pass"]]
-            self.assertEqual(failed, [f"{view.name}.pose_landmark_rms_clear", f"{view.name}.status_accepted"])
+            self.assertEqual(failed, [f"{view.name}.facing_cues_for", f"{view.name}.status_accepted"])
             self.assertEqual(len(d["attempts"]), heldout.ATTEMPTS)
 
     def test_rerun_replaces_stale_files(self):
@@ -554,9 +550,9 @@ class HeldoutTest(unittest.TestCase):
                      "--note", note, "--by", by])
 
     def _all_in_review(self) -> None:
-        # The fake A-pose fits to about 0.011; with the pass limit below that, every view lands in review. The
-        # limit stays patched for the whole test: it is part of the checks version a review must match.
-        patch = mock.patch.object(heldout, "POSE_RMS_PASS", 0.005)
+        # With the keypoint facing margin out of reach every view lands in review (the fake draws no face). The
+        # margin stays patched for the whole test: it is part of the checks version a review must match.
+        patch = mock.patch.object(heldout, "KP_FACING_MARGIN", 1.0)
         patch.start()
         self.addCleanup(patch.stop)
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 2)
@@ -744,7 +740,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
         run = self.root / "r"
         old_version = self._rec()["details"]["checks_version"]
-        with mock.patch.object(heldout, "POSE_RMS_PASS", 0.005):  # stricter checks since the views were made
+        with mock.patch.object(heldout, "KP_FACING_MARGIN", 1.0):  # stricter checks since the views were made
             self.assertNotEqual(heldout.checks_version(), old_version)
             self.assertEqual(self._live(FakeAPI(), "r", ["2h"], views=["front-left-30"]), 2)
             rec = self._rec()
@@ -760,7 +756,7 @@ class HeldoutTest(unittest.TestCase):
     def test_review_needs_the_current_checks_and_image(self):
         self._all_in_review()
         run = self.root / "r"
-        with mock.patch.object(heldout, "POSE_RMS_FAIL", 0.03):
+        with mock.patch.object(heldout, "ARM_DROP_DEG", (30.0, 80.0)):
             self.assertEqual(self._review("front-left-30", "accept"), 1)  # judged under other checks
             self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
             self.assertEqual(self._review("front-left-30", "accept"), 0)
@@ -775,7 +771,7 @@ class HeldoutTest(unittest.TestCase):
         self._all_in_review()
         run = self.root / "r"
         self.assertEqual(self._review("front-left-30", "accept", "looks right"), 0)
-        with mock.patch.object(heldout, "POSE_RMS_FAIL", 0.005):  # a gate the view now fails
+        with mock.patch.object(heldout, "ARM_DROP_DEG", (0.0, 1.0)):  # a gate the view now fails
             self.assertEqual(main(["recheck", "--runs", str(self.root), "--run-id", "r"]), 0)
             d = self._rec()["details"]["views"]["front-left-30"]
             self.assertEqual((d["status"], d["machine_status"]), ("rejected", "rejected"))
@@ -877,7 +873,7 @@ class HeldoutTest(unittest.TestCase):
     def test_checks_version_follows_constants_and_code(self):
         base = heldout.checks_version()
         self.assertEqual(heldout.checks_version(), base)
-        with mock.patch.object(heldout, "POSE_RMS_PASS", 0.01):
+        with mock.patch.object(heldout, "ARM_DROP_DEG", (35.0, 70.0)):
             self.assertNotEqual(heldout.checks_version(), base)
         with mock.patch.object(heldout, "LEG_BANDS", {**heldout.LEG_BANDS, "knee": (0.67, 0.74)}):
             self.assertNotEqual(heldout.checks_version(), base)
