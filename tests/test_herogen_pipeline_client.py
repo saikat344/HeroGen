@@ -192,8 +192,10 @@ class SampleCompareImagesTest(unittest.TestCase):
         endpoint, body, kw = seen[0]
         self.assertEqual(endpoint, "responses")
         # Through the one request path, with the cost an attempt of unknown outcome is counted at: the output cap.
-        self.assertEqual(kw, {"model": client_mod.TEXT_MODEL, "kind": "compare", "key": c.log.calls[0]["key"],
-                              "unknown_cost_usd": 3000 * 4.25 / 1e6})
+        price = kw.pop("usage_cost_usd")
+        self.assertEqual(kw, {"model": client_mod.TEXT_MODEL, "kind": "compare", "key": c.log.calls[0]["key"]})
+        self.assertAlmostEqual(price(None), 3000 * 4.25 / 1e6)  # no usage came back: the output cap
+        self.assertAlmostEqual(price({"input_tokens": 10, "output_tokens": 20}), (10 * 1.25 + 20 * 4.25) / 1e6)
         self.assertEqual(body["model"], client_mod.TEXT_MODEL)
         self.assertEqual(body["reasoning"], {"effort": "low"})
         self.assertEqual(body["text"]["format"]["strict"], True)
@@ -303,6 +305,16 @@ class CompareThroughServerTest(unittest.TestCase):
                 # Answered, so it may be billed: never $0. Reported input tokens count; missing output is the cap.
                 want = ((usage or {}).get("input_tokens", 0) * 1.25 + 3000 * 4.25) / 1e6
                 self.assertAlmostEqual(c.log.cost_usd(), want)
+
+    def test_a_retried_failed_answer_is_priced_from_the_usage_it_reports(self):
+        failed = (200, {}, {"status": "failed", "output": [], "usage": {"input_tokens": 16000, "output_tokens": 500},
+                            "error": {"code": "server_error", "message": "try again"}})
+        out, c, server, rows = self._compare(failed, self.ok)
+        self.assertEqual(out, {"same": "yes"})
+        self.assertEqual([(r["status"], r["outcome"]) for r in rows], [(500, "failed"), (200, "ok")])
+        self.assertEqual([x.get("outcome") for x in c.log.calls], ["unknown", None])
+        self.assertEqual(c.log.calls[0]["cost_usd"], round((16000 * 1.25 + 500 * 4.25) / 1e6, 6))  # not the cap
+        self.assertAlmostEqual(c.log.cost_usd(), 0.028875)
 
     def test_a_token_priced_call_needs_its_unknown_outcome_cost(self):
         c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter)
