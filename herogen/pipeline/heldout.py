@@ -76,7 +76,7 @@ from herogen.pipeline.client import (
     IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss, SamInstance,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
-from herogen.pipeline.stages import _load, _sam_or_threshold, _Stage, method_kind
+from herogen.pipeline.stages import _load, _Stage, method_kind, sam_coverage, sam_figure_mask
 
 ATTEMPTS = 4  # generations per view before it is given up on
 # Orthographic views of one figure at one scale have equal heights; the same 0.95 as the turnaround sheet.
@@ -538,10 +538,11 @@ def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> d
     """SAM 3.1 `face` and `head` on the raw image; the offset of the face inside the head, or None when
     either is not found on the figure (a full helmet, say).
 
-    Only a Model API failure (`ApiError`, after the client's retries; cached, so a replay repeats it) is
-    recorded, with ``api_error`` set, and `view_checks` then sends the view to human review rather than judge
-    its facing without the cue. Anything else is raised: a replay miss (a partial cache must not quietly drop
-    a vote), a corrupt cache entry, a bug."""
+    Only a Model API failure (`ApiError`, after the client's retries; never cached, so a replay of the run has
+    no entry for it and stops) is recorded, with ``api_error`` set, and `view_checks` then sends the view to
+    human review rather than judge its facing without the cue: the one Model API failure that does not stop a
+    stage, since it can only keep a view from being accepted. Anything else is raised: a replay miss (a
+    partial cache must not quietly drop a vote), a corrupt cache entry, a bug."""
     out: dict[str, Any] = {"face_found": False, "head_found": False, "offset": None}
     near = imaging.dilate(figure, 4)
     try:
@@ -636,15 +637,22 @@ def _review(c: C.Check) -> C.Check:
 def view_checks(
     view: HeldoutView, heldout: np.ndarray, model: TurnaroundModel | None, profile_toe: float,
     raw_area_frac: float, face: dict[str, Any], profile_face: float | None, *,
-    profile_face_error: bool = False,
+    profile_face_error: bool = False, mask_sam_coverage: float | None = None,
 ) -> tuple[list[C.Check], dict[str, Any]]:
     """The checks for one held-out view (placed at the shared scale) and the measurements behind them.
 
     Gated checks reject the view; checks marked ``review`` send it to human review when they fail.
     ``profile_face_error``: the profile views' face cue failed on the Model API, so the head cue could not
-    vote (needs review, like a failure on this view's face).
+    vote (needs review, like a failure on this view's face). ``mask_sam_coverage``: the figure mask's
+    `sam_coverage`; under C.SAM_COVERAGE_MIN SAM missed the figure, the view is rejected and nothing else is
+    measured on its mask (None only for a view recorded before coverage was, whose SAM mask met the same rule).
     """
     out = [C.check("figure_area_frac", raw_area_frac, FIGURE_AREA_MIN)]
+    if mask_sam_coverage is not None:
+        out.append(C.check("figure_mask_sam_coverage", mask_sam_coverage, C.SAM_COVERAGE_MIN,
+                           note="SAM 3.1 px over background-threshold px"))
+        if mask_sam_coverage < C.SAM_COVERAGE_MIN:
+            return out, {"mask_sam_coverage": round(mask_sam_coverage, 4)}
     seen = landmarks(heldout)
     if model is None or seen is None:
         out.append(C.check("figure_measurable", 0.0, 1.0, op="==",
@@ -905,16 +913,12 @@ def turn_guide(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_deg: 
     return img, round(h * k)
 
 
-def figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str]:
-    """SAM 3.1 figure mask, the same rule as a turnaround view: kept unless SAM missed the figure (empty, or
-    under half the background-threshold area), in which case the threshold mask is used."""
-    sam, method, _ = _sam_or_threshold(client, img)
-    if method_kind(method) != SAM_MODEL:
-        return sam, method
-    thr = imaging.threshold_mask(img)
-    if sam.sum() > 0 and sam.sum() >= 0.5 * thr.sum():
-        return sam, method
-    return thr, "threshold (sam under half the threshold area)"
+def figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str, float]:
+    """SAM 3.1 figure mask, its method, and its `sam_coverage` of the background-threshold area (the gated
+    `figure_mask_sam_coverage` check, the same rule as a turnaround view). The mask is always SAM's (empty
+    when SAM found nothing); a Model API failure raises."""
+    sam, method, _ = sam_figure_mask(client, img)
+    return sam, method, sam_coverage(sam, imaging.threshold_mask(img))
 
 
 def place_on_canvas(
@@ -1095,13 +1099,15 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
                 "so a cache recorded by another version can miss; views kept with --views need no new "
                 f"generations, so make only this one again, live: --stages 2h --views {view.name} --live"
             ) from e
-        mask, method = figure_mask(client, raw)
+        mask, method, coverage = figure_mask(client, raw)
         # Raw px -> input-canvas px (the model may answer at another resolution) -> turnaround px.
         scale = ctx.cover.size[0] / raw.size[0] / framing
         img, placed = place_on_canvas(raw, mask, scale, ctx.size, ctx.bottom_row)
-        face = measure_face(client, raw, mask) if mask.any() else {"offset": None, "error": "no figure"}
+        measurable = coverage >= C.SAM_COVERAGE_MIN
+        face = measure_face(client, raw, mask) if measurable else {"offset": None, "error": "no SAM figure"}
         checks, measured = view_checks(view, placed, ctx.model, ctx.profile_toe, float(mask.mean()), face,
-                                       ctx.profile_face, profile_face_error=ctx.profile_face_error)
+                                       ctx.profile_face, profile_face_error=ctx.profile_face_error,
+                                       mask_sam_coverage=coverage)
         status = view_status(checks)
         tried.append({
             "attempt": attempt,
@@ -1258,9 +1264,10 @@ def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: Turnaround
         raise ValueError(f"{name}'s files {d['files']} are not all under heldout/")
     placed = imaging.from_mask_image(_load(run, rels["mask"]))
     area = next((c["value"] for c in kept["checks"] if c["name"] == "figure_area_frac"), 1.0)
+    coverage = next((c["value"] for c in kept["checks"] if c["name"] == "figure_mask_sam_coverage"), None)
     face = (kept.get("measured") or {}).get("face") or {"offset": None}
     checks, measured = view_checks(view, placed, model, profile_toe, area, face, profile_face,
-                                   profile_face_error=profile_face_error)
+                                   profile_face_error=profile_face_error, mask_sam_coverage=coverage)
     machine = view_status(checks)
     image_sha = d.get("image_sha256") or file_sha256(run.path / rels["image"])
     review = d.get("review")

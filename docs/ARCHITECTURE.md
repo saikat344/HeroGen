@@ -44,6 +44,11 @@ of this pipeline.
 
 `checks` hold measured numbers only. A gate fails when any check with `"gate": true` (default true) fails.
 
+A stage that stops before its checks are complete writes its record with `"ok": false`, a `status` and an
+`error`, plus every call made so far: `"error"` (the Model API failed after the client's retries, or any other
+error) or `"input_rejected"` (stage 1 found no character in the sketch). `python3 -m herogen.pipeline run`
+exits 0 when every stage passed, 2 when a gate failed, 3 when the input was rejected and 1 on an error.
+
 ## Views and cameras
 
 - Orthographic views. Character faces **-Y** in Blender (front camera on -Y looking +Y), +Z up, feet at Z = 0.
@@ -136,10 +141,34 @@ cost, and `cost_usd` counts both (`run_cost_usd` is the run that made the views)
 the body's render, for each held-out view the record accepts; other views the scores file names are listed as
 not accepted (see `herogen/pipeline/results.py` for the format).
 
-**Mask method.** `views/meta.json` records how each mask was made: `"mask_method": {"front": "sam-3.1", ...}`
-(`"sam-3.1"`, `"threshold"` or `"visual_hull"`), and `"top_method"`. A mask falls back to the threshold only
-when the SAM call failed on the Model API; the failure is cached, so a replay falls back the same way. A replay
-miss, a corrupt cache entry or any other error stops the stage.
+**Mask method.** Every figure mask is SAM 3.1's: the first of the prompts `character` and `person` that finds
+something, recorded per mask as `sam-3.1:<prompt>` (`sam-3.1:none` when neither finds anything, an empty mask).
+No mask is ever made another way, and nothing is measured on a mask SAM did not make:
+
+- A SAM or Muse Image call that fails after the client's retries stops the stage (record status `"error"`,
+  with the error and every call made). So does an answer whose `status` is not `completed` (or that carries an
+  `error`): an incomplete SAM answer has no output, which would otherwise read as "nothing found". The
+  responses endpoint always sends a status; Muse Image sends none, so only a status it does send is checked.
+  Such an answer is logged as a call (it may be billed) but never cached. The one exception is the held-out face cue: a failed `face` or `head`
+  call sends that view to human review, so it can only keep the view from being accepted.
+- No character found in the sketch rejects the input: stage 1 segments the sketch before it asks for the
+  cover, so a sketch SAM finds nothing in costs no edit, and its record has status `"input_rejected"` and the
+  error "no character found in the sketch". Nothing found in a generated image fails that image's gate: the
+  cover's `cover_mask_area_frac`, a turnaround sheet's `figures_found` (it is generated again), a held-out
+  generation's `figure_mask_sam_coverage` (rejected, measured no further, generated again). Nothing found in
+  the drawn top view means it is not used, so the top view is the visual hull.
+- A turnaround sheet is split into its four figures on the SAM mask only; when SAM's columns don't give four
+  figures, `figures_found` fails. The background-threshold mask is only a reference: the gated
+  `view_mask_sam_coverage_min` (stage 2) and `figure_mask_sam_coverage` (stage 2h) checks require SAM's mask to
+  cover at least half (`SAM_COVERAGE_MIN`, 0.5) of the threshold area of each figure, so a figure SAM half
+  missed fails its gate instead of being measured.
+- The client never caches a failed call, so a replay never repeats a failure: a call that failed live has no
+  cache entry, and its replay stops with `ReplayMiss`, as does an entry for a failed call that an earlier
+  version cached. A replay miss, a corrupt cache entry or any other error stops the stage.
+
+`views/meta.json` records `"mask_method": {"front": "sam-3.1", ...}` (`"sam-3.1"` or `"visual_hull"`, the top
+silhouette implied by the four side views' SAM masks, whose top-view checks gate), the detailed method per view
+and `"top_method"`.
 
 **Shoulder covers.** Stage 4 adds one cover per shoulder, merged into its owner section (`UpperTorso`) so each
 GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and

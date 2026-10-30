@@ -58,6 +58,16 @@ TOP_PROMPT = (
 )
 
 
+class InputRejected(RuntimeError):
+    """The input can't be used (no character found in the sketch, say). The stage record, written before this
+    is raised, has status "input_rejected" and the reason as its error."""
+
+    def __init__(self, stage: int, record: dict[str, Any]) -> None:
+        super().__init__(record["error"])
+        self.stage = stage
+        self.record = record
+
+
 class GateFailed(RuntimeError):
     def __init__(self, stage: int, record: dict[str, Any]) -> None:
         failed = [c["name"] for c in record["checks"] if c.get("gate", True) and not c["pass"]]
@@ -114,12 +124,26 @@ class _Stage:
         return record
 
     def fail(self, error: str, status: str = "error") -> dict[str, Any]:
-        """Write the record of a stage that stopped early (``status`` "error") or is still running
-        ("running"): not ok, with ``error`` and every call made so far, so paid calls are never left
-        unrecorded."""
+        """Write the record of a stage that stopped early (``status`` "error"), rejected its input
+        ("input_rejected") or is still running ("running"): not ok, with ``error`` and every call made so
+        far, so paid calls are never left unrecorded."""
         record = {**self._record(), "ok": False, "status": status, "error": error}
         self.run.write_stage(record)
         return record
+
+    def reject_input(self, error: str) -> InputRejected:
+        """Write the record of a stage whose input can't be used, and return the exception to raise."""
+        return InputRejected(self.n, self.fail(error, status="input_rejected"))
+
+
+def _stopping_on_api_error(body: Callable[[], dict[str, Any]], st: _Stage) -> dict[str, Any]:
+    """Run a stage's ``body``. A Model API failure (`ApiError`, after the client's retries) stops the stage:
+    its record is written with the error and every call made so far, and the error is raised."""
+    try:
+        return body()
+    except ApiError as e:
+        st.fail(f"the Model API failed: {e}"[:800])
+        raise
 
 
 def _load(run: RunFolder, rel: str) -> Image.Image:
@@ -141,7 +165,8 @@ def _figure_mask(instances: list[SamInstance], shape: tuple[int, int]) -> np.nda
 
 
 def method_kind(method: str) -> str:
-    """The contract's mask-method name for a detailed method string: "sam-3.1", "threshold" or "visual_hull"."""
+    """The contract's mask-method name for a detailed method string: "sam-3.1" or "visual_hull". Records
+    written by earlier versions can also hold "threshold" (a background-threshold fallback, never made now)."""
     if method.startswith(SAM_MODEL):
         return SAM_MODEL
     if method.startswith("visual_hull"):
@@ -149,23 +174,29 @@ def method_kind(method: str) -> str:
     return "threshold"
 
 
-def _sam_or_threshold(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str, int]:
-    """SAM 3.1 figure mask (first text prompt that finds something), else the background-threshold mask."""
+SAM_NOTHING_FOUND = f"{SAM_MODEL}:none"  # the method of an empty mask: no prompt in SAM_TEXTS found anything
+
+
+def sam_figure_mask(client: ModelClient, img: Image.Image) -> tuple[np.ndarray, str, int]:
+    """SAM 3.1 figure mask from the first text prompt in SAM_TEXTS that finds something: (mask, method,
+    instance count). When no prompt finds anything the mask is empty and the method SAM_NOTHING_FOUND; the
+    caller decides what that means (no character in a sketch is an input failure; an empty generated image
+    fails its gate). No mask is ever made another way: a Model API failure, a replay miss or a corrupt cache
+    entry raises."""
     shape = (img.size[1], img.size[0])
-    errors = []
     for text in SAM_TEXTS:
-        try:
-            inst = client.segment(img, text)
-        except ApiError as e:  # the Model API failed (cached, so a replay falls back the same way)
-            errors.append(type(e).__name__)
-            continue
-        # Anything else stops the stage: a replay miss, a corrupt cache entry or a bug must not quietly switch
-        # to the threshold mask.
+        inst = client.segment(img, text)
         mask = _figure_mask(inst, shape)
         if mask.sum() > 0:
             return mask, f"{SAM_MODEL}:{text}", len(inst)
-    why = f"sam error: {', '.join(errors)}" if errors else "sam found nothing"
-    return imaging.threshold_mask(img), f"threshold ({why})", 0
+    return np.zeros(shape, dtype=bool), SAM_NOTHING_FOUND, 0
+
+
+def sam_coverage(sam: np.ndarray, reference: np.ndarray) -> float:
+    """SAM mask px over background-threshold px: how much of what differs from the background SAM covered.
+    The threshold mask is only this reference, never a figure mask. 0 for an empty SAM mask."""
+    s = int(sam.sum())
+    return 0.0 if s == 0 else s / max(1, int(reference.sum()))
 
 
 # ---- stage 0 ----------------------------------------------------------------------------------------
@@ -186,14 +217,27 @@ def stage0_input(run: RunFolder, sketch_path: Path, label: str = "") -> dict[str
 # ---- stage 1 ----------------------------------------------------------------------------------------
 
 
+NO_CHARACTER = ("no character found in the sketch: SAM 3.1 found nothing for any of {texts}. HeroGen needs "
+                "one clearly drawn, full-body character")
+
+
 def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     st = _Stage(run, client, 1, "cover_art")
+    return _stopping_on_api_error(lambda: _stage1(st, run, client), st)
+
+
+def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch = _load(run, "00-sketch.png")
     w, h = sketch.size
+    # The sketch is segmented first: a sketch with no character in it is rejected before any paid edit.
+    sketch_mask, sketch_method, n_s = sam_figure_mask(client, sketch)
+    if not sketch_mask.any():
+        st.details = {"mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS)}
+        raise st.reject_input(NO_CHARACTER.format(texts=", ".join(repr(t) for t in SAM_TEXTS)))
     cover = client.edit_image(COVER_PROMPT, [sketch], size=f"{w}x{h}")
     st.save_image("01-cover.png", cover)
-    sketch_mask, sketch_method, n_s = _sam_or_threshold(client, sketch)
-    cover_mask, cover_method, n_c = _sam_or_threshold(client, cover)
+    # An empty cover mask (SAM found nothing in the cover) fails the gated cover_mask_area_frac check.
+    cover_mask, cover_method, n_c = sam_figure_mask(client, cover)
     st.save_image("01-masks/sketch.png", imaging.to_mask_image(sketch_mask))
     st.save_image("01-masks/cover.png", imaging.to_mask_image(cover_mask))
     st.checks, extra = C.cover_checks(sketch_mask, cover_mask)
@@ -214,30 +258,23 @@ SHEET_SIZE = "2560x1024"  # aspect only (Muse Image fixes the resolution); room 
 
 
 def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, fig_method: str) -> dict[str, Any]:
-    """Find the four figures' column extents and cut them out (`panel0`..`panel3`, left to right).
+    """Find the four figures' column extents in the SAM mask and cut them out (`panel0`..`panel3`, left to
+    right), each with its SAM mask.
 
-    The split uses the SAM mask (falls back to the threshold mask if SAM's columns don't give four
-    figures). A view keeps the SAM mask unless SAM missed it (empty, or under half the threshold area in
-    that column range), in which case its mask is the threshold mask and `mask_method` says so.
+    Only the SAM mask is used: when its columns don't give four figures the sheet has no views (and fails
+    `figures_found`). ``thr_mask`` (background threshold) is only the reference for `sam_coverage` per view,
+    which a gated check compares with C.SAM_COVERAGE_MIN, so a figure SAM missed fails the gate instead of
+    being measured on another mask.
     """
     names = [f"panel{i}" for i in range(len(SIDE_VIEWS))]
-    sam_ok = fig_method.startswith(SAM_MODEL)
-    runs = imaging.split_columns(fig_mask, expected=len(names))
-    source = fig_method
-    if len(runs) != len(names) and sam_ok:
-        runs = imaging.split_columns(thr_mask, expected=len(names))
-        source = "threshold"
-    out: dict[str, Any] = {"runs": runs, "split_source": source, "views": {}}
+    runs = imaging.split_columns(fig_mask, expected=len(names)) if fig_mask.any() else []
+    out: dict[str, Any] = {"runs": runs, "split_source": fig_method, "views": {}, "sam_coverage": {}}
     if len(runs) != len(names):
         return out
-    combined = np.zeros_like(thr_mask)
-    methods = {}
+    combined = np.zeros_like(fig_mask)
     for (x0, x1), name in zip(runs, names, strict=True):
-        s, t = fig_mask[:, x0:x1], thr_mask[:, x0:x1]
-        if sam_ok and s.sum() > 0 and s.sum() >= 0.5 * t.sum():
-            combined[:, x0:x1], methods[name] = s, fig_method
-        else:
-            combined[:, x0:x1], methods[name] = t, "threshold"
+        combined[:, x0:x1] = fig_mask[:, x0:x1]
+        out["sam_coverage"][name] = round(sam_coverage(fig_mask[:, x0:x1], thr_mask[:, x0:x1]), 4)
     # Side views share the sheet's row range, so their feet stay on one baseline after the crop.
     boxes = [imaging.bbox(combined[:, x0:x1]) for x0, x1 in runs]
     y0 = min(b[1] for b in boxes if b)
@@ -246,7 +283,7 @@ def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, 
         out["views"][name] = {
             "image": sheet.crop((x0, y0, x1, y1)),
             "mask": combined[y0:y1, x0:x1],
-            "mask_method": methods[name],
+            "mask_method": fig_method,
             "sheet_box": [x0, y0, x1, y1],
         }
     return out
@@ -322,9 +359,10 @@ def orient_sides(sq: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], d
 
 
 def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
-    """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width)."""
+    """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width).
+    Its mask is SAM 3.1's; when SAM finds nothing in it, ``mask`` is None and the drawn view is not used."""
     img = client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
-    mask, method, _ = _sam_or_threshold(client, img)
+    mask, method, _ = sam_figure_mask(client, img)
     tb = imaging.bbox(mask)
     fb = imaging.bbox(sq["front"]["mask"])
     if tb is None or fb is None:
@@ -355,13 +393,27 @@ def stage2_turnaround(
     run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4
 ) -> dict[str, Any]:
     st = _Stage(run, client, 2, "turnaround")
+    return _stopping_on_api_error(lambda: _stage2(st, run, client, height_units, attempts), st)
+
+
+def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
+    cov = split["sam_coverage"]
+    if not cov:
+        return []
+    low = min(cov, key=cov.get)
+    return [C.check("view_mask_sam_coverage_min", cov[low], C.SAM_COVERAGE_MIN,
+                    note=f"lowest: {low}; SAM 3.1 px over background-threshold px in each figure's columns")]
+
+
+def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int
+            ) -> dict[str, Any]:
     cover = _load(run, "01-cover.png")
     tried = []
     for attempt in range(attempts):
         sheet = client.edit_image(TURNAROUND_PROMPT, [cover], size=SHEET_SIZE, attempt=attempt)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
-        fig, fig_method, n_inst = _sam_or_threshold(client, sheet)
+        fig, fig_method, n_inst = sam_figure_mask(client, sheet)
         split = split_sheet(sheet, fig, thr, fig_method)
         sq: dict[str, Any] = {}
         size = 0
@@ -374,11 +426,12 @@ def stage2_turnaround(
             orient, orient_notes, assignment["side_fixes"] = orient_sides(sq)
         side_checks = C.side_view_checks(
             {n: v["mask"] for n, v in sq.items()}, figures_found=len(split["runs"])
-        )
+        ) + _coverage_checks(split)
         tried.append({
             "attempt": attempt,
             "sam_instances": n_inst,
             "split_source": split["split_source"],
+            "sam_coverage": split["sam_coverage"],
             "column_runs": [list(r) for r in split["runs"]],
             "assignment": assignment,
             "checks": side_checks,

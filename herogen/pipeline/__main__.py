@@ -9,6 +9,10 @@ those views and keeps the others from the earlier stage 2h record.
 records a person's decision on one held-out view: the view's files move to `heldout/` (accepted) or
 `heldout/rejected/`, and the decision is appended to `stage-2h.json`. `recheck --run-id <id>` judges every
 recorded held-out view again under the current checks, with no model calls.
+
+`run` exits 0 when every stage passed, 2 when a gate failed, 3 when the input was rejected (no character found
+in the sketch) and 1 on an error, such as the Model API failing after its retries; the stage record then holds
+the error and every call made.
 """
 
 from __future__ import annotations
@@ -18,10 +22,10 @@ import getpass
 import sys
 from pathlib import Path
 
-from herogen.pipeline.client import ModelClient
+from herogen.pipeline.client import ApiError, ModelClient
 from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
-from herogen.pipeline.stages import GateFailed, stage0_input, stage1_cover, stage2_turnaround
+from herogen.pipeline.stages import GateFailed, InputRejected, stage0_input, stage1_cover, stage2_turnaround
 from herogen.pipeline.results import stage5_results
 
 OWN_STAGES = {0, 1, 2, 5}
@@ -112,11 +116,16 @@ def run_pipeline(
                 _print_heldout(e.record)
             status = 2
             break
+        except InputRejected as e:
+            print(f"stage {n}: input rejected: {e}; stopping", file=sys.stderr)
+            status = 3
+            break
         except Exception as e:  # noqa: BLE001  (report, stop, still write results)
-            print(f"stage {n}: error: {type(e).__name__}: {e}; stopping", file=sys.stderr)
-            rec = run.read_stage(HELDOUT) if n == HELDOUT else None  # type: ignore[arg-type]
+            what = "the Model API failed" if isinstance(e, ApiError) else f"error: {type(e).__name__}"
+            print(f"stage {n}: {what}: {e}; stopping", file=sys.stderr)
+            rec = run.read_stage(n)  # type: ignore[arg-type]
             if rec and rec.get("status") == "error" and str(rec.get("started", "")) >= began:  # this run's
-                print(f"  the error and the calls made are in {run.path / 'stage-2h.json'}", file=sys.stderr)
+                print(f"  the error and the calls made are in {run.path / f'stage-{n}.json'}", file=sys.stderr)
             status = 1
             break
     if 5 in stages:

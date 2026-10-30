@@ -107,6 +107,12 @@ A_POSE_SPREAD_MIN = 1.5
 # 0.20-0.28 of its height (measured on four generated sheets); an arm reaching forward measured 0.40.
 SIDE_DEPTH_MAX = 0.33
 SIDE_VIEWS = ("front", "right", "back", "left")
+# SAM coverage: a figure's SAM 3.1 mask px over the background-threshold px in the same region. Under half
+# means SAM missed much of the figure (or the threshold picked up more than the figure), so its masks can't be
+# measured. 0.5 is the rule that earlier versions used to switch a view to the threshold mask; it now fails
+# the gate instead. On a replay of the 45-sketch benchmark the lowest values were 0.83 (87 split sheets) and
+# 0.76 (413 held-out generations), so none failed it.
+SAM_COVERAGE_MIN = 0.5
 
 
 def band_span(mask: np.ndarray, lo: float, hi: float) -> int:
