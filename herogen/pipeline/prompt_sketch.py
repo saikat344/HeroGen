@@ -12,7 +12,7 @@ attempt is drawn again as a new sample (the image API takes no seed) up to ``ATT
 - same character: a vision model, asked with the frozen same-character prompt (``same-character-v2`` by
   default), says the full-body image shows the same character as the design and lists no body change (a head,
   arm, leg, tail or wing added or dropped). Props it reports as added, removed or moved to the other hand are
-  recorded without gating (see ``PROP_NOTE``).
+  recorded without gating (see ``prop_note``).
 
 The thresholds and where they come from are in docs/ARCHITECTURE.md. A Model API failure stops the stage with an
 error; it is never replaced by a guess or another method. Retries of a failing HTTP call are the shared client's.
@@ -57,11 +57,16 @@ EDGE_TOL_MIN_PX = 2
 # The error code the Model API returns when it refuses a prompt; reported as a refusal, never retried.
 REFUSED = "content_policy_violation"
 
-PROP_NOTE = (
-    "props the identity check reported as added, removed or moved to the other hand; not a gate, because on "
-    "full-body redraws of bust designs it also reports gear the design did not show (13 of 32 calls on pairs "
-    "people rated the same character)"
-)
+def prop_note(version: prompts.PromptVersion) -> str:
+    """Why prop changes are recorded but not gated, with the numbers measured for ``version`` (its calibration)."""
+    head = ("props the identity check reported as added, removed or moved to the other hand; not a gate, because "
+            "on full-body redraws of bust designs it also reports gear the design did not show")
+    cal = prompts.calibration(version)
+    if cal is None:
+        return f"{head} (no calibration is recorded for {version.name})"
+    t = cal["rating_set"]["true_pairs"]
+    return (f"{head} ({t['added_prop_listed']} of {t['answers']} {version.name} answers on pairs people rated the "
+            "same character listed an added prop)")
 
 
 class PromptRejected(ValueError):
@@ -189,7 +194,7 @@ def identity_checks(
         body = list(answer["body_changes"])
         details["body_changes"] = body
         checks.append(C.check("body_changes", len(body), 0, op="=="))
-    checks.append(C.check("prop_changes_reported", n_changes, 0, op="==", gate=False, note=PROP_NOTE))
+    checks.append(C.check("prop_changes_reported", n_changes, 0, op="==", gate=False, note=prop_note(version)))
     return checks, details
 
 
