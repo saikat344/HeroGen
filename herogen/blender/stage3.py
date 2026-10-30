@@ -105,7 +105,9 @@ def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
     src = sam3d_mesh.load_source(res.path("mesh.glb"))
     with Image.open(run / "views" / "front.png") as im:
         img = np.asarray(im.convert("RGB"), dtype=np.float64)
-    src_verts, info = sam3d_mesh.orient(src, vs.views["front"], img, height)
+    sides, excluded = sam3d_mesh.pose_views(vs)
+    src_verts, info = sam3d_mesh.orient(src, vs.views["front"], img, height, sides=sides,
+                                        sides_excluded=excluded)
     verts, faces, info["remesh"] = sam3d_mesh.remesh(src_verts, src.faces, height)
     work = work_dir(run)
     work.mkdir(parents=True, exist_ok=True)

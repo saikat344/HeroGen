@@ -185,6 +185,99 @@ class TestSourceMesh(HybridBase):
         self.assertEqual(info["triangles"], len(f))
 
 
+@unittest.skipUnless(HAVE_SCIPY, "scipy is required for the hybrid mesh path")
+class TestPitchRegistration(HybridBase):
+    """The pitch is registered on the observed left/right masks: the front view cannot see it."""
+
+    def oriented(self, name: str, pitch_deg: float, sides=True):
+        p = self.tmp / f"{name}.glb"
+        self.source_glb(p, yaw_deg=0.0, pitch_deg=pitch_deg)
+        src = sam3d_mesh.load_source(p)
+        use, skip = sam3d_mesh.pose_views(self.vs) if sides else ({}, {})
+        v, info = sam3d_mesh.orient(src, self.vs.views["front"], None, 5.5, sides=use, sides_excluded=skip)
+        return src, v, info
+
+    def side_iou(self, v, faces) -> dict:
+        return {k: sam3d_mesh.iou(raster.render_view(self.vs.views[k], v, faces).mask, self.vs.views[k].mask)
+                for k in ("left", "right")}
+
+    def test_an_upright_source_stays_upright_and_matches_the_sides(self):
+        src, v, info = self.oriented("upright", 0.0)
+        pf = info["pose_fit"]
+        self.assertEqual((pf["status"], pf["views"]), ("fitted", ["left", "right"]))
+        self.assertLessEqual(abs(pf["pitch_deg"]), 1.0)
+        self.assertEqual(info["fit"]["pitch"], pf["pitch_deg"])
+        self.assertEqual(pf["y_offset_studs"], 0.0)                  # the frame stays box-centred
+        for k, s in self.side_iou(v, src.faces).items():
+            self.assertGreater(s, 0.90, k)
+
+    def test_a_leaning_source_has_its_pitch_recovered_from_the_sides(self):
+        src, v, info = self.oriented("lean", 12.0)
+        pf = info["pose_fit"]
+        self.assertEqual(pf["status"], "fitted")
+        self.assertLessEqual(abs(pf["pitch_deg"] - -12.0), 1.5)          # undoes the source's tilt
+        self.assertGreater(pf["side_iou_half_res"]["fitted"], pf["side_iou_half_res"]["pitch_0"] + 0.2)
+        for k, s in self.side_iou(v, src.faces).items():
+            self.assertGreater(s, 0.90, k)
+        self.assertGreater(info["front_iou_final_numpy"], 0.95)
+        # without side views nothing can see the tilt: the pitch stays 0 and the record says why
+        src0, v0, info0 = self.oriented("lean-front-only", 12.0, sides=False)
+        self.assertEqual((info0["pose_fit"]["status"], info0["fit"]["pitch"]), ("fallback", 0.0))
+        self.assertIn("no observed side view", info0["pose_fit"]["reason"])
+        for k, s in self.side_iou(v0, src0.faces).items():
+            self.assertLess(s, 0.80, k)
+
+    def test_pose_views_skip_derived_and_missing_side_masks(self):
+        kept = {k: v for k, v in self.vs.views.items() if k != "right"}
+        meta = {"mask_method": {"left": "visual_hull (front, top)"}}
+        vs = views.ViewSet(kept, ["right"], meta, self.vs.pps, self.vs.height_px, [])
+        use, skip = sam3d_mesh.pose_views(vs)
+        self.assertEqual(use, {})
+        self.assertEqual(skip, {"left": "derived view (visual_hull (front, top))",
+                                "right": "no usable mask (missing or empty)"})
+        p = self.tmp / "derived.glb"
+        self.source_glb(p, yaw_deg=0.0, pitch_deg=12.0)
+        _, info = sam3d_mesh.orient(sam3d_mesh.load_source(p), vs.views["front"], None, 5.5, sides=use,
+                                    sides_excluded=skip)
+        pf = info["pose_fit"]
+        self.assertEqual((pf["status"], pf["pitch_deg"], info["fit"]["pitch"]), ("fallback", 0.0, 0.0))
+        self.assertIn("left: derived view", pf["reason"])
+        self.assertIn("right: no usable mask", pf["reason"])
+
+    def test_a_flat_or_ambiguous_side_fit_falls_back_to_pitch_zero(self):
+        # a sphere looks the same at every pitch: nothing to register
+        n = 24
+        th, ph = np.meshgrid(np.linspace(0, np.pi, n), np.linspace(0, 2 * np.pi, n, endpoint=False),
+                             indexing="ij")
+        pts = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], -1).reshape(-1, 3)
+        faces = []
+        for i in range(n - 1):
+            for j in range(n):
+                a, b, c, d = i * n + j, i * n + (j + 1) % n, (i + 1) * n + j, (i + 1) * n + (j + 1) % n
+                faces += [[a, c, b], [b, c, d]]
+        ball = sam3d_mesh.SourceMesh(pts, np.array(faces), np.zeros((len(faces), 3, 2)), None)
+        p = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0, "distance": 0.0, "cam_height": 0.0}
+        sides = {k: self.vs.views[k] for k in ("left", "right")}
+        pitch, rec = sam3d_mesh.fit_pitch(ball, p, sides, 5.5)
+        self.assertEqual((pitch, rec["status"]), (0.0, "fallback"))
+        self.assertTrue(rec["reason"].startswith("flat"), rec["reason"])
+        # side masks showing a block (symmetric front to back) leaning both ways at once: two equal peaks
+        corners = np.array([[x, y, z] for x in (-0.5, 0.5) for y in (-0.25, 0.25) for z in (0.0, 5.5)])
+        quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+        tris = np.array([t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))])
+        src = sam3d_mesh.SourceMesh(corners, tris, np.zeros((len(tris), 3, 2)), None)
+        both = {}
+        for k in ("left", "right"):
+            m = np.zeros_like(self.vs.views[k].mask)
+            for t in (-15.0, 15.0):
+                placed = sam3d_mesh._place(src, {**p, "pitch": t}, 5.5)
+                m |= raster.render_view(self.vs.views[k], placed, tris).mask
+            both[k] = views.View(k, m, self.vs.views[k].pps, self.vs.views[k].cmid, self.vs.views[k].vref)
+        pitch, rec = sam3d_mesh.fit_pitch(src, p, both, 5.5)
+        self.assertEqual((pitch, rec["status"]), (0.0, "fallback"))
+        self.assertTrue(rec["reason"].startswith("ambiguous"), rec["reason"])
+
+
 class TestBodyJoints(HybridBase):
     def test_mapping_recovers_the_synthetic_joints(self):
         body = synthetic_body_result(self.truth, self.vs.views["front"])
@@ -414,16 +507,21 @@ class TestStage3HybridBlender(HybridBase):
         for v in ("back", "left", "right"):     # observed views are gated, with a note that the shape never saw them
             self.assertTrue(chk[f"silhouette_iou_{v}"]["gate"], v)
             self.assertIn("shape not built from this view", chk[f"silhouette_iou_{v}"]["note"])
-        # Built from the front view alone, the shape does not match the side masks (the fit picks a small pitch
-        # the front view cannot tell from none), so the gated side views fail and so does the stage.
-        for v in ("left", "right"):
-            self.assertFalse(chk[f"silhouette_iou_{v}"]["pass"], v)
+        # The source is the exact upright body: with its pitch registered on the side masks (the shape still
+        # comes from the front view alone) the side views pass, and the record says what was fitted on them.
+        pose = rec["mesh"]["source"]["pose_fit"]
+        self.assertEqual((pose["status"], pose["views"]), ("fitted", ["left", "right"]))
+        self.assertLessEqual(abs(pose["pitch_deg"]), 1.0)
+        for v in ("front", "back", "left", "right"):
+            self.assertTrue(chk[f"silhouette_iou_{v}"]["pass"], v)
         self.assertEqual(chk["front_view_present"]["value"], 1)
         self.assertEqual(chk["open_edges"]["value"], 0)
         self.assertIn("03-source.glb", rec["outputs"])
         self.assertEqual(json.loads((run / "03-joints.json").read_text())["source"], "sam3d-body")
         self.assertEqual(rec["cost_usd"], 0.0)
-        self.assertFalse(rec["ok"])                                   # the side views fail
+        # front, back, left and right pass; the observed top view is gated as well and decides the stage (it
+        # also measures the front fit's perspective correction, which the turnaround views barely see)
+        self.assertEqual(rec["ok"], chk["silhouette_iou_top"]["pass"])
         # an empty cache: the remote sources fall back to carve and silhouette, and the record says so
         rec2 = run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
                           remote=rclient.RemoteClient(self.tmp / "empty"), timeout=300)
