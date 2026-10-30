@@ -109,6 +109,11 @@ TOP_EXTENT_MIN = 0.80
 A_POSE_SPREAD_MIN = 1.5
 # Profile depth: a standing figure seen from the side with its arms down or out to the sides measures
 # 0.20-0.28 of its height (measured on four generated sheets); an arm reaching forward measured 0.40.
+# Recorded, not gated: the ratio measures body shape, not pose. Round bellies, robes, hat brims, chibi heads,
+# wings, tails and backpacks are all deeper than 0.33. It failed 9 of 21 true turnarounds of real game
+# characters (bench-gt), 67 of 105 judged-usable generated sheets, and, once stage 2 carves each sheet as
+# stage 3 does (`stages.carve_check`), it rejected 16 sheets that carve and were judged usable (12 tuning, 4
+# held-out) while stopping no sheet judged unusable (155 labelled attempts).
 SIDE_DEPTH_MAX = 0.33
 SIDE_VIEWS = ("front", "right", "back", "left")
 # SAM coverage: a figure's SAM 3.1 mask px over the background-threshold px in the same region. Under half
@@ -154,7 +159,8 @@ def side_view_checks(masks: dict[str, np.ndarray], *, figures_found: int, figure
                      note="recorded, not gated: fixed height bands misread hats, big heads and T-poses"))
     for v in ("right", "left"):
         w, h = size[v]
-        out.append(check(f"{v}_profile_width_over_height", w / h if h else 1.0, SIDE_DEPTH_MAX, op="<="))
+        out.append(check(f"{v}_profile_width_over_height", w / h if h else 1.0, SIDE_DEPTH_MAX, op="<=", gate=False,
+                         note="recorded, not gated: measures body shape (belly, robe, hat, wings), not pose"))
     return out
 
 
