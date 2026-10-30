@@ -50,8 +50,24 @@ checkout, so a body can be compared with the version that made it.
 
 A stage that stops before its checks are complete writes its record with `"ok": false`, a `status` and an
 `error`, plus every call made so far: `"error"` (the Model API failed after the client's retries, or any other
-error) or `"input_rejected"` (stage 1 found no character in the sketch). `python3 -m herogen.pipeline run`
-exits 0 when every stage passed, 2 when a gate failed, 3 when the input was rejected and 1 on an error.
+error) or `"input_rejected"` (an input check rejected the sketch, see below). `python3 -m herogen.pipeline run` exits 0
+when every stage passed, 2 when a gate failed, 3 when the input was rejected and 1 on an error.
+
+## Input checks (stages 0 and 1)
+
+Before any image is generated, stages 0 and 1 check that the sketch can be used (`herogen/pipeline/inputs.py`).
+Each input check is an ordinary check (name, value, threshold, op, pass, gate) plus a `verdict`:
+
+- `"pass"`.
+- `"reject"`: the check is gated. The stage writes its record with status `"input_rejected"` and every check it
+  measured, the run stops with exit status 3, and the record's `error` joins the `message` of every rejecting
+  check, each saying what is wrong and what to do.
+- `"warn"`: not gated. The check keeps its `message`, the stage's `notes` repeat it, the CLI prints it, and the
+  run goes on.
+
+| Check | Stage | Measures | Verdict when it fails |
+| --- | --- | --- | --- |
+| `min_side_px` | 0 | the sketch's shorter side in pixels, `>= 256` | reject |
 
 ## Views and cameras
 

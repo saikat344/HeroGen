@@ -10,9 +10,10 @@ records a person's decision on one held-out view: the view's files move to `held
 `heldout/rejected/`, and the decision is appended to `stage-2h.json`. `recheck --run-id <id>` judges every
 recorded held-out view again under the current checks, with no model calls.
 
-`run` exits 0 when every stage passed, 2 when a gate failed, 3 when the input was rejected (no character found
-in the sketch) and 1 on an error, such as the Model API failing after its retries; the stage record then holds
-the error and every call made.
+`run` exits 0 when every stage passed, 2 when a gate failed, 3 when an input check rejected the sketch (stages 0
+and 1, before any image is generated) and 1 on an error, such as the Model API failing after its retries; the
+stage record then holds the error and every call made. An input check that only warns is printed and the run goes
+on.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import getpass
 import sys
 from pathlib import Path
 
+from herogen.pipeline import inputs
 from herogen.pipeline.client import ApiError, ModelClient
 from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
@@ -108,6 +110,8 @@ def run_pipeline(
             else:
                 rec = stage2h_heldout(run, client, views=views)
             print(f"stage {n} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
+            for c in inputs.warnings(rec.get("checks") or []):
+                print(f"stage {n}: warning: {c['message']}", file=sys.stderr)
             if n == HELDOUT:
                 _print_heldout(rec)
         except GateFailed as e:

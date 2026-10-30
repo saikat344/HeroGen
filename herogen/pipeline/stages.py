@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.pipeline import checks as C
-from herogen.pipeline import imaging
+from herogen.pipeline import imaging, inputs
 from herogen.pipeline.client import (
     COST_BASIS, IMAGE_MODEL, PRICE_PER_IMAGE_USD, SAM_MODEL, ApiError, ModelClient, SamInstance,
 )
@@ -224,15 +224,24 @@ def degraded_masks(record: dict[str, Any]) -> list[str]:
 # ---- stage 0 ----------------------------------------------------------------------------------------
 
 
+def _finish_input_checks(st: _Stage) -> None:
+    """Raise `InputRejected` (after writing the record) when an input check rejected the sketch; otherwise
+    add each warning's message to the record's notes."""
+    if inputs.rejections(st.checks):
+        raise st.reject_input(inputs.rejection_error(st.checks))
+    st.notes += [f"Warning: {c['message']}." for c in inputs.warnings(st.checks)]
+
+
 def stage0_input(run: RunFolder, sketch_path: Path, label: str = "") -> dict[str, Any]:
     st = _Stage(run, None, 0, "input")
     img = Image.open(sketch_path).convert("RGB")  # re-encoded: drops EXIF and other metadata
     st.save_image("00-sketch.png", img)
     w, h = img.size
     st.details = {"width": w, "height": h, "source_name": Path(sketch_path).name, "label": label}
-    st.checks = [C.check("min_side_px", min(w, h), 256)]
     if label:
         st.notes.append(f"Input is a {label}.")
+    st.checks = [inputs.size_check(w, h)]
+    _finish_input_checks(st)
     return st.finish()
 
 

@@ -11,7 +11,7 @@ sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joi
 
 | Stage | What it does | Models and tools |
 | --- | --- | --- |
-| 0 input | Copies the sketch into a run folder | |
+| 0 input | Copies the sketch into a run folder; input checks here and at the start of stage 1 reject an unusable sketch before any image is generated, or warn | |
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1 |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Carves a mesh from the four view masks (default), or builds it with SAM 3D Objects from the front view (`--mesh-source sam3d-objects`, which today fails the side views' silhouette gate); finds the joints from the silhouettes (default) or with SAM 3D Body (`--joints sam3d-body`); checks the mesh's silhouettes against every observed view's mask | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
