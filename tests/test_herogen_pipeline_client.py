@@ -3,6 +3,9 @@ strict schema, checking every answer against it."""
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +18,9 @@ from PIL import Image
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
+from herogen.pipeline import retry
+from fake_model_server import FakeModelServer, error_body, no_wait_policy
+from test_herogen_pipeline_flow import DUMMY_KEY
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, schema_errors  # noqa: E402
 
@@ -128,6 +134,159 @@ class CompareImagesTest(unittest.TestCase):
         self.assertEqual(schema_errors({"score": 1, "kind": "b", "tags": ["t"]}, SCHEMA["schema"]), [])
         self.assertEqual(schema_errors(True, {"type": "number"}), ["answer should be number, got bool"])
         self.assertIn("can't be checked", schema_errors(1, {"type": "number", "minimum": 0})[0])
+
+
+def _png_b64(colour: str) -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), colour).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+SAMPLE_SCHEMA = {"name": "verdict", "schema": {"type": "object", "properties": {"same": {"type": "string"}},
+                                        "required": ["same"], "additionalProperties": False}}
+
+
+class GenerateAttemptTest(unittest.TestCase):
+    def test_attempt_is_a_new_sample_with_its_own_key_and_same_body(self):
+        bodies = []
+
+        def fake_post(_client, endpoint, body, **_):
+            bodies.append(body)
+            return {"data": [{"b64_json": _png_b64("white" if len(bodies) == 1 else "black")}]}
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ModelClient, "_post", fake_post):
+            c = ModelClient(d, mode="live")
+            a = c.generate_image("p", size="64x64")
+            b = c.generate_image("p", size="64x64", attempt=1)
+            self.assertNotEqual(a.getpixel((0, 0)), b.getpixel((0, 0)))
+            self.assertEqual(bodies[0], bodies[1])  # the API takes no seed; only the cache key differs
+            self.assertNotIn("seed", bodies[0])
+            self.assertEqual(c.generate_image("p", size="64x64").getpixel((0, 0)), a.getpixel((0, 0)))  # cached
+            self.assertEqual(len(bodies), 2)
+
+
+class SampleCompareImagesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.images = [Image.new("RGB", (2000, 1000), "white"), Image.new("RGB", (300, 600), "grey")]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _resp(text, usage=None):
+        return {"status": "completed", "usage": usage or {"input_tokens": 2000, "output_tokens": 1000},
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
+
+    def test_request_shape_cost_and_replay(self):
+        seen = []
+
+        def fake_post(_client, endpoint, body, **kw):
+            seen.append((endpoint, body, kw))
+            return self._resp('{"same": "yes"}')
+
+        with mock.patch.object(ModelClient, "_post", fake_post):
+            c = ModelClient(self.tmp.name, mode="live")
+            out = c.compare_images("question", self.images, schema=SAMPLE_SCHEMA, image_max_side=1024)
+        self.assertEqual(out, {"same": "yes"})
+        endpoint, body, kw = seen[0]
+        self.assertEqual(endpoint, "responses")
+        # Through the one request path, with the cost an attempt of unknown outcome is counted at: the output cap.
+        self.assertEqual(kw, {"model": client_mod.TEXT_MODEL, "kind": "compare", "key": c.log.calls[0]["key"],
+                              "unknown_cost_usd": 3000 * 4.25 / 1e6})
+        self.assertEqual(body["model"], client_mod.TEXT_MODEL)
+        self.assertEqual(body["reasoning"], {"effort": "low"})
+        self.assertEqual(body["text"]["format"]["strict"], True)
+        content = body["input"][0]["content"]
+        self.assertEqual(content[0], {"type": "input_text", "text": "question"})
+        first = Image.open(io.BytesIO(base64.b64decode(content[1]["image_url"].split(",", 1)[1])))
+        self.assertEqual((first.format, first.size), ("JPEG", (1024, 512)))
+        want = (2000 * 1.25 + 1000 * 4.25) / 1e6
+        self.assertAlmostEqual(c.log.cost_usd(), want)
+        self.assertEqual(c.log.calls[0]["cost_usd"], round(want, 6))
+
+        def no_network(*_a, **_k):
+            raise AssertionError("replay must not call the network")
+
+        with mock.patch.object(ModelClient, "_post", no_network):
+            r = ModelClient(self.tmp.name, mode="replay")
+            self.assertEqual(r.compare_images("question", self.images, schema=SAMPLE_SCHEMA, image_max_side=1024),
+                             {"same": "yes"})
+            self.assertEqual(r.log.cost_usd(), 0.0)
+            with self.assertRaises(client_mod.ReplayMiss):
+                r.compare_images("question", self.images, schema=SAMPLE_SCHEMA, image_max_side=1024, attempt=1)
+
+    def test_bad_answers_raise(self):
+        for text in ("", "not json", "[1, 2]"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(ModelClient, "_post", lambda c, e, b, t=text, **_: self._resp(t)):
+                with self.assertRaises(ClientError):
+                    ModelClient(d, mode="live").compare_images("q", self.images, schema=SAMPLE_SCHEMA)
+                saved = [json.loads(p.read_text()) for p in Path(d).glob("*.json")]
+                self.assertEqual(len(saved), 1)  # the paid answer is kept for inspection
+
+    def test_incomplete_answer_is_an_api_error_and_not_cached(self):
+        resp = {**self._resp('{"same": "yes"}'), "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"}}
+        with mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: resp):
+            c = ModelClient(self.tmp.name, mode="live")
+            with self.assertRaisesRegex(client_mod.ApiError, "not 'completed'"):
+                c.compare_images("q", self.images, schema=SAMPLE_SCHEMA)
+        self.assertEqual(list(Path(self.tmp.name).glob("*.json")), [])
+        self.assertGreater(c.log.cost_usd(), 0)  # answered, so billed and logged
+
+    def test_unpriced_model_is_an_error(self):
+        with self.assertRaises(ClientError):
+            client_mod.token_cost_usd("no-such-model", {"input_tokens": 1})
+
+
+class CompareThroughServerTest(unittest.TestCase):
+    """compare_images goes through the real request path: the retry policy, the shared limiter and the ledger."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = Path(self.tmp.name) / "cache"
+        self.limiter = retry.SharedLimiter(Path(self.tmp.name) / "limiter", "k")
+        self.images = [Image.new("RGB", (32, 32), "white"), Image.new("RGB", (32, 32), "grey")]
+        self.ok = (200, {}, SampleCompareImagesTest._resp('{"same": "yes"}'))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _compare(self, *answers):
+        queue = list(answers)
+        server = FakeModelServer(lambda e, b: queue.pop(0) if len(queue) > 1 else queue[0], DUMMY_KEY)
+        c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter)
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                self.assertLogs("herogen.pipeline.client", "WARNING"):
+            out = c.compare_images("q", self.images, schema=SAMPLE_SCHEMA)
+        rows = [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()]
+        return out, c, server, rows
+
+    def test_a_429_is_retried_and_lowers_the_shared_limit(self):
+        out, c, server, rows = self._compare((429, {}, error_body(429)), self.ok)
+        self.assertEqual(out, {"same": "yes"})
+        self.assertEqual(server.count("responses"), 2)
+        self.assertEqual([(r["model"], r["attempt"], r["status"], r["outcome"]) for r in rows],
+                         [(client_mod.TEXT_MODEL, 1, 429, "failed"), (client_mod.TEXT_MODEL, 2, 200, "ok")])
+        self.assertEqual(json.loads(self.limiter.state_path.read_text())["limit"], retry.LIMIT_START // 2)
+        self.assertEqual([x["cached"] for x in c.log.calls], [False])  # a 429 is not billed
+        self.assertAlmostEqual(c.log.cost_usd(), (2000 * 1.25 + 1000 * 4.25) / 1e6)
+
+    def test_an_attempt_of_unknown_outcome_is_counted_at_the_output_cap(self):
+        out, c, _, rows = self._compare((0, {}, None), self.ok)  # the first connection is dropped unanswered
+        self.assertEqual(out, {"same": "yes"})
+        self.assertEqual([r["outcome"] for r in rows], ["unknown", "ok"])
+        self.assertEqual([x.get("outcome") for x in c.log.calls], ["unknown", None])
+        self.assertEqual(c.log.calls[0]["cost_usd"], round(3000 * 4.25 / 1e6, 6))
+        self.assertAlmostEqual(c.log.cost_usd(), (3000 * 4.25 + 2000 * 1.25 + 1000 * 4.25) / 1e6)
+
+    def test_a_token_priced_call_needs_its_unknown_outcome_cost(self):
+        c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter)
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                self.assertRaisesRegex(ClientError, "unknown outcome"):
+            c._post("responses", {}, model=client_mod.TEXT_MODEL, kind="compare", key="k")
+        self.assertFalse((self.cache / client_mod.LEDGER).exists())  # refused before any attempt
 
 
 if __name__ == "__main__":
