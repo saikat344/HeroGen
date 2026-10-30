@@ -1,6 +1,7 @@
 # Dev mode and the web tests: the service's dependencies plus a local server and Starlette's test client.
 # A package requirements-test.txt (what CI installs) also pins has the same version there. uvicorn and click are
-# dev mode's only: CI does not install them.
+# for dev mode and the browser tests only: CI installs neither, and runs no headless Chrome, so the browser
+# tests (tests/test_herogen_service_e2e.py) skip there.
 -r requirements.txt
 uvicorn==0.54.0           # BSD-3-Clause
 httpx2==2.13.1            # BSD-3-Clause (Starlette's test client)

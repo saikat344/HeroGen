@@ -688,6 +688,21 @@ class TestJobsApi(WebCase):
         self.assertFalse(self.svc.storage.input_path(uid, job2["id"]).exists())
         self.assertEqual(b.get(f"/api/jobs/{job2['id']}").status_code, 404)
 
+    def test_a_job_canceled_mid_stage_shows_nothing_of_its_own_running(self):
+        # The page polls while the job is active or a stage beside it (`side`) runs; a stage of the job's own that
+        # was running at the cancel used to stay "running" for good.
+        b = self.signin()
+        job = self.make_job(b).json()
+        c = self.store.job_claim(job["id"], "c", 60, 2)
+        self.store.job_stage_set(job["id"], c["attempt"], "1", "running", lease_s=60)
+        view = b.post(f"/api/jobs/{job['id']}/cancel", json={}).json()
+        self.assertEqual(view["state"], "canceled")
+        stages = {s["key"]: s for s in view["stages"]}
+        self.assertEqual(stages["1"]["state"], "canceled")
+        self.assertEqual([k for k, s in stages.items() if s["side"]], ["2h"])
+        self.assertEqual([k for k, s in stages.items() if s["state"] == "running"], [])
+        self.assertEqual(b.get(f"/api/jobs/{job['id']}").json()["stages"], view["stages"])
+
     def test_delete_account(self):
         b = self.signin()
         job = self.make_job(b).json()

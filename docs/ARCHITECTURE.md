@@ -852,6 +852,10 @@ function is `nonpreemptible`. Instead:
   than twice for one attempt stops before running anything (`group_enter`).
 - Each running stage holds a lease covering its timeout plus 10 minutes. The sweep requeues a job whose lease ran out
   (its worker died) or fails it when it is out of attempts.
+- When an attempt ends without its worker recording the stage it was running (a cancel, a delete, or the sweep's
+  requeue or failure), the store closes that stage in the same write: "pending" when the job is queued again,
+  "canceled" when it was canceled, "failed" otherwise. Only the live attempt may write a stage, so nothing else
+  would, and the stage would show as running for good.
 - Errors are sorted three ways. A failed gate rejects the job, with the stage's reason. A timeout, a network
   error, or the model or GPU service answering HTTP 429 or 5xx queues another attempt. Anything else (a 4xx, a bad
   response, a bug) fails the job.
@@ -917,7 +921,8 @@ minutes; it never waits for the held-out views.
   `heldout_stages`; more wait in Modal's queue), so they yield the API to other jobs' own stages. The pipeline's
   shared limiter coordinates the processes of one container only (it locks a local file), so across containers
   this cap is what bounds the held-out views' share.
-- The page lists 2h last as "quality check (held-out views)" and keeps polling while it runs after the job. The
+- The page lists 2h last as "quality check (held-out views)" and keeps polling while it runs after the job (each
+  stage in the job's JSON says whether it runs beside the job, `side`; only those keep a finished job polling). The
   results page (stage 5) is written when the job's own path ends, so it shows 2h only if 2h finished first; the
   viewer always reads the current `stage-2h.json`.
 
@@ -1088,7 +1093,7 @@ with a hash of the form, in the tab's `sessionStorage` from before it sends the 
 the job (200 or 201) or a 409 (the key belongs to a saved job with a different form). On any other answer (503, another
 5xx, a lost connection, 401, 429, a refused upload) it sends the same key with the next attempt from that tab, also
 after a reload; other tabs and devices make their own keys. A sketch no job claims is deleted by retention after a day. Status polling is every 3
-seconds while a job is queued or running.
+seconds while a job is queued or running, and after that while its quality check runs.
 
 ### Lab API and viewer
 

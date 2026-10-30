@@ -42,7 +42,10 @@ TRANSITIONS = {
     "running": {"succeeded", "rejected", "failed", "canceled", "queued"},
     "succeeded": set(), "rejected": set(), "failed": set(), "canceled": set(),
 }
-STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped", "unavailable")
+STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped", "unavailable", "canceled")
+# What a stage the attempt was still running becomes when the attempt ends without recording it (a cancel, a
+# delete, the sweep requeueing or failing a lost worker): requeued, it runs again; otherwise it never finishes.
+STAGE_WHEN_ENDED = {"queued": "pending", "canceled": "canceled"}
 # Stages that run beside the job (they never decide or delay it): only the held-out views, used for scoring.
 SIDE_STAGES = ("2h",)
 SIDE_FINAL = ("passed", "unavailable")
@@ -500,6 +503,8 @@ class Store:
             if row is None:
                 raise NotFound("no such account")
             jobs = [r["id"] for r in c.execute("SELECT id FROM jobs WHERE user_id=?", (user_id,))]
+            for r in c.execute("SELECT id FROM jobs WHERE user_id=? AND state='running'", (user_id,)).fetchall():
+                self._end_stages(c, r["id"], "canceled")
             c.execute("UPDATE jobs SET deleted_at=COALESCE(deleted_at, ?), state=CASE WHEN state IN "
                       "('queued','running') THEN 'canceled' ELSE state END WHERE user_id=?", (now, user_id))
             c.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, user_id))
@@ -601,6 +606,17 @@ class Store:
         cols["state"] = new
         sets = ", ".join(f"{k}=?" for k in cols)
         c.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*cols.values(), job["id"]))
+        if old == "running" and new != "running":
+            self._end_stages(c, job["id"], STAGE_WHEN_ENDED.get(new, "failed"))
+
+    @staticmethod
+    def _end_stages(c: sqlite3.Connection, job_id: str, state: str) -> None:
+        """Close the job's own stages left running when its attempt ends. Only the live attempt may write a stage
+        (`job_stage_set`), so after a cancel, a delete or the sweep's requeue or failure nothing else ever would,
+        and the stage would show as running for good (the page keeps polling while a stage runs). Side stages
+        (`claim` set) are left alone: they run on beside the job and end with `side_finish` or their lease."""
+        c.execute("UPDATE job_stages SET state=?, lease_until=NULL WHERE job_id=? AND state='running' AND claim IS "
+                  "NULL", (state, job_id))
 
     def job_dispatch(self, job_id: str, call_id: str) -> bool:
         """Record that a worker was started for a queued job."""

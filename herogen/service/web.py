@@ -45,7 +45,16 @@ from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
 from herogen.service.runner import STAGE_LABELS, plan_for
 from herogen.service.storage import SAFE_SEGMENT, Storage
-from herogen.service.store import Conflict, NotFound, QuotaExceeded, RateLimiter, StoreError, new_id, valid_id
+from herogen.service.store import (
+    SIDE_STAGES,
+    Conflict,
+    NotFound,
+    QuotaExceeded,
+    RateLimiter,
+    StoreError,
+    new_id,
+    valid_id,
+)
 from herogen.service.uploads import UploadRejected, clean_name, clean_prompt
 from herogen.service.worker import dispatch_queued, event
 
@@ -526,6 +535,7 @@ class App:
         for spec in plan_for(job["kind"]):
             r = rows.get(spec.key)
             stages.append({"key": spec.key, "label": spec.label, "state": r["state"] if r else "pending",
+                           "side": spec.key in SIDE_STAGES,
                            "seconds": r["seconds"] if r else None, "cost_usd": r["cost_usd"] if r else None,
                            "message": r["message"] if r else ""})
         err = None
