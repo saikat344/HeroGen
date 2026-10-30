@@ -27,7 +27,8 @@ from herogen.pipeline.client import ModelClient, ReplayMiss, SamInstance  # noqa
 from herogen.pipeline.results import collect  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder  # noqa: E402
 from fake_model_server import (  # noqa: E402
-    FakeModelServer, data_url_image, error_body, pipeline_without_waits, pixels_key, sam_response,
+    NOT_A_PHOTO, FakeModelServer, data_url_image, error_body, is_question, pipeline_without_waits, pixels_key,
+    question_answer, sam_response,
 )
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
@@ -58,6 +59,8 @@ class FaultyAPI(FakeAPI):
         self.partial = False
 
     def respond(self, endpoint: str, body: dict):
+        if is_question(body):  # the photo question, answered by the flow tests' fake (no faults)
+            return 200, {}, self.post(None, endpoint, body)
         if endpoint != "responses":
             kind = KINDS.get(body.get("prompt"), "heldout" if HELDOUT_REQUEST.search(body["prompt"]) else "other")
             if self.muse_faults.get(kind) == "failed":
@@ -170,7 +173,7 @@ class FaultInjectionTest(unittest.TestCase):
         self.assertIn("HTTP 429", s1["error"])
         self.assertIn("the Model API failed", self.err)
         self.assertEqual(self.server.count("images/edits"), 0)  # no cover made for an unmeasurable sketch
-        self.assertEqual(self.server.count("responses"), retry.MAX_ATTEMPTS)
+        self.assertEqual(self.server.count("responses"), 1 + retry.MAX_ATTEMPTS)  # the photo question, then SAM
         self.assertFalse((self.root / "r" / "01-masks").exists())
         self._no_failure_cached()
         status = {s["stage"]: s["status"] for s in collect(RunFolder(self.root, "r"))["stages"]}
@@ -206,8 +209,11 @@ class FaultInjectionTest(unittest.TestCase):
         self.assertIn("max_output_tokens", s1["error"])
         self.assertEqual(api.sam_kinds, ["sketch"])  # stopped at once, not taken as "try the next prompt"
         self.assertEqual(self.server.count("images/edits"), 0)
-        self.assertEqual(list((self.root / "_cache").glob("*.json")), [])  # not a result, never cached
-        self.assertEqual(s1["cost_usd"], client_mod.PRICE_PER_IMAGE_USD[client_mod.SAM_MODEL])  # answered: billed
+        cached = [json.loads(p.read_text())["request"]["model"] for p in (self.root / "_cache").glob("*.json")]
+        self.assertEqual(cached, [client_mod.TEXT_MODEL])  # only the photo question: the SAM answer is not a result
+        question = client_mod.token_cost_usd(client_mod.TEXT_MODEL, question_answer(NOT_A_PHOTO)["usage"])
+        self.assertAlmostEqual(s1["cost_usd"], client_mod.PRICE_PER_IMAGE_USD[client_mod.SAM_MODEL] + question,
+                               places=5)  # each call's cost is rounded to 6 places
         self.assertEqual(self._replay("r2"), 1)
 
     def test_a_failed_sam_answer_on_the_sheet_stops_stage2(self):

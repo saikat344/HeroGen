@@ -45,6 +45,20 @@ def sam_response(text: str) -> dict:
             "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
 
 
+def is_question(body: dict) -> bool:
+    """A Muse Spark question (a responses call with a JSON schema), not a SAM 3.1 call."""
+    return "text" in body and body.get("model") == client_mod.TEXT_MODEL
+
+
+def question_answer(answer: dict) -> dict:
+    """A Muse Spark answer from the responses endpoint, with its token usage."""
+    return {"status": "completed", "usage": {"input_tokens": 1200, "output_tokens": 150},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(answer)}]}]}
+
+
+NOT_A_PHOTO = {"real_person_photo_probability": 0.0, "image_kind": "drawing_or_artwork", "reason": "a drawing"}
+
+
 def error_body(status: int) -> dict:
     return {"error": {"code": status, "message": f"fake error {status}"}}
 

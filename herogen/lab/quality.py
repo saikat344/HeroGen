@@ -23,6 +23,7 @@ POSE_WORDS = {"rest": "rest", "walk_a": "walk", "walk_b": "walk (other leg)", "a
 LABELS = {
     "min_side_px": "Sketch size, shortest side (px)",
     "sketch_line_contrast": "Sketch lines dark enough (grey levels)",
+    "upload_real_person_photo_probability": "Upload is not a photo of a real person (probability)",
     "sketch_characters_found": "Characters found in the sketch",
     "sketch_small_extra_figures": "Smaller extra figures in the sketch",
     "sketch_feet_on_figure": "Feet found on the sketched figure",
