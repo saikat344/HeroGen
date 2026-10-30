@@ -69,6 +69,6 @@ class RunFolder:
     def write_stage(self, record: dict[str, Any]) -> Path:
         return self.write_json(f"stage-{record['stage']}.json", record)
 
-    def read_stage(self, n: int) -> dict[str, Any] | None:
+    def read_stage(self, n: int | str) -> dict[str, Any] | None:
         p = self.path / f"stage-{n}.json"
         return json.loads(p.read_text()) if p.exists() else None
