@@ -22,6 +22,7 @@ jobs:
         with:
           # Every tag, to find the rc tags on a production tag's commit.
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -44,7 +45,10 @@ jobs:
       group: release-deploy-${{ needs.plan.outputs.environment }}
       cancel-in-progress: false
     steps:
+      # No GitHub token is left in the checkout for the deploy's own code to find.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Check the service and the deploy settings
         env:
           TAG: ${{ github.ref_name }}
