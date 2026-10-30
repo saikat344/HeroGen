@@ -482,9 +482,10 @@ SHEET_GATES = ("figures_found", "height_agreement_4_views", "front_back_width_ag
                "view_mask_sam_coverage_min", CARVE_GATE)
 
 
-def carve_check(masks: dict[str, np.ndarray], height_units: float) -> tuple[dict[str, Any], dict[str, float]]:
+def carve_check(masks: dict[str, np.ndarray], height_units: float, *, derived_top: bool = False) -> tuple[dict[str, Any], dict[str, float]]:
     """Carve ``masks`` exactly as stage 3 does and gate the worst view's silhouette IoU with stage 3's own gate
-    (`herogen.blender.stage3.IOU_GATE`): (the check, every view's IoU).
+    (`herogen.blender.stage3.IOU_GATE`): (the check, every view's IoU). A derived top constrains the
+    geometry but its own IoU is not gated, matching stage 3.
 
     Generated views that disagree (a staff in the back view only, arms angled differently front and back, a
     profile wider than the other) carve into a body that loses whatever any view lacks, and stage 3 then
@@ -494,7 +495,8 @@ def carve_check(masks: dict[str, np.ndarray], height_units: float) -> tuple[dict
     from herogen.blender.views import views_from_masks
 
     ious = s3.carve_view_ious(views_from_masks(masks, height_units), height_units)
-    worst = min(ious, key=ious.get)
+    gated = {v: x for v, x in ious.items() if v != "top" or not derived_top}
+    worst = min(gated, key=gated.get)
     note = f"worst: {worst}; stage 3's carve of these views, IoU per view " + ", ".join(
         f"{v} {x:.3f}" for v, x in ious.items())
     return C.check(CARVE_GATE, ious[worst], s3.IOU_GATE, note=note), ious
@@ -507,6 +509,61 @@ def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
     low = min(cov, key=cov.get)
     return [C.check("view_mask_sam_coverage_min", cov[low], C.SAM_COVERAGE_MIN,
                     note=f"lowest: {low}; SAM 3.1 px over background-threshold px in each figure's columns")]
+
+
+def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
+               height_units: float) -> tuple:
+    """Select the top and check the final masks before ranking or accepting a sheet."""
+    top_checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    notes: list[str] = []
+    # Top view. A drawn top view comes from its own call (a plan view can't share a row with standing
+    # figures at one scale). It is used if its depth/width agrees with the side views; otherwise the top
+    # silhouette implied by the four side views is used instead.
+    side_masks = {n: v["mask"] for n, v in sq.items()}
+    drawn = model_top_view(client, cover, sq, size, bg)
+    used = None
+    final_carve = None
+    if drawn.get("mask") is not None:
+        drawn_checks = C.top_view_checks(
+            side_masks, drawn["mask"], prefix="top_drawn", gate=False,
+            note="drawn top view, width scaled to the front width",
+        )
+        top_checks += drawn_checks
+        if all(c["pass"] for c in drawn_checks):
+            # Stage 3 carves with a drawn top view and gates its IoU too: keep it only if that carve still passes.
+            with_top, ious = carve_check({**side_masks, "top": drawn["mask"]}, height_units)
+            details["carve_ious_with_drawn_top"] = ious
+            if with_top["pass"]:
+                used = drawn
+                final_carve = with_top
+                details["carve_ious_with_saved_top"] = ious
+                details["top_method"] = IMAGE_MODEL
+                details["top_method_detail"] = f"{IMAGE_MODEL} separate call, scaled to the front width"
+            else:
+                notes.append(f"Stage 3's carve with the drawn top view fails its IoU gate ({with_top['note']}), "
+                                "so the drawn top view is not used.")
+    if used is None:
+        used = hull_top_view(sq, size, bg)
+        details["top_method"] = "visual_hull"
+        details["top_method_detail"] = "visual hull of the four side views"
+        notes.append(
+            "The drawn top view did not agree with the side views, so views/top.png is the top silhouette "
+            "implied by the four side views (visual hull), drawn flat grey."
+        )
+    details["top_drawn_scale"] = drawn.get("scale")
+    hull_note = "visual hull: agrees by construction up to side-view disagreement"
+    top_checks += C.top_view_checks(
+        side_masks, used["mask"], note=hull_note if used["mask_method"] == "visual_hull" else ""
+    )
+
+    if final_carve is None:
+        final_carve, ious = carve_check(
+            {**side_masks, "top": used["mask"]}, height_units, derived_top=True
+        )
+        details["carve_ious_with_saved_top"] = ious
+    top_checks.append(final_carve)
+    return used, drawn["raw"], top_checks, details, notes
 
 
 def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int
@@ -534,6 +591,16 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         ) + _coverage_checks(split)
         if sq:  # every split sheet, so `attempt_rank` compares sheets on the same gates
             side_checks.append(carve_check({n: v["mask"] for n, v in sq.items()}, height_units)[0])
+        top = None
+        top_raw = None
+        top_details: dict[str, Any] = {}
+        top_notes: list[str] = []
+        if C.gate_ok(side_checks):
+            top, top_raw, top_checks, top_details, top_notes = _sheet_top(
+                client, cover, sq, size, bg, height_units
+            )
+            # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
+            side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
         tried.append({
             "attempt": attempt,
             "sam_instances": n_inst,
@@ -541,6 +608,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             "sam_coverage": split["sam_coverage"],
             "column_runs": [list(r) for r in split["runs"]],
             "assignment": assignment,
+            **top_details,
             "checks": side_checks,
         })
         # Keep the best sheet, not the last: fewest failed gates, then the smallest summed shortfall; a tie
@@ -548,10 +616,12 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         rank = C.attempt_rank(side_checks, SHEET_GATES)
         tried[-1]["rank"] = {"failed_gates": rank[0], "shortfall": rank[1]}
         if not kept or rank < kept[0]:
-            kept = (rank, attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks)
+            kept = (rank, attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks,
+                    top, top_raw, top_details, top_notes)
         if C.gate_ok(side_checks):
             break
-    _, kept_attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks = kept
+    (_, kept_attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks,
+     top, top_raw, top_details, top_notes) = kept
     st.save_image("02-turnaround.png", sheet)
     st.details = {
         "prompt": TURNAROUND_PROMPT,
@@ -559,60 +629,25 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         "attempts": tried,
         "kept_attempt": kept_attempt,
         "view_assignment": assignment,
+        **top_details,
     }
     if len(tried) > 1:
         st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (fewest failed "
                         "gates, then the smallest shortfall).")
     st.checks = list(side_checks) + orient
-    st.notes += orient_notes
+    st.notes += orient_notes + top_notes
+    if top is not None:
+        st.save_image("02-top-drawn.png", top_raw)
+        sq["top"] = {"image": top["image"], "mask": top["mask"], "mask_method": top["mask_method"]}
     if not sq:
         st.notes.append("Could not split the sheet into four figures.")
         return st.finish()
-    if not C.gate_ok(side_checks):
-        # Save what was cut so the failure can be inspected, and skip the top-view call.
+    if top is None:
+        # Save what was cut so the failure can be inspected; no top was requested for this sheet.
         for name, v in sq.items():
             st.save_image(f"views/{name}.png", v["image"])
             st.save_image(f"masks/{name}.png", imaging.to_mask_image(v["mask"]))
         return st.finish()
-
-    # Top view. A drawn top view comes from its own call (a plan view can't share a row with standing
-    # figures at one scale). It is used if its depth/width agrees with the side views; otherwise the top
-    # silhouette implied by the four side views is used instead.
-    side_masks = {n: v["mask"] for n, v in sq.items()}
-    drawn = model_top_view(client, cover, sq, size, bg)
-    st.save_image("02-top-drawn.png", drawn["raw"])
-    used = None
-    if drawn.get("mask") is not None:
-        drawn_checks = C.top_view_checks(
-            side_masks, drawn["mask"], prefix="top_drawn", gate=False,
-            note="drawn top view, width scaled to the front width",
-        )
-        st.checks += drawn_checks
-        if all(c["pass"] for c in drawn_checks):
-            # Stage 3 carves with a drawn top view and gates its IoU too: keep it only if that carve still passes.
-            with_top, ious = carve_check({**side_masks, "top": drawn["mask"]}, height_units)
-            st.details["carve_ious_with_drawn_top"] = ious
-            if with_top["pass"]:
-                used = drawn
-                st.details["top_method"] = IMAGE_MODEL
-                st.details["top_method_detail"] = f"{IMAGE_MODEL} separate call, scaled to the front width"
-            else:
-                st.notes.append(f"Stage 3's carve with the drawn top view fails its IoU gate ({with_top['note']}), "
-                                "so the drawn top view is not used.")
-    if used is None:
-        used = hull_top_view(sq, size, bg)
-        st.details["top_method"] = "visual_hull"
-        st.details["top_method_detail"] = "visual hull of the four side views"
-        st.notes.append(
-            "The drawn top view did not agree with the side views, so views/top.png is the top silhouette "
-            "implied by the four side views (visual hull), drawn flat grey."
-        )
-    st.details["top_drawn_scale"] = drawn.get("scale")
-    sq["top"] = {"image": used["image"], "mask": used["mask"], "mask_method": used["mask_method"]}
-    hull_note = "visual hull: agrees by construction up to side-view disagreement"
-    st.checks += C.top_view_checks(
-        side_masks, used["mask"], note=hull_note if used["mask_method"] == "visual_hull" else ""
-    )
 
     for name in ALL_VIEWS:
         st.save_image(f"views/{name}.png", sq[name]["image"])

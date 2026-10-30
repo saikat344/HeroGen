@@ -146,7 +146,7 @@ threshold); a tie keeps the earlier sheet. A gate a sheet was never measured on 
 shortfall of 1, so a sheet that could not be split into four figures ranks below every sheet that could.
 `stage-2.json` lists every attempt with its checks and `rank`, and `details.kept_attempt` names the kept
 one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
-sheet's. The top view is asked for only when the kept sheet passed.
+sheet's. A top view is requested only for an attempt whose side checks and preliminary carve pass.
 
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the
@@ -157,7 +157,10 @@ disagree (a staff in one view only, arms angled differently front and back, one 
 into a body that keeps only what every view shows, which stage 3 refuses; checked here, the sheet is generated
 again instead. A drawn top view is used only if the carve with it still passes the gate (stage 3 carves with
 an observed top view and gates its IoU); otherwise the visual-hull top is used and a note says why, and
-`details.carve_ious_with_drawn_top` records the IoUs that decided it.
+`details.carve_ious_with_drawn_top` records the IoUs that decided it. The final carve includes whichever top
+will be saved, including a visual-hull fallback; the derived top constrains the geometry but its own IoU is
+not gated. Its carve replaces the preliminary side-only carve before ranking and acceptance, so a failure
+uses the remaining sheet attempts. `details.carve_ious_with_saved_top` records the final IoUs.
 
 **Recorded, not gated.** `a_pose_hand_span_over_shoulders` (widest row at 35-60% of the height over the widest
 at 15-25%) is still measured on every sheet, with `gate: false` and a note. Its fixed height bands read hat
