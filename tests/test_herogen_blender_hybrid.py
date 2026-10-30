@@ -365,7 +365,7 @@ class TestDepthRegister(HybridBase):
     def depth_views(self, names=("left", "right")):
         return {n: self.vs.views[n] for n in names}
 
-    def test_shifted_iou_is_a_zero_filled_shift(self):
+    def test_shifted_iou_counts_pixels_shifted_off_camera(self):
         rng = np.random.default_rng(0)
         a, b = rng.random((40, 50)) > 0.6, rng.random((40, 50)) > 0.5
         for axis, k in ((1, 7), (1, -12), (0, 5), (0, -3), (1, 0), (1, 60)):
@@ -376,7 +376,78 @@ class TestDepthRegister(HybridBase):
                 src[axis] = slice(0, n - k) if k >= 0 else slice(-k, n)
                 dst[axis] = slice(k, n) if k >= 0 else slice(0, n + k)
                 moved[tuple(dst)] = a[tuple(src)]
-            self.assertAlmostEqual(sam3d_mesh.shifted_iou(a, b, axis, k), sam3d_mesh.iou(moved, b), places=12)
+            inter = int((moved & b).sum())
+            expected = inter / (int(a.sum()) + int(b.sum()) - inter)
+            self.assertAlmostEqual(sam3d_mesh.shifted_iou(a, b, axis, k), expected, places=12)
+
+    @staticmethod
+    def box(depth):
+        v = np.array([[x, y, z] for x in (-0.5, 0.5) for y in (-depth, depth) for z in (0.0, 5.5)])
+        quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+        f = np.array([t for q in quads for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3]))])
+        return v, f
+
+    def box_views(self):
+        v, f = self.box(0.5)
+        result = {}
+        for name in ("left", "right", "top"):
+            view = views.View(name, np.zeros((64, 64), bool), 10.0, 32.0, 32.0 if name == "top" else 60.0)
+            view.mask = raster.render_view(view, v, f).mask
+            result[name] = view
+        return result
+
+    def test_box_offsets_are_verified_by_rerendering_in_each_depth_view(self):
+        from unittest.mock import patch
+
+        v, f = self.box(0.5)
+        for name, view in self.box_views().items():
+            for k in (-7, 7):
+                with self.subTest(view=name, pixels=k):
+                    displaced = v + [0, k / view.pps, 0]
+                    with patch.object(raster, "render_view", wraps=raster.render_view) as render:
+                        dy, rec = sam3d_mesh.register_depth(displaced, f, {name: view})
+                    self.assertEqual(rec["offset_px"], -k)
+                    self.assertEqual(rec["iou_after"][name], 1.0)
+                    self.assertEqual(render.call_count, 2)
+                    verified_view, verified_verts, _ = render.call_args.args
+                    np.testing.assert_allclose(verified_verts, displaced + [0, dy, 0], atol=1e-12)
+                    actual = sam3d_mesh.iou(raster.render_view(verified_view, verified_verts, f).mask,
+                                           verified_view.mask)
+                    self.assertEqual(rec["iou_after"][name], round(actual, 4))
+
+    def test_a_visible_remeshed_box_cannot_gain_by_clipping(self):
+        v, f = self.box(2.8)
+        v, f, _ = sam3d_mesh.remesh(v, f, 5.5, nz=32)
+        edges = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+        self.assertTrue((np.unique(edges, axis=0, return_counts=True)[1] == 2).all())
+        for name, view in self.box_views().items():
+            with self.subTest(view=name):
+                rows, cols, _ = raster.project(name, view.pps, view.cmid, view.vref, v)
+                self.assertGreaterEqual(min(rows.min(), cols.min()), 0)
+                self.assertLessEqual(max(rows.max(), cols.max()), 64)
+                dy, rec = sam3d_mesh.register_depth(v, f, {name: view})
+                self.assertEqual(dy, 0.0)
+                actual = sam3d_mesh.iou(raster.render_view(view, v, f).mask, view.mask)
+                self.assertEqual(rec["iou_after"][name], round(actual, 4))
+
+    def test_an_initially_clipped_box_uses_its_complete_silhouette(self):
+        v, f = self.box(5.0)
+        for name, view in self.box_views().items():
+            with self.subTest(view=name):
+                dy, rec = sam3d_mesh.register_depth(v, f, {name: view})
+                self.assertEqual(dy, 0.0)
+                # Independently re-render on a canvas containing the entire moved mesh and the observation.
+                expanded = views.View(name, np.pad(view.mask, 80), view.pps, view.cmid + 80, view.vref + 80)
+                actual = sam3d_mesh.iou(raster.render_view(expanded, v + [0, dy, 0], f).mask, expanded.mask)
+                self.assertEqual(rec["iou_after"][name], round(actual, 4))
+                self.assertEqual(rec["iou_before"][name], round(actual, 4))
+
+    def test_without_visible_mesh_evidence_the_offset_is_zero(self):
+        v, f = self.box(0.5)
+        view = self.box_views()["left"]
+        dy, rec = sam3d_mesh.register_depth(v + [0, 100, 0], f, {"left": view})
+        self.assertEqual(dy, 0.0)
+        self.assertIn("no pixel", rec["note"])
 
     def test_a_known_depth_offset_is_undone(self):
         pps = self.vs.views["left"].pps
