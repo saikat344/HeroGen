@@ -163,7 +163,11 @@ an observed top view and gates its IoU); otherwise the visual-hull top is used a
 at 15-25%) is still measured on every sheet, with `gate: false` and a note. Its fixed height bands read hat
 brims, big chibi heads, shoulder armour and T-posed arms as shoulders: it failed 9 of 21 true turnarounds of
 real game characters and 30 of 105 generated sheets three judges called usable, and next to the carve check it
-stopped no sheet they called unusable.
+stopped no sheet they called unusable. `right_profile_width_over_height` and `left_profile_width_over_height`
+(profile box width over height, at most 0.33) are recorded the same way: they measure body shape, not pose,
+so round bellies, robes, hat brims, chibi heads, wings, tails and backpacks exceed them. They failed 9 of the 21
+true turnarounds and 67 of the 105 usable sheets, 16 of which also carve, and stopped no unusable sheet the
+carve check let through.
 
 ## Stage 3: mesh source and joints
 
