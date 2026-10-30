@@ -1547,8 +1547,8 @@ herogen.blender's remote client starts `$HEROGEN_MODAL run <runner>.py::main --j
 worker image points `HEROGEN_MODAL` at `modal_bridge.py`, which takes the same arguments, calls the runner's `infer`
 in its deployed app (the runner's `APP` constant) and writes the files the runner's own `main` writes, so the
 client's cache, cost estimate and error handling are unchanged. Stage 3 requests the live hybrid by default through
-`HEROGEN_SERVICE_STAGE3_ARGS` (`--mesh-source sam3d-objects --joints sam3d-body --remote live`); it
-runs with the pipeline's own defaults.
+`HEROGEN_SERVICE_STAGE3_ARGS` (`--mesh-source sam3d-objects --joints sam3d-body --remote live`). The Blender
+worker image installs SciPy 1.18.1 (BSD-3-Clause), required by hybrid orientation and outline conform.
 
 ### Retention
 
