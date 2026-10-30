@@ -170,15 +170,24 @@ def load_views(run: Path, height_studs: float) -> ViewSet:
     """Read `masks/{view}.png` and `views/meta.json`; missing views are skipped and recorded."""
     meta_path = run / "views" / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    masks = {name: load_mask(run / "masks" / f"{name}.png") for name in VIEWS
+             if (run / "masks" / f"{name}.png").exists()}
+    return views_from_masks(masks, height_studs, meta)
+
+
+def views_from_masks(given: dict[str, np.ndarray], height_studs: float, meta: dict | None = None) -> ViewSet:
+    """The view set stage 3 builds from masks in memory (named as in VIEWS, at one pixel scale, feet on one
+    row), exactly as `load_views` does from a run folder; views not given are recorded as missing. Stage 2
+    uses it to check, before it keeps a sheet, that stage 3's carve will reproduce the views."""
+    meta = meta or {}
     notes: list[str] = []
     masks: dict[str, np.ndarray] = {}
     missing: list[str] = []
     for name in VIEWS:
-        p = run / "masks" / f"{name}.png"
-        if not p.exists():
+        if name not in given:
             missing.append(name)
             continue
-        m = load_mask(p)
+        m = np.asarray(given[name], dtype=bool)
         if m.shape[0] != m.shape[1]:
             notes.append(f"{name} mask is not square {m.shape}")
         if not m.any():

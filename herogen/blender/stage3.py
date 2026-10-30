@@ -26,6 +26,21 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.logical_and(a, b).sum() / union) if union else 0.0
 
 
+def carve_view_ious(vs, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ) -> dict[str, float]:
+    """Each view's silhouette IoU against the carve stage 3 builds from ``vs`` (same joints, arm prior, carve,
+    smoothing and resolution), with the mesh rasterised in numpy (`raster`) instead of rendered by Blender.
+    On the same mesh the two renders agree: six stage-3 runs measured with Blender were reproduced to 1e-4 in
+    every view. Stage 2 uses this to keep only sheets whose carve passes this stage's IoU gate."""
+    from . import raster
+
+    try:
+        skeleton = joints.estimate(vs, height)
+    except Exception:  # noqa: BLE001  (as in run_stage3: the prior is optional, the carve does not need it)
+        skeleton = None
+    verts, faces, _ = carve.build_mesh(vs, height, nz, skeleton=skeleton)
+    return {name: round(iou(raster.render_view(v, verts, faces).mask, v.mask), 4) for name, v in vs.views.items()}
+
+
 def work_dir(run: Path) -> Path:
     return run / "blender-work"
 

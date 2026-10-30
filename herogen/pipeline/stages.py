@@ -475,10 +475,30 @@ def stage2_turnaround(
     return _stopping_on_api_error(lambda: _stage2(st, run, client, height_units, attempts), st)
 
 
+# Stage 3's carve of a sheet's views, gated by stage 3's own silhouette-IoU gate (see `carve_check`).
+CARVE_GATE = "carve_silhouette_iou_min"
 # Every gated check a sheet that splits into four figures is measured on (`attempt_rank` counts a missing one).
 SHEET_GATES = ("figures_found", "height_agreement_4_views", "front_back_width_agreement", "left_right_mirror_iou",
                "a_pose_hand_span_over_shoulders", "right_profile_width_over_height", "left_profile_width_over_height",
-               "view_mask_sam_coverage_min")
+               "view_mask_sam_coverage_min", CARVE_GATE)
+
+
+def carve_check(masks: dict[str, np.ndarray], height_units: float) -> tuple[dict[str, Any], dict[str, float]]:
+    """Carve ``masks`` exactly as stage 3 does and gate the worst view's silhouette IoU with stage 3's own gate
+    (`herogen.blender.stage3.IOU_GATE`): (the check, every view's IoU).
+
+    Generated views that disagree (a staff in the back view only, arms angled differently front and back, a
+    profile wider than the other) carve into a body that loses whatever any view lacks, and stage 3 then
+    refuses it. Checked here, such a sheet is generated again instead of ending the run at stage 3.
+    """
+    from herogen.blender import stage3 as s3
+    from herogen.blender.views import views_from_masks
+
+    ious = s3.carve_view_ious(views_from_masks(masks, height_units), height_units)
+    worst = min(ious, key=ious.get)
+    note = f"worst: {worst}; stage 3's carve of these views, IoU per view " + ", ".join(
+        f"{v} {x:.3f}" for v, x in ious.items())
+    return C.check(CARVE_GATE, ious[worst], s3.IOU_GATE, note=note), ious
 
 
 def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
@@ -513,6 +533,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         side_checks = C.side_view_checks(
             {n: v["mask"] for n, v in sq.items()}, figures_found=len(split["runs"])
         ) + _coverage_checks(split)
+        if sq:  # every split sheet, so `attempt_rank` compares sheets on the same gates
+            side_checks.append(carve_check({n: v["mask"] for n, v in sq.items()}, height_units)[0])
         tried.append({
             "attempt": attempt,
             "sam_instances": n_inst,
@@ -568,9 +590,16 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         )
         st.checks += drawn_checks
         if all(c["pass"] for c in drawn_checks):
-            used = drawn
-            st.details["top_method"] = IMAGE_MODEL
-            st.details["top_method_detail"] = f"{IMAGE_MODEL} separate call, scaled to the front width"
+            # Stage 3 carves with a drawn top view and gates its IoU too: keep it only if that carve still passes.
+            with_top, ious = carve_check({**side_masks, "top": drawn["mask"]}, height_units)
+            st.details["carve_ious_with_drawn_top"] = ious
+            if with_top["pass"]:
+                used = drawn
+                st.details["top_method"] = IMAGE_MODEL
+                st.details["top_method_detail"] = f"{IMAGE_MODEL} separate call, scaled to the front width"
+            else:
+                st.notes.append(f"Stage 3's carve with the drawn top view fails its IoU gate ({with_top['note']}), "
+                                "so the drawn top view is not used.")
     if used is None:
         used = hull_top_view(sq, size, bg)
         st.details["top_method"] = "visual_hull"
