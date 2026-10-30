@@ -787,14 +787,16 @@ both work; an annotated tag is read as the commit it points at.
 3. **deploy** needs both, and runs in the GitHub environment the plan chose, with that environment's secrets and
    variables. Deploys to one environment run one at a time: a running deploy is never cancelled, and a deploy
    waiting behind it is replaced by a newer one that starts waiting. Its steps:
-   - before anything is installed, checks that `herogen/service/modal_app.py` is in the commit and that every
-     setting below is set (`release.py check <tag>`). It fails the job with every problem at once: the missing
-     file, and each missing or blank setting by name, as a secret or a variable. Values are never printed;
+   - before anything is installed, checks that `herogen/service/modal_app.py` is in the commit, that every
+     setting below is set, and that the custom domain holds the base URL's host (`release.py check <tag>`). It
+     fails the job with every problem at once: the missing file, each missing or blank setting by name, as a
+     secret or a variable, and a domain or base URL that does not fit, naming both hosts. A secret's value is
+     never printed;
    - installs the Modal CLI pinned with its dependencies in `tools/release/requirements.txt`;
    - `release.py deploy <tag>` checks the same again, then runs
      `python -m modal deploy -m herogen.service.modal_app --tag <tag>`, so each Modal deployment is tagged with its
      release tag. The service bakes every `HEROGEN_SERVICE_*` variable of the deploying shell into its image, so
-     of those the deploy gets only the four variables below and two fixed ones; any other `HEROGEN_SERVICE_*`
+     of those the deploy gets only the five variables below and two fixed ones; any other `HEROGEN_SERVICE_*`
      variable in the job is removed. The fixed ones: `HEROGEN_SERVICE_MODE=production` (the service refuses to
      deploy in any other mode; staging deploys use it too) and `HEROGEN_SERVICE_EMAIL_PROVIDER=resend` (production
      mode needs a real email provider, and Resend is the only one the service has).
@@ -812,6 +814,14 @@ Each environment has its own custom domain, set up before its first deploy, so `
 from the start and the check requires it. Deploying first and then setting the base URL to the address Modal
 prints for the `web` function is not supported by this flow.
 
+`HEROGEN_SERVICE_DOMAIN` attaches the custom domain: the service passes it to its `web` function's
+`custom_domains`, reading it as a comma-separated list (entries stripped, empty ones dropped). The check reads it
+the same way and requires every entry to be a bare host name (no scheme, port or path), the base URL to be
+`https://<host>` with no port or path, and the base URL's host to be one of the entries (compared without regard
+to case). Usually it is that one host. The service accepts requests only for the base URL's host
+(`HEROGEN_SERVICE_HOSTS` defaults to it and is not passed), so any other domain listed is attached but its
+requests are refused.
+
 The SAM 3D apps that stage 3 can call, `herogen-sam3d-objects` and `herogen-sam3d-body`
 (`herogen/blender/remote/`), have fixed names, so staging and production share them. This flow does not deploy
 them; redeploying either changes it for both environments at once. Per-environment names for them are not built
@@ -823,7 +833,8 @@ Each GitHub environment needs:
 | --- | --- | --- |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | secret | The Modal API token the deploy runs with |
 | `HEROGEN_SERVICE_APP` | variable | The Modal app name, which prefixes every volume and secret of the service |
-| `HEROGEN_SERVICE_BASE_URL` | variable | The service's public `https://` origin, on the environment's own custom domain |
+| `HEROGEN_SERVICE_BASE_URL` | variable | The service's public origin, `https://<host>` on the environment's own custom domain |
+| `HEROGEN_SERVICE_DOMAIN` | variable | The custom domain the web function is served on: the base URL's host (a comma-separated list must include it) |
 | `HEROGEN_SERVICE_EMAIL_FROM` | variable | The sign-in mail's From address, on your own sending domain |
 | `HEROGEN_SERVICE_TERMS_VERSION` | variable | The version of the published terms users accept |
 

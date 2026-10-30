@@ -30,6 +30,7 @@ SETTINGS = {
     "HEROGEN_SERVICE_BASE_URL": "https://hero.example.org",
     "HEROGEN_SERVICE_EMAIL_FROM": "HeroGen <signin@hero.example.org>",
     "HEROGEN_SERVICE_TERMS_VERSION": "2026-10-01",
+    "HEROGEN_SERVICE_DOMAIN": "hero.example.org",
 }
 
 
@@ -371,7 +372,7 @@ class RootCase(unittest.TestCase):
         self.calls = []
 
     def entry(self):
-        (self.root / R.ENTRY_PATH).parent.mkdir(parents=True)
+        (self.root / R.ENTRY_PATH).parent.mkdir(parents=True, exist_ok=True)
         (self.root / R.ENTRY_PATH).write_text("app = None\n", encoding="utf-8")
 
     def run_(self, code=0):
@@ -405,7 +406,7 @@ class Config(unittest.TestCase):
         self.assertEqual(R.REQUIRED, (
             ("MODAL_TOKEN_ID", "secret"), ("MODAL_TOKEN_SECRET", "secret"), ("HEROGEN_SERVICE_APP", "variable"),
             ("HEROGEN_SERVICE_BASE_URL", "variable"), ("HEROGEN_SERVICE_EMAIL_FROM", "variable"),
-            ("HEROGEN_SERVICE_TERMS_VERSION", "variable")))
+            ("HEROGEN_SERVICE_TERMS_VERSION", "variable"), ("HEROGEN_SERVICE_DOMAIN", "variable")))
 
 
 class Check(RootCase):
@@ -456,6 +457,76 @@ class Check(RootCase):
         self.assertIn("is not a release tag", err)
 
 
+class Domain(RootCase):
+    """HEROGEN_SERVICE_DOMAIN: required, a bare host (or a comma list, as the service reads it) that holds the base
+    URL's host."""
+
+    def refused(self, **settings):
+        self.entry()
+        with self.assertRaises(R.ReleaseError) as e:
+            R.check("v2.0.0", dict(SETTINGS, **settings), self.root)
+        return str(e.exception)
+
+    def test_missing_or_blank(self):
+        env = dict(SETTINGS)
+        del env["HEROGEN_SERVICE_DOMAIN"]
+        self.entry()
+        with self.assertRaises(R.ReleaseError) as e:
+            R.check("v2.0.0", env, self.root)
+        self.assertIn("  variable HEROGEN_SERVICE_DOMAIN", str(e.exception))
+        for blank in ("", "  ", " , ,"):
+            with self.subTest(blank=blank):
+                msg = self.refused(HEROGEN_SERVICE_DOMAIN=blank)
+                self.assertIn("missing 1 setting(s)", msg)
+                self.assertIn("  variable HEROGEN_SERVICE_DOMAIN", msg)
+
+    def test_matching(self):
+        self.entry()
+        for domain, base in (("hero.example.org", "https://hero.example.org"),
+                             ("Hero.Example.ORG", "https://hero.example.org/"),
+                             ("hero.example.org", "https://HERO.example.org"),
+                             (" www.example.org , hero.example.org ", "https://hero.example.org")):
+            with self.subTest(domain=domain, base=base):
+                env = dict(SETTINGS, HEROGEN_SERVICE_DOMAIN=domain, HEROGEN_SERVICE_BASE_URL=base)
+                self.assertEqual(R.domain_problems(env), [])
+                R.check("v2.0.0", env, self.root)
+
+    def test_mismatched_host(self):
+        msg = self.refused(HEROGEN_SERVICE_DOMAIN="other.example.org")
+        self.assertIn("HEROGEN_SERVICE_BASE_URL's host hero.example.org is not in HEROGEN_SERVICE_DOMAIN "
+                      "(other.example.org)", msg)
+        msg = self.refused(HEROGEN_SERVICE_DOMAIN="a.example.org,b.example.org")
+        self.assertIn("(a.example.org, b.example.org)", msg)
+
+    def test_domain_must_be_a_bare_host(self):
+        for bad in ("https://hero.example.org", "hero.example.org/app", "hero.example.org:443", "hero", "-x.org",
+                    "hero..example.org", "hero example.org"):
+            with self.subTest(bad=bad):
+                self.assertIn("is not a bare host name", self.refused(HEROGEN_SERVICE_DOMAIN=bad))
+
+    def test_base_url_must_be_https_on_the_domain(self):
+        for bad in ("http://hero.example.org", "https://hero.example.org:8443", "https://hero.example.org/app",
+                    "hero.example.org", "https://"):
+            with self.subTest(bad=bad):
+                self.assertIn("must be https://<host> on the custom domain", self.refused(HEROGEN_SERVICE_BASE_URL=bad))
+
+    def test_every_problem_at_once_and_none_before_both_are_set(self):
+        msg = self.refused(HEROGEN_SERVICE_DOMAIN="https://x.example.org", MODAL_TOKEN_ID="")
+        self.assertIn("secret MODAL_TOKEN_ID", msg)
+        self.assertIn("is not a bare host name", msg)
+        self.assertIn("is not in HEROGEN_SERVICE_DOMAIN", msg)
+        self.assertEqual(R.domain_problems(dict(SETTINGS, HEROGEN_SERVICE_BASE_URL="")), [])
+
+    def test_passed_to_the_deploy(self):
+        self.entry()
+        env = dict(SETTINGS, HEROGEN_SERVICE_DOMAIN="hero.example.org")
+        self.assertEqual(R.deploy_env(env)["HEROGEN_SERVICE_DOMAIN"], "hero.example.org")
+        calls = []
+        R.deploy("v2.0.0", env, self.root, lambda cmd, cwd=None, env=None: calls.append(env) or
+                 subprocess.CompletedProcess(cmd, 0))
+        self.assertEqual(calls[0]["HEROGEN_SERVICE_DOMAIN"], "hero.example.org")
+
+
 class Deploy(RootCase):
     def test_runs_modal_deploy_with_only_the_service_settings(self):
         self.entry()
@@ -470,7 +541,8 @@ class Deploy(RootCase):
         self.assertEqual(service, {
             "HEROGEN_SERVICE_APP": "herogen-service-staging", "HEROGEN_SERVICE_BASE_URL": "https://hero.example.org",
             "HEROGEN_SERVICE_EMAIL_FROM": "HeroGen <signin@hero.example.org>",
-            "HEROGEN_SERVICE_TERMS_VERSION": "2026-10-01", "HEROGEN_SERVICE_MODE": "production",
+            "HEROGEN_SERVICE_TERMS_VERSION": "2026-10-01", "HEROGEN_SERVICE_DOMAIN": "hero.example.org",
+            "HEROGEN_SERVICE_MODE": "production",
             "HEROGEN_SERVICE_EMAIL_PROVIDER": "resend"})
         for k in ("PATH", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "MODAL_ENVIRONMENT"):
             self.assertEqual(denv[k], env[k])
