@@ -41,10 +41,13 @@ from this stage), grown by 2 px, inside the crop box; without a head mask, the f
 Outputs: `views/closeup-<view>.png` (the close-up as Muse Image returned it), `views/closeup-<view>-input.png`
 (the crop sent), `masks/closeup-<view>.png` (the footprint) and `views/closeup.json`: per view the recipe, the
 crop box, A, the measurements, `used` and, when a close-up is not used, why; plus the SHA-256 of the view image
-it was made from, so stage 4 ignores a close-up of an older turnaround. A view that fails keeps nothing.
+it was made from, so stage 4 ignores a close-up of an older turnaround. A view that fails keeps no image; the
+record is written in every case, also when no view is used (then with each view's reason, or the stage's
+`fallback`).
 
 This stage never fails a hero. Any error (a Model API failure after the client's retries, a replay miss, a missing
-input, a bug) is recorded with its reason, no close-up is written, and stage 4 bakes the plain views as before.
+input, a bug) is recorded with its reason (`fallback`), no close-up image is written, and stage 4 bakes the plain
+views as before.
 Its record is `stage-2f.json` (the same record, per view under `details.closeups`); no check is gated. No file
 another stage reads is changed (`views/<view>.png`, `masks/<view>.png` and `views/meta.json` are untouched), so the
 held-out views stay valid.
@@ -515,11 +518,10 @@ def stage2f_face_source(run: RunFolder, client: ModelClient) -> dict[str, Any]:
         record = {"stage": STAGE, "views": {}, "fallback": f"{type(e).__name__}: {e}"[:600]}
     used = sorted(v for v, r in record["views"].items() if r.get("used"))
     record["used_views"] = used
-    if used:
-        run.write_json(RECORD, record)
-        st.outputs += [RECORD] + [x for v in used for x in (record["views"][v]["file"],
-                                                          record["views"][v]["input"],
-                                                          record["views"][v]["footprint"])]
+    # The record is written even when no close-up is used, so stage 4 can say why for each view.
+    run.write_json(RECORD, record)
+    st.outputs += [RECORD] + [x for v in used for x in (record["views"][v]["file"], record["views"][v]["input"],
+                                                      record["views"][v]["footprint"])]
     # per view under "closeups": a stage record's "views" means held-out views (stage 2h) to other readers
     st.details = {**{k: v for k, v in record.items() if k != "views"}, "closeups": record["views"]}
     for v, r in record["views"].items():
