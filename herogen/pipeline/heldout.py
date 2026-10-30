@@ -74,8 +74,13 @@ from PIL import Image, ImageDraw
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
-from herogen.pipeline.client import IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss
 from herogen.pipeline.inputs import FACE_TEXT, HEAD_TEXT, best_instance, face_offset
+from herogen.pipeline import keypoints as KP
+from herogen.pipeline.sapiens import COST_BASIS as SAPIENS_COST_BASIS
+from herogen.pipeline.sapiens import POSE_MODEL, PoseClient, PoseError
+from herogen.pipeline.client import (
+    IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss, SamInstance,
+)
 from herogen.pipeline.runfolder import RunFolder, now_iso
 from herogen.pipeline.stages import _load, _Stage, degraded_masks, method_kind, sam_coverage, sam_figure_mask
 
@@ -179,6 +184,8 @@ AZIMUTH_CLEARANCE_DEG = 10.0
 # yet on real images. Not lowered to fit the windows.
 FIT_ERROR_DEG = (-2.0, 1.0)
 YAW_WINDOW_HALF_DEG = 5.0
+# Body keypoints (Sapiens 2) scoring less are left out of every keypoint fit.
+KP_MIN_SCORE = 0.3
 
 
 def yaw_window(target_deg: float) -> tuple[float, float]:
@@ -538,6 +545,57 @@ def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> d
     return out
 
 
+def _box(mask: np.ndarray) -> list[float] | None:
+    b = imaging.bbox(mask)
+    return None if b is None else [float(v) for v in b]
+
+
+def measure_keypoints(pose: PoseClient, img: Image.Image, mask: np.ndarray) -> dict[str, Any]:
+    """Sapiens 2 keypoints of the figure in ``img`` (its person box: ``mask``'s bounding box): the body joints
+    `keypoints.POSE_JOINTS` as [x, y, score] in ``img``'s px, and the mask's bottom edge row (the soles).
+
+    A Sapiens failure (`PoseError`, after the client's tries) is recorded with ``api_error`` set instead of
+    stopping the stage. Anything else is raised (a replay miss, a bug)."""
+    box = _box(mask)
+    if box is None:
+        return {"joints": None, "error": "no figure"}
+    try:
+        kps = pose.keypoints(img, box)
+    except PoseError as e:
+        return {"joints": None, "error": f"{type(e).__name__}: {e}"[:300], "api_error": True}
+    return {"joints": {n: [round(v, 3) for v in kps[n]] for n in KP.POSE_JOINTS if n in kps},
+            "box": box, "bottom": box[3]}
+
+
+def _seen(kp: dict[str, Any] | None, scale: float) -> dict[str, tuple[float, float, float]] | None:
+    """A measured view's joints in turnaround px (`keypoints.to_uz`), the low-scoring ones dropped."""
+    if not kp or not kp.get("joints"):
+        return None
+    return KP.to_uz({n: tuple(v) for n, v in kp["joints"].items()}, kp["bottom"], scale, KP_MIN_SCORE)
+
+
+def body_model(turnaround_kp: dict[str, Any] | None) -> KP.BodyModel | None:
+    """The turnaround's 3D joint model from its recorded keypoints (`turnaround_keypoints`); None when they are
+    missing or too few."""
+    if not turnaround_kp or any(not (turnaround_kp.get(v) or {}).get("joints") for v in ("front",)):
+        return None
+    f = turnaround_kp["front"]
+    side = {v: ({n: tuple(x) for n, x in turnaround_kp[v]["joints"].items()}, turnaround_kp[v]["bottom"])
+            if (turnaround_kp.get(v) or {}).get("joints") else (None, None) for v in ("left", "right")}
+    return KP.body_model({n: tuple(x) for n, x in f["joints"].items()}, side["left"][0], side["right"][0],
+                         front_bottom=f["bottom"], front_height=turnaround_kp["front_height"],
+                         left_bottom=side["left"][1], right_bottom=side["right"][1], min_score=KP_MIN_SCORE)
+
+
+def turnaround_keypoints(pose: PoseClient, views: dict[str, Image.Image], masks: dict[str, np.ndarray]
+                         ) -> dict[str, Any]:
+    """`measure_keypoints` of the turnaround's front, left and right views, and the front figure's height."""
+    out: dict[str, Any] = {v: measure_keypoints(pose, views[v], masks[v]) for v in ("front", "left", "right")}
+    fb = imaging.bbox(masks["front"])
+    out["front_height"] = float(fb[3] - fb[1]) if fb else 0.0
+    return out
+
+
 # ---- checks ------------------------------------------------------------------------------------------
 #
 # Thresholds come from exact 3/4 silhouettes of the stage-2 test humanoid at yaws 20-70 degrees, for both
@@ -615,10 +673,14 @@ def view_checks(
     view: HeldoutView, heldout: np.ndarray, model: TurnaroundModel | None, profile_toe: float,
     raw_area_frac: float, face: dict[str, Any], profile_face: float | None, *,
     profile_face_error: bool = False, mask_sam_coverage: float | None = None,
+    body: KP.BodyModel | None = None, keypoints: dict[str, Any] | None = None, kp_scale: float = 1.0,
 ) -> tuple[list[C.Check], dict[str, Any]]:
     """The checks for one held-out view (placed at the shared scale) and the measurements behind them.
 
     Gated checks reject the view; checks marked ``review`` send it to human review when they fail.
+    ``body``: the turnaround's joint model (`body_model`); ``keypoints``: the view's `measure_keypoints`, in
+    the px of the image they were measured on, ``kp_scale`` turnaround px per image px. Their fit
+    (`keypoints.fit_yaw`) is recorded as ``keypoint_fit`` (information only).
     ``profile_face_error``: the profile views' face cue failed on the Model API, so the head cue could not
     vote (needs review, like a failure on this view's face). ``mask_sam_coverage``: the figure mask's
     `sam_coverage`; under C.SAM_COVERAGE_MIN SAM missed the figure, the view is rejected and nothing else is
@@ -656,6 +718,9 @@ def view_checks(
     out.append(C.check("found_yaw_window_miss_deg", miss, YAW_WINDOW_REVIEW_DEG, op="<=", note=note))
     out.append(_review(C.check("found_yaw_in_window", miss, 0.0, op="<=", note=note)))
 
+    kseen = _seen(keypoints, kp_scale)
+    kfit = KP.fit_yaw(body, kseen) if body is not None and kseen is not None else None
+
     toe = toe_offset_h(heldout)
     toe_turn = view.facing * toe / profile_toe if profile_toe > 0.01 else None
     face_turn = None
@@ -676,6 +741,8 @@ def view_checks(
                                         "vote")))
     measured = {
         "found_yaw_deg": best["yaw_deg"],
+        "keypoint_fit": kfit,
+        "keypoints": keypoints,
         "fit": fit,
         "hand_z_morph": {"view": hand_z_morph(heldout, seen), "front": model.hand_z_morph,
                          "note": "information only; close to zero by construction"},
@@ -1143,7 +1210,8 @@ def checks_version() -> str:
     sources = [inspect.getsource(f) for f in (
         _runs, _band, _extent, landmarks, arm_slopes, TurnaroundModel, turnaround_model, landmark_errors,
         _rms, fit_yaw, hand_z_morph, yaw_range, range_clearance, azimuth_clearance, window_miss, yaw_window,
-        toe_offset_h, face_offset, _vote, _review, view_checks, view_status, recheck_view, C, imaging)]
+        toe_offset_h, face_offset, _vote, _review, view_checks, view_status, recheck_view, _seen, body_model, C,
+        imaging, KP)]
     digest = hashlib.sha256(json.dumps([consts, sources], sort_keys=True).encode()).hexdigest()[:12]
     return f"c-{digest}"
 
@@ -1165,6 +1233,9 @@ class _Context:
     profile_face_error: bool = False  # the profiles' face cue failed on the Model API
     identity: str = ""  # `stage2_identity`
     legs: GuideLegs | None = None  # the turn guide's legs (`guide_legs`); None: the outline rule
+    pose: PoseClient | None = None  # Sapiens 2 keypoints
+    turnaround_kp: dict[str, Any] | None = None  # `turnaround_keypoints`
+    body: KP.BodyModel | None = None  # `body_model` of them
 
 
 def _inputs(view: HeldoutView, ctx: _Context, request_deg: float
@@ -1228,9 +1299,10 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
         img, placed, pad = place_on_canvas(raw, mask, scale, ctx.size, ctx.bottom_row)
         measurable = coverage >= C.SAM_COVERAGE_MIN
         face = measure_face(client, raw, mask) if measurable else {"offset": None, "error": "no SAM figure"}
+        kps = measure_keypoints(ctx.pose, raw, mask) if measurable and ctx.body is not None else None
         checks, measured = view_checks(view, placed, ctx.model, ctx.profile_toe, float(mask.mean()), face,
                                        ctx.profile_face, profile_face_error=ctx.profile_face_error,
-                                       mask_sam_coverage=coverage)
+                                       mask_sam_coverage=coverage, body=ctx.body, keypoints=kps, kp_scale=scale)
         status = view_status(checks)
         tried.append({
             "attempt": attempt,
@@ -1376,9 +1448,11 @@ def check_provenance(run: RunFolder, prev: dict[str, Any], name: str, identity: 
 
 def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: TurnaroundModel | None,
                  profile_toe: float, profile_face: float | None, profile_face_error: bool,
-                 identity: str) -> tuple[dict[str, Any], list[C.Check], dict[str, str]]:
+                 identity: str, body: KP.BodyModel | None = None
+                 ) -> tuple[dict[str, Any], list[C.Check], dict[str, str]]:
     """Judge a recorded view's kept generation again under the current checks, from its files and recorded
-    measurements (no model calls). A human decision on the same image still holds (a rejection always; an
+    measurements, its keypoints included (no model calls). A human decision on the same image still holds (a
+    rejection always; an
     acceptance unless a gated check now fails). Returns the updated record, its checks and the file moves to
     its new status's folder."""
     view = VIEW_BY_NAME[name]
@@ -1392,8 +1466,13 @@ def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: Turnaround
     if coverage is None and method_kind(str(kept.get("mask_method", SAM_MODEL))) != SAM_MODEL:
         coverage = 0.0  # an earlier version measured it on a threshold mask: not a measurement
     face = (kept.get("measured") or {}).get("face") or {"offset": None}
+    kps = (kept.get("measured") or {}).get("keypoints")
+    if kps is None:
+        kps = {"joints": None, "error": "no keypoints recorded (made before they were measured)"}
     checks, measured = view_checks(view, placed, model, profile_toe, area, face, profile_face,
-                                   profile_face_error=profile_face_error, mask_sam_coverage=coverage)
+                                   profile_face_error=profile_face_error, mask_sam_coverage=coverage,
+                                   body=body, keypoints=kps,
+                                   kp_scale=float(kept.get("scale_view_px_per_raw_px", 1.0)))
     machine = view_status(checks)
     image_sha = d.get("image_sha256") or file_sha256(run.path / rels["image"])
     review = d.get("review")
@@ -1467,8 +1546,8 @@ def _commit(run: RunFolder, st: _HeldoutStage, prev: dict[str, Any], made: list[
 
 
 def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTEMPTS,
-                    views: list[str] | None = None, time_limit_s: float | None = TIME_LIMIT_S
-                    ) -> dict[str, Any]:
+                    views: list[str] | None = None, time_limit_s: float | None = TIME_LIMIT_S,
+                    pose: PoseClient | None = None) -> dict[str, Any]:
     """Generate, mask and check the held-out views for a run whose stage 2 passed: all four, or only
     ``views`` (by name), keeping the others, their files and their review decisions from the earlier record
     (each checked to come from the current turnaround, and judged again if the checks changed since).
@@ -1513,6 +1592,13 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     masks = {"front": front, "left": left, "right": right}
 
     st = _HeldoutStage(run, client, "2h", "heldout")  # type: ignore[arg-type]
+    own_pose = pose is None
+    if pose is None:  # Sapiens 2 shares the Model API client's cache folder and mode
+        pose = PoseClient(client.cache_dir, mode=client.mode)
+    pose_calls0 = len(pose.log.calls)
+
+    def pose_cost() -> float:
+        return pose.log.cost_usd(pose_calls0)
     shutil.rmtree(run.path / STAGING_DIR, ignore_errors=True)  # a run that was killed
     decisions = [dict(e) for e in (prev.get("details") or {}).get("decisions") or []]
     kept_checks = [c for c in prev.get("checks", [])
@@ -1541,8 +1627,9 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         base = dict(prev) if prev else {**run_rec, "ok": False, "outputs": [], "checks": [], "details": {},
                                         "calls": [], "cost_usd": 0.0, "run_cost_usd": 0.0}
         this = {"started": run_rec["started"], "seconds": run_rec["seconds"], "status": status,
-                "error": error, "made": [v.name for v in chosen], "cost_usd": run_rec["cost_usd"],
-                "calls": run_rec["calls"]}
+                "error": error, "made": [v.name for v in chosen],
+                "cost_usd": round(run_rec["cost_usd"] + pose_cost(), 6), "calls": run_rec["calls"],
+                "keypoint_calls": pose.log.calls[pose_calls0:]}
         stops = [r for r in earlier_stops if r.get("started") != this["started"]] + [this]
         rec = {**base, "ok": False, "status": status, "error": error, "run_cost_usd": prev_run_cost,
                "stopped_runs": stops, "cost_usd": round(prev_run_cost + sum(r["cost_usd"] for r in stops), 6)}
@@ -1578,12 +1665,15 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
             profile_face_error=any(f.get("api_error") for f in profile_face_found.values()),
             identity=identity,
             legs=legs,
+            pose=pose,
         )
+        ctx.turnaround_kp = turnaround_keypoints(pose, ctx.views, masks)
+        ctx.body = body_model(ctx.turnaround_kp)
         version = checks_version()
         for name, d in keep.items():
             if d.get("checks_version") != version:
                 new, checks, mv = recheck_view(run, name, d, ctx.model, ctx.profile_toe, profile_face,
-                                               ctx.profile_face_error, identity)
+                                               ctx.profile_face_error, identity, ctx.body)
                 per_view[name] = {**new, "run_started": per_view[name]["run_started"]}
                 kept_checks[:] = [c for c in kept_checks if c["name"].split(".", 1)[0] != name]
                 kept_checks += [{**c, "name": f"{name}.{c['name']}"} for c in checks]
@@ -1601,6 +1691,9 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         shutil.rmtree(run.path / STAGING_DIR, ignore_errors=True)
         stopped(f"{type(e).__name__}: {e}"[:800], status="error")
         raise
+    finally:
+        if own_pose:
+            pose.close()
     if keep:
         st.notes.append(f"Kept from earlier runs: {', '.join(keep)}.")
     assemble()
@@ -1618,6 +1711,10 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         "profile_face": _rounded(profile_face_found),
         "guide_legs": {"method": legs.method, "hips": list(legs.hips), "knees": [list(k) for k in legs.knees],
                        "soles": [list(k) for k in legs.soles], "feet": feet_found},
+        "turnaround_keypoints": ctx.turnaround_kp,
+        "keypoint_model": POSE_MODEL,
+        "keypoint_calls": pose.log.calls[pose_calls0:],
+        "keypoint_cost_basis": SAPIENS_COST_BASIS,
         "inputs": ("the cover; a pose reference (views/front.png, or the nearer profile once the request "
                    f"reaches {PROFILE_REFERENCE_FROM_DEG:.0f} degrees) and a mannequin turn guide at the "
                    "requested yaw, both centred on a canvas the cover's size at one scale (the figure "
@@ -1641,8 +1738,11 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     # This run's cost plus the runs that stopped since the run the earlier record describes.
     since = [r for r in earlier_stops if str(r.get("started", "")) > str(prev.get("started", ""))]
     stops_cost = sum(r.get("cost_usd", 0.0) for r in since)
-    return st.finish(lambda rec: rec.update({"run_cost_usd": rec["cost_usd"], "stopped_runs": since,
-                                             "cost_usd": round(rec["cost_usd"] + stops_cost, 6)}))
+    run_cost = pose_cost()
+    return st.finish(lambda rec: rec.update({"run_cost_usd": round(rec["cost_usd"] + run_cost, 6),
+                                             "stopped_runs": since,
+                                             "models": rec["models"] + [POSE_MODEL],
+                                             "cost_usd": round(rec["cost_usd"] + run_cost + stops_cost, 6)}))
 
 
 def accepted_views(run: RunFolder) -> dict[str, str]:
@@ -1677,15 +1777,16 @@ DECISIONS = ("accepted", "rejected")
 
 
 def _profile_values(run: RunFolder, rec: dict[str, Any]
-                    ) -> tuple[TurnaroundModel | None, float, float | None, bool]:
-    """The turnaround model and profile cues a recorded run was judged with, without model calls."""
+                    ) -> tuple[TurnaroundModel | None, float, float | None, bool, KP.BodyModel | None]:
+    """The turnaround models and profile cues a recorded run was judged with, without model calls."""
     m = {v: imaging.from_mask_image(_load(run, f"masks/{v}.png")) for v in ("front", "left", "right")}
     det = rec.get("details") or {}
     pf = det.get("profile_face") or {}
     return (turnaround_model(m["front"], m["left"], m["right"]),
             float(np.mean([abs(toe_offset_h(m[v])) for v in ("left", "right")])),
             det.get("profile_face_offset"),
-            any(isinstance(f, dict) and f.get("api_error") for f in pf.values()))
+            any(isinstance(f, dict) and f.get("api_error") for f in pf.values()),
+            body_model(det.get("turnaround_keypoints")))
 
 
 def recheck_heldout(run: RunFolder) -> dict[str, Any]:
@@ -1702,11 +1803,11 @@ def recheck_heldout(run: RunFolder) -> dict[str, Any]:
         if name not in VIEW_BY_NAME:
             raise ValueError(f"{name} is not a current held-out view; run stage 2h again")
         check_provenance(run, rec, name, identity)
-    model, toe, face, face_err = _profile_values(run, rec)
+    model, toe, face, face_err, body = _profile_values(run, rec)
     checks = [c for c in rec["checks"] if c["name"].split(".", 1)[0] not in views]
     moves: dict[str, str] = {}
     for name, d in list(views.items()):
-        new, ch, mv = recheck_view(run, name, d, model, toe, face, face_err, identity)
+        new, ch, mv = recheck_view(run, name, d, model, toe, face, face_err, identity, body)
         views[name] = {**new, "run_started": _view_started(rec, name)}
         checks += [{**c, "name": f"{name}.{c['name']}"} for c in ch] + _status_checks(name, views[name])
         moves.update(mv)

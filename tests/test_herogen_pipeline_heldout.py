@@ -27,7 +27,7 @@ from herogen.pipeline.results import stage5_results  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder, runs_root  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI, _decode_data_url, _img  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
-from test_herogen_pipeline_heldout_synth import figure, turnaround  # noqa: E402
+from test_herogen_pipeline_heldout_synth import FakePose, figure, turnaround, use_fake_pose  # noqa: E402
 
 BUILD_FILES = ["00-sketch.png", "01-cover.png", "02-turnaround.png", "stage-0.json", "stage-1.json",
                "stage-2.json", "views/meta.json"] + [f"views/{v}.png" for v in stages.ALL_VIEWS] \
@@ -49,6 +49,7 @@ class HeldoutTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "runs"
         self.sketch = Path(self.tmp.name) / "sketch.png"
         paint(place(figure_mask(200, "front"), (300, 280), (50, 40)), colour=(90, 90, 90)).save(self.sketch)
+        self.poses = use_fake_pose(self)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -693,6 +694,42 @@ class HeldoutTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["recheck", "--run-id", "r", "--runs", str(self.root)]), 0)
         self.assertEqual(sorted(heldout.accepted_views(run)), sorted(VIEWS))
+
+    def test_body_keypoints_are_measured_and_recorded(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        det = self._rec()["details"]
+        tk = det["turnaround_keypoints"]
+        for v in ("front", "left", "right"):
+            self.assertEqual(set(tk[v]["joints"]), set(heldout.KP.POSE_JOINTS))
+        self.assertGreater(tk["front_height"], 0)
+        self.assertEqual(det["keypoint_model"], heldout.POSE_MODEL)
+        self.assertEqual(len(det["keypoint_calls"]), 3 + len(VIEWS))  # the turnaround's three, one per generation
+        self.assertIn(heldout.POSE_MODEL, self._rec()["models"])
+        for view in heldout.VIEWS:
+            m = det["views"][view.name]["attempts"][0]["measured"]
+            self.assertEqual(m["keypoints"]["bottom"], m["keypoints"]["box"][3])
+            # The fake draws the requested turn; the keypoint fit finds it on the requested side.
+            self.assertAlmostEqual(m["keypoint_fit"][f"facing_{view.side}"]["yaw_deg"], view.yaw_deg, delta=4.0)
+            self.assertEqual(m["keypoint_fit"]["yaw_deg"] > 0, view.yaw_deg > 0)
+
+    def test_sapiens_failure_is_recorded_not_raised(self):
+        self.poses[:] = []
+        with mock.patch.object(heldout, "PoseClient", lambda *_a, **_k: FakePose(fail=True)):
+            self.assertIn(self._live(FakeAPI(), "r", [0, 1, 2]), (0, 2))
+        det = self._rec()["details"]
+        self.assertTrue(det["turnaround_keypoints"]["front"]["api_error"])
+        self.assertIsNone(heldout.body_model(det["turnaround_keypoints"]))
+        for view in heldout.VIEWS:
+            m = det["views"][view.name]["attempts"][0]["measured"]
+            self.assertIsNone(m["keypoint_fit"])
+
+    def test_recheck_uses_the_recorded_keypoints(self):
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        before = {n: d["attempts"][0]["measured"]["keypoint_fit"] for n, d in self._rec()["details"]["views"].items()}
+        with mock.patch.object(heldout, "PoseClient", side_effect=AssertionError("no model calls on recheck")):
+            rec = heldout.recheck_heldout(RunFolder(self.root, "r"))
+        for n, d in rec["details"]["views"].items():
+            self.assertEqual(d["attempts"][0]["measured"]["keypoint_fit"], before[n])
 
     def test_kept_views_are_judged_again_under_new_checks(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)

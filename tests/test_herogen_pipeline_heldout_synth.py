@@ -145,17 +145,30 @@ def figure(pose: str = "a", *, clothed: bool = True, arm_deg: float = 50.0, stri
     return fig
 
 
-def stick_figure(h: int = 200, pose: str = "a") -> synth.Figure:
-    """The stick-and-block figure of `test_herogen_pipeline_synth.figure_mask` as a 3D figure, in px: its
-    front mask and profiles are this figure's front and side silhouettes, so a fake turnaround sheet drawn
-    with `figure_mask` and a fake held-out view drawn with this agree. pose: "a", "down" (arms hanging),
-    "stride" (legs swung 25 degrees forward and back)."""
+def _floor_shift(fig: synth.Figure) -> float:
+    """How far `_drop_to_floor` moves ``fig`` down."""
+    lows = []
+    for p in fig.parts:
+        if isinstance(p, synth.Capsule):
+            lows.append(min(p.a[2], p.b[2]) - p.r)
+        elif isinstance(p, synth.Ellipsoid):
+            lows.append(p.c[2] - p.radii[2])
+        else:
+            lows.append(p.c[2] - p.half[2])
+    return min(lows)
+
+
+def _stick(h: int, pose: str) -> tuple[synth.Figure, dict[str, tuple[float, float, float]]]:
+    """The stick figure before it is dropped onto the floor, and its body joints (Sapiens 2 names)."""
     f = synth.Figure()
     r = 0.07 * h
     f.parts.append(synth.Ellipsoid((0.0, 0.0, h - r), (r, r, r)))
     f.parts.append(synth.RBox((0.0, 0.0, h - 0.34 * h), (0.14 * h, 0.08 * h, 0.21 * h), 1.0))
     reach = 0.36 * h * math.sin(math.radians(45))
-    for sx in (1.0, -1.0):
+    j = {"nose": (0.0, -r, h - r), "neck": (0.0, 0.0, h - 2 * r),
+         "left_eye": (0.4 * r, -0.9 * r, h - 0.7 * r), "right_eye": (-0.4 * r, -0.9 * r, h - 0.7 * r),
+         "left_ear": (r, 0.0, h - r), "right_ear": (-r, 0.0, h - r)}
+    for sx, side in ((1.0, "left"), (-1.0, "right")):
         top = (0.14 * h * sx, 0.0, h - 0.17 * h)
         end = (top[0] + sx * reach, 0.0, top[2] - reach) if pose != "down" else (top[0] + sx * 0.02 * h, 0.0,
                                                                                      top[2] - 0.36 * h)
@@ -168,9 +181,126 @@ def stick_figure(h: int = 200, pose: str = "a") -> synth.Figure:
             f.parts.append(synth.Capsule(hip, ankle, 0.05 * h))
         else:
             f.parts.append(synth.RBox(mid, (0.05 * h, 0.05 * h, ln / 2), 1.0))
-        f.parts.append(synth.RBox((ankle[0], ankle[1] - 0.035 * h, ankle[2] + 0.0175 * h),
-                                  (0.05 * h, 0.095 * h, 0.0175 * h), 1.0))
-    return _drop_to_floor(f)
+        foot = (ankle[0], ankle[1] - 0.035 * h, ankle[2] + 0.0175 * h)
+        f.parts.append(synth.RBox(foot, (0.05 * h, 0.095 * h, 0.0175 * h), 1.0))
+        j[f"{side}_shoulder"], j[f"{side}_wrist"] = top, end
+        j[f"{side}_elbow"] = tuple((a + b) / 2 for a, b in zip(top, end, strict=True))
+        j[f"{side}_hip"], j[f"{side}_knee"] = hip, mid
+        j[f"{side}_ankle"] = (ankle[0], ankle[1], ankle[2] + 0.05 * h)
+        j[f"{side}_big_toe"] = (foot[0] - 0.02 * h * sx, foot[1] - 0.08 * h, foot[2])
+        j[f"{side}_small_toe"] = (foot[0] + 0.03 * h * sx, foot[1] - 0.07 * h, foot[2])
+        j[f"{side}_heel"] = (foot[0], foot[1] + 0.085 * h, foot[2])
+    return f, j
+
+
+def stick_figure(h: int = 200, pose: str = "a") -> synth.Figure:
+    """The stick-and-block figure of `test_herogen_pipeline_synth.figure_mask` as a 3D figure, in px: its
+    front mask and profiles are this figure's front and side silhouettes, so a fake turnaround sheet drawn
+    with `figure_mask` and a fake held-out view drawn with this agree. pose: "a", "down" (arms hanging),
+    "stride" (legs swung 25 degrees forward and back)."""
+    return _drop_to_floor(_stick(h, pose)[0])
+
+
+def stick_joints(h: int = 200, pose: str = "a") -> dict[str, tuple[float, float, float]]:
+    """`stick_figure`'s body joints, on the same floor."""
+    f, j = _stick(h, pose)
+    dz = _floor_shift(f)
+    return {n: (x, y, z - dz) for n, (x, y, z) in j.items()}
+
+
+def turned_joints(fig: synth.Figure, joints: dict, yaw_deg: float, size: int = SIZE, ppu: float = PPU
+                  ) -> dict[str, tuple[float, float]]:
+    """Image (col, row) of ``joints`` (pixel centres at integers) in `turned_mask`'s frame at ``yaw_deg``."""
+    a = math.radians(yaw_deg)
+    c, s = math.cos(a), math.sin(a)
+    prims = [_prim(p, c, s) for p in fig.parts]
+    lo = np.min([synth._bounds(p)[0] for p in prims], axis=0)
+    hi = np.max([synth._bounds(p)[1] for p in prims], axis=0)
+    u0, v0 = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
+    out = {}
+    for n, p in joints.items():
+        u, v = _turn(p, c, s)
+        out[n] = ((u - u0) * ppu + size / 2 - 0.5, (v0 - v) * ppu + size / 2 - 0.5)
+    return out
+
+
+class FakePose:
+    """A stand-in for `herogen.pipeline.sapiens.PoseClient` for images of the stick figure: it finds the pose
+    and yaw whose `turned_mask` best matches the figure in the box (height-normalised), then returns the stick
+    figure's joints seen there, mapped onto the box. ``fail``: raise `PoseError` instead (Sapiens down)."""
+
+    POSES = ("a", "down", "stride")
+    N = 48  # height of the normalised comparison grid, px
+    _CANDS: list | None = None  # shared: [(pose, yaw, figure, box, normalised mask)], the masks stacked
+
+    def __init__(self, fail: bool = False, mode: str = "live") -> None:
+        from herogen.pipeline.sapiens import PoseLog  # noqa: PLC0415
+
+        self.fail, self.mode, self.calls = fail, mode, []
+        self.log = PoseLog()
+
+    @classmethod
+    def _norm(cls, m: np.ndarray) -> np.ndarray:
+        b = imaging.bbox(m)
+        crop = m[b[1] : b[3], b[0] : b[2]]
+        k = cls.N / crop.shape[0]
+        w = max(1, min(cls.N * 2, round(crop.shape[1] * k)))
+        img = imaging.to_mask_image(crop).resize((w, cls.N), Image.BILINEAR)
+        out = np.zeros((cls.N, cls.N * 2), dtype=bool)
+        x0 = cls.N - w // 2
+        drawn = imaging.from_mask_image(img)
+        out[:, max(0, x0) : x0 + w] = drawn[:, max(0, -x0) : max(0, -x0) + min(w, 2 * cls.N)]
+        return out
+
+    @classmethod
+    def _candidates(cls) -> tuple[list, np.ndarray]:
+        if cls._CANDS is None:
+            cands = []
+            for pose in cls.POSES:
+                fig = stick_figure(200, pose)
+                for yaw in range(-90, 91):
+                    m = turned_mask(fig, yaw, size=200, ppu=0.5)
+                    cands.append((pose, float(yaw), fig, imaging.bbox(m)))
+                    cands[-1] += (cls._norm(m),)
+            cls._CANDS = [cands, np.stack([c[4] for c in cands])]
+        return cls._CANDS[0], cls._CANDS[1]
+
+    def keypoints(self, image: Image.Image, box: list[float]) -> dict[str, tuple[float, float, float]]:
+        from herogen.pipeline.sapiens import PoseError  # noqa: PLC0415
+
+        self.calls.append(list(box))
+        self.log.calls.append({"model": "fake-pose", "cached": False, "cost_usd": 0.0})
+        if self.fail:
+            raise PoseError("fake Sapiens is down")
+        mask = np.asarray(image.convert("L")) < 200  # the fakes paint the figure on white
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        sub = np.zeros_like(mask)
+        sub[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+        cands, stack = self._candidates()
+        pose, yaw, fig, cb, _ = cands[int(np.argmax((stack == self._norm(sub)).sum(axis=(1, 2))))]
+        self.found = (pose, yaw)
+        k = (y1 - y0) / (cb[3] - cb[1])
+        pts = turned_joints(fig, stick_joints(200, pose), yaw, size=200, ppu=0.5)
+        return {n: (x0 + (c + 0.5 - cb[0]) * k - 0.5, y0 + (r + 0.5 - cb[1]) * k - 0.5, 0.9)
+                for n, (c, r) in pts.items()}
+
+    def close(self) -> None:
+        pass
+
+
+def use_fake_pose(test: unittest.TestCase, **kw) -> list[FakePose]:
+    """Make every stage 2h in ``test`` read keypoints from a `FakePose` (no Modal); returns the list each new
+    one is appended to."""
+    made: list[FakePose] = []
+
+    def factory(_cache_dir, mode: str = "replay") -> FakePose:
+        made.append(FakePose(mode=mode, **kw))
+        return made[-1]
+
+    p = mock.patch.object(heldout, "PoseClient", factory)
+    p.start()
+    test.addCleanup(p.stop)
+    return made
 
 
 REQUEST = re.compile(r"(\d+) degrees from the front, the toes and face toward the (left|right) edge")

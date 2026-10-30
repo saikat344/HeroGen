@@ -32,6 +32,7 @@ from fake_model_server import (  # noqa: E402
 )
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
+from test_herogen_pipeline_heldout_synth import use_fake_pose  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
 
 KINDS = {stages.COVER_PROMPT: "cover", stages.TURNAROUND_PROMPT: "sheet", stages.TOP_PROMPT: "top"}
@@ -131,6 +132,7 @@ class FaultInjectionTest(unittest.TestCase):
         self.sketch = Path(self.tmp.name) / "sketch.png"
         paint(place(figure_mask(200, "front"), (300, 280), (50, 40)), colour=(90, 90, 90)).save(self.sketch)
         self.err = ""
+        use_fake_pose(self)
 
     def tearDown(self):
         # Whatever the fault, no stage is ever ok on a mask SAM did not make.
@@ -306,6 +308,7 @@ class LegacyRecordTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        use_fake_pose(self)
 
     def tearDown(self):
         self.tmp.cleanup()

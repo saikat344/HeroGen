@@ -23,7 +23,7 @@ from herogen.pipeline import facesource, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
-from test_herogen_pipeline_heldout_synth import fake_heldout_image  # noqa: E402
+from test_herogen_pipeline_heldout_synth import fake_heldout_image, use_fake_pose  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
 from fake_model_server import NOT_A_PHOTO, is_question, question_answer  # noqa: E402
 
@@ -129,6 +129,7 @@ class _RunsTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "runs"
         self.sketch = Path(self.tmp.name) / "sketch.png"
         paint(place(figure_mask(200, "front"), (300, 280), (50, 40)), colour=(90, 90, 90)).save(self.sketch)
+        use_fake_pose(self)
 
     def tearDown(self):
         self.tmp.cleanup()
