@@ -1,8 +1,8 @@
 name: release
 
 # A tag vX.Y.Z-rc.N deploys the hosted service to staging; a tag vX.Y.Z deploys it to production, only when the
-# same commit carries a vX.Y.Z-rc.N tag. The rules are tools/release/release.py; docs/ARCHITECTURE.md ("Releases")
-# describes the flow and the settings each GitHub environment needs.
+# same commit carries a vX.Y.Z-rc.N tag and staging has a successful deployment of that commit. The rules are
+# tools/release/release.py; docs/ARCHITECTURE.md ("Releases") describes the flow and the settings it needs.
 
 on:
   push:
@@ -15,6 +15,10 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Reading deployments is for the staging check of a production tag; no other job gets it.
+    permissions:
+      contents: read
+      deployments: read
     outputs:
       environment: ${{ steps.plan.outputs.environment }}
     steps:
@@ -30,6 +34,8 @@ jobs:
         id: plan
         env:
           TAG: ${{ github.ref_name }}
+          # The token goes to this step only; the checkout keeps none.
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/release/release.py plan "$TAG"
 
   test:
