@@ -32,7 +32,7 @@ class SamPaidResponseTest(unittest.TestCase):
     def test_failed_decode_keeps_the_response_and_bills_once(self):
         posts = []
 
-        def fake_post(_client, endpoint, body):
+        def fake_post(_client, endpoint, body, **_):
             posts.append(endpoint)
             return _RESPONSE
 

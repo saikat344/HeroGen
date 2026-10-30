@@ -21,12 +21,14 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import checks as C  # noqa: E402
 from herogen.pipeline import client as client_mod  # noqa: E402
-from herogen.pipeline import heldout, stages  # noqa: E402
+from herogen.pipeline import heldout, retry, stages  # noqa: E402
 from herogen.pipeline.__main__ import run_pipeline  # noqa: E402
 from herogen.pipeline.client import ModelClient, ReplayMiss, SamInstance  # noqa: E402
 from herogen.pipeline.results import collect  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder  # noqa: E402
-from fake_model_server import FakeModelServer, data_url_image, error_body, pixels_key, sam_response  # noqa: E402
+from fake_model_server import (  # noqa: E402
+    FakeModelServer, data_url_image, error_body, pipeline_without_waits, pixels_key, sam_response,
+)
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
@@ -135,11 +137,13 @@ class FaultInjectionTest(unittest.TestCase):
     def _live(self, api: FaultyAPI, run_id: str = "r", stage_list=(0, 1, 2, 5)) -> int:
         server = FakeModelServer(api.respond, DUMMY_KEY)
         err = io.StringIO()
-        with server.serving(), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
-                mock.patch.object(client_mod.time, "sleep", lambda s: None), \
-                mock.patch.object(client_mod, "decode_sam_output", api.decode), contextlib.redirect_stderr(err):
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                pipeline_without_waits(), mock.patch.object(client_mod, "decode_sam_output", api.decode), \
+                contextlib.redirect_stderr(err), self.assertLogs("herogen.pipeline.client", "WARNING") as logs:
+            client_mod.log.warning("test run starts")  # assertLogs needs one record even when nothing retries
             code = run_pipeline(self.sketch, run_id, list(stage_list), mode="live", runs=str(self.root))
-        self.server, self.err = server, err.getvalue()
+        self.server, self.err, self.logs = server, err.getvalue(), logs.output
+        self.assertFalse([line for line in logs.output if DUMMY_KEY in line or "earer" in line])
         self.assertTrue(all(h["auth_ok"] == "True" for _, h in server.requests))
         return code
 
@@ -166,7 +170,7 @@ class FaultInjectionTest(unittest.TestCase):
         self.assertIn("HTTP 429", s1["error"])
         self.assertIn("the Model API failed", self.err)
         self.assertEqual(self.server.count("images/edits"), 0)  # no cover made for an unmeasurable sketch
-        self.assertEqual(self.server.count("responses"), client_mod.RETRIES + 1)
+        self.assertEqual(self.server.count("responses"), retry.MAX_ATTEMPTS)
         self.assertFalse((self.root / "r" / "01-masks").exists())
         self._no_failure_cached()
         status = {s["stage"]: s["status"] for s in collect(RunFolder(self.root, "r"))["stages"]}
@@ -190,7 +194,7 @@ class FaultInjectionTest(unittest.TestCase):
         api = FaultyAPI({"sketch": 500}, texts=(stages.SAM_TEXTS[0],))
         self.assertEqual(self._live(api), 1)
         self.assertEqual(self._stage(1)["status"], "error")
-        self.assertEqual(api.sam_kinds, ["sketch"] * (client_mod.RETRIES + 1))
+        self.assertEqual(api.sam_kinds, ["sketch"] * (retry.MAX_ATTEMPTS))
 
     def test_an_incomplete_sam_answer_is_not_nothing_found(self):
         # An incomplete answer carries no output, which would read as zero instances; only its status tells.
@@ -210,14 +214,15 @@ class FaultInjectionTest(unittest.TestCase):
         self.assertEqual(self._live(FaultyAPI({"sheet": "failed"})), 1)
         s2 = self._stage(2)
         self.assertEqual(s2["status"], "error")
-        self.assertIn("status is 'failed'", s2["error"])
-        self.assertIn("server_error", s2["error"])
+        self.assertIn(f"failed after {retry.MAX_ATTEMPTS} attempts: HTTP 200 with status 'failed'", s2["error"])
+        self.assertIn("server_error", s2["error"])  # a transient failure: retried like a 500, then stopped
 
     def test_a_failed_muse_answer_stops_stage1(self):
         self.assertEqual(self._live(FaultyAPI({}, muse_faults={"cover": "failed"})), 1)
         s1 = self._stage(1)
         self.assertEqual(s1["status"], "error")
-        self.assertIn("images/edits: the response status is 'failed'", s1["error"])
+        self.assertIn(f"images/edits failed after {retry.MAX_ATTEMPTS} attempts: HTTP 200 with status 'failed'",
+                      s1["error"])
         self.assertFalse((self.root / "r" / "01-cover.png").exists())
 
     def test_no_character_in_the_sketch_rejects_the_input(self):
