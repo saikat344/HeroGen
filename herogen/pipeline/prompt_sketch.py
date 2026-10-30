@@ -210,14 +210,45 @@ def stagep_prompt(
     version: prompts.PromptVersion | None = None,
     same_version: prompts.PromptVersion | None = None,
 ) -> dict[str, Any]:
-    version = version or prompts.selected("prompt_sketch")
-    same_version = same_version or prompts.selected("same_character")
+    """Run stage p.
+
+    Before anything else the earlier ``stage-p.json`` is deleted (first, so if that fails nothing else has been
+    touched), then the earlier images, then a ``running`` record (``ok: false``) is written. From then on
+    ``stage-p.json`` is either absent or describes this run. Every error is recorded with ``ok: false`` before it
+    propagates (an unexpected one is re-raised as it is) whenever the record can still be written; when it can't
+    (a full disk, say), that write's error propagates and no record is left. A failed gate is recorded by
+    ``finish``."""
     st = _Stage(run, client, STAGE, "prompt_sketch")
-    # A rerun starts clean, so no image from an earlier run of this stage can be mistaken for this run's.
+    # A rerun starts clean: no record or image from an earlier run of this stage can be mistaken for this run's.
+    (run.path / f"stage-{STAGE}.json").unlink(missing_ok=True)
     for rel in (DESIGN, SKETCH):
         (run.path / rel).unlink(missing_ok=True)
     shutil.rmtree(run.path / ATTEMPTS_DIR, ignore_errors=True)
-    st.details = {"prompt_version": version.ref(), "same_character_version": same_version.ref(), "attempts": []}
+    st.details = {"attempts": []}
+    st.fail("stage p started and has not finished", status="running")
+    try:
+        return _stagep(st, run, client, user_text, version, same_version)
+    except (GateFailed, InputRejected, PromptStageError):
+        raise  # already recorded
+    except Exception as e:
+        attempts = st.details.get("attempts") or []
+        if attempts and "pass" not in attempts[-1] and "error" not in attempts[-1]:
+            attempts[-1]["error"] = f"{type(e).__name__}: {e}"
+        st.fail(f"{type(e).__name__}: {e}")
+        raise
+
+
+def _stagep(
+    st: _Stage,
+    run: RunFolder,
+    client: ModelClient,
+    user_text: Any,
+    version: prompts.PromptVersion | None,
+    same_version: prompts.PromptVersion | None,
+) -> dict[str, Any]:
+    version = version or prompts.selected("prompt_sketch")
+    same_version = same_version or prompts.selected("same_character")
+    st.details.update({"prompt_version": version.ref(), "same_character_version": same_version.ref()})
     max_chars, delimiters = _user_text_rules(version)
     try:
         character = clean_user_text(user_text, max_chars=max_chars, delimiters=delimiters)
