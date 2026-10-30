@@ -106,7 +106,16 @@ Muse Image, 5 photo-realistic and 8 stylised 3D renders of characters, 4 phone p
 toy and a statue. The photos of people measure 0.95-1.0 and everything else 0-0.10, and 0.5 lies inside that gap.
 The photos of people are generated, not photos of real people; real photographs are not yet part of the measurement.
 
-Besides the figure prompt and the photo question (about $0.002-0.004), the input checks make 3 or 4 SAM 3.1 calls on the sketch ($0.0075-0.01 at list price).
+Besides the figure prompt and the photo question (about $0.002-0.004 with reported usage), the input checks make
+3 or 4 SAM 3.1 calls on the sketch ($0.0075-0.01 at list price). The photo question uses the shared strict-schema
+`ModelClient.compare_images` path through `_post`, with its pricing function supplied for every Muse Spark
+attempt. `inputs.PHOTO_MAX_OUTPUT_TOKENS` explicitly keeps its output cap at 3000: reported token counts are
+priced as reported, and missing output usage is estimated at that cap ($0.01275, plus any reported input).
+A retried failed answer retains its own cost; an unanswered or unreadable attempt is counted at the cap.
+A refused question stops the stage before further model calls; it is never skipped. These calls and their costs
+are included in the stage record under the same accounting policy as stage p (see "Model API calls" below).
+A client failure after an uncached call writes the stage's error record before propagating, preserving every
+logged attempt and its cost, including answers that fail schema validation.
 A run recorded without them has no cache entries for those calls, so replaying its stage 1 stops on a replay miss.
 
 ## Views and cameras
@@ -988,13 +997,17 @@ AnimationConstraint variant is not written.
 All Muse Image, SAM 3.1 and Muse Spark (`muse-spark-1.3`, stage p's identity check) calls go through one request
 path, `ModelClient._post` in `herogen/pipeline/client.py`; the policy is in `herogen/pipeline/retry.py`.
 
-Muse Spark (`muse-spark-1.3`) answers questions about images (`ModelClient.compare_images`): one Responses API
+Muse Spark (`muse-spark-1.3`) answers questions about images (`ModelClient.compare_images`), including stage 1's
+photo input check and stage p's identity check: one Responses API
 call with the prompt, the images as JPEG data URLs scaled to at most 1024 px, and a strict JSON schema. The answer
 is checked against the schema, live and on replay (types, required fields, enums, no extra fields; a schema keyword
 outside that subset is refused), so a non-conforming answer stops the stage instead of being guessed. It is
 cached like any result; an incomplete answer is never cached. Its cost is estimated from the token usage at
-$1.25 / $4.25 per million input / output tokens (reasoning counts as output) and logged per call; a call whose
-answer never came back is counted at 0, since its tokens are unknown.
+$1.25 / $4.25 per million input / output tokens (reasoning counts as output) and logged per call. The pricing
+function passed to `_post` uses `answer_cost_usd` for successful and retried failed answers alike: reported
+counts are priced as reported, missing output at the request's output cap, and missing input at 0. An attempt
+whose answer never came back is counted at the output cap, as detailed below, so a possibly billed attempt
+without usage is never counted at $0.
 
 - **What is retried:** HTTP 408, 409, 425, 429 and 5xx, except 501 and 505 (they say the request can never
   work), and network errors (no HTTP status). Never any other 4xx, and never a 200 whose body is not a JSON
