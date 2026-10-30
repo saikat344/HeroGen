@@ -831,9 +831,9 @@ def _overlap(p: tuple[float, float], q: tuple[float, float]) -> float:
 
 def _trace_leg(mask: np.ndarray, run: tuple[float, float], r_from: int, r_to: int) -> tuple[float, float]:
     """Follow one leg's ``run`` of row ``r_from`` up the outline to row ``r_to``. On each row above, of the
-    runs overlapping the last one, the one overlapping ``run`` itself most (then the last one), so where a
-    hand, an arm, a tail or the other leg joins the leg for some rows and parts from it again, the trace goes
-    on up the part over the leg's own columns; a row with no overlapping run keeps the last. Two legs that
+    runs overlapping the last one, keep the one overlapping ``run`` itself most (then the last one). The
+    starting columns favour the leg when a touching prop parts from it again, but cannot separate a prop
+    that still overlaps those columns. A row with no overlapping run keeps the last. Two legs that
     join into the pelvis below ``r_to`` both end on the run they join."""
     a, b = run
     for r in range(r_from - 1, r_to - 1, -1):
@@ -845,11 +845,11 @@ def _trace_leg(mask: np.ndarray, run: tuple[float, float], r_from: int, r_to: in
 
 def legs_from_feet(front: np.ndarray, feet: list[np.ndarray], method: str) -> GuideLegs | None:
     """The legs anchored on two detected feet (full-size masks, image-left first): each foot's leg is the
-    sole-row run its pixels in that row overlap most (two feet on one run, standing together, split it
-    halfway between them). Each leg is followed up the outline (`_trace_leg`) to the knee row and on to the
-    hip row; legs on one run at the knee row split it at its middle; the hips span from the image-left
-    leg's left edge to the image-right leg's right edge (the run both reach, when they join below the hip
-    row). ``method`` is recorded with them. None when a foot has no pixel on a run of the sole row."""
+    sole-row run its pixels in that row overlap most, clipped to the foot's own columns. Each leg is
+    followed up the outline (`_trace_leg`) to the knee row and on to the hip row; legs on one run at the
+    knee row split it at its middle; the hips span from the image-left leg's left edge to the image-right
+    leg's right edge (the run both reach, when they join below the hip row). ``method`` is recorded with
+    them. None when a foot has no pixel on a run of the sole row."""
     rows = {n: _row_at(front, f) for n, f in GuideLegs.ROWS.items()}
     sole_runs = _runs(front[rows["sole"]])
     picked = []
@@ -861,13 +861,9 @@ def legs_from_feet(front: np.ndarray, feet: list[np.ndarray], method: str) -> Gu
         over = [(min(q[1], hi) - max(q[0], lo), q) for q in sole_runs if q[0] < hi and q[1] > lo]
         if not over:
             return None
-        picked.append((max(over)[1], (lo, hi)))
-    (run_l, foot_l), (run_r, foot_r) = picked
-    if run_l == run_r:  # standing with the feet together: split the run between the two feet
-        m = (foot_l[1] + foot_r[0]) / 2
-        soles = ((run_l[0], m), (m, run_l[1]))
-    else:
-        soles = (run_l, run_r)
+        run = max(over)[1]
+        picked.append((max(run[0], lo), min(run[1], hi)))
+    soles = tuple(picked)
     knees = tuple(_trace_leg(front, run, rows["sole"], rows["knee"]) for run in soles)
     if knees[0] == knees[1]:
         a, b = knees[0]
@@ -905,10 +901,22 @@ def find_feet(client: ModelClient, img: Image.Image, figure: np.ndarray,
 
 def guide_legs(front: np.ndarray, feet: list[np.ndarray], prompt: str | None = None) -> GuideLegs:
     """The guide's legs: anchored on the feet SAM found (`legs_from_feet`; method ``sam-3.1:<prompt>``), as a
-    silhouette alone can't tell a leg from a tail, a staff or a cape, but a foot is never one of those.
+    silhouette alone can't tell a leg from a tail, a staff or a cape.
     Without two feet on the sole row, the outline rule (`legs_from_outline`; method ``outline``)."""
     legs = legs_from_feet(front, feet, f"{SAM_MODEL}:{prompt}") if len(feet) == 2 else None
     return legs if legs is not None else legs_from_outline(front)
+
+
+def find_guide_legs(client: ModelClient, img: Image.Image,
+                    front: np.ndarray) -> tuple[GuideLegs, dict[str, Any]]:
+    """The guide's legs (`guide_legs`) on the feet `find_feet` finds, and what it found. When no prompt found
+    two usable feet, the outline rule draws them and ``fallback_reason`` records why. A Model API failure or a
+    replay miss on the feet is raised, so the stage stops."""
+    feet, found = find_feet(client, img, front)
+    legs = guide_legs(front, feet, found["prompt"])
+    if legs.method == "outline":
+        found["fallback_reason"] = "two usable feet were not found on the sole row"
+    return legs, found
 
 
 def _guide_shapes(front: np.ndarray, left: np.ndarray, right: np.ndarray, yaw_deg: float,
@@ -1554,8 +1562,7 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     try:
         profile_face, profile_face_found = _profile_face(client, run)
         front_view = _load(run, "views/front.png")
-        feet, feet_found = find_feet(client, front_view, front)
-        legs = guide_legs(front, feet, feet_found["prompt"])
+        legs, feet_found = find_guide_legs(client, front_view, front)
         ctx = _Context(
             cover=cover,
             views={v: _load(run, f"views/{v}.png") for v in masks},

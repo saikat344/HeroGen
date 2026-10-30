@@ -34,7 +34,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.blender import synth  # noqa: E402  (read-only use of the stage-2 test humanoid)
 from herogen.pipeline import heldout, imaging  # noqa: E402
-from herogen.pipeline.client import ApiError, SamInstance  # noqa: E402
+from herogen.pipeline.client import ApiError, ReplayMiss, SamInstance  # noqa: E402
 
 SIZE = 512
 PPU = 80.0  # pixels per stud: the 5.5-stud figure is 440 px tall, the same scale as synth.render_masks
@@ -843,6 +843,31 @@ class GuideLegsTest(unittest.TestCase):
         self.assertEqual(legs.hips, self._runs(front, "hip")[0] if len(self._runs(front, "hip")) == 1
                          else next(r for r in self._runs(front, "hip") if r[0] <= 256 < r[1]))
 
+    def test_wider_shield_touching_a_foot_at_the_sole_row(self):
+        plain = np.zeros((480, 400), dtype=bool)
+        plain[40:100, 185:215] = True
+        plain[100:240, 145:255] = True
+        plain[240:440, 160:180] = True
+        plain[240:440, 220:240] = True
+        front = plain | _box(plain, 243, 250, 303, 440)  # shield three times wider than a leg
+        front[425:440, 240:243] = True  # shield touches the foot in the bottom 15 rows
+        for mirror in (False, True):
+            with self.subTest(mirror=mirror):
+                body, shield = (np.fliplr(m) if mirror else m for m in (plain, front))
+                feet = self._feet(body)
+                self.assertEqual(len(self._runs(shield, "sole")), 2)  # one foot has merged with the shield
+                self.assertEqual(len(self._runs(shield, "knee")), 3)
+                legs = self._legs(shield, feet)
+                self.assertEqual(legs.knees, tuple(self._runs(body, "knee")))
+                self.assertEqual(legs.soles, tuple(self._runs(body, "sole")))
+                self.assertEqual(legs.hips, (160, 240))
+                lines, _ = self._leg_lines(shield, legs)
+                fb = imaging.bbox(shield)
+                cx = (fb[0] + fb[2]) / 2
+                for line, (a, b) in zip(lines, legs.soles, strict=True):
+                    self.assertEqual(line[1][0] + cx, (a + b) / 2)  # knee
+                    self.assertEqual(line[2][0] + cx, (a + b) / 2)  # ankle
+
     def test_arm_thicker_than_the_thigh_it_touches(self):
         # An arm 40 px thick (the thigh is 36) that touches the image-left thigh between the hip and knee
         # rows and is apart from it at the hip row: the hips stay on the legs.
@@ -859,16 +884,15 @@ class GuideLegsTest(unittest.TestCase):
 
     def test_feet_together(self):
         # Legs pressed together (one run at the knee row) and feet touching (one run at the sole row): the
-        # sole run is split halfway between the two feet, the knee run at its middle.
+        # soles stay within the detected feet, the knee run is split at its middle.
         plain = turnaround(figure("a", clothed=False, leg_spread=-0.3))["front"]
         feet = self._feet(plain)
         (fl, fr) = self._runs(plain, "sole")
         b = imaging.bbox(plain)
         plain[b[3] - 20 : b[3], fl[1] : fr[0]] = True  # the feet touch
-        (sole,) = self._runs(plain, "sole")
-        m = (fl[1] + fr[0]) / 2
+        self.assertEqual(len(self._runs(plain, "sole")), 1)
         legs = self._legs(plain, feet)
-        self.assertEqual(legs.soles, ((sole[0], m), (m, sole[1])))
+        self.assertEqual(legs.soles, (fl, fr))
         (knee,) = self._runs(plain, "knee")
         self.assertEqual(legs.knees, ((knee[0], sum(knee) / 2), (sum(knee) / 2, knee[1])))
         front = _capsule(plain, (150.0, 60.0), (150.0, 468.0), 6.0)  # and a staff beside them
@@ -939,12 +963,22 @@ class FindFeetTest(unittest.TestCase):
         self.assertEqual(heldout.find_feet(client, None, self.front)[0], [])
         self.assertEqual(client.asked, ["foot", "shoe", "boot"])
 
+    def test_guide_fallback_records_missing_or_unusable_feet(self):
+        for feet in ([], [np.zeros_like(self.front), self.feet[1]]):
+            with self.subTest(count=len(feet)), mock.patch.object(
+                    heldout, "find_feet", return_value=(feet, {"prompt": None, "found": {}})):
+                legs, found = heldout.find_guide_legs(None, None, self.front)
+                self.assertEqual(legs, heldout.legs_from_outline(self.front))
+                self.assertEqual(found["fallback_reason"], "two usable feet were not found on the sole row")
+
     def test_model_api_failure_stops(self):
-        class Broken:
-            def segment(self, *_a):
-                raise ApiError("HTTP 500")
-        with self.assertRaises(ApiError):
-            heldout.find_feet(Broken(), None, self.front)
+        for error in (ApiError("HTTP 500"), ReplayMiss("no cached foot")):
+            with self.subTest(error=type(error).__name__):
+                client = self._Client({})
+                with mock.patch.object(client, "segment", side_effect=error) as segment, \
+                        self.assertRaises(type(error)):
+                    heldout.find_guide_legs(client, None, self.front)
+                self.assertEqual(segment.call_count, 1)
 
 
 class MeasureFaceTest(unittest.TestCase):
