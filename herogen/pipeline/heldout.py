@@ -5,10 +5,10 @@ A-pose, with a pose reference and a mannequin turn guide (see "Three input image
 `front-left-30`, `front-left-60`, `front-right-30` and `front-right-60`, named by their target yaw.
 Front-left views face image left, front-right views image right. The stage writes into its record the
 building azimuths a body may be built or coloured from (the four turnaround views and the diagonals between
-them, every 45 degrees). A view's whole yaw range must clear every one by 10 degrees: from the drift-robust
-fit's yaw to the plain fit's, widened by 2 degrees on each side, the larger bound of the fit's error measured on
-synthetic outlines (-2 to +1 degrees; not yet measured on real images). The windows are 25-33 and 57-65
-degrees.
+them, every 45 degrees). A view's found yaw comes from Sapiens 2 body keypoints fitted to the turnaround's
+(`herogen/pipeline/keypoints.py`); every true yaw its measured error allows (`FIT_ERROR_DEG`, from renders at
+known yaws) must clear every building azimuth by 10 degrees. The windows are 25-26.4 and 57.1-65 degrees, and
+generations aim at their middle.
 
 Each view is generated up to four times until it is accepted; the best generation is kept. Its found yaw
 must land in its window; up to 5 degrees outside needs human review. Its image, mask and raw generation go
@@ -126,6 +126,11 @@ class HeldoutView:
     def side(self) -> str:
         return "left" if self.facing < 0 else "right"
 
+    @property
+    def aim_deg(self) -> float:
+        """The |yaw| generations ask for: the middle of the window (the target itself can lie outside it)."""
+        return (self.window_deg[0] + self.window_deg[1]) / 2
+
 
 _TAIL = (
     "Legs straight and parallel, slightly apart, both feet flat on the ground side by side, not walking and "
@@ -157,56 +162,53 @@ def view_prompt(view: HeldoutView, request_deg: float, reference: str) -> str:
 
 
 def next_request(view: HeldoutView, request_deg: float, found_deg: float | None) -> float:
-    """The next attempt's requested turn: the last request plus the last attempt's shortfall (target minus
-    found, both as turns toward the view's side), kept between 5 and MAX_REQUEST_DEG. No found yaw on the
+    """The next attempt's requested turn: the last request plus the last attempt's shortfall (the view's
+    `aim_deg` minus the found yaw, both as turns toward the view's side), kept between 5 and MAX_REQUEST_DEG. No found yaw on the
     view's side (the figure faced the other way or wasn't measurable): ask the same again."""
     if found_deg is None:
         return request_deg
-    return float(min(MAX_REQUEST_DEG, max(5.0, request_deg + abs(view.yaw_deg) - abs(found_deg))))
+    return float(min(MAX_REQUEST_DEG, max(5.0, request_deg + view.aim_deg - abs(found_deg))))
 
 
 # Build/evaluation split. The azimuths a body may be built or coloured from, which this stage writes into its
 # record (`build_azimuths_deg`) for later stages to keep to: the four turnaround views and the four diagonals
-# between them. A held-out view's true yaw must be at least AZIMUTH_CLEARANCE_DEG from every one of them. The
-# true yaw isn't known, only a range for it (`yaw_range`): from the drift-robust fit's yaw to the plain fit's,
-# widened on both sides by FIT_ERROR_DEG's larger bound; the whole range must clear.
+# between them. A held-out view's true yaw must be at least AZIMUTH_CLEARANCE_DEG from every one of them, so a
+# score on it never stands in for a score on a view a body was built from. The true yaw isn't known, only the
+# found yaw and the measured error of the fit that found it (`yaw_range`); the whole range of true yaws the
+# found one allows must clear.
 BUILD_AZIMUTHS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 AZIMUTH_CLEARANCE_DEG = 10.0
-# Found |yaw| minus true |yaw| on exact silhouettes, measured by the drift study (`drift_table` in
-# tests/test_herogen_pipeline_heldout_synth.py; four synthetic figures in the turnaround's A-pose, the
-# held-out arms drifted -8 to +8 degrees, drawn at the targets and at and half a degree past both edges of
-# every window): -2.0 to +1.0 degrees with the drift-robust fit (-12.5 to +8.5 with the hands taken at their
-# turnaround positions). Not symmetric: the 60-degree views read 0.5-2 degrees low. The hands cause it: a
-# hand landmark is the outline's outermost point, and a hand is round, so its radius doesn't foreshorten with
-# the turn while the fit foreshortens the whole front-view x (centre plus radius). At 60 degrees the seen
-# hands are about 0.01 of the figure height each farther out than predicted, which reads as a smaller turn
-# (without the hands the same fits read 2-4 degrees high instead). Measured on synthetic outlines only, not
-# yet on real images. Not lowered to fit the windows.
-FIT_ERROR_DEG = (-2.0, 1.0)
+# Found |yaw| minus true |yaw| of the body-keypoint fit (`keypoints.fit_yaw`: head, torso and legs, scores of at
+# least KP_MIN_SCORE), measured on the bench-gt renders at known yaws: 21 characters, flat and lit, each judged
+# against its own front and profile renders as the turnaround, at 25, 45 and 65 degrees either side (217 views).
+# The 5th and 95th percentiles; the median is -1.0. The low tail comes from three characters (a long coat, a long
+# dress, a sci-fi suit) whose turn the fit reads 4-16 degrees short at every angle. The silhouette fit (`fit_yaw`)
+# on the same views is off by 14 degrees or more on one view in ten, against 6 for this one. Not measured on
+# generated images, which have no known yaw.
+FIT_ERROR_DEG = (-8.6, 2.1)
 YAW_WINDOW_HALF_DEG = 5.0
-# Body keypoints (Sapiens 2) scoring less are left out of every keypoint fit.
+# Body keypoints (Sapiens 2) scoring less are left out of every keypoint fit (on the same renders, 0.5 instead
+# reads the turn no better: 6.5 degrees off at the 90th percentile against 6.2).
 KP_MIN_SCORE = 0.3
 
 
 def yaw_window(target_deg: float) -> tuple[float, float]:
-    """The accepted |found yaw| range for a target: YAW_WINDOW_HALF_DEG either side, cut back to
-    AZIMUTH_CLEARANCE_DEG plus the larger FIT_ERROR_DEG bound (2 degrees) from every building azimuth. The cut
-    is the same on both sides: the fit error is measured on synthetic outlines only, so its asymmetry isn't
-    used to move a window edge nearer an azimuth."""
-    margin = AZIMUTH_CLEARANCE_DEG + max(abs(e) for e in FIT_ERROR_DEG)
+    """The accepted |found yaw| range for a target: YAW_WINDOW_HALF_DEG either side, cut back so that every true
+    yaw a found yaw inside it allows (`yaw_range`) is at least AZIMUTH_CLEARANCE_DEG from every building
+    azimuth. With the measured fit error the 30-degree window ends below its target."""
     lo, hi = target_deg - YAW_WINDOW_HALF_DEG, target_deg + YAW_WINDOW_HALF_DEG
     for a in BUILD_AZIMUTHS_DEG:
         if a <= target_deg:
-            lo = max(lo, a + margin)
+            lo = max(lo, a + AZIMUTH_CLEARANCE_DEG + FIT_ERROR_DEG[1])
         else:
-            hi = min(hi, a - margin)
+            hi = min(hi, a - AZIMUTH_CLEARANCE_DEG + FIT_ERROR_DEG[0])
     if lo > hi:
         raise ValueError(f"no yaw window around {target_deg} keeps clear of the building azimuths")
     return lo, hi
 
 
-# Two targets each side, between the front, the diagonal and the profile: 30 degrees (accepted 25-33) and
-# 60 degrees (accepted 57-65).
+# Two targets each side, between the front, the diagonal and the profile, named 30 and 60 degrees; `yaw_window`
+# gives the yaws each accepts (25-26.4 and 57.1-65) and the generations aim at the window's middle (`aim_deg`).
 VIEWS = tuple(
     HeldoutView(f"front-{side}-{deg}", sign * deg, yaw_window(deg), -sign)
     for deg in (30, 60) for side, sign in (("left", 1), ("right", -1))
@@ -450,18 +452,7 @@ def fit_yaw(model: TurnaroundModel, seen: Landmarks) -> dict[str, Any]:
     return out
 
 
-# The yaw range a view is judged on. The drift-robust fit reads a change of both hands' heights from the
-# turnaround's as arm drift, so a shared error in measuring them (both hands read high, or both low) moves its
-# yaw too, about 2 degrees per 0.01 of the figure height at 30 degrees, and nothing measured on one image
-# separates that error from real drift. Until the fit's error is measured on real images with known yaws, a
-# view's yaw range spans both readings: the drift-robust fit's yaw and the plain fit's (hands where the
-# turnaround has them, which is right when there is no drift), widened on both sides by the larger
-# FIT_ERROR_DEG bound (2 degrees); the whole range must clear every building azimuth by AZIMUTH_CLEARANCE_DEG.
-# With the arms where the turnaround has them the two fits agree; one run's generated 30-degree views read 4-5
-# degrees apart. One corner remains (a sweep of 980 synthetic views drawn under 10
-# degrees from an azimuth): arms raised 3-8 degrees and both hands measured 0.01-0.02 of the height low push
-# both fits low, and 24 of the 980, 30-degree views drawn at 35.5-37 degrees, pass with a true clearance of
-# 8-9.5 degrees. Left as a documented limitation until the fit is calibrated on real images.
+# The silhouette fit above no longer decides a view's turn (see FIT_ERROR_DEG and `yaw_range`); it is recorded.
 # How far the hands' heights move when a mask is eroded or dilated by HAND_Z_MORPH_PX is recorded for
 # information only: it is close to zero by construction (a hand's lowest-reaching row hardly moves when its
 # outline does), so it can't measure the error above.
@@ -487,17 +478,13 @@ def hand_z_morph(mask: np.ndarray, lm: Landmarks | None = None) -> float:
     return float(np.sqrt(np.mean(np.square(dev)))) if dev else 0.0
 
 
-def yaw_range(fit_side: dict[str, Any], side: str) -> dict[str, Any]:
-    """From one side of `fit_yaw`: the found-yaw range spanning the drift-robust and the plain fit, and the
-    true-yaw range it allows: that range widened on both sides by the larger FIT_ERROR_DEG bound (the error
-    is measured on synthetic outlines only, so its asymmetry isn't used to let a view nearer an azimuth; the
-    same margin as `yaw_window`), in |yaw|, signed back to the ``side``."""
-    sign = 1.0 if side == "left" else -1.0
-    found = [abs(fit_side["yaw_deg"]), abs(fit_side["plain_yaw_deg"])]
-    margin = max(abs(e) for e in FIT_ERROR_DEG)
-    lo, hi = min(found) - margin, max(found) + margin
-    return {"found_deg": sorted([sign * min(found), sign * max(found)]),
-            "true_deg": sorted([sign * lo, sign * hi])}
+def yaw_range(found_deg: float) -> dict[str, Any]:
+    """The true-yaw range a found yaw allows, from the keypoint fit's measured error FIT_ERROR_DEG (found |yaw|
+    minus true |yaw|): |found| minus the upper error to |found| minus the lower one, signed back to the found
+    yaw's side."""
+    sign = 1.0 if found_deg >= 0 else -1.0
+    lo, hi = abs(found_deg) - FIT_ERROR_DEG[1], abs(found_deg) - FIT_ERROR_DEG[0]
+    return {"found_deg": [found_deg, found_deg], "true_deg": sorted([sign * lo, sign * hi])}
 
 
 def range_clearance(lo_deg: float, hi_deg: float) -> float:
@@ -636,12 +623,8 @@ FACE_PROFILE_MIN = 0.05  # profile face offsets below this can't serve as the re
 # Facing passes when at least one cue says the view's way and none says the other way; no deciding cue
 # needs human review.
 # The view's own yaw window (`yaw_window`): inside it the view can be accepted; up to 5 degrees outside it
-# needs human review; further out it is rejected (and generated again). Synthetic (the yaw-window table, 4
-# views x 4 figures, A-pose drawn 0, 3, 5 and 8 degrees either side of the target): at the target and 3
-# degrees off accepted 40 of 48, the other 8 drawn at 57 and found at 56 (rejected: their yaw range comes
-# within 10 degrees of the diagonal); 5 off: accepted at 65 (8), review at 25 (found 24; 8), rejected at 35 and
-# 55 (16); 8 off: review at 22 and 68 (16), rejected at 38 and 52 (16). Distorted poses drawn at the target
-# and 3 degrees either side: 0 of 240 accepted (238 rejected, 2 review).
+# needs human review; further out it is rejected (and generated again). The found yaw is the body-keypoint fit's
+# on the view's side (the facing checks judge the side).
 YAW_WINDOW_REVIEW_DEG = 5.0
 
 
@@ -680,7 +663,8 @@ def view_checks(
     Gated checks reject the view; checks marked ``review`` send it to human review when they fail.
     ``body``: the turnaround's joint model (`body_model`); ``keypoints``: the view's `measure_keypoints`, in
     the px of the image they were measured on, ``kp_scale`` turnaround px per image px. Their fit
-    (`keypoints.fit_yaw`) is recorded as ``keypoint_fit`` (information only).
+    (`keypoints.fit_yaw`) gives the found yaw; without either, or with too few joints, the turn can't be
+    measured and the view needs review.
     ``profile_face_error``: the profile views' face cue failed on the Model API, so the head cue could not
     vote (needs review, like a failure on this view's face). ``mask_sam_coverage``: the figure mask's
     `sam_coverage`; under C.SAM_COVERAGE_MIN SAM missed the figure, the view is rejected and nothing else is
@@ -705,21 +689,28 @@ def view_checks(
     out.append(C.check("pose_landmark_rms", best["rms"], POSE_RMS_FAIL, op="<=",
                        note=f"at the found yaw {best['yaw_deg']:+.0f}; worst landmark: {best['worst']}"))
     out.append(_review(C.check("pose_landmark_rms_clear", best["rms"], POSE_RMS_PASS, op="<=")))
-    rng = yaw_range(best, side)
-    clearance = range_clearance(*rng["true_deg"])
-    lo_t, hi_t = rng["true_deg"]
-    out.append(C.check("found_yaw_clear_of_build_azimuths_deg", clearance, AZIMUTH_CLEARANCE_DEG, op=">=",
-                       note=f"found yaw {best['yaw_deg']:+.0f} (plain fit {best['plain_yaw_deg']:+.0f}), "
-                            f"true yaw {lo_t:+.0f} to {hi_t:+.0f} (fit error {FIT_ERROR_DEG}); building azimuths "
-                            f"{list(BUILD_AZIMUTHS_DEG)}"))
-    miss = window_miss(view, best["yaw_deg"])
-    lo, hi = view.window_deg
-    note = f"found yaw {best['yaw_deg']:+.0f}, window {lo:.0f}-{hi:.0f}"
-    out.append(C.check("found_yaw_window_miss_deg", miss, YAW_WINDOW_REVIEW_DEG, op="<=", note=note))
-    out.append(_review(C.check("found_yaw_in_window", miss, 0.0, op="<=", note=note)))
-
     kseen = _seen(keypoints, kp_scale)
     kfit = KP.fit_yaw(body, kseen) if body is not None and kseen is not None else None
+    found = None
+    if kfit is None:
+        why = ((keypoints or {}).get("error") or ("no turnaround keypoints" if body is None else
+                                                  "too few body keypoints found"))
+        out.append(_review(C.check("turn_measured", 0.0, 1.0, op="==",
+                                   note=f"the turn could not be measured: {why}")))
+        rng, clearance, miss = None, None, None
+    else:
+        found = kfit[f"facing_{side}"]["yaw_deg"]
+        rng = yaw_range(found)
+        clearance = range_clearance(*rng["true_deg"])
+        lo_t, hi_t = rng["true_deg"]
+        out.append(C.check("found_yaw_clear_of_build_azimuths_deg", clearance, AZIMUTH_CLEARANCE_DEG, op=">=",
+                           note=f"found yaw {found:+.1f} (body keypoints), true yaw {lo_t:+.1f} to {hi_t:+.1f} "
+                                f"(fit error {list(FIT_ERROR_DEG)}); building azimuths {list(BUILD_AZIMUTHS_DEG)}"))
+        miss = window_miss(view, found)
+        lo, hi = view.window_deg
+        note = f"found yaw {found:+.1f}, window {lo:.1f}-{hi:.1f}"
+        out.append(C.check("found_yaw_window_miss_deg", miss, YAW_WINDOW_REVIEW_DEG, op="<=", note=note))
+        out.append(_review(C.check("found_yaw_in_window", miss, 0.0, op="<=", note=note)))
 
     toe = toe_offset_h(heldout)
     toe_turn = view.facing * toe / profile_toe if profile_toe > 0.01 else None
@@ -740,14 +731,13 @@ def view_checks(
                                    note="the Model API failed on the face or head, so the head cue could not "
                                         "vote")))
     measured = {
-        "found_yaw_deg": best["yaw_deg"],
+        "found_yaw_deg": found,
         "keypoint_fit": kfit,
         "keypoints": keypoints,
         "fit": fit,
         "hand_z_morph": {"view": hand_z_morph(heldout, seen), "front": model.hand_z_morph,
                          "note": "information only; close to zero by construction"},
-        "found_yaw_range_deg": rng["found_deg"],
-        "true_yaw_range_deg": rng["true_deg"],
+        "true_yaw_range_deg": rng["true_deg"] if rng else None,
         "azimuth_clearance_deg": clearance,
         "yaw_window_miss_deg": miss,
         "facing_fit_margin": margin,
@@ -1275,7 +1265,7 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
         raise ValueError("attempts must be at least 1")
     tried: list[dict[str, Any]] = []
     kept: tuple = ()
-    request = abs(view.yaw_deg)
+    request = view.aim_deg
     first_sample = VIEWS.index(view) * attempts if view in VIEWS else 0
     for attempt in range(attempts):
         if deadline is not None and time.monotonic() > deadline:
@@ -1321,7 +1311,8 @@ def _generate_view(st: _HeldoutStage, client: ModelClient, view: HeldoutView, ct
             "checks": checks,
         })
         fit = (measured.get("fit") or {}).get(f"facing_{view.side}", {})
-        key = (_RANK[status], measured.get("yaw_window_miss_deg", 99.0), fit.get("rms", 9.0))
+        miss = measured.get("yaw_window_miss_deg")
+        key = (_RANK[status], 99.0 if miss is None else miss, fit.get("rms", 9.0))
         if not kept or key < kept[0]:
             kept = (key, attempt, status, checks, raw, img, placed, method, images)
         if status == "accepted":

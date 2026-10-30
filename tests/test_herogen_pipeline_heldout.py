@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -27,7 +28,9 @@ from herogen.pipeline.results import stage5_results  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder, runs_root  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI, _decode_data_url, _img  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
-from test_herogen_pipeline_heldout_synth import FakePose, figure, turnaround, use_fake_pose  # noqa: E402
+from test_herogen_pipeline_heldout_synth import (  # noqa: E402
+    FakePose, body_of, figure, keypoints_at, turnaround, use_fake_pose,
+)
 
 BUILD_FILES = ["00-sketch.png", "01-cover.png", "02-turnaround.png", "stage-0.json", "stage-1.json",
                "stage-2.json", "views/meta.json"] + [f"views/{v}.png" for v in stages.ALL_VIEWS] \
@@ -93,7 +96,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertIn("consistency", rec["details"]["reference_note"])
         self.assertEqual(rec["details"]["build_azimuths_deg"], [45.0 * i for i in range(8)])
         self.assertEqual(rec["details"]["azimuth_clearance_deg"], 10.0)
-        self.assertEqual(rec["details"]["fit_error_deg"], [-2.0, 1.0])
+        self.assertEqual(rec["details"]["fit_error_deg"], [-8.6, 2.1])
         self.assertEqual(rec["details"]["checks_version"], heldout.checks_version())
         self.assertEqual(heldout.accepted_views(RunFolder(self.root, "r")),
                          {v.name: heldout.view_paths(v)["image"] for v in heldout.VIEWS})
@@ -113,13 +116,13 @@ class HeldoutTest(unittest.TestCase):
             self.assertEqual(d["image_sha256"], heldout.file_sha256(run / files["image"]))
             self.assertEqual(d["stage2_identity"], heldout.stage2_identity(RunFolder(self.root, "r")))
             measured0 = d["attempts"][0]["measured"]
-            fit0 = measured0["fit"][f"facing_{view.side}"]
-            self.assertEqual(measured0["found_yaw_range_deg"], sorted([fit0["yaw_deg"], fit0["plain_yaw_deg"]]))
-            lo, hi = measured0["true_yaw_range_deg"]
-            self.assertLess(lo, hi)
+            self.assertEqual(measured0["found_yaw_deg"], measured0["keypoint_fit"][f"facing_{view.side}"]["yaw_deg"])
+            self.assertEqual(measured0["true_yaw_range_deg"],
+                             heldout.yaw_range(measured0["found_yaw_deg"])["true_deg"])
             self.assertEqual(d["mask_method"], "sam-3.1")
             first = d["attempts"][0]
-            self.assertEqual(first["requested_yaw_deg"], view.yaw_deg)  # the first request is the target
+            # The first request is the middle of the window.
+            self.assertEqual(first["requested_yaw_deg"], math.copysign(view.aim_deg, view.yaw_deg))
             self.assertEqual(first["pose_reference"],
                              "views/front.png" if abs(view.yaw_deg) < 50 else f"views/{view.side}.png")
             for rel in d["kept_inputs"].values():
@@ -282,17 +285,18 @@ class HeldoutTest(unittest.TestCase):
             tried = rec["details"]["views"][view.name]["attempts"]
             self.assertGreater(len(tried), 1)
             asked = [abs(a["requested_yaw_deg"]) for a in tried]
-            self.assertEqual(asked[0], abs(view.yaw_deg))
+            self.assertEqual(asked[0], view.aim_deg)
             self.assertEqual(asked, sorted(asked))
             for a, b in zip(tried, tried[1:]):  # the next request is the last one plus the shortfall
-                want = abs(a["requested_yaw_deg"]) + abs(view.yaw_deg) - abs(a["measured"]["found_yaw_deg"])
+                want = abs(a["requested_yaw_deg"]) + view.aim_deg - abs(a["measured"]["found_yaw_deg"])
                 self.assertAlmostEqual(abs(b["requested_yaw_deg"]), min(heldout.MAX_REQUEST_DEG, want))
             self.assertEqual(len({a["sample"] for a in tried}), len(tried))
             if abs(tried[-1]["requested_yaw_deg"]) >= heldout.PROFILE_REFERENCE_FROM_DEG:
                 self.assertEqual(tried[-1]["pose_reference"], f"views/{view.side}.png")
 
     def test_stride_rejected(self):
-        self._assert_rejected(FakeAPI(heldout_pose="stride"), "pose_landmark_rms")
+        # Striding legs don't match the turnaround's, so the keypoint turn lands outside every window.
+        self._assert_rejected(FakeAPI(heldout_pose="stride"), "found_yaw_window_miss_deg")
 
     def test_arms_down_never_accepted(self):
         self.assertEqual(self._live(FakeAPI(heldout_pose="down"), "r", [0, 1, 2]), 2)
@@ -414,10 +418,11 @@ class HeldoutTest(unittest.TestCase):
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
         from test_herogen_pipeline_heldout_synth import turned_mask  # noqa: PLC0415
 
-        seen = turned_mask(figure("a"), 30)
+        seen = turned_mask(figure("a"), 26)
         for face, profile_error in ((out, False), ({"offset": None}, True)):
             checks, _ = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.3, 0.2, face,
-                                            None, profile_face_error=profile_error)
+                                            None, profile_face_error=profile_error, body=body_of(figure("a")),
+                                            keypoints=keypoints_at(figure("a"), 26))
             self.assertEqual(heldout.view_status(checks), "needs review")
             self.assertEqual([c["name"] for c in checks if not c["pass"]], ["head_cue_measured"])
 
@@ -442,9 +447,13 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(first["status"], "needs review")  # never accepted without the cue
         for p in (self.root / "_cache").glob("*.json"):
             self.assertNotIn("api_error", json.loads(p.read_text()))
-        # The failure is not a result, so a replay has nothing for that call and stops.
-        self.assertEqual(self._replay("r2", [0, 1, 2]), 1)
-        self.assertIn("ReplayMiss", self._rec("r2")["error"])
+        # The failure is not a result, so it is never replayed: the second generation sent the same request (the
+        # first one's found yaw kept it at 26 degrees), the fake drew the same image, and its face call is the
+        # one a replay finds, so the replay accepts that image at its first generation.
+        self.assertEqual(self._replay("r2", [0, 1, 2]), 0)
+        again = self._rec("r2")["details"]["views"]["front-left-30"]
+        self.assertEqual((again["status"], again["kept_attempt"]), ("accepted", 0))
+        self.assertFalse(again["attempts"][0]["measured"]["face"].get("api_error"))
 
     def test_error_mid_stage_keeps_the_earlier_files(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
@@ -709,7 +718,8 @@ class HeldoutTest(unittest.TestCase):
             m = det["views"][view.name]["attempts"][0]["measured"]
             self.assertEqual(m["keypoints"]["bottom"], m["keypoints"]["box"][3])
             # The fake draws the requested turn; the keypoint fit finds it on the requested side.
-            self.assertAlmostEqual(m["keypoint_fit"][f"facing_{view.side}"]["yaw_deg"], view.yaw_deg, delta=4.0)
+            self.assertAlmostEqual(abs(m["keypoint_fit"][f"facing_{view.side}"]["yaw_deg"]),
+                                   0.98 * round(view.aim_deg), delta=0.75)
             self.assertEqual(m["keypoint_fit"]["yaw_deg"] > 0, view.yaw_deg > 0)
 
     def test_sapiens_failure_is_recorded_not_raised(self):
