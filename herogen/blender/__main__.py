@@ -18,7 +18,14 @@ def _upstream_problem(run: Path, stage: int) -> str | None:
         rec = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return f"{path.name} unreadable ({exc.__class__.__name__})"
-    return None if rec.get("ok") is True else f"{path.name} has ok={rec.get('ok')!r}"
+    if rec.get("ok") is not True:
+        return f"{path.name} has ok={rec.get('ok')!r}"
+    if stage == 2:  # an earlier version could pass stage 2 on background-threshold masks: not a measurement
+        methods = (rec.get("details") or {}).get("mask_method") or {}
+        fallback = sorted(v for v, m in methods.items() if str(m).startswith("threshold"))
+        if fallback:
+            return f"{path.name} passed on threshold masks ({', '.join(fallback)}); run stage 2 again"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

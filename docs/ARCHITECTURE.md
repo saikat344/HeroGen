@@ -168,7 +168,10 @@ No mask is ever made another way, and nothing is measured on a mask SAM did not 
 
 `views/meta.json` records `"mask_method": {"front": "sam-3.1", ...}` (`"sam-3.1"` or `"visual_hull"`, the top
 silhouette implied by the four side views' SAM masks, whose top-view checks gate), the detailed method per view
-and `"top_method"`.
+and `"top_method"`. Records written by earlier versions can hold `"threshold"` masks, from a fallback that no
+longer exists; such a record is not a measurement and never counts as passed, whatever its `ok`: the results
+page shows it as "degraded: threshold masks", stage 2h refuses to start from such a stage 2, `herogen.blender`
+refuses to build on it (without `--force`), and a held-out view measured on one is never an accepted view.
 
 **Shoulder covers.** Stage 4 adds one cover per shoulder, merged into its owner section (`UpperTorso`) so each
 GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and

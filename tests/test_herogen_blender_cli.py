@@ -43,6 +43,14 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("ok=False", err)
 
+    def test_stage2_passed_on_threshold_masks_stops_stage3(self):
+        # A record an earlier version passed on background-threshold masks is not a measurement.
+        (self.run / "stage-2.json").write_text(json.dumps({"stage": 2, "ok": True, "details": {
+            "mask_method": {"front": "sam-3.1", "right": "threshold", "top": "visual_hull"}}}))
+        code, err = self._main("--stages", "3")
+        self.assertEqual(code, 2)
+        self.assertIn("threshold masks (right)", err)
+
     def test_empty_stages_is_a_usage_error(self):
         with self.assertRaises(SystemExit) as cm:
             self._main("--stages", ",")

@@ -11,6 +11,7 @@ from typing import Any
 
 from herogen.pipeline.heldout import accepted_views, stage2_identity
 from herogen.pipeline.runfolder import RunFolder, now_iso
+from herogen.pipeline.stages import degraded_masks
 
 STAGES = [
     (0, "input"),
@@ -121,15 +122,19 @@ def collect(run: RunFolder) -> dict[str, Any]:
             continue
         stopped = f"Stopped early: {rec['error']}" if rec.get("error") else ""
         stale = n == HELDOUT_STAGE[0] and _stale_heldout(run, rec)
+        # A record an earlier version passed on threshold masks is not a measurement, so never a pass.
+        degraded = degraded_masks(rec) if rec.get("ok") else []
+        if degraded:
+            stopped = f"Not a measurement: masks SAM 3.1 did not make ({'; '.join(degraded)})."
         total_cost += float(rec.get("cost_usd") or 0.0)
         total_seconds += float(rec.get("seconds") or 0.0)
         stages.append(
             {
                 "stage": n,
                 "name": rec.get("name", label),
-                "status": "stale: stage 2 ran again" if stale else
+                "status": "stale: stage 2 ran again" if stale else "degraded: threshold masks" if degraded else
                 ("pass" if rec.get("ok") else _FAILED.get(rec.get("status"), "gate failed")),
-                "ok": bool(rec.get("ok")) and not stale,
+                "ok": bool(rec.get("ok")) and not stale and not degraded,
                 "seconds": rec.get("seconds"),
                 "cost_usd": rec.get("cost_usd"),
                 "cost_basis": rec.get("cost_basis", ""),

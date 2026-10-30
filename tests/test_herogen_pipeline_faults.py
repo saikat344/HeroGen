@@ -316,6 +316,30 @@ class LegacyRecordTest(unittest.TestCase):
         with self.assertRaises(ReplayMiss):
             stages.sam_figure_mask(ModelClient(cache), img)
 
+    def test_threshold_records_never_count_as_passed(self):
+        run = RunFolder(self.root, "old")
+        run.write_stage({"stage": 1, "name": "cover_art", "ok": True, "checks": [], "details": {
+            "mask_method": {"sketch": "threshold (sam error: ApiError, ApiError)", "cover": "sam-3.1:character"}}})
+        run.write_stage({"stage": 2, "name": "turnaround", "ok": True, "checks": [], "details": {
+            "attempts": [{"attempt": 0, "split_source": "threshold"}],
+            "mask_method_detail": {v: "sam-3.1:character" for v in stages.SIDE_VIEWS} | {"top": "visual_hull"}}})
+        self.assertEqual(stages.degraded_masks(run.read_stage(1)), ["sketch: threshold (sam error: ApiError, ApiError)"])
+        self.assertEqual(stages.degraded_masks(run.read_stage(2)), ["split: threshold"])
+        status = {s["stage"]: (s["status"], s.get("ok")) for s in collect(run)["stages"]}
+        self.assertEqual(status[1], ("degraded: threshold masks", False))
+        self.assertEqual(status[2], ("degraded: threshold masks", False))
+        with self.assertRaises(ValueError) as cm:
+            heldout.stage2h_heldout(run, ModelClient(self.root / "cache"))
+        self.assertIn("run stage 2 again", str(cm.exception))
+
+    def test_new_records_are_not_degraded(self):
+        rec = {"stage": 2, "ok": True, "details": {
+            "attempts": [{"attempt": 0, "split_source": "sam-3.1:character"}],
+            "mask_method_detail": {v: "sam-3.1:person" for v in stages.SIDE_VIEWS} | {"top": "visual_hull"}}}
+        self.assertEqual(stages.degraded_masks(rec), [])
+        self.assertEqual(stages.degraded_masks({"stage": 1, "details": {"mask_method": {
+            "sketch": "sam-3.1:character", "cover": stages.SAM_NOTHING_FOUND}}}), [])
+
 
 if __name__ == "__main__":
     unittest.main()
