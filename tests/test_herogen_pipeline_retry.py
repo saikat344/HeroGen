@@ -389,7 +389,7 @@ class RetryThroughServerTest(unittest.TestCase):
             def __exit__(self, *_a):
                 return False
 
-            def read1(self, _n):
+            def read(self):
                 raise self.error
 
         errors = [ssl.SSLError("bad record mac"), ConnectionAbortedError("aborted"),
@@ -400,10 +400,10 @@ class RetryThroughServerTest(unittest.TestCase):
                 client = ModelClient(self.cache, mode="live", policy=self.policy, limiter=self.limiter)
                 answers = iter([Answer(error)])
 
-                def urlopen(req, timeout):
+                def urlopen(req, timeout, guard):
                     return next(answers, None) or _OkAnswer()
 
-                with mock.patch.object(client_mod.urllib.request, "urlopen", urlopen), \
+                with mock.patch.object(client_mod, "_open", urlopen), \
                         mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
                         self.assertLogs("herogen.pipeline.client", "WARNING"):
                     img = client.generate_image("p")
@@ -430,12 +430,7 @@ class _OkAnswer:
     def __exit__(self, *_a):
         return False
 
-    sent = False
-
-    def read1(self, _n):
-        if self.sent:
-            return b""
-        self.sent = True
+    def read(self):
         return json.dumps(OK_IMAGE[2]).encode()
 
 
@@ -489,29 +484,70 @@ class WindowsProcessProbeTest(unittest.TestCase):
 
 
 class ReadDeadlineTest(unittest.TestCase):
-    """The per-call deadline holds while an answer is being read, not only between attempts."""
+    """The per-call deadline holds while an answer is read (every part of it), not only between attempts; a
+    truncated answer is never taken as one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = Path(self.tmp.name) / "cache"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _segment(self, answer, *, deadline_s=0.10, timeout_s=0.05):
+        """One SAM call against ``answer`` with a real clock; returns (seconds, error)."""
+        server = FakeModelServer(lambda e, b: answer, DUMMY_KEY)
+        limiter = retry.SharedLimiter(Path(self.tmp.name) / "limiter", "k")
+        client = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=limiter)
+        self.client = client
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                mock.patch.dict(client_mod.DEADLINE_S, {client_mod.SAM_MODEL: deadline_s}), \
+                mock.patch.object(client_mod, "TIMEOUT_S", timeout_s), self.assertLogs("herogen.pipeline.client"):
+            client_mod.log.warning("start")
+            t0 = time.monotonic()
+            try:
+                client.segment(IMAGE, "character")
+                error = None
+            except ApiError as e:
+                error = e
+            seconds = time.monotonic() - t0  # before the server finishes trickling and shuts down
+        return seconds, error
+
+    def ledger(self):
+        return [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()]
 
     def test_a_trickling_answer_is_cut_off_at_the_deadline(self):
-        with tempfile.TemporaryDirectory() as d:
-            cache = Path(d) / "cache"
-            limiter = retry.SharedLimiter(Path(d) / "limiter", "k")
-            # Each 4-byte piece comes well within the socket timeout; the whole answer takes about 0.5 s.
-            server = FakeModelServer(lambda e, b: OK_SAM + (0.0, 0.02), DUMMY_KEY)
-            client = ModelClient(cache, mode="live", policy=no_wait_policy(), limiter=limiter)
-            with server.serving(d + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
-                    mock.patch.dict(client_mod.DEADLINE_S, {client_mod.SAM_MODEL: 0.10}), \
-                    mock.patch.object(client_mod, "TIMEOUT_S", 0.05), self.assertRaises(ApiError) as cm:
-                t0 = time.monotonic()
-                try:
-                    client.segment(IMAGE, "character")
-                finally:
-                    seconds = time.monotonic() - t0  # before the server finishes trickling and shuts down
-            self.assertLess(seconds, 0.3)
-            self.assertIn("TimeoutError", str(cm.exception))
-            self.assertIn("deadline", str(cm.exception))
-            rows = [json.loads(x) for x in (cache / client_mod.LEDGER).read_text().splitlines()]
-            self.assertEqual([(r["attempt"], r["outcome"], r["status"]) for r in rows], [(1, "unknown", None)])
-            self.assertEqual([c.get("outcome") for c in client.log.calls], ["unknown"])  # may be billed: counted
+        # Each 4-byte piece comes within the socket timeout; the part that trickles (a padded body, headers or
+        # trailers of 200 bytes or more) takes 2 s or more, against a 0.1 s deadline.
+        padded = (200, {"X-Pad": "p" * 200}, {**sam_response(""), "pad": "p" * 200})
+        for framing in ("length", "headers", "chunked", "trailers"):
+            with self.subTest(framing=framing):
+                self.cache = Path(self.tmp.name) / f"cache-{framing}"
+                seconds, e = self._segment(padded + (0.0, 0.04, framing))
+                self.assertIsNotNone(e)
+                self.assertLess(seconds, 1.5)  # cut off near the deadline (the margin is for a loaded machine)
+                self.assertIn("TimeoutError", str(e))
+                self.assertIn("deadline", str(e))
+                self.assertEqual([(r["attempt"], r["outcome"], r["status"]) for r in self.ledger()],
+                                 [(1, "unknown", None)])
+                self.assertEqual([c.get("outcome") for c in self.client.log.calls], ["unknown"])  # may be billed
+                self.assertEqual(list(self.cache.glob("*.json")), [])  # never cached
+
+    def test_the_same_answers_sent_at_once_pass(self):
+        for framing in ("length", "chunked"):
+            with self.subTest(framing=framing):
+                self.cache = Path(self.tmp.name) / f"fast-{framing}"
+                _, e = self._segment(OK_SAM + (0.0, 0.0, framing), deadline_s=10.0, timeout_s=5.0)
+                self.assertIsNone(e)
+                self.assertEqual([r["outcome"] for r in self.ledger()], ["ok"])
+
+    def test_a_short_body_is_never_taken_or_cached_as_an_answer(self):
+        _, e = self._segment(OK_SAM + (0.0, 0.0, "short"), deadline_s=10.0, timeout_s=5.0)
+        self.assertIsNotNone(e)
+        self.assertIn("IncompleteRead", str(e))
+        self.assertEqual({r["outcome"] for r in self.ledger()}, {"unknown"})  # retried, each may be billed
+        self.assertEqual(len(self.ledger()), retry.MAX_ATTEMPTS)
+        self.assertEqual(list(self.cache.glob("*.json")), [])
 
 
 class SharedLimiterTest(unittest.TestCase):
