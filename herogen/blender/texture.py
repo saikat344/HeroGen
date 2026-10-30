@@ -89,13 +89,20 @@ def load_closeups(run: Path, vs: ViewSet) -> tuple[dict[str, Closeup], dict]:
         return {}, {"used": [], "notes": ["no close-ups in the run (stage 2f made none)"]}
     try:
         rec = json.loads(p.read_text())
-    except ValueError:
+        if not isinstance(rec, dict) or not isinstance(rec.get("views"), dict):
+            raise ValueError("invalid close-up record")
+    except (OSError, ValueError):
         return {}, {"used": [], "notes": [f"{CLOSEUP_RECORD} could not be read"]}
     out: dict[str, Closeup] = {}
     notes: list[str] = []
     for name in CLOSEUP_VIEWS:
-        r = (rec.get("views") or {}).get(name) or {}
+        r = rec["views"].get(name) or {}
+        if not isinstance(r, dict):
+            notes.append(f"{name}: could not be read (invalid view record)")
+            continue
         if not r.get("used"):
+            if r.get("reason"):
+                notes.append(f"{name}: {r['reason']}")
             continue
         view = vs.views.get(name)
         vpath = run / "views" / f"{name}.png"
@@ -116,6 +123,10 @@ def load_closeups(run: Path, vs: ViewSet) -> tuple[dict[str, Closeup], dict]:
             continue
         if foot.shape != view.mask.shape or img.shape[0] != img.shape[1] or A.shape != (2, 3):
             notes.append(f"{name}: sizes do not match the view")
+            continue
+        if (img.shape[0] < 2 or not np.isfinite(A).all() or abs(np.linalg.det(A[:, :2])) < 1e-12
+                or not np.isfinite([l, t, rgt, b]).all() or l >= rgt or t >= b):
+            notes.append(f"{name}: invalid transform or crop box; not used")
             continue
         rows = np.arange(foot.shape[0]) + 0.5
         cols = np.arange(foot.shape[1]) + 0.5

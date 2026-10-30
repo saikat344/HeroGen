@@ -1,4 +1,5 @@
-"""Close-ups in the texture bake (herogen/blender/texture.py).
+"""Close-ups in the texture bake (herogen/blender/texture.py) and the scorer's Head texture variants
+(herogen/blender/score.py).
 
 A synthetic head (a UV sphere seen by a front view whose face region is flat red)
 gets close-ups of the front view whose face is yellow (a flat colour change, which the bake must not take) or a
@@ -263,6 +264,32 @@ class TestLoadCloseups(unittest.TestCase):
         cus, info = texture.load_closeups(self.run, self.vs)
         self.assertEqual(cus, {})
         self.assertIn("another front view", info["notes"][0])
+
+    def test_rejected_views_keep_their_reason(self):
+        self.write()
+        _, info = texture.load_closeups(self.run, self.vs)
+        self.assertIn("left: NCC in the view 0.5 < 0.97", info["notes"])
+
+    def test_invalid_transforms_and_crops_fall_back(self):
+        for key, value in (("A", [[0, 0, 0], [0, 0, 0]]),
+                           ("A", [[float("nan"), 0, 0], [0, 1, 0]]),
+                           ("crop_box", [10, 0, 0, SIZE])):
+            with self.subTest(key=key, value=value):
+                old = self.rec["views"]["front"][key]
+                self.rec["views"]["front"][key] = value
+                self.write()
+                cus, info = texture.load_closeups(self.run, self.vs)
+                self.assertEqual(cus, {})
+                self.assertIn("invalid transform or crop", info["notes"][0])
+                self.rec["views"]["front"][key] = old
+
+    def test_wrong_json_types_fall_back(self):
+        for record in ([], {"views": []}, {"views": {"front": [1]}}):
+            with self.subTest(record=record):
+                (self.run / "views" / "closeup.json").write_text(json.dumps(record))
+                cus, info = texture.load_closeups(self.run, self.vs)
+                self.assertEqual(cus, {})
+                self.assertIn("could not be read", info["notes"][0])
 
     def test_no_record_means_no_close_ups(self):
         cus, info = texture.load_closeups(self.run, self.vs)
