@@ -101,7 +101,7 @@ from .views import largest_component, load_mask, save_mask
 CONTRACT_YAW = {"front": 0.0, "left": 90.0, "back": 180.0, "right": 270.0}
 TURNAROUND = ("front", "back", "left", "right")
 HELDOUT_DIR = "heldout"
-# The held-out view the pipeline writes today (stage 2h); more may sit next to it.
+# The single held-out view an earlier stage 2h wrote; stage 2h now writes front-left/right-30 and -60.
 HELDOUT_VIEW = "front-left-34"
 HELDOUT_MASK = f"{HELDOUT_DIR}/{HELDOUT_VIEW}-mask.png"
 HELDOUT_YAW_RANGE = (15.0, 75.0)
@@ -145,6 +145,7 @@ class ScoreView:
     image_path: str | None = None
     reference: str | None = None     # stage-2h.json's "reference" ("generated": scores measure consistency)
     stage2h: dict | None = None      # that view's status and found yaw in stage-2h.json, when recorded
+    source: str | None = None        # how the held-out view was admitted (`HELDOUT_SOURCES`)
 
     @property
     def heldout(self) -> bool:
@@ -193,8 +194,107 @@ def heldout_record(run: Path) -> dict:
     return out
 
 
+# How a held-out view is admitted, by the form of `stage-2h.json` (the formats the lab also reads):
+HELDOUT_SOURCES = {
+    "record": "stage 2h's per-view record: the views heldout.accepted_views returns (status accepted, made from "
+              "the current turnaround, image still matching its recorded SHA-256)",
+    "single-view record": "the older one-view stage 2h record: its view, when the record passed and lists the image "
+                          "(heldout.accepted_views)",
+    "ground-truth record": "a bench record (\"reference\": \"ground-truth\", views rendered from a known body, no "
+                           "per-view status): every view it lists whose image and mask exist",
+    "not recorded": "no stage-2h.json: every heldout/<name>.png directly in heldout/ with its -mask.png",
+    "unreadable record": "a stage-2h.json that cannot be read: no held-out view",
+    "record without views": "a stage-2h.json that lists no view: no held-out view",
+}
+
+
+def _folder_heldout(run: Path) -> dict[str, tuple[str, str]]:
+    """Every `heldout/<name>.png` directly in `heldout/` with a matching `-mask.png` (subfolders such as
+    `review/`, `rejected/` and `archive/` hold views that must not be scored)."""
+    held = run / HELDOUT_DIR
+    if not held.is_dir():
+        return {}
+    out = {}
+    for mp in sorted(held.glob("*-mask.png")):
+        name = mp.name[: -len("-mask.png")]
+        if mp.is_file() and (held / f"{name}.png").is_file():
+            out[name] = (f"{HELDOUT_DIR}/{name}.png", f"{HELDOUT_DIR}/{name}-mask.png")
+    return out
+
+
+def heldout_sources(run: Path) -> dict:
+    """Which held-out views may be scored, read from `stage-2h.json` and never from the folder layout alone:
+    {"source": a `HELDOUT_SOURCES` key, "views": {name: (image, mask)}, "skipped": {name: reason}} for every
+    view file directly in `heldout/` that is not admitted."""
+    from herogen.pipeline import heldout as H
+    from herogen.pipeline.runfolder import RunFolder
+
+    folder = _folder_heldout(run)
+    path = run / "stage-2h.json"
+    views: dict[str, tuple[str, str]] = {}
+    reasons: dict[str, str] = {}
+    if not path.exists():
+        source, views = "not recorded", folder
+    else:
+        try:
+            rec = json.loads(path.read_text())
+            if not isinstance(rec, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError):
+            rec = None
+        det = rec.get("details") if isinstance(rec, dict) and isinstance(rec.get("details"), dict) else {}
+        per_view = det.get("views") if isinstance(det.get("views"), dict) else {}
+        ref = det.get("reference", rec.get("reference")) if isinstance(rec, dict) else None
+        if rec is None:
+            source = "unreadable record"
+        elif per_view and not any(isinstance(d, dict) and "status" in d for d in per_view.values()) \
+                and ref == "ground-truth":
+            source = "ground-truth record"
+            for name, d in per_view.items():
+                files = d.get("files") if isinstance(d, dict) and isinstance(d.get("files"), dict) else {}
+                img = H.heldout_rel(files.get("colour") or files.get("image"))
+                msk = H.heldout_rel(files.get("mask"))
+                if img and msk and (run / img).is_file() and (run / msk).is_file():
+                    views[name] = (img, msk)
+                else:
+                    reasons[name] = "its recorded image or mask is missing"
+        elif not per_view and not isinstance(det.get("view"), str):
+            source = "record without views"
+        else:
+            source = "record" if per_view else "single-view record"
+            rf = RunFolder(run.parent, run.name)
+            accepted = H.accepted_views(rf)
+            identity = H.stage2_identity(rf) if per_view else ""
+            for name, img in accepted.items():
+                d = per_view.get(name) if isinstance(per_view.get(name), dict) else {}
+                files = d.get("files") if isinstance(d.get("files"), dict) else {}
+                msk = H.heldout_rel(files.get("mask")) or f"{img[: -len('.png')]}-mask.png"
+                if (run / msk).is_file():
+                    views[name] = (img, msk)
+                else:
+                    reasons[name] = "accepted, but its mask is missing"
+            for name, d in per_view.items():
+                if name in views or name in reasons or not isinstance(d, dict):
+                    continue
+                files = d.get("files") if isinstance(d.get("files"), dict) else {}
+                img = H.heldout_rel(files.get("image"))
+                if rec.get("status") == "running":
+                    reasons[name] = "stage 2h is running"
+                elif d.get("status") != "accepted":
+                    reasons[name] = f"not accepted (status {d.get('status')})"
+                elif d.get("stage2_identity") != identity:
+                    reasons[name] = "made from an earlier turnaround"
+                elif not img or not (run / img).is_file():
+                    reasons[name] = "its recorded image is missing"
+                else:
+                    reasons[name] = "its image changed since stage 2h recorded it"
+    skipped = {n: reasons.get(n, "not admitted by stage-2h.json") for n in folder if n not in views}
+    skipped.update({n: r for n, r in reasons.items() if n not in views})
+    return {"source": source, "views": views, "skipped": dict(sorted(skipped.items()))}
+
+
 def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | None = None) -> list[ScoreView]:
-    """The turnaround views and every held-out view (`heldout/<name>.png` + `-mask.png`) present in the run."""
+    """The turnaround views and the held-out views `heldout_sources` admits."""
     out = []
 
     def colour(p: Path, mask: np.ndarray) -> tuple[np.ndarray | None, str | None]:
@@ -214,14 +314,11 @@ def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | Non
         img, ipath = colour(run / "views" / f"{v}.png", m)
         out.append(ScoreView(v, m, img, CONTRACT_YAW[v], mask_path=p.relative_to(run).as_posix(),
                              image_path=ipath))
-    held = run / HELDOUT_DIR
-    # only files directly in heldout/: its review/ and rejected/ subfolders hold views that must not be scored
-    names = sorted(p.name[: -len("-mask.png")] for p in held.glob("*-mask.png") if p.is_file()) \
-        if held.is_dir() else []
+    admitted = heldout_sources(run)
     record = heldout_record(run)
-    for name in names:
-        ip, mp = held / f"{name}.png", held / f"{name}-mask.png"
-        if not ip.exists() or not SAFE_NAME.match(name) or name in CONTRACT_YAW:
+    for name, (irel, mrel) in sorted(admitted["views"].items()):
+        ip, mp = run / irel, run / mrel
+        if not SAFE_NAME.match(name) or name in CONTRACT_YAW:
             continue
         m = load_mask(mp)
         if not m.any():
@@ -232,7 +329,7 @@ def load_score_views(run: Path, yaw_ranges: dict[str, tuple[float, float]] | Non
             rng = yaw_ranges[name]
         img, ipath = colour(ip, m)
         out.append(ScoreView(name, m, img, None, tuple(rng), fixed, mp.relative_to(run).as_posix(), ipath,
-                             record.get("reference"), record.get("views", {}).get(name)))
+                             record.get("reference"), record.get("views", {}).get(name), admitted["source"]))
     return out
 
 
@@ -1045,6 +1142,7 @@ def write_scores(run: Path, bodies: list[dict], views: list[ScoreView] | None = 
         except (ValueError, AttributeError):
             kept = []
     views = views or []
+    held = heldout_sources(run)
     data = {
         "scored": datetime.now().astimezone().isoformat(timespec="seconds"),
         "scorer": "herogen.blender.score",
@@ -1069,8 +1167,10 @@ def write_scores(run: Path, bodies: list[dict], views: list[ScoreView] | None = 
         },
         "views": [{"view": v.name, "mask": v.mask_path, "image": v.image_path, "heldout": v.heldout,
                    **({"yaw_range": list(v.yaw_range), "fixed_yaw": v.fixed_yaw, "reference": v.reference,
-                       "measures": MEASURES.get(v.reference)} if v.heldout else
+                       "measures": MEASURES.get(v.reference), "source": v.source} if v.heldout else
                       {"yaw_deg": v.yaw})} for v in views],
+        "heldout_source": {k: held[k] for k in ("source", "skipped")}
+        | {"rule": HELDOUT_SOURCES.get(held["source"])},
         "bodies": kept + bodies,
     }
     write_atomic(path, json.dumps(data, indent=2) + "\n")
