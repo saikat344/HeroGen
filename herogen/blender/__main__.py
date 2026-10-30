@@ -51,10 +51,10 @@ def main(argv: list[str] | None = None) -> int:
                         "roblox-ingame (24,000 / 6,000 high / low) or roblox-avatar (the triangle, "
                         "watertight-part and texture limits of Roblox's character body specification; no rig, "
                         "attachments, facial animation or cages)")
-    r.add_argument("--mesh-source", choices=("carve", "sam3d-objects"), default="carve",
-                   help="stage 3 mesh: silhouette carving (default) or SAM 3D Objects from the front view")
-    r.add_argument("--joints", choices=("silhouette", "sam3d-body"), default="silhouette",
-                   help="joints: silhouette finder (default) or SAM 3D Body on the front view")
+    r.add_argument("--mesh-source", choices=("carve", "sam3d-objects"), default="sam3d-objects",
+                   help="stage 3 mesh: SAM 3D Objects (default), with a recorded carve fallback")
+    r.add_argument("--joints", choices=("silhouette", "sam3d-body"), default="sam3d-body",
+                   help="joints: SAM 3D Body (default) or silhouette finder")
     r.add_argument("--y-method", choices=("mesh", "mhr3d"), default="mesh", help="sam3d-body joint depth")
     r.add_argument("--limb-roots", choices=("silhouette", "sam3d-body"), default="silhouette",
                    help="sam3d-body joints: where shoulders and hips are cut (see body_joints)")
@@ -113,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
         except (RemoteError, BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
             print(f"stage 3 stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
+        if rec.get("fallback"):
+            print(f"stage 3 fallback: {rec['fallback']['reason']}; using carve", file=sys.stderr)
         print(json.dumps({"stage": 3, "ok": rec["ok"], "seconds": rec["seconds"],
                           "mesh_source": rec.get("mesh_source"), "joints_source": rec.get("joints_source"),
                           "checks": {c["name"]: c["value"] for c in rec["checks"]}}))

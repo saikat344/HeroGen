@@ -636,8 +636,7 @@ class TestStage3HybridBlender(HybridBase):
                                 remote=rclient.RemoteClient(cache), timeout=300)
         self.assertTrue(rec["ok"])
         self.assertEqual((rec["mesh_source"], rec["joints_source"]), ("carve", "silhouette"))
-        self.assertIn("sam3d-objects failed (sam3d-objects: GlbError", rec["notes"])
-        self.assertIn("sam3d-body failed (sam3d-body: JSONDecodeError", rec["notes"])
+        self.assertIn("hybrid build failed (sam3d-objects: GlbError", rec["notes"])
         self.assertFalse((run / "03-source.glb").exists())
         self.assertFalse((stage3.work_dir(run) / "03-source-texture.png").exists())
         self.assertEqual(json.loads((run / "03-joints.json").read_text())["source"], "silhouette")
@@ -692,7 +691,7 @@ class TestStage4HybridBlender(HybridBase):
             self.assertAlmostEqual(hyb["views"][v]["ssim"], chk[f"texture_ssim_{v}"]["value"], delta=0.03)
         self.assertEqual((hyb["views"]["left"]["seen_shape"], hyb["views"]["left"]["seen_colour"]), (False, True))
         # stage 4 again on the carve: the hybrid's comparison atlases must not survive as stale variants
-        rec3 = run_stage3(run, nz=96, timeout=300)
+        rec3 = run_stage3(run, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette")
         self.assertEqual(rec3["mesh_source"], "carve")
         run_stage4(run, timeout=600, profile="roblox-ingame")
         self.assertEqual(sorted(p.name for p in (run / "04-body").glob("atlas-high*.png")), ["atlas-high.png"])

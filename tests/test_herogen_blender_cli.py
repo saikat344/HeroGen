@@ -72,6 +72,52 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertIn("stage 3 stopped:", err)
         self.assertNotIn("Traceback", err)
 
+    def test_default_requests_the_hybrid_and_reports_fallback(self):
+        from unittest import mock
+        from herogen.blender import stage3, synth
+
+        synth.write_run(self.run, synth.humanoid(), size=256, ppu=40.0)
+        result = {"ok": True, "seconds": 0.0, "checks": [], "fallback": {"reason": "cache miss"}}
+        with mock.patch.object(stage3, "run_stage3", return_value=result) as build:
+            code, err = self._main("--stages", "3")
+        self.assertEqual(code, 0)
+        self.assertEqual(build.call_args.kwargs["mesh_source"], "sam3d-objects")
+        self.assertEqual(build.call_args.kwargs["joints_source"], "sam3d-body")
+        self.assertIn("fallback: cache miss; using carve", err)
+
+    def test_failed_hybrid_build_records_fallback_and_preserves_spend(self):
+        from unittest import mock
+        from herogen.blender import stage3
+        from herogen.blender.bl import BlenderError
+
+        def build(run, **kwargs):
+            rec = kwargs["rec"]
+            if kwargs["mesh_source"] == "sam3d-objects":
+                rec.data["cost_usd"] = 0.12
+                rec.add({"name": "partial", "pass": False})
+                raise BlenderError("hybrid export failed")
+            self.assertEqual(kwargs["joints_source"], "silhouette")
+            self.assertFalse(kwargs["fallback"])
+            self.assertEqual(rec.data["checks"], [])
+            rec.data["mesh_source"] = "carve"
+            return rec.finish()
+
+        with mock.patch.object(stage3, "_run_stage3", side_effect=build) as build_mock:
+            rec = stage3.run_stage3(self.run)
+        self.assertEqual(build_mock.call_count, 2)
+        self.assertEqual(rec["mesh_source_requested"], "sam3d-objects")
+        self.assertEqual(rec["cost_usd"], 0.12)
+        self.assertIn("hybrid export failed", rec["fallback"]["reason"])
+        self.assertTrue(rec["ok"])
+
+    def test_quality_rejection_never_retries_carve(self):
+        from unittest import mock
+        from herogen.blender import stage3
+
+        with mock.patch.object(stage3, "_run_stage3", return_value={"ok": False}) as build:
+            self.assertFalse(stage3.run_stage3(self.run)["ok"])
+        self.assertEqual(build.call_count, 1)
+
     def test_body_detector_flag_reaches_stage3(self):
         from unittest import mock
 
