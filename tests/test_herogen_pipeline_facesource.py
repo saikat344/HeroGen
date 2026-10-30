@@ -265,6 +265,22 @@ class TestStage(unittest.TestCase):
             with self.assertRaises(ReplayMiss):
                 F.stage2f_face_source(run, FakeClient())
         self.assertFalse(list((run.path / "views").glob("closeup-*")))   # nothing stale left behind
+        rec = json.loads((run.path / "stage-2f.json").read_text())       # the earlier record is replaced
+        self.assertEqual((rec["ok"], rec["status"]), (False, "error"))
+        self.assertIn("ReplayMiss", rec["error"])
+        self.assertEqual((rec["outputs"], rec["details"]["used_views"]), ([], []))
+
+    def test_results_show_a_replay_miss_as_failed(self):
+        from herogen.pipeline.results import collect
+
+        run = write_run(self.root)
+        self.assertTrue(F.stage2f_face_source(run, FakeClient())["ok"])
+        with mock.patch.object(F, "make_face_source", side_effect=ReplayMiss("no cached response for key k")):
+            with self.assertRaises(ReplayMiss):
+                F.stage2f_face_source(run, FakeClient())
+        row = [s for s in collect(run)["stages"] if s["stage"] == "2f"][0]
+        self.assertNotEqual(row["status"], "pass")
+        self.assertFalse(any("closeup" in str(x) for x in row.get("outputs") or row.get("images") or []))
 
     def test_the_cli_reports_a_fallback_on_stderr_and_goes_on(self):
         from herogen.pipeline.__main__ import run_pipeline
