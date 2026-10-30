@@ -426,11 +426,11 @@ def _profile_head(client: ModelClient, image: Image.Image, figure: np.ndarray, b
                                                                                                     dict]:
     """SAM 3.1 `head` on a profile view: the most confident instance lying mostly inside the crop and on the
     figure, clipped to the figure."""
-    from herogen.pipeline.heldout import _best
+    from herogen.pipeline.inputs import best_instance
 
     insts = client.segment(image, HEAD_TEXT)
     near = imaging.dilate(figure, 4) & box_mask(figure.shape, box)
-    best = _best(insts, near)
+    best = best_instance(insts, near)
     rec = {"method": f"{SAM_MODEL}:{HEAD_TEXT}", "instances": len(insts)}
     if best is None:
         return None, {**rec, "found": False}
