@@ -48,8 +48,9 @@ record is written in every case, also when no view is used (then with each view'
 This stage never fails a hero over its own failure. Any error (a Model API failure after the client's retries, a
 missing input, a bug) is recorded with its reason (`fallback`), no close-up image is written, and stage 4 bakes the
 plain views as before; the fallback is loud: the CLI prints it to stderr, and stage 4's record notes it. A replay
-miss (no cached answer when replaying) is not a model failure but a broken cache or run, and is raised, as in every
-other stage.
+miss (no cached answer when replaying) is not a model failure but a broken cache or run: the stage's record is
+replaced by a failed one (`ok` false, `status` "error", the error, no outputs, no view used) and the miss is raised,
+as in every other stage.
 Its record is `stage-2f.json` (the same record, per view under `details.closeups`); no check is gated. No file
 another stage reads is changed (`views/<view>.png`, `masks/<view>.png` and `views/meta.json` are untouched), so the
 held-out views stay valid.
@@ -516,10 +517,12 @@ def stage2f_face_source(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     _clear(run)
     try:
         record = make_face_source(run, client)
-    except ReplayMiss:
+    except ReplayMiss as e:
         # a replay with no cached answer is a broken cache or run, not a model failure: it stops the run, as in
-        # every other stage
+        # every other stage, and the record of an earlier run is replaced by a failed one (no outputs, nothing used)
         _clear(run)
+        st.details = {"stage": STAGE, "closeups": {}, "used_views": []}
+        st.fail(f"{type(e).__name__}: {e}"[:FALLBACK_CHARS])
         raise
     except Exception as e:  # noqa: BLE001  (any other failure falls back to the plain views; the reason is kept)
         _clear(run)
