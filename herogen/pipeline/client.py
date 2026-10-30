@@ -1,4 +1,5 @@
-"""The one model client for herogen/pipeline: Muse Image and SAM 3.1, with record and replay.
+"""The one model client for herogen/pipeline: Muse Image, SAM 3.1 and Muse Spark image questions, with record and
+replay.
 
 Modes:
 - ``live``: call Meta's Model API, then save a request summary and the response to the cache.
@@ -47,16 +48,22 @@ from herogen.pipeline import retry
 API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
 SAM_MODEL = "sam-3.1"
+TEXT_MODEL = "muse-spark-1.3"
 
 # List-price estimates in USD used to report a cost per stage. Estimates, not billed actuals.
 PRICE_PER_IMAGE_USD = {IMAGE_MODEL: 0.01, SAM_MODEL: 2.50 / 1000.0}
-COST_BASIS = "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image)"
+# Text and vision calls are priced by tokens: (input, output) USD per million tokens; reasoning counts as output.
+PRICE_PER_MTOK_USD = {TEXT_MODEL: (1.25, 4.25)}
+COST_BASIS = (
+    "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image; "
+    "muse-spark-1.3 $1.25/$4.25 per million input/output tokens, 0 for a call whose answer never came back)"
+)
 
 ENV_KEY = "MODEL_API_KEY"
 TIMEOUT_S = 240.0  # socket timeout of one attempt
 # Per-call deadline over all attempts and waits. One SAM call has sat on an open connection for about 4 minutes
 # before answering, so a deadline allows a slow attempt plus retries.
-DEADLINE_S = {SAM_MODEL: 600.0, IMAGE_MODEL: 900.0}
+DEADLINE_S = {SAM_MODEL: 600.0, IMAGE_MODEL: 900.0, TEXT_MODEL: 600.0}
 LEDGER = "calls-ledger.jsonl"
 
 log = logging.getLogger(__name__)
@@ -91,16 +98,19 @@ class CallLog:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def add(self, model: str, kind: str, key: str, cached: bool, outcome: str = "") -> None:
+    def add(self, model: str, kind: str, key: str, cached: bool, outcome: str = "",
+            cost_usd: float | None = None) -> None:
         """``outcome`` "unknown": the call may have reached the model but no answer came back (counted in the
-        cost, since it may be billed)."""
-        call = {"model": model, "kind": kind, "key": key, "cached": cached}
+        cost, since it may be billed). ``cost_usd``: the cost of a token-priced call, from its usage."""
+        call: dict[str, Any] = {"model": model, "kind": kind, "key": key, "cached": cached}
         if outcome:
             call["outcome"] = outcome
+        if cost_usd is not None:
+            call["cost_usd"] = round(cost_usd, 6)
         self.calls.append(call)
 
     def cost_usd(self, since: int = 0) -> float:
-        return round(sum(PRICE_PER_IMAGE_USD.get(c["model"], 0.0) for c in self.calls[since:] if not c["cached"]), 6)
+        return round(sum(call_cost(c) for c in self.calls[since:] if not c["cached"]), 6)
 
     def models(self, since: int = 0) -> list[str]:
         seen: list[str] = []
@@ -108,6 +118,32 @@ class CallLog:
             if c["model"] not in seen:
                 seen.append(c["model"])
         return seen
+
+
+def call_cost(call: dict[str, Any]) -> float:
+    """Estimated USD of one logged call: its token-priced cost when it has one, else the per-image price."""
+    if "cost_usd" in call:
+        return float(call["cost_usd"])
+    return PRICE_PER_IMAGE_USD.get(call["model"], 0.0)
+
+
+def token_cost_usd(model: str, usage: dict[str, Any] | None) -> float:
+    if model not in PRICE_PER_MTOK_USD:
+        raise ClientError(f"no token price configured for {model}")
+    usage = usage or {}
+    pin, pout = PRICE_PER_MTOK_USD[model]
+    return (int(usage.get("input_tokens") or 0) * pin + int(usage.get("output_tokens") or 0) * pout) / 1e6
+
+
+def jpeg_bytes(img: Image.Image, max_side: int, quality: int) -> bytes:
+    """RGB JPEG, scaled down (Lanczos) so its longer side is at most ``max_side``."""
+    im = img.convert("RGB")
+    if max(im.size) > max_side:
+        s = max_side / max(im.size)
+        im = im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
 
 
 def png_bytes(img: Image.Image) -> bytes:
@@ -234,6 +270,65 @@ class ModelClient:
                  "output_text": _output_text(resp)}
         self._save_entry(key, entry)
         return self._decode_and_save(key, entry, rgb.size)
+
+    def compare_images(
+        self,
+        prompt: str,
+        images: list[Image.Image],
+        *,
+        schema: dict[str, Any],
+        model: str = TEXT_MODEL,
+        reasoning_effort: str = "low",
+        max_output_tokens: int = 3000,
+        image_max_side: int = 1024,
+        jpeg_quality: int = 90,
+    ) -> dict[str, Any]:
+        """A Responses API call with images and a strict JSON schema; returns the parsed JSON object.
+
+        Images are sent as JPEG data URLs scaled to ``image_max_side``. Cost is estimated from the token usage.
+        The answer is checked against ``schema`` (`schema_errors`), live and on replay: an empty, unparsable or
+        non-conforming answer raises ``ClientError`` naming what is wrong (it is never guessed). An incomplete
+        answer raises `ApiError` and is never cached.
+        """
+        jpgs = [jpeg_bytes(im, image_max_side, jpeg_quality) for im in images]
+        summary: dict[str, Any] = {
+            "endpoint": "responses",
+            "model": model,
+            "prompt": prompt,
+            "images_sha256": [_sha(j) for j in jpgs],
+            "schema": schema,
+            "reasoning_effort": reasoning_effort,
+            "max_output_tokens": max_output_tokens,
+        }
+        key = request_key(summary)
+        entry = self._load(key)
+        if entry is not None:
+            self.log.add(model, "compare", key, cached=True)
+            return _conforming(_parse_json_object(entry["output_text"], key), schema, key)
+        if self.mode == "replay":
+            raise ReplayMiss(f"no cached responses entry for key {key} (model={model})")
+        if model not in PRICE_PER_MTOK_USD:  # checked before the paid call, so its cost is never lost
+            raise ClientError(f"no token price configured for {model}")
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        content += [{"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")}
+                    for j in jpgs]
+        body = {
+            "model": model,
+            "input": [{"type": "message", "role": "user", "content": content}],
+            "max_output_tokens": max_output_tokens,
+            "reasoning": {"effort": reasoning_effort},
+            "text": {"format": {"type": "json_schema", "name": schema["name"], "strict": True,
+                                "schema": schema["schema"]}},
+        }
+        started = time.monotonic()
+        resp = self._post("responses", body, model=model, kind="compare", key=key)
+        cost = token_cost_usd(model, resp.get("usage"))
+        self.log.add(model, "compare", key, cached=False, cost_usd=cost)
+        require_completed("responses", resp, required=True)
+        entry = {"request": summary, "seconds": round(time.monotonic() - started, 2), "status": resp.get("status"),
+                 "output_text": _output_text(resp), "usage": resp.get("usage"), "cost_usd": round(cost, 6)}
+        self._save_entry(key, entry)
+        return _conforming(_parse_json_object(entry["output_text"], key), schema, key)
 
     def _decode_and_save(self, key: str, entry: dict[str, Any], size: tuple[int, int]) -> list[SamInstance]:
         instances = decode_sam_output(entry["output_text"], size)
@@ -426,6 +521,63 @@ def _error_body(e: urllib.error.HTTPError) -> str:
         return _scrub(e.read().decode("utf-8", "replace")[:300])
     except (OSError, http.client.HTTPException) as err:  # the body itself can be cut off
         return f"(body unreadable: {type(err).__name__})"
+
+
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "object": (dict,), "array": (list,), "string": (str,), "boolean": (bool,), "integer": (int,),
+    "number": (int, float), "null": (type(None),),
+}
+_SCHEMA_KEYWORDS = {"type", "properties", "required", "additionalProperties", "items", "enum", "description"}
+
+
+def schema_errors(value: Any, schema: dict[str, Any], path: str = "answer") -> list[str]:
+    """Where ``value`` breaks ``schema``: the JSON Schema subset the vision schemas use (type, properties,
+    required, additionalProperties false, items, enum). A keyword outside that subset is an error, so a schema
+    is never checked only in part."""
+    unknown = sorted(set(schema) - _SCHEMA_KEYWORDS)
+    if unknown:
+        return [f"{path}: schema keyword(s) {', '.join(unknown)} can't be checked"]
+    kind = schema.get("type")
+    if kind is not None:
+        if kind not in _JSON_TYPES:
+            return [f"{path}: schema type {kind!r} can't be checked"]
+        ok = isinstance(value, _JSON_TYPES[kind]) and not (kind in ("integer", "number") and isinstance(value, bool))
+        if not ok:
+            return [f"{path} should be {kind}, got {type(value).__name__}"]
+    errors: list[str] = []
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path} is {value!r}, not one of {schema['enum']}")
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        errors += [f"{path}.{k} is missing" for k in schema.get("required", []) if k not in value]
+        if schema.get("additionalProperties") is False:
+            errors += [f"{path}.{k} is not in the schema" for k in value if k not in props]
+        for k, sub in props.items():
+            if k in value:
+                errors += schema_errors(value[k], sub, f"{path}.{k}")
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            errors += schema_errors(item, schema["items"], f"{path}[{i}]")
+    return errors
+
+
+def _conforming(answer: dict[str, Any], schema: dict[str, Any], key: str) -> dict[str, Any]:
+    errors = schema_errors(answer, schema["schema"])
+    if errors:
+        raise ClientError(f"responses entry {key} does not match schema {schema['name']!r}: " + "; ".join(errors))
+    return answer
+
+
+def _parse_json_object(text: str, key: str) -> dict[str, Any]:
+    if not text.strip():
+        raise ClientError(f"responses entry {key} has no output text")
+    try:
+        out = json.loads(text)
+    except ValueError as e:
+        raise ClientError(f"responses entry {key} is not JSON: {e}") from e
+    if not isinstance(out, dict):
+        raise ClientError(f"responses entry {key} is not a JSON object")
+    return out
 
 
 def _output_text(resp: dict[str, Any]) -> str:
