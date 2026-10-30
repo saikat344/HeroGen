@@ -448,11 +448,6 @@ Close-ups go only into the Head texture, and weights and visibility are unchange
 `texture.closeups` in `sections.json` records the views used and why others were not. Each Head bake's
 `texture.bake.<lod>.head.closeups` records the texel density and the texels with close-up detail.
 
-On the ground-truth bench (true geometry, per-point projection, faces scored at +-25 and +-65 degrees in a 768 px
-face window), the front and profile close-ups added this way changed face colour error by -3.1% [-6.9, -0.4] on
-the tuning characters and -14.5% [-20.1, -9.5] on the held-out ones. LPIPS changed by -8.4% and -28.5%. Pasting the
-close-up's colour in instead made tuning worse (+20%), since its low-frequency colour drifts from the view's.
-
 ## Stage 2f: face source (head close-ups)
 
 A turnaround view gives the face a few dozen pixels. Stage 2f (`herogen/pipeline/facesource.py`) runs after stage 2
