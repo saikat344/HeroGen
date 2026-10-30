@@ -2,28 +2,36 @@
 """Release rules for the hosted service: which tag deploys where, and what a deploy needs.
 
 A tag `vX.Y.Z-rc.N` deploys the service to the `staging` GitHub environment. A tag `vX.Y.Z` deploys it to
-`production`, and only when the same commit also carries a tag `vX.Y.Z-rc.N` (any N). Any other tag is refused.
-X, Y, Z and N are whole numbers without leading zeros. `.github/workflows/release.yml` runs these commands; the
-rules live here so they are tested code.
+`production`, and only when the same commit also carries a tag `vX.Y.Z-rc.N` (any N) and the `staging`
+environment has a successful deployment of that commit. Any other tag is refused. X, Y, Z and N are whole numbers
+without leading zeros. `.github/workflows/release.yml` runs these commands; the rules live here so they are tested
+code.
 
 Standard library only (the deploy itself runs the Modal CLI from tools/release/requirements.txt).
 
 Usage, from the repository root:
-  release.py plan <tag>            check the tag (and, for production, its rc tag); print the environment
+  release.py plan <tag>            check the tag (and, for production, its rc tag and its staging deployment);
+                                   print the environment
   release.py check <tag>           check that the service's Modal app is in the commit and every deploy
                                    setting is set (names what is missing, never a value)
   release.py deploy <tag>          check again, then `python -m modal deploy -m herogen.service.modal_app`
 
-On GitHub Actions, `plan` writes `environment`, `version` and `commit` to $GITHUB_OUTPUT; `plan` and `deploy` add
-a line to the job summary, and a refusal goes to the summary and an error annotation.
+`plan` for a production tag reads the repository's deployments from the GitHub API: it needs GITHUB_REPOSITORY
+(`owner/name`) and GITHUB_TOKEN (a token that may read deployments); GITHUB_API_URL defaults to
+https://api.github.com. On GitHub Actions, `plan` writes `environment`, `version` and `commit` to $GITHUB_OUTPUT;
+`plan` and `deploy` add a line to the job summary, and a refusal goes to the summary and an error annotation.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +64,15 @@ FIXED = {"HEROGEN_SERVICE_MODE": "production", "HEROGEN_SERVICE_EMAIL_PROVIDER":
 # The service bakes every HEROGEN_SERVICE_* variable of the deploying shell into its image, so the deploy gets
 # only the ones above.
 SERVICE_PREFIX = "HEROGEN_SERVICE_"
+
+# GitHub deployment states (REST API, deployment statuses). A deployment with no status yet is pending.
+SUCCESS = "success"
+IN_PROGRESS = ("queued", "pending", "in_progress")
+GITHUB_API = "https://api.github.com"
+API_VERSION = "2022-11-28"
+PER_PAGE = 100
+MAX_PAGES = 20
+_NEXT = re.compile(r'<([^<>]+)>\s*;\s*rel="next"')
 
 
 class ReleaseError(Exception):
@@ -127,11 +144,144 @@ def rc_tags_at(tag: Tag, tags: Sequence[str]) -> list[str]:
     return [t.name for t in sorted(rcs, key=lambda t: t.rc)]
 
 
+# ---------------------------------------------------------------------------
+# Deployments, from the GitHub REST API
+
+
+@dataclass(frozen=True)
+class Response:
+    status: int
+    body: bytes
+    link: str = ""   # the Link header, for the next page
+
+
+Fetch = Callable[[str, Mapping[str, str]], Response]
+
+
+def urllib_fetch(url: str, headers: Mapping[str, str]) -> Response:
+    """GET `url`. An HTTP error comes back as its Response; no answer at all is a ReleaseError."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=dict(headers)), timeout=30) as r:
+            return Response(r.status, r.read(), r.headers.get("Link", "") or "")
+    except urllib.error.HTTPError as e:
+        return Response(e.code, b"", (e.headers.get("Link", "") if e.headers else "") or "")
+    except (urllib.error.URLError, OSError) as e:
+        reason = getattr(e, "reason", None) or type(e).__name__
+        raise ReleaseError(f"the GitHub API did not answer ({reason}), so the {STAGING} deployment of this commit "
+                           "cannot be checked; re-run this workflow.") from None
+
+
+class Deployments(Protocol):
+    def deployments(self, environment: str, sha: str) -> list[dict]: ...
+
+    def states(self, deployment_id: int) -> list[str]: ...
+
+
+class GitHubDeployments:
+    """A repository's deployments and their statuses. The token goes in the Authorization header, only to
+    `api_url`; a next-page link elsewhere is refused."""
+
+    def __init__(self, repo: str, token: str, api_url: str = GITHUB_API, fetch: Fetch = urllib_fetch,
+                 max_pages: int = MAX_PAGES) -> None:
+        self.repo, self.api_url, self.fetch, self.max_pages = repo, api_url.rstrip("/"), fetch, max_pages
+        self._headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                         "X-GitHub-Api-Version": API_VERSION, "User-Agent": "herogen-release"}
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str], fetch: Fetch = urllib_fetch) -> GitHubDeployments:
+        missing = [n for n in ("GITHUB_REPOSITORY", "GITHUB_TOKEN") if not env.get(n, "").strip()]
+        if missing:
+            raise ReleaseError(f"checking the {STAGING} deployment needs {' and '.join(missing)} (the workflow sets "
+                               "them; locally, set GITHUB_REPOSITORY to owner/name and GITHUB_TOKEN to a token that "
+                               "may read deployments).")
+        return cls(env["GITHUB_REPOSITORY"].strip(), env["GITHUB_TOKEN"].strip(),
+                   env.get("GITHUB_API_URL", "").strip() or GITHUB_API, fetch)
+
+    def _error(self, status: int, what: str) -> ReleaseError:
+        if status == 401:
+            why = "the GitHub token was refused (401)"
+        elif status == 403:
+            why = ("the GitHub token may not read deployments, or the API rate limit was reached (403); the job "
+                   "needs the `deployments: read` permission")
+        elif status == 404:
+            why = f"GitHub found no repository {self.repo!r} or deployment there (404)"
+        elif status >= 500:
+            why = f"the GitHub API failed ({status}); re-run this workflow later"
+        else:
+            why = f"the GitHub API answered {status}"
+        return ReleaseError(f"could not read {what}: {why}. Production is not deployed until this check passes.")
+
+    def _get_all(self, path: str, query: Mapping[str, str], what: str) -> list:
+        url = f"{self.api_url}{path}?{urllib.parse.urlencode({**query, 'per_page': PER_PAGE})}"
+        items: list = []
+        for _ in range(self.max_pages):
+            r = self.fetch(url, self._headers)
+            if r.status != 200:
+                raise self._error(r.status, what)
+            try:
+                page = json.loads(r.body)
+            except ValueError:
+                page = None
+            if not isinstance(page, list):
+                raise ReleaseError(f"could not read {what}: the GitHub API's answer is not a list.")
+            items += page
+            m = _NEXT.search(r.link)
+            if not m:
+                return items
+            url = m.group(1)
+            if not url.startswith(self.api_url + "/"):
+                raise ReleaseError(f"could not read {what}: the GitHub API's next page is not on {self.api_url}.")
+        raise ReleaseError(f"could not read {what}: more than {self.max_pages} pages of {PER_PAGE}.")
+
+    def deployments(self, environment: str, sha: str) -> list[dict]:
+        found = self._get_all(f"/repos/{self.repo}/deployments", {"environment": environment, "sha": sha},
+                              f"the {environment} deployments of {sha}")
+        return [d for d in found if isinstance(d, dict)]
+
+    def states(self, deployment_id: int) -> list[str]:
+        """The deployment's status states, newest first, as the API lists them."""
+        found = self._get_all(f"/repos/{self.repo}/deployments/{int(deployment_id)}/statuses", {},
+                              f"the statuses of deployment {deployment_id}")
+        return [str(s.get("state", "")) for s in found if isinstance(s, dict)]
+
+
+def staging_succeeded(commit: str, api: Deployments) -> int:
+    """The id of a successful `staging` deployment of `commit`, or a ReleaseError saying what was found instead.
+
+    A deployment counts once any of its statuses is `success`: GitHub marks an earlier successful deployment
+    `inactive` when a later one to the same environment succeeds, and it still counts."""
+    found = [d for d in api.deployments(STAGING, commit) if d.get("sha") == commit and "id" in d]
+    rerun = f"Let its rc tag deploy to {STAGING}, then re-run this workflow."
+    if not found:
+        raise ReleaseError(f"cannot deploy to {PRODUCTION}: the {STAGING} environment has no deployment of commit "
+                           f"{commit}. {rerun}")
+    latest = {}
+    for d in found:
+        states = api.states(d["id"])
+        if SUCCESS in states:
+            return int(d["id"])
+        latest[d["id"]] = states[0] if states else "pending"
+    running = sorted(i for i, s in latest.items() if s in IN_PROGRESS)
+    if running:
+        raise ReleaseError(f"cannot deploy to {PRODUCTION} yet: the {STAGING} deployment of commit {commit} is still "
+                           f"in progress (deployment {', '.join(map(str, running))}). Re-run this workflow once it "
+                           "has succeeded.")
+    ended = ", ".join(f"{i}: {s}" for i, s in sorted(latest.items()))
+    raise ReleaseError(f"cannot deploy to {PRODUCTION}: no {STAGING} deployment of commit {commit} succeeded "
+                       f"(latest states {ended}). Fix the {STAGING} deploy (re-run it, or release a new rc), then "
+                       "re-run this workflow.")
+
+
+# ---------------------------------------------------------------------------
+# The plan
+
+
 @dataclass(frozen=True)
 class Plan:
     tag: Tag
     commit: str
     rc_tags: tuple[str, ...]
+    staging_deployment: int | None = None
 
     @property
     def environment(self) -> str:
@@ -141,11 +291,12 @@ class Plan:
         if self.tag.is_rc:
             return f"{self.tag.name} ({self.commit}) deploys to {STAGING}."
         return (f"{self.tag.name} ({self.commit}) deploys to {PRODUCTION}: the commit carries "
-                f"{', '.join(self.rc_tags)}.")
+                f"{', '.join(self.rc_tags)} and {STAGING} deployment {self.staging_deployment} of it succeeded.")
 
 
-def plan(name: str, git: Git) -> Plan:
-    """Where tag `name` deploys. Production is refused unless the tag's commit carries an rc tag of its version."""
+def plan(name: str, git: Git, deployments: Callable[[], Deployments]) -> Plan:
+    """Where tag `name` deploys. Production is refused unless the tag's commit carries an rc tag of its version
+    and has a successful `staging` deployment. `deployments` is called only for a production tag."""
     tag = parse_tag(name)
     commit = git.commit_of(tag.name)
     if not commit:
@@ -158,7 +309,15 @@ def plan(name: str, git: Git) -> Plan:
             f"{tag.name} cannot deploy to {PRODUCTION}: its commit {commit} carries no {tag.name}-rc.N tag. "
             f"A production tag goes on a commit that was released to {STAGING} first: tag this commit "
             f"{tag.name}-rc.N, let it deploy, then re-run this workflow (a re-run reads the tags again).")
-    return Plan(tag, commit, tuple(rcs))
+    try:
+        deployment = staging_succeeded(commit, deployments())
+    except ReleaseError as e:
+        raise ReleaseError(f"{tag.name} {e}") from None
+    return Plan(tag, commit, tuple(rcs), deployment)
+
+
+# ---------------------------------------------------------------------------
+# The deploy
 
 
 def missing_config(env: Mapping[str, str]) -> list[tuple[str, str]]:
@@ -233,7 +392,8 @@ def _escape(text: str) -> str:
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None, git: Git | None = None,
-         root: Path | None = None, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> int:
+         root: Path | None = None, run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+         fetch: Fetch = urllib_fetch) -> int:
     env = os.environ if env is None else env
     root = Path.cwd() if root is None else root
     p = argparse.ArgumentParser(prog="release.py", description=__doc__.split("\n\n")[0])
@@ -245,7 +405,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     args = p.parse_args(argv)
     try:
         if args.command == "plan":
-            pl = plan(args.tag, git or LocalGit(root))
+            pl = plan(args.tag, git or LocalGit(root), lambda: GitHubDeployments.from_env(env, fetch))
             print(pl.describe())
             _github_output({"environment": pl.environment, "version": pl.tag.version, "commit": pl.commit}, env)
             _summary(pl.describe(), env)
