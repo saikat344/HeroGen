@@ -179,6 +179,13 @@ so they skip there; run them locally before changing the service page.
 The hybrid mesh tests need `scipy`, which `requirements-test.txt` includes. The pytorch3d rasteriser's test
 needs `torch` and `pytorch3d`, which only the SAM 3D Objects image installs, so it skips everywhere else.
 
+## Releases
+
+Tags deploy the hosted service (`herogen/service`) to Modal through `.github/workflows/release.yml`: `vX.Y.Z-rc.N`
+to staging, then `vX.Y.Z` on the same commit to production, each after the tests pass. Any other tag starting with
+`v` fails. Deploying needs the service code in the tagged commit. The rules, the secrets and variables each GitHub
+environment needs, and how to roll back are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#releases).
+
 ## Third-party models and libraries
 
 Muse Image and SAM 3.1 are called through Meta's Model API. `meta-sam-parser`, an optional dependency used to
