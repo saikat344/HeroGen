@@ -288,6 +288,22 @@ class CompareThroughServerTest(unittest.TestCase):
         self.assertEqual(c.log.calls[0]["cost_usd"], round(3000 * 4.25 / 1e6, 6))
         self.assertAlmostEqual(c.log.cost_usd(), (3000 * 4.25 + 2000 * 1.25 + 1000 * 4.25) / 1e6)
 
+    def test_an_answer_without_usage_is_counted_at_the_output_cap(self):
+        for usage in (None, {}, {"input_tokens": 2000}):
+            with self.subTest(usage=usage):
+                self.cache = Path(self.tmp.name) / f"cache-{len(str(usage))}"
+                incomplete = (200, {}, {"status": "incomplete", "output": [], "usage": usage,
+                                        "incomplete_details": {"reason": "max_output_tokens"}})
+                server = FakeModelServer(lambda e, b: incomplete, DUMMY_KEY)
+                c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter)
+                with server.serving(self.tmp.name + "/limiter"), \
+                        mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                        self.assertRaisesRegex(client_mod.ApiError, "incomplete"):
+                    c.compare_images("q", self.images, schema=SCHEMA)
+                # Answered, so it may be billed: never $0. Reported input tokens count; missing output is the cap.
+                want = ((usage or {}).get("input_tokens", 0) * 1.25 + 3000 * 4.25) / 1e6
+                self.assertAlmostEqual(c.log.cost_usd(), want)
+
     def test_a_token_priced_call_needs_its_unknown_outcome_cost(self):
         c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter)
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
