@@ -475,6 +475,43 @@ section's centre, size, pivot and triangles).
 The Studio scripts and these steps have not yet been run in a Studio session. The joints are Motor6D; an
 AnimationConstraint variant is not written.
 
+## Model API calls: retries, shared limit, ledger
+
+All Muse Image and SAM 3.1 calls go through `herogen/pipeline/client.py`; the policy is in
+`herogen/pipeline/retry.py`.
+
+- **What is retried:** HTTP 408, 409, 425, 429 and 5xx, except 501 and 505 (they say the request can never
+  work), and network errors (no HTTP status). Never any other 4xx, and never a 200 whose body is not a JSON
+  object. A 200 answer whose `status` is `failed` with error code `rate_limit_exceeded` or `server_error` is
+  retried as a 429 or a 500 (and logged as a call of unknown outcome, since it may be billed); any other answer
+  that did not complete stops the call at once.
+- **How long to wait:** the server's `Retry-After` (seconds or an HTTP date; a non-finite or unreadable value is
+  ignored) plus 0-1 s of jitter; else the
+  largest rate-limit reset header (`retry-after-ms`, `ratelimit-reset`, `x-ratelimit-reset`,
+  `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens`; an `x-ratelimit-reset` over 10^9 is read as an epoch
+  time in seconds, over 10^11 in milliseconds) plus the same jitter; else full-jitter exponential backoff, a random time between 0 and
+  min(60 s, 2 s x 2^n) before retry n + 1.
+- **Limits:** at most 8 attempts within a per-call time limit of 10 minutes for SAM 3.1 and 15 for Muse Image
+  (`DEADLINE_S`), separate from each attempt's 240 s socket timeout. A wait that would end past it is not started;
+  the call fails at once. A call that fails raises `ApiError`, which stops the stage (see "Mask method").
+- **Shared limit per key:** every process calling with one API key shares one limit on calls in flight, in a
+  JSON state file under `HEROGEN_LIMITER_DIR` (default `~/.cache/herogen/api-limiter`) named by a 16-hex-digit
+  SHA-256 prefix of the key, never the key, and guarded by an exclusive `flock`. The limit starts at 4. A 429
+  halves it (never below 1) and, when its caller starts the wait it was given, holds every process off for that
+  wait, at most 60 s (`HOLD_MAX_S`), so a huge or bad wait never blocks the key; a hold read back from the
+  state file is cut to 60 s from now too. Every 20
+  successful calls since the last 429 raise it by one, up to 8. A slot held by a process that has died, or
+  for longer than 300 s, is freed. The start and maximum are configured, not measured.
+- **Ledger and logs:** every HTTP attempt is a line in `<cache>/calls-ledger.jsonl`: time, model, endpoint,
+  request key, attempt, status, outcome (`ok`, `failed`, `unknown` or `unreadable`), seconds, the wait for a
+  call slot and the wait before the next attempt with its reason, and the scrubbed error. Each retry is also a
+  warning on the `herogen.pipeline.client` logger. Neither holds a header or the key. An attempt that may
+  have reached the model and be billed without a usable answer has outcome `unknown`, is also in the stage
+  record's `calls` (`"outcome": "unknown"`) and is counted in the cost estimate: one that timed out or was cut
+  off while sending, any error while waiting for or reading the answer, a 200 answer that can't be read or
+  that failed, and, for a Muse Image generation (paid and not idempotent), any 5xx but 503. A Muse Image
+  generation is never retried on a 409.
+
 ## Rules
 
 - No secrets in code, logs or run folders. Model keys come from the environment.

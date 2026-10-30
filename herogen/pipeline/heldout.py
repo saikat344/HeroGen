@@ -1061,9 +1061,10 @@ def _inputs(view: HeldoutView, ctx: _Context, request_deg: float
     return view_prompt(view, request_deg, reference), [ctx.cover, ref, guide], k, reference
 
 
-# Overall time limit for one stage 2h run. Each Model API call can wait TIMEOUT_S (240 s) and retry, and a
-# run makes up to 16 generations and 52 SAM calls; a typical live run takes 7-12 minutes. The limit is checked
-# before each generation, so the generation in flight finishes first.
+# Overall time limit for one stage 2h run. Each Model API call can retry within its own deadline (client
+# DEADLINE_S: 10 minutes for SAM 3.1, 15 for Muse Image), and a run makes up to 16 generations and 52 SAM calls;
+# a typical live run takes 7-12 minutes. The limit is checked before each generation, so the generation in
+# flight finishes first.
 TIME_LIMIT_S = 1800.0
 
 

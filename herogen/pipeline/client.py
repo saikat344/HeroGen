@@ -12,25 +12,37 @@ image), so a replay returns exactly what the live call returned for the same inp
 PNG files next to a JSON entry; SAM masks are stored decoded (one PNG per instance) so replay needs no mask
 decoder. The API key is read from ``MODEL_API_KEY`` at call time, sent only in the Authorization header,
 and never stored, printed or logged.
+
+Live calls follow the retry policy and the shared per-key limiter in `herogen.pipeline.retry`. Every HTTP
+attempt is appended to ``<cache>/calls-ledger.jsonl`` (model, endpoint, request key, status, outcome, time
+taken, wait before the next attempt; never a header or the key). An attempt that may have reached the model
+without an answer coming back (it timed out or was cut off on our side) is recorded there and in the call log
+as outcome "unknown": it may be billed, so the cost estimate counts it.
 """
 
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
+import http.client
 import io
 import json
+import logging
 import os
 import re
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
+
+from herogen.pipeline import retry
 
 API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
@@ -41,8 +53,13 @@ PRICE_PER_IMAGE_USD = {IMAGE_MODEL: 0.01, SAM_MODEL: 2.50 / 1000.0}
 COST_BASIS = "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image)"
 
 ENV_KEY = "MODEL_API_KEY"
-TIMEOUT_S = 240.0
-RETRIES = 2
+TIMEOUT_S = 240.0  # socket timeout of one attempt
+# Per-call deadline over all attempts and waits. One SAM call has sat on an open connection for about 4 minutes
+# before answering, so a deadline allows a slow attempt plus retries.
+DEADLINE_S = {SAM_MODEL: 600.0, IMAGE_MODEL: 900.0}
+LEDGER = "calls-ledger.jsonl"
+
+log = logging.getLogger(__name__)
 
 
 class ClientError(RuntimeError):
@@ -74,8 +91,13 @@ class CallLog:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def add(self, model: str, kind: str, key: str, cached: bool) -> None:
-        self.calls.append({"model": model, "kind": kind, "key": key, "cached": cached})
+    def add(self, model: str, kind: str, key: str, cached: bool, outcome: str = "") -> None:
+        """``outcome`` "unknown": the call may have reached the model but no answer came back (counted in the
+        cost, since it may be billed)."""
+        call = {"model": model, "kind": kind, "key": key, "cached": cached}
+        if outcome:
+            call["outcome"] = outcome
+        self.calls.append(call)
 
     def cost_usd(self, since: int = 0) -> float:
         return round(sum(PRICE_PER_IMAGE_USD.get(c["model"], 0.0) for c in self.calls[since:] if not c["cached"]), 6)
@@ -118,12 +140,16 @@ def _scrub(text: str) -> str:
 class ModelClient:
     """Muse Image generate/edit and SAM 3.1 text-prompt segmentation, through one record/replay cache."""
 
-    def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None) -> None:
+    def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
+                 policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None) -> None:
+        """``policy`` and ``limiter`` default to `retry.RetryPolicy()` and the shared limiter of the key in use."""
         if mode not in ("live", "replay"):
             raise ValueError(f"mode must be 'live' or 'replay', got {mode!r}")
         self.cache_dir = Path(cache_dir)
         self.mode = mode
         self.log = log if log is not None else CallLog()
+        self.policy = policy or retry.RetryPolicy()
+        self.limiter = limiter
 
     # ---- public calls -------------------------------------------------------------------------------
 
@@ -199,7 +225,7 @@ class ModelClient:
         }
         started = time.monotonic()
         # A failed call raises `ApiError` and is never cached: a failure is not a result to replay.
-        resp = self._post("responses", body)
+        resp = self._post("responses", body, model=SAM_MODEL, kind="segment", key=key)
         # The call is billed now, so log it and keep the raw response before decoding can fail.
         self.log.add(SAM_MODEL, "segment", key, cached=False)
         # An incomplete or failed response can carry no output, which would read as "nothing found".
@@ -231,7 +257,7 @@ class ModelClient:
         if self.mode == "replay":
             raise ReplayMiss(f"no cached {endpoint} response for key {key}")
         started = time.monotonic()
-        resp = self._post(endpoint, body)
+        resp = self._post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
         try:
             require_completed(endpoint, resp, required=False)
         except ApiError:
@@ -257,43 +283,108 @@ class ModelClient:
         self.log.add(IMAGE_MODEL, kind, key, cached=False)
         return img
 
-    def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-        key = os.environ.get(ENV_KEY, "").strip()
-        if not key:
+    def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str) -> dict[str, Any]:
+        """POST to the Model API under the retry policy and the shared limiter (`herogen.pipeline.retry`),
+        each attempt a line in the ledger and each retry a logged warning. Raises `ApiError` when the
+        attempts or the deadline run out, or at once on a status that is never retried."""
+        api_key = os.environ.get(ENV_KEY, "").strip()
+        if not api_key:
             raise ClientError(f"{ENV_KEY} is not set; live mode needs it in the environment")
         data = json.dumps(body).encode("utf-8")
-        last_err = ""
-        for attempt in range(RETRIES + 1):
-            req = urllib.request.Request(
-                f"{API_BASE}/{endpoint}",
-                data=data,
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-            )
+        policy = self.policy
+        limiter = self.limiter or retry.SharedLimiter.for_key(api_key)
+        deadline_s = DEADLINE_S.get(model, DEADLINE_S[SAM_MODEL])
+        deadline = policy.clock() + deadline_s
+        paid_edit = model == IMAGE_MODEL  # each answered Muse call is a new, billed generation
+        last = "no attempt made"
+        for attempt in range(1, policy.max_attempts + 1):
+            slot, slot_wait = limiter.acquire(policy.wall() + (deadline - policy.clock()))
+            if slot is None:
+                raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "
+                               f"(attempt {attempt}; last: {last})")
+            started = policy.clock()
+            status: int | None = None
+            headers: dict[str, str] = {}
+            outcome = "failed"
+            parsed: Any = None
             try:
+                req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
+                    "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                    "Accept": "application/json"})
                 with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+                    status = r.status
                     raw = r.read().decode("utf-8", "replace")
                 try:
                     parsed = json.loads(raw)
-                except ValueError as e:
-                    raise ApiError(f"{endpoint}: response is not JSON ({e})") from e
-                if not isinstance(parsed, dict):
-                    raise ApiError(f"{endpoint}: response is not a JSON object")
-                return parsed
+                except ValueError:
+                    parsed = None
+                outcome = "ok" if isinstance(parsed, dict) else "unreadable"
+                last = f"HTTP {status}" if outcome == "ok" else f"HTTP {status}: the response is not a JSON object"
+                if outcome == "unreadable":  # answered, so it may be billed
+                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+                as_http = retry.failed_answer_status(parsed) if outcome == "ok" else None
+                if as_http is not None:  # answered "failed" for a transient reason: retried like that status
+                    last = f"HTTP {status} with status 'failed' ({_scrub(json.dumps(parsed.get('error')))[:200]})"
+                    status, outcome = as_http, "failed"
+                    self.log.add(model, kind, key, cached=False, outcome="unknown")  # answered: may be billed
             except urllib.error.HTTPError as e:
-                detail = _scrub(e.read().decode("utf-8", "replace")[:400])
-                last_err = f"HTTP {e.code}: {detail}"
-                if e.code != 429 and e.code < 500:
-                    break
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                last_err = _scrub(f"{type(e).__name__}: {e}")[:300]
-            if attempt < RETRIES:
-                time.sleep(2.0 * (attempt + 1))
-        raise ApiError(f"{endpoint} failed: {last_err}")
+                status, headers = e.code, dict(e.headers.items()) if e.headers else {}
+                last = f"HTTP {e.code}: {_error_body(e)}"
+                if retry.maybe_billed(status, paid_edit=paid_edit):  # a gateway error after generating, maybe
+                    outcome = "unknown"
+                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+                sending = isinstance(e, urllib.error.URLError)
+                reason = e.reason if sending else e
+                status = None  # no whole answer came back, whatever status line came first
+                # urllib wraps only errors while connecting or sending in URLError. Any other error came while
+                # waiting for or reading the answer, so the request went out and may have reached the model;
+                # so may one that timed out or was cut off while sending.
+                if not sending or isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError)):
+                    outcome = "unknown"
+                    self.log.add(model, kind, key, cached=False, outcome="unknown")
+                last = _scrub(f"{type(reason).__name__}: {reason}")[:300]
+            seconds = policy.clock() - started
+            final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
+                or attempt == policy.max_attempts
+            wait, why = (0.0, "") if final else policy.wait(attempt - 1, headers)
+            left = max(0.0, deadline - policy.clock())
+            gives_up = not final and wait > left
+            # Others on the key are held off only for a wait this call really starts (the limiter caps it again).
+            limiter.release(slot, ok=outcome == "ok", rate_limited=status == 429,
+                            hold_s=0.0 if final or gives_up else wait)
+            self._ledger({"model": model, "endpoint": endpoint, "key": key, "attempt": attempt, "status": status,
+                          "outcome": outcome, "seconds": round(seconds, 3), "slot_wait_s": round(slot_wait, 3),
+                          "wait_s": None if final or gives_up else round(wait, 3), "wait_reason": why or None,
+                          "error": None if outcome == "ok" else last})
+            if outcome == "ok":
+                return parsed
+            if outcome == "unreadable":
+                raise ApiError(f"{endpoint}: {last}")
+            if final or gives_up:
+                break
+            log.warning("%s %s attempt %d/%d failed (%s); retrying in %.1f s (%s)", model, endpoint, attempt,
+                        policy.max_attempts, last[:120], wait, why)
+            policy.sleep(wait)
+        if not retry.retryable(status, paid_edit=paid_edit):
+            raise ApiError(f"{endpoint} failed: {last} (not retried)")
+        if attempt == policy.max_attempts:
+            raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}")
+        raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the next wait would pass the "
+                       f"{deadline_s:.0f} s deadline")
+
+    def _ledger(self, row: dict[str, Any]) -> None:
+        """Append one attempt to the cache's ledger (under an exclusive lock, so parallel runs never interleave)."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"time": datetime.now().astimezone().isoformat(timespec="milliseconds"), **row},
+                          sort_keys=True) + "\n"
+        with open(self.cache_dir / LEDGER, "a") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(line)
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _load(self, key: str) -> dict[str, Any] | None:
         path = self.cache_dir / f"{key}.json"
@@ -328,6 +419,13 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
         detail = resp.get("error") or resp.get("incomplete_details")
         raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
                        + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
+
+
+def _error_body(e: urllib.error.HTTPError) -> str:
+    try:
+        return _scrub(e.read().decode("utf-8", "replace")[:300])
+    except (OSError, http.client.HTTPException) as err:  # the body itself can be cut off
+        return f"(body unreadable: {type(err).__name__})"
 
 
 def _output_text(resp: dict[str, Any]) -> str:
