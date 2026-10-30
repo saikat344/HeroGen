@@ -52,10 +52,12 @@ class FakeAPI:
     """Stands in for Meta's Model API. Draws every image by code; SAM masks come from thresholding."""
 
     def __init__(self, sheet_order=("front", "right", "front", "left"), heldout_yaw: float | None = None,
-                 heldout_pose: str = "a", heldout_gain: float = 1.0) -> None:
+                 heldout_pose: str = "a", heldout_gain: float = 0.98) -> None:
         self.sheet_order = sheet_order
         self.heldout_yaw = heldout_yaw  # held-out turn; None: as requested; negative: the wrong way
-        self.heldout_gain = heldout_gain  # turn drawn / turn requested, when heldout_yaw is None
+        # Turn drawn / turn requested, when heldout_yaw is None. 0.98 by default: the prompt asks for whole
+        # degrees, so the 30-degree views' aim of 25.7 is asked as 26, and the window ends at 26.4.
+        self.heldout_gain = heldout_gain
         self.heldout_pose = heldout_pose  # "a", "down" or "stride" (see test_herogen_pipeline_heldout_synth)
         self.calls: list[str] = []
         self.prompts: list[str] = []

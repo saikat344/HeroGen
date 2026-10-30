@@ -224,10 +224,47 @@ def turned_joints(fig: synth.Figure, joints: dict, yaw_deg: float, size: int = S
     return out
 
 
+def humanoid_joints(fig: synth.Figure) -> dict[str, tuple[float, float, float]]:
+    """Body joints (Sapiens 2 names) of a `figure`, read from its parts so a stride's moved legs are followed:
+    synth.humanoid's head, neck, then per side (left, right) upper arm, forearm, hand, thigh, shin, foot."""
+    head, neck = fig.parts[0], fig.parts[1]
+    (hx, hy, hz), (rx, ry, rz) = head.c, head.radii
+    j = {"nose": (hx, hy - ry, hz), "neck": tuple(neck.a),
+         "left_eye": (hx + 0.35 * rx, hy - 0.85 * ry, hz + 0.15 * rz),
+         "right_eye": (hx - 0.35 * rx, hy - 0.85 * ry, hz + 0.15 * rz),
+         "left_ear": (hx + rx, hy, hz), "right_ear": (hx - rx, hy, hz)}
+    for side, first, sx in (("left", 5, 1.0), ("right", 11, -1.0)):
+        upper, fore, _, thigh, shin, foot = fig.parts[first : first + 6]
+        j[f"{side}_shoulder"], j[f"{side}_elbow"], j[f"{side}_wrist"] = upper.a, upper.b, fore.b
+        j[f"{side}_hip"], j[f"{side}_knee"], j[f"{side}_ankle"] = thigh.a, thigh.b, shin.b
+        (fx, fy, fz), (wx, wy, wz) = foot.c, foot.half
+        j[f"{side}_big_toe"] = (fx - 0.5 * wx * sx, fy - wy, fz - wz)
+        j[f"{side}_small_toe"] = (fx + 0.5 * wx * sx, fy - 0.8 * wy, fz - wz)
+        j[f"{side}_heel"] = (fx, fy + wy, fz - wz)
+    return {n: tuple(float(v) for v in p) for n, p in j.items()}
+
+
+def keypoints_at(fig: synth.Figure, yaw_deg: float, score: float = 0.9) -> dict:
+    """What `heldout.measure_keypoints` records for `turned_mask(fig, yaw_deg)`: the joints in that image's
+    px, and its soles' row."""
+    m = turned_mask(fig, yaw_deg)
+    pts = turned_joints(fig, humanoid_joints(fig), yaw_deg)
+    return {"joints": {n: [c, r, score] for n, (c, r) in pts.items()}, "bottom": float(imaging.bbox(m)[3])}
+
+
+def body_of(fig: synth.Figure) -> "heldout.KP.BodyModel":
+    """The turnaround joint model of ``fig`` (its front and profiles), as stage 2h builds it."""
+    t = turnaround(fig)
+    b = imaging.bbox(t["front"])
+    return heldout.body_model({**{v: keypoints_at(fig, y) for v, y in (("front", 0), ("left", 90), ("right", -90))},
+                               "front_height": float(b[3] - b[1])})
+
+
 class FakePose:
-    """A stand-in for `herogen.pipeline.sapiens.PoseClient` for images of the stick figure: it finds the pose
-    and yaw whose `turned_mask` best matches the figure in the box (height-normalised), then returns the stick
-    figure's joints seen there, mapped onto the box. ``fail``: raise `PoseError` instead (Sapiens down)."""
+    """A stand-in for `herogen.pipeline.sapiens.PoseClient` for images of the stick figure: the pose and yaw
+    `fake_heldout_image` drew (else, for a turnaround view, those whose `turned_mask` best matches the figure in
+    the box, height-normalised, among the turnaround's front and profiles), then the stick figure's joints
+    seen there, mapped onto the box. ``fail``: raise `PoseError` instead (Sapiens down)."""
 
     POSES = ("a", "down", "stride")
     N = 48  # height of the normalised comparison grid, px
@@ -258,7 +295,7 @@ class FakePose:
             cands = []
             for pose in cls.POSES:
                 fig = stick_figure(200, pose)
-                for yaw in range(-90, 91):
+                for yaw in (0, 90, -90):  # the turnaround's front and profiles
                     m = turned_mask(fig, yaw, size=200, ppu=0.5)
                     cands.append((pose, float(yaw), fig, imaging.bbox(m)))
                     cands[-1] += (cls._norm(m),)
@@ -276,8 +313,14 @@ class FakePose:
         x0, y0, x1, y1 = (int(round(v)) for v in box)
         sub = np.zeros_like(mask)
         sub[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
-        cands, stack = self._candidates()
-        pose, yaw, fig, cb, _ = cands[int(np.argmax((stack == self._norm(sub)).sum(axis=(1, 2))))]
+        drawn = DRAWN.get(_pixels(image))
+        if drawn is not None:  # a fake held-out view: its pose and turn are known exactly
+            pose, yaw = drawn
+            fig = stick_figure(200, pose)
+            cb = imaging.bbox(turned_mask(fig, yaw, size=200, ppu=0.5))
+        else:  # a turnaround view: the best-matching pose and yaw
+            cands, stack = self._candidates()
+            pose, yaw, fig, cb, _ = cands[int(np.argmax((stack == self._norm(sub)).sum(axis=(1, 2))))]
         self.found = (pose, yaw)
         k = (y1 - y0) / (cb[3] - cb[1])
         pts = turned_joints(fig, stick_joints(200, pose), yaw, size=200, ppu=0.5)
@@ -315,7 +358,8 @@ def fake_heldout_image(prompt: str, yaw: float | None = None, pose: str = "a", f
 
     deg, side = REQUEST.search(prompt).groups()
     turn = gain * float(deg) if yaw is None else yaw
-    m = turned_mask(stick_figure(200, pose), turn if side == "left" else -turn, size=400, ppu=1.0)
+    signed = turn if side == "left" else -turn
+    m = turned_mask(stick_figure(200, pose), signed, size=400, ppu=1.0)
     b = imaging.bbox(m)
     m = m[b[1] : b[3], b[0] : b[2]]
     fb = imaging.bbox(imaging.threshold_mask(frame))
@@ -323,7 +367,19 @@ def fake_heldout_image(prompt: str, yaw: float | None = None, pose: str = "a", f
     new = (max(1, round(m.shape[1] * k)), max(1, round(m.shape[0] * k)))
     m = imaging.from_mask_image(imaging.to_mask_image(m).resize(new, Image.BILINEAR))
     at = ((fb[0] + fb[2]) // 2 - m.shape[1] // 2, fb[3] - m.shape[0])
-    return paint(place(m, frame.size, at), colour=(30, 80, 160), bg=(255, 255, 255))
+    img = paint(place(m, frame.size, at), colour=(30, 80, 160), bg=(255, 255, 255))
+    DRAWN[_pixels(img)] = (pose, signed)
+    return img
+
+
+DRAWN: dict[str, tuple[str, float]] = {}  # what `fake_heldout_image` drew, by pixels: (pose, yaw)
+
+
+def _pixels(img: Image.Image) -> str:
+    import hashlib  # noqa: PLC0415
+
+    a = np.asarray(img.convert("RGB"))
+    return hashlib.sha256(repr(a.shape).encode() + a.tobytes()).hexdigest()
 
 
 FIGURES = {"plain": dict(clothed=False), "clothed": dict(clothed=True),
@@ -354,7 +410,7 @@ def evaluate(view_name: str, pose: str, yaw: float, figure_kw: dict, pose_kw: di
     profile_face = float(np.mean([abs(face_offset_at(t_fig, y)) for y in (90, -90)]))
     face = {"offset": face_offset_at(fig, yaw), "face_found": True, "head_found": True}
     checks, measured = heldout.view_checks(view, seen, model, profile_toe, float(seen.mean()), face,
-                                           profile_face)
+                                           profile_face, body=body_of(t_fig), keypoints=keypoints_at(fig, yaw))
     return heldout.view_status(checks), measured, checks
 
 
@@ -377,7 +433,7 @@ def table() -> list[tuple]:
                     _, m, checks = evaluate(view, pose, sign * yaw, fkw, pkw)
                     wrong = _pose_facing_status(evaluate(view, pose, -sign * yaw, fkw, pkw)[2])
                     rows.append((view, fname, pname, yaw, _pose_facing_status(checks), wrong,
-                                 m["fit"][f"facing_{side}"]["rms"], m["found_yaw_deg"],
+                                 m["fit"][f"facing_{side}"]["rms"], _num(m["found_yaw_deg"]),
                                  m["facing_fit_margin"], m["toe_turn"], m["face_turn"]))
     return rows
 
@@ -395,8 +451,8 @@ def target_table() -> list[tuple]:
                 for off in (TARGET_OFFSETS if pname == "A-pose" else (-3, 0, 3)):
                     yaw = view.yaw_deg + (off if view.yaw_deg > 0 else -off)
                     status, m, _ = evaluate(view.name, pose, yaw, fkw, pkw)
-                    rows.append((view.name, fname, pname, yaw, m["found_yaw_deg"], m["yaw_window_miss_deg"],
-                                 status))
+                    rows.append((view.name, fname, pname, yaw, _num(m["found_yaw_deg"]),
+                                 _num(m["yaw_window_miss_deg"]), status))
     return rows
 
 
@@ -404,9 +460,9 @@ DRIFTS = (-8, -5, -3, 0, 3, 5, 8)  # arm angle of the held-out figure minus the 
 
 
 def drift_table() -> list[tuple]:
-    """The drift study `FIT_ERROR_DEG` was set from: every figure, arms drifted by DRIFTS, drawn at
-    and half a degree past both edges of every window and at the targets, facing left (the figures are
-    mirror-symmetric): (target, drift, figure, yaw drawn, found yaw, found with the plain fit, status)."""
+    """The drift study of the silhouette fit: every figure, arms drifted by DRIFTS, drawn at and half a degree
+    past both edges of every window and at the targets, facing left (the figures are mirror-symmetric): (target,
+    drift, figure, yaw drawn, found yaw (body keypoints), found with the silhouette's plain fit, status)."""
     rows = []
     for tgt in (30, 60):
         lo, hi = heldout.yaw_window(tgt)
@@ -417,6 +473,10 @@ def drift_table() -> list[tuple]:
                     rows.append((tgt, drift, fname, y, m["found_yaw_deg"],
                                  m["fit"]["facing_left"]["plain_yaw_deg"], status))
     return rows
+
+
+def _num(v) -> float:
+    return float("nan") if v is None else float(v)
 
 
 def _failed(checks) -> list[str]:
@@ -453,16 +513,15 @@ class HeldoutChecksTest(unittest.TestCase):
     pass."""
 
     def test_a_pose_accepted_in_every_window(self):
-        # Drawn at and around each target, up to its window edge; the fit reads 0-2 degrees low, so the edge
-        # nearer the diagonal is tested from inside (the drift tests cover the edges).
-        drawn = {30: (26, 28, 30, 32, 33), 60: (59, 60, 62, 64, 65)}
+        # Drawn across each window; exact keypoints are found to the fit's half-degree grid.
+        drawn = {30: (25, 25.5, 26), 60: (57.5, 59, 61, 63, 65)}
         for fname, fkw in FIGURES.items():
             for view in heldout.VIEWS:
                 for d in drawn[abs(int(view.yaw_deg))]:
                     y = math.copysign(d, view.yaw_deg)
                     status, m, checks = evaluate(view.name, "a", y, fkw)
                     self.assertEqual(status, "accepted", (fname, view.name, y, _failed(checks)))
-                    self.assertLessEqual(abs(m["found_yaw_deg"] - y), 2, (fname, view.name, y))
+                    self.assertLessEqual(abs(m["found_yaw_deg"] - y), 0.5, (fname, view.name, y))
                     self.assertEqual(m["facing_votes"], {"landmarks": 1, "toes": 1, "head": 1})
 
     def test_pose_and_facing_hold_at_every_yaw(self):
@@ -484,10 +543,13 @@ class HeldoutChecksTest(unittest.TestCase):
                         self.assertEqual(status, "rejected", (fname, pname, view.name))
                         self.assertIn("pose_landmark_rms", _failed(checks))
 
-    def test_small_stride_needs_review(self):
-        status, _, checks = evaluate("front-left-60", "stride", 60, FIGURES["plain"], dict(stride_deg=8.0))
-        self.assertEqual(status, "needs review")
-        self.assertEqual(_failed(checks), ["pose_landmark_rms_clear"])
+    def test_small_stride_never_accepted(self):
+        # An 8-degree stride: the legs no longer match the turnaround's, so the keypoint fit can't place the
+        # turn either (it runs to the profile).
+        status, m, checks = evaluate("front-left-60", "stride", 61, FIGURES["plain"], dict(stride_deg=8.0))
+        self.assertEqual(status, "rejected")
+        self.assertIn("pose_landmark_rms_clear", _failed(checks))
+        self.assertGreater(m["keypoint_fit"]["facing_left"]["rms"], 0.03)
 
     def test_wrong_facing_rejected(self):
         for fname, fkw in FIGURES.items():
@@ -498,8 +560,8 @@ class HeldoutChecksTest(unittest.TestCase):
                 self.assertEqual(m["facing_votes"], {"landmarks": -1, "toes": -1, "head": -1})
 
     def test_yaw_just_outside_the_window_needs_review(self):
-        for name, yaw in (("front-left-30", 22), ("front-right-30", -22), ("front-left-60", 68),
-                          ("front-right-60", -68)):
+        for name, yaw in (("front-left-30", 22), ("front-right-30", -22), ("front-left-60", 67),
+                          ("front-right-60", -67)):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["plain"])
             self.assertEqual(status, "needs review", (name, yaw))
             self.assertEqual(_failed(checks), ["found_yaw_in_window"])
@@ -510,62 +572,78 @@ class HeldoutChecksTest(unittest.TestCase):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["plain"])
             self.assertEqual(status, "rejected", (name, yaw))
             self.assertIn("found_yaw_window_miss_deg", _failed(checks))
-        self.assertEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 5.0)
-        self.assertEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 1.0)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -52.0), 5.1)
+        self.assertAlmostEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-left-30"], 34.0), 7.6)
         self.assertEqual(heldout.window_miss(heldout.VIEW_BY_NAME["front-right-60"], -60.0), 0.0)
 
+    def test_windows_keep_every_allowed_true_yaw_clear(self):
+        # The windows follow from the measured fit error: the 30-degree one ends below its target.
+        self.assertEqual(heldout.FIT_ERROR_DEG, (-8.6, 2.1))
+        self.assertEqual([tuple(round(e, 6) for e in v.window_deg) for v in heldout.VIEWS],
+                         [(25.0, 26.4)] * 2 + [(57.1, 65.0)] * 2)
+        self.assertEqual([round(v.aim_deg, 6) for v in heldout.VIEWS], [25.7, 25.7, 61.05, 61.05])
+        for view in heldout.VIEWS:
+            for edge in view.window_deg:
+                rng = heldout.yaw_range(math.copysign(edge, view.yaw_deg))
+                self.assertGreaterEqual(heldout.range_clearance(*rng["true_deg"]) + 1e-9,
+                                        heldout.AZIMUTH_CLEARANCE_DEG, (view.name, edge))
+
+    def test_true_yaw_range_from_the_measured_error(self):
+        lo_err, hi_err = heldout.FIT_ERROR_DEG
+        for found in (26.0, -26.0, 61.0, -61.0):
+            rng = heldout.yaw_range(found)
+            lo, hi = sorted(abs(v) for v in rng["true_deg"])
+            self.assertAlmostEqual(lo, abs(found) - hi_err)
+            self.assertAlmostEqual(hi, abs(found) - lo_err)
+            self.assertEqual(rng["true_deg"][0] > 0, found > 0)
+        _, m, _ = evaluate("front-left-30", "a", 26, FIGURES["plain"])
+        self.assertEqual(m["true_yaw_range_deg"], heldout.yaw_range(m["found_yaw_deg"])["true_deg"])
+
     def test_building_azimuths_rejected(self):
-        for name, yaw in (("front-left-30", 0), ("front-left-30", 5), ("front-left-30", 42),
-                          ("front-right-60", -45), ("front-right-60", -50)):
+        # Found at or near a building azimuth, or where the measured error lets the true yaw come within
+        # AZIMUTH_CLEARANCE_DEG of one: the target 30 itself (its true yaw can be 38.6), and 55-57 at 60.
+        for name, yaw in (("front-left-30", 0), ("front-left-30", 5), ("front-left-30", 30),
+                          ("front-left-30", 42), ("front-right-60", -45), ("front-right-60", -50),
+                          ("front-left-60", 55), ("front-left-60", 56.5), ("front-left-60", 85)):
             status, m, checks = evaluate(name, "a", yaw, FIGURES["clothed"])
             self.assertEqual(status, "rejected", (name, yaw))
             self.assertIn("found_yaw_clear_of_build_azimuths_deg", _failed(checks))
-        for yaw in (85, 90):  # the profile camera: no turned fit either
-            self.assertEqual(evaluate("front-left-60", "a", yaw, FIGURES["clothed"])[0], "rejected", yaw)
         self.assertEqual(heldout.azimuth_clearance(-30.0), 15.0)
         self.assertEqual(heldout.azimuth_clearance(-35.0), 10.0)
         self.assertEqual(heldout.azimuth_clearance(-81.0), 9.0)
         self.assertEqual(heldout.azimuth_clearance(178.0), 2.0)
-        lo_err, hi_err = heldout.FIT_ERROR_DEG
-        for view in heldout.VIEWS:  # a view found at a window edge by both fits still clears
-            for y in view.window_deg:
-                self.assertGreaterEqual(heldout.range_clearance(y - 2.0, y + 2.0),
-                                        heldout.AZIMUTH_CLEARANCE_DEG, (view.name, y))
-        self.assertEqual([v.window_deg for v in heldout.VIEWS], [(25.0, 33.0)] * 2 + [(57.0, 65.0)] * 2)
-        # Found 34-35 is in the old 25-35 window but its true yaw can be within 10 degrees of the diagonal.
-        _, m, checks = evaluate("front-left-30", "a", 35, FIGURES["plain"])
-        clear = next(c for c in checks if c["name"] == "found_yaw_clear_of_build_azimuths_deg")
-        self.assertEqual((clear["threshold"], clear["pass"]), (10.0, False))
-        margin = max(-lo_err, hi_err)  # the larger bound, both sides
-        self.assertEqual(m["true_yaw_range_deg"], [m["found_yaw_range_deg"][0] - margin,
-                                                   m["found_yaw_range_deg"][1] + margin])
-        # 60-degree views drawn just inside the old window edge read 55-56 and are rejected, not sent to review.
-        for fname in ("plain", "clothed+armour"):
-            for y in (56.0, 56.5, 57.0):
-                status, _, checks = evaluate("front-left-60", "a", y, FIGURES[fname])
-                self.assertEqual(status, "rejected", (fname, y))
-                self.assertIn("found_yaw_clear_of_build_azimuths_deg", _failed(checks))
         self.assertEqual(heldout.range_clearance(30.0, 40.0), 5.0)
         self.assertEqual(heldout.range_clearance(-50.0, -40.0), 0.0)
         self.assertEqual(heldout.range_clearance(-34.0, -20.0), 11.0)
 
+    def test_without_keypoints_the_turn_needs_review(self):
+        t_fig = figure("a")
+        t = turnaround(t_fig)
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        seen = turned_mask(t_fig, 26)
+        for body, kps, why in ((None, keypoints_at(t_fig, 26), "no turnaround keypoints"),
+                               (body_of(t_fig), {"joints": None, "error": "PoseError: down", "api_error": True},
+                                "PoseError: down"),
+                               (body_of(t_fig), {"joints": {"nose": [1.0, 1.0, 0.9]}, "bottom": 10.0},
+                                "too few body keypoints found")):
+            checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.3, 0.2,
+                                            {"offset": None}, None, body=body, keypoints=kps)
+            self.assertEqual(heldout.view_status(checks), "needs review")
+            self.assertEqual(_failed(checks), ["turn_measured"])
+            self.assertIn(why, next(c for c in checks if c["name"] == "turn_measured")["note"])
+            self.assertIsNone(m["found_yaw_deg"])
+        self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.7, None), 25.7)
+
     def test_arm_drift_does_not_move_the_found_yaw(self):
-        # Arms held 5 or 8 degrees higher or lower than the turnaround's, drawn at both edges of both
-        # targets' windows, both sides: found minus drawn |yaw| stays inside FIT_ERROR_DEG (the
-        # turnaround-arms fit was off by up to 12).
+        # Arms held 5 or 8 degrees higher or lower than the turnaround's: the arms are not in the turn fit.
         for fname in ("plain", "clothed+armour"):
             for view in heldout.VIEWS:
-                for edge in view.window_deg:
-                    for drift in (-8, -5, 5, 8):
-                        y = math.copysign(edge, view.yaw_deg)
-                        _, m, _ = evaluate(view.name, "lowered", y, FIGURES[fname], dict(arm_deg=50.0 + drift))
-                        err = abs(m["found_yaw_deg"]) - abs(y)
-                        self.assertTrue(heldout.FIT_ERROR_DEG[0] <= err <= heldout.FIT_ERROR_DEG[1],
-                                        (fname, view.name, y, drift, m["found_yaw_deg"]))
+                for drift in (-8, -5, 5, 8):
+                    y = math.copysign(view.aim_deg, view.yaw_deg)
+                    _, m, _ = evaluate(view.name, "lowered", y, FIGURES[fname], dict(arm_deg=50.0 + drift))
+                    self.assertLessEqual(abs(m["found_yaw_deg"] - y), 0.5, (fname, view.name, drift))
 
     def test_arm_drift_near_a_diagonal_never_accepted(self):
-        # Drawn closer than AZIMUTH_CLEARANCE_DEG to the diagonal with drifted arms (raised arms used to read
-        # 35 from 39, lowered ones 32 from 27): never accepted, whichever window it is judged by.
         for fname in ("plain", "clothed"):
             for name, ys in (("front-left-30", (35.5, 36, 39)), ("front-right-30", (-36, -39)),
                              ("front-left-60", (51, 54.5)), ("front-right-60", (-51, -54))):
@@ -574,70 +652,6 @@ class HeldoutChecksTest(unittest.TestCase):
                         status, m, checks = evaluate(name, "lowered", y, FIGURES[fname],
                                                      dict(arm_deg=50.0 + drift))
                         self.assertNotEqual(status, "accepted", (fname, name, y, drift, m["found_yaw_deg"]))
-
-    def test_yaw_range_spans_both_fits(self):
-        # Arms as in the turnaround: the drift-robust and plain fits agree, the range is a degree at most.
-        for fname in ("plain", "clothed+armour"):
-            for name, y in (("front-left-30", 30), ("front-right-60", -60)):
-                _, m, _ = evaluate(name, "a", y, FIGURES[fname])
-                lo, hi = m["found_yaw_range_deg"]
-                self.assertLessEqual(hi - lo, 1.0, (fname, name))
-                self.assertLess(m["hand_z_morph"]["view"], 0.001)  # information only
-        # Arms 5 degrees lower: the plain fit reads high, the range covers both readings.
-        _, m, _ = evaluate("front-left-30", "lowered", 30, FIGURES["plain"], dict(arm_deg=45.0))
-        fit = m["fit"]["facing_left"]
-        self.assertEqual(m["found_yaw_range_deg"], sorted([fit["yaw_deg"], fit["plain_yaw_deg"]]))
-        self.assertGreaterEqual(fit["plain_yaw_deg"] - fit["yaw_deg"], 2.0)
-        margin = max(abs(e) for e in heldout.FIT_ERROR_DEG)
-        self.assertEqual(m["true_yaw_range_deg"], [m["found_yaw_range_deg"][0] - margin,
-                                                   m["found_yaw_range_deg"][1] + margin])
-
-    def _judge_with_hands_off(self, name: str, y: float, dz: float, drift: float = 0.0):
-        """Checks of a view drawn at ``y`` with the arms ``drift`` degrees off the turnaround's and both hands
-        measured ``dz`` of the figure height too high (the turnaround measured correctly)."""
-        real = heldout.landmarks
-        t = turnaround(figure("a", clothed=False))
-        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
-        fig = figure("lowered", clothed=False, arm_deg=50.0 + drift) if drift else figure("a", clothed=False)
-        seen = turned_mask(fig, y)
-
-        def shifted(mask):
-            lm = real(mask)
-            if lm is not None:
-                lm.hands = [(x, z + dz) for x, z in lm.hands]
-            return lm
-
-        with mock.patch.object(heldout, "landmarks", shifted):
-            checks, m = heldout.view_checks(heldout.VIEW_BY_NAME[name], seen, model, 0.3, 0.2, {"offset": None},
-                                            None)
-        return next(c for c in checks if c["name"] == "found_yaw_clear_of_build_azimuths_deg"), m
-
-    def test_shared_hand_height_error_fails_the_clearance(self):
-        # Both hands measured 0.01-0.02 of the height too high or too low, which the drift-robust fit reads as
-        # arm drift: a view drawn within 10 degrees of the diagonal fails the clearance check (with the robust
-        # fit alone it passed, at 36-37 degrees).
-        for dz in (-0.02, -0.01, 0.01, 0.02):
-            for name, y in (("front-left-30", 35.5), ("front-left-30", 36), ("front-left-30", 37),
-                            ("front-left-60", 54), ("front-left-60", 55), ("front-left-60", 56.5)):
-                clear, m = self._judge_with_hands_off(name, y, dz)
-                self.assertFalse(clear["pass"], (dz, name, y, m["found_yaw_deg"], m["true_yaw_range_deg"]))
-
-    def test_raised_arms_with_low_hands_miss_by_at_most_two_degrees(self):
-        # The documented corner: arms raised 3-8 degrees and both hands measured 0.01-0.02 low push both fits
-        # the same way. A view drawn up to 2 degrees too near the diagonal can pass the clearance (its true
-        # clearance 8-10 degrees); one drawn nearer fails it.
-        passed = []
-        for drift in (3, 5, 8):
-            for dz in (-0.02, -0.015, -0.01):
-                for y in (35.5, 36, 37, 38, 39):
-                    clear, m = self._judge_with_hands_off("front-left-30", y, dz, drift)
-                    true_clearance = heldout.azimuth_clearance(y)
-                    if clear["pass"]:
-                        passed.append(y)
-                        self.assertGreaterEqual(true_clearance, heldout.AZIMUTH_CLEARANCE_DEG - 2.0,
-                                                (drift, dz, y, m["true_yaw_range_deg"]))
-        self.assertTrue(passed)  # the corner exists, as documented
-        self.assertLessEqual(max(passed), 37)
 
     def test_drift_compensation_follows_the_arm(self):
         # The front view's forearm runs outward and down; a hand seen higher moves outward along it.
@@ -685,10 +699,11 @@ class HeldoutChecksTest(unittest.TestCase):
         # No toe or face cue, and a fit margin below the vote limit: nothing decides the facing.
         t = turnaround(figure("a"))
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
-        seen = turned_mask(figure("a"), 30)
+        seen = turned_mask(figure("a"), 26)
         with mock.patch.object(heldout, "FIT_FACING_MARGIN", 1.0):
             checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
-                                            {"offset": None}, None)
+                                            {"offset": None}, None, body=body_of(figure("a")),
+                                            keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(heldout.view_status(checks), "needs review")
         self.assertEqual(_failed(checks), ["facing_cues_for"])
         self.assertEqual(m["facing_votes"], {"landmarks": 0, "toes": 0, "head": 0})
@@ -696,9 +711,10 @@ class HeldoutChecksTest(unittest.TestCase):
     def test_unmeasurable_cues_do_not_vote(self):
         t = turnaround(figure("a"))
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
-        seen = turned_mask(figure("a"), 30)
+        seen = turned_mask(figure("a"), 26)
         checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
-                                        {"offset": None, "face_found": False}, None)
+                                        {"offset": None, "face_found": False}, None, body=body_of(figure("a")),
+                                        keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(m["facing_votes"], {"landmarks": 1, "toes": 0, "head": 0})
         self.assertEqual(heldout.view_status(checks), "accepted")
 
@@ -1193,6 +1209,7 @@ if __name__ == "__main__":
                 print(f"{tgt:>6}  {drift:+5d}  {min(e):+4.1f} {max(e):+5.1f} | {min(p):+5.1f} {max(p):+5.1f}   "
                       f"{n[0]}/{n[1]}/{n[2]}")
         e = [r[4] - r[3] for r in rows]
-        print(f"found minus drawn: {min(e):+.1f} to {max(e):+.1f} degrees (FIT_ERROR_DEG {heldout.FIT_ERROR_DEG})")
+        print(f"found minus drawn: {min(e):+.1f} to {max(e):+.1f} degrees on exact synthetic keypoints "
+              f"(FIT_ERROR_DEG {heldout.FIT_ERROR_DEG} is measured on renders)")
     else:
         unittest.main(argv=[sys.argv[0]] + [a for a in sys.argv[1:] if a != "--test"])

@@ -75,6 +75,7 @@ VIEW_CHECKS = {
     "height_agreement_front": "height matches the front view",
     "pose_landmark_rms": "pose landmarks fit (RMS)",
     "pose_landmark_rms_clear": "pose landmarks fit clearly (RMS)",
+    "turn_measured": "angle measured (body keypoints)",
     "found_yaw_clear_of_build_azimuths_deg": "angle clear of the build angles (°)",
     "found_yaw_window_miss_deg": "angle off the requested window (°)",
     "found_yaw_in_window": "angle inside the requested window (° off)",
