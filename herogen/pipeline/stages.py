@@ -265,6 +265,20 @@ def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     return _stopping_on_api_error(lambda: _stage1(st, run, client), st)
 
 
+def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
+                        figure: np.ndarray) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The input checks on the main figure's body parts, each found with its own SAM 3.1 prompt (recorded in
+    ``sam_prompts``)."""
+    prompts = [inputs.FOOT_TEXT]
+    feet = inputs.parts_on(client.segment(sketch, inputs.FOOT_TEXT), figure)
+    legs = None
+    if not feet:
+        prompts.append(inputs.LEG_TEXT)
+        legs = inputs.parts_on(client.segment(sketch, inputs.LEG_TEXT), figure)
+    checks = [inputs.feet_check(feet, legs)]
+    return checks, {"sam_prompts": prompts, "feet_on_figure": feet, "legs_on_figure": legs}
+
+
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch = _load(run, "00-sketch.png")
     w, h = sketch.size
@@ -273,12 +287,16 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch_method = f"{SAM_MODEL}:{text}" if sketch_inst else SAM_NOTHING_FOUND
     input_checks, input_details = inputs.character_checks(
         sketch_inst, NO_CHARACTER.format(texts=", ".join(repr(t) for t in SAM_TEXTS)))
+    if sketch_inst and not inputs.rejections(input_checks):
+        # Only the main (largest) figure is the character; smaller figures are warned about.
+        sketch_mask = inputs.by_area(sketch_inst)[0].mask
+        more_checks, more_details = _sketch_part_checks(client, sketch, sketch_mask)
+        input_checks += more_checks
+        input_details.update(more_details)
     st.checks = input_checks
     st.details = {"mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS),
                   "sam_instances": {"sketch": len(sketch_inst)}, "input": input_details}
     _finish_input_checks(st)
-    # Only the main (largest) figure is the character; smaller figures were warned about above.
-    sketch_mask = inputs.by_area(sketch_inst)[0].mask
     cover = client.edit_image(COVER_PROMPT, [sketch], size=f"{w}x{h}")
     st.save_image("01-cover.png", cover)
     # An empty cover mask (SAM found nothing in the cover) fails the gated cover_mask_area_frac check.

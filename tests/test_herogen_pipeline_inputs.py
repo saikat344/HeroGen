@@ -237,5 +237,69 @@ class Stage1CharactersTest(_SketchRun):
         self.assertEqual(api.sam_texts, list(stages.SAM_TEXTS))
 
 
+def bottom(fig: np.ndarray, frac: float) -> np.ndarray:
+    """The lowest ``frac`` of a figure mask's height (its feet, or its legs for a larger share)."""
+    ys = np.flatnonzero(fig.any(axis=1))
+    out = fig.copy()
+    out[: ys[-1] + 1 - int(frac * (ys[-1] - ys[0] + 1))] = False
+    return out
+
+
+class FeetTest(unittest.TestCase):
+    def test_parts_on_the_figure(self):
+        fig = box_mask((100, 100), 10, 10, 50, 90)
+        parts = [inst(box_mask((100, 100), 20, 80, 30, 95)), inst(box_mask((100, 100), 60, 80, 70, 90)),
+                 inst(box_mask((100, 100), 45, 80, 55, 90))]  # 2/3 on, off, half on
+        self.assertEqual(inputs.parts_on(parts, fig), 2)
+
+    def test_verdicts(self):
+        self.assertEqual(inputs.feet_check(2, None)["verdict"], "pass")
+        cropped = inputs.feet_check(0, 2)
+        self.assertEqual((cropped["verdict"], cropped["gate"]), ("reject", True))
+        self.assertIn("looks cropped", cropped["message"])
+        hidden = inputs.feet_check(0, 0)
+        self.assertEqual((hidden["verdict"], hidden["gate"]), ("warn", False))
+        self.assertIn("long robe", hidden["message"])
+
+
+class Stage1FeetTest(_SketchRun):
+    def setUp(self):
+        super().setUp()
+        self.img = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+
+    def test_feet_found(self):
+        api = PromptAPI({"foot": lambda fig: [bottom(fig, 0.04)]})
+        self.assertEqual(self._live(self.img, api), 0)
+        s1 = self._stage(1)
+        self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "pass")
+        self.assertEqual((s1["details"]["input"]["feet_on_figure"], s1["details"]["input"]["legs_on_figure"]),
+                         (1, None))
+        self.assertNotIn("leg", api.sam_texts)  # legs are asked only when no feet are found
+
+    def test_legs_without_feet_are_a_cropped_figure(self):
+        api = PromptAPI({"foot": lambda fig: [], "leg": lambda fig: [bottom(fig, 0.4)]})
+        self.assertEqual(self._live(self.img, api), 3)
+        s1 = self._stage(1)
+        self.assertEqual(s1["status"], "input_rejected")
+        self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "reject")
+        self.assertIn("the figure looks cropped", s1["error"])
+        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "leg"])
+        self.assertEqual(api.sam_texts[-2:], ["foot", "leg"])
+        self.assertNotIn("images/edits", api.calls)
+
+    def test_no_feet_or_legs_warn(self):
+        api = PromptAPI({"foot": lambda fig: [], "leg": lambda fig: []})
+        self.assertEqual(self._live(self.img, api), 0)
+        s1 = self._stage(1)
+        self.assertTrue(s1["ok"])
+        self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "warn")
+        self.assertIn("warning: no feet or legs found on the figure", self.err)
+
+    def test_parts_are_not_asked_for_a_rejected_sketch(self):
+        api = PromptAPI()
+        self.assertEqual(self._live(paint(two_figures(400), colour=(60, 60, 60)), api), 3)
+        self.assertNotIn("foot", api.sam_texts)
+
+
 if __name__ == "__main__":
     unittest.main()
