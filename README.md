@@ -98,11 +98,20 @@ License 1.1, vendored in `herogen/lab/static/fonts/` with their licences. Source
 ## Tests
 
 ```bash
+pip install -r requirements-test.txt
 python3 -m unittest discover -s tests -v
 python3 tools/guard/guard.py tree
 ```
 
-Tests use synthetic inputs drawn by code and never call a model. Blender tests skip when Blender isn't installed.
+Tests use synthetic inputs drawn by code and never call a model. `requirements-test.txt` pins every pip package
+the tests use. Three tools are not pip packages, and the tests that need them skip when they are missing:
+
+- **Blender** (stages 3 and 4, and the benchmark renders), found as described under Requirements.
+- **luau-compile**, an optional syntax check of the Roblox scripts, when it is on `PATH`.
+- **Lune**, an optional cross-check of the Roblox model with rbx-dom, when it is on `PATH`.
+
+CI installs `requirements-test.txt` but none of the three, so those tests skip there; run them locally before
+changing the code they cover. CI prints every skipped test and its reason after the test run.
 
 ## Third-party models and libraries
 
