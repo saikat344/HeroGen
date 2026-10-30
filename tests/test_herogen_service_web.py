@@ -438,13 +438,14 @@ class TestJobsApi(WebCase):
         job = r.json()
         self.assertEqual((job["state"], job["name"], job["kind"]), ("queued", "Sir Bob", "sketch"))
         self.assertEqual(self.submitted, [job["id"]], "dispatched at once")
-        self.assertEqual([s["key"] for s in job["stages"]], ["0", "1", "2", "3", "4", "6", "5"])
+        self.assertEqual([s["key"] for s in job["stages"]], ["0", "1", "2", "3", "4", "6", "5", "2h"])
         self.assertFalse(job["downloads"]["glb"]["available"])
         self.assertEqual(b.get(f"/api/jobs/{job['id']}/download/glb").status_code, 409)
         self.assertEqual(self.finish(job["id"]), "succeeded")
         view = b.get(f"/api/jobs/{job['id']}").json()
         self.assertEqual(view["state"], "succeeded")
-        self.assertTrue(all(s["state"] == "passed" for s in view["stages"]))
+        self.assertTrue(all(s["state"] == "passed" for s in view["stages"] if s["key"] != "2h"))
+        self.assertEqual(view["stages"][-1]["state"], "pending", "this test starts no quality check")
         self.assertIn("sketch", view["images"])
         self.assertTrue(view["images"]["sketch"].startswith(f"/runs/r1/{job['id']}/"))
         self.assertIn("Placeholder", view["roblox_readme"])
@@ -627,6 +628,40 @@ class TestJobsApi(WebCase):
         r = b.get("/api/jobs")
         self.assertEqual((r.status_code, r.json()["error"]["code"], r.headers["retry-after"]), (503, "busy", "5"))
         self.assertIn("frame-ancestors 'none'", r.headers["content-security-policy"])
+
+    def test_an_unavailable_quality_check_is_not_a_job_error(self):
+        from herogen.service.snapshot import LocalVolume
+        from herogen.service.worker import (
+            HeldoutWorkdir,
+            InPlaceWorkdir,
+            make_context,
+            run_group,
+            run_heldout,
+            run_job,
+        )
+
+        b = self.signin()
+        job = self.make_job(b).json()
+        runner = FakeRunner(fail={"2h": "error"})
+
+        def heldout(j):
+            ctx = make_context(self.s, self.svc.storage, j)
+            run_heldout(self.store, self.s, j, runner, lambda claim: HeldoutWorkdir(
+                ctx, self.tmp / "h" / j["id"], LocalVolume(), lambda: self.store.side_live(j["id"], "2h", claim)))
+
+        def execute(j, attempt, group, resume):
+            return run_group(self.store, self.s, j, attempt, group, resume, runner,
+                             InPlaceWorkdir(make_context(self.s, self.svc.storage, j)))
+
+        self.assertEqual(run_job(self.store, self.s, self.svc.storage, job["id"], "t", execute, heldout=heldout),
+                         "succeeded")
+        view = b.get(f"/api/jobs/{job['id']}").json()
+        self.assertEqual((view["state"], view["error"]), ("succeeded", None))
+        side = next(s for s in view["stages"] if s["key"] == "2h")
+        self.assertEqual((side["label"], side["state"]), ("quality check (held-out views)", "unavailable"))
+        self.assertIn("The hero is not affected.", side["message"])
+        self.assertTrue(view["downloads"]["glb"]["available"])
+        self.assertTrue(view["downloads"]["roblox"]["available"])
 
     def test_rejected_job_shows_its_reason(self):
         b = self.signin()

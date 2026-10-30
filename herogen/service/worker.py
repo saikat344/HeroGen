@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import shutil
 import time
 from collections.abc import Callable
@@ -30,10 +31,12 @@ from typing import Any, Protocol
 from herogen.service.config import Settings
 from herogen.service.runner import (
     GROUPS,
+    HELDOUT,
     Outcome,
     StageContext,
     StageRunner,
     plan_for,
+    read_record,
     record_ok,
     resume_index,
     stage3_args,
@@ -93,9 +96,19 @@ class InPlaceWorkdir:
         pass
 
 
-def _mirror(src: Path, dst: Path, delete: bool) -> None:
+# What the held-out views write in a run folder, and only they: the job's own path never copies or deletes these, so
+# the two never touch the same file.
+HELDOUT_PATHS = ("heldout", "stage-2h.json")
+
+
+def _excluded(rel: Path, exclude: tuple[str, ...]) -> bool:
+    return bool(rel.parts) and rel.parts[0] in exclude
+
+
+def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -> None:
     """Make `dst` hold `src`'s files: copy new or changed ones (size or mtime), and with `delete` remove files
-    `src` no longer has. Links are never followed or copied."""
+    `src` no longer has. Paths whose first part is in `exclude` are neither copied nor deleted. Links are never
+    followed or copied."""
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
     for dirpath, dirs, files in os.walk(src):
@@ -103,9 +116,9 @@ def _mirror(src: Path, dst: Path, delete: bool) -> None:
         dirs[:] = [d for d in dirs if not (Path(dirpath) / d).is_symlink()]
         for f in files:
             s = Path(dirpath) / f
-            if s.is_symlink() or f.endswith(".part"):
-                continue
             rel = rel_dir / f
+            if s.is_symlink() or f.endswith(".part") or _excluded(rel, exclude):
+                continue
             seen.add(rel)
             d = dst / rel
             st = s.stat()
@@ -121,7 +134,7 @@ def _mirror(src: Path, dst: Path, delete: bool) -> None:
         for dirpath, _dirs, files in os.walk(dst):
             for f in files:
                 rel = Path(dirpath).relative_to(dst) / f
-                if rel not in seen:
+                if rel not in seen and not _excluded(rel, exclude):
                     (dst / rel).unlink()
 
 
@@ -163,7 +176,7 @@ class CopyWorkdir:
         if not self.still_current():
             return
         r, loc = self.remote, self.local
-        _mirror(loc.run_dir, r.run_dir, delete=True)
+        _mirror(loc.run_dir, r.run_dir, delete=True, exclude=HELDOUT_PATHS)
         _mirror(loc.cache_dir, r.cache_dir, delete=False)
         _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
         if loc.input_path.is_file():
@@ -174,6 +187,30 @@ class CopyWorkdir:
 
     def close(self) -> None:
         shutil.rmtree(self.local_root, ignore_errors=True)
+
+
+class HeldoutWorkdir(CopyWorkdir):
+    """The held-out views' work folder: a local copy like CopyWorkdir, but its copy back writes only `heldout/`
+    and `stage-2h.json` (plus new cache entries), only into a run folder that still exists, and only while the
+    side stage's claim holds and the job has not been deleted. So it never touches the job's own files, and never
+    brings back the files of a job or account deleted while it ran."""
+
+    def sync(self) -> None:
+        assert self.local is not None
+        r, loc = self.remote, self.local
+        self.volume.reload()
+        if not self.still_current() or not r.run_dir.is_dir():
+            return
+        if (loc.run_dir / "heldout").is_dir():
+            _mirror(loc.run_dir / "heldout", r.run_dir / "heldout", delete=True)
+        rec = loc.run_dir / "stage-2h.json"
+        if rec.is_file():
+            part = r.run_dir / "stage-2h.json.part"
+            shutil.copy2(rec, part)
+            os.replace(part, r.run_dir / "stage-2h.json")
+        _mirror(loc.cache_dir, r.cache_dir, delete=False)
+        _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
+        self.volume.commit()
 
 
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> StageContext:
@@ -241,12 +278,64 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
 
 
 GroupExecutor = Callable[[dict[str, Any], int, str, int], GroupResult]
+QC_UNAVAILABLE = ("The quality check is unavailable for this hero: the held-out views could not be made. "
+                  "The hero is not affected.")
+QC_NOT_ACCEPTED = ("The quality check did not accept the held-out views (they are kept for review). "
+                   "The hero is not affected.")
+
+
+def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRunner,
+                workdir_for: Callable[[str], Workdir], compute_price_per_s: float = 0.0) -> str | None:
+    """The held-out views (stage 2h) for one job, beside the job's own path. They exist only for scoring, so
+    whatever happens here (a failed gate, every view rejected, a Model API error, a timeout, a crash, a lost
+    container, a rate limit) is recorded on the 2h stage as passed or unavailable, and the job's state, error,
+    retries, refund and quota are never touched. At most one run per job (`store.side_claim`), never retried.
+    Returns the stage's state, or None when this call had nothing to do."""
+    jid = job["id"]
+    claim = secrets.token_hex(8)
+    if not store.side_claim(jid, "2h", claim, settings.stage_timeout_s + LEASE_MARGIN_S):
+        event("heldout_skipped", job=jid)
+        return None
+    event("heldout_started", job=jid)
+    state, message, seconds, cost = "unavailable", QC_UNAVAILABLE, 0.0, 0.0
+    workdir = workdir_for(claim)
+    try:
+        ctx = workdir.open()
+        out = runner.run(HELDOUT, ctx)
+        seconds, cost = out.seconds, out.cost_usd
+        rec = read_record(ctx.run_dir, HELDOUT.record) or {}
+        if out.state == "passed":
+            state, message = "passed", ""
+        elif out.state == "rejected" and rec.get("status") != "error":
+            message = QC_NOT_ACCEPTED
+        elif out.state == "skipped":
+            message = out.message
+        if out.detail and state != "passed":
+            log.warning("held-out views of %s: %s; output tail:\n%s", jid, out.state, out.detail)
+        workdir.sync()
+    except Exception:
+        log.exception("held-out views of %s stopped", jid)
+    finally:
+        try:
+            workdir.close()
+        except Exception:
+            log.exception("held-out work folder of %s", jid)
+    total = round(cost + seconds * compute_price_per_s, 6)
+    try:
+        store.side_finish(jid, "2h", claim, state, seconds=seconds, cost_usd=total, message=message)
+    except Exception:
+        log.exception("could not record the held-out views of %s", jid)
+    event("heldout_finished", job=jid, state=state, seconds=seconds, cost_usd=total)
+    return state
 
 
 def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
-            redispatch: Callable[[str], None] | None = None, volume=None) -> str | None:
+            redispatch: Callable[[str], None] | None = None, volume=None,
+            heldout: Callable[[dict[str, Any]], None] | None = None) -> str | None:
     """Orchestrate one attempt of a job; returns the job's state afterwards (None when this worker had nothing
-    to do: a duplicate, or a job that is no longer queued)."""
+    to do: a duplicate, or a job that is no longer queued). Once the model group has passed stage 2, `heldout`
+    is called to start the held-out views beside the rest of the job (`run_heldout`); the job never waits for
+    them, and an error starting them is only logged."""
     claim = store.job_claim(job_id, call_id, CLAIM_LEASE_S, settings.max_attempts)
     if claim is None:
         event("job_claim_skipped", job=job_id, call=call_id)
@@ -274,6 +363,11 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
         seconds += res.seconds
         cost += res.cost_usd
         compute += res.compute_usd
+        if group == "model" and res.status == "ok" and heldout is not None:
+            try:
+                heldout(job)
+            except Exception:
+                log.exception("could not start the held-out views of %s", job_id)
         detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
                   "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
                            "list price"}
@@ -367,7 +461,8 @@ def purge(store, settings: Settings, storage: Storage, volume=None) -> dict[str,
 
 
 class ThreadBackend:
-    """Dev mode: each job runs in a background thread of this process, its groups in-process."""
+    """Dev mode: each job runs in a background thread of this process, its groups in-process, and its held-out
+    views in a separate, smaller pool of threads (`heldout_concurrency`), on a local copy like on Modal."""
 
     def __init__(self, store, settings: Settings, storage: Storage, runner: StageRunner) -> None:
         import concurrent.futures
@@ -375,8 +470,31 @@ class ThreadBackend:
         self.store, self.settings, self.storage, self.runner = store, settings, storage, runner
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, settings.max_running_jobs),
                                                           thread_name_prefix="herogen-job")
+        self.side_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, settings.heldout_concurrency),
+                                                               thread_name_prefix="herogen-heldout")
         self.futures: dict[str, Any] = {}
         self.n = 0
+
+    def start_heldout(self, job: dict[str, Any]) -> None:
+        self.n += 1
+        self.futures[f"heldout-{self.n}"] = self.side_pool.submit(self._heldout, job)
+
+    def _heldout(self, job: dict[str, Any]) -> None:
+        import tempfile
+
+        from herogen.service.snapshot import LocalVolume
+
+        ctx = make_context(self.settings, self.storage, job)
+        root = Path(tempfile.mkdtemp(prefix="herogen-heldout-"))
+
+        def workdir_for(claim: str) -> Workdir:
+            return HeldoutWorkdir(ctx, root / "work", LocalVolume(),
+                                  lambda: self.store.side_live(job["id"], "2h", claim))
+
+        try:
+            run_heldout(self.store, self.settings, job, self.runner, workdir_for)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def execute(self, job: dict[str, Any], attempt: int, group: str, resume: int) -> GroupResult:
         ctx = make_context(self.settings, self.storage, job)
@@ -391,11 +509,17 @@ class ThreadBackend:
     def _run(self, job_id: str, call_id: str) -> None:
         try:
             run_job(self.store, self.settings, self.storage, job_id, call_id, self.execute,
-                    redispatch=lambda j: dispatch_queued(self.store, self.settings, self.submit))
+                    redispatch=lambda j: dispatch_queued(self.store, self.settings, self.submit),
+                    heldout=self.start_heldout)
         except Exception:
             log.exception("job %s crashed", job_id)
 
     def wait(self, timeout: float = 30.0) -> None:
         import concurrent.futures
 
-        concurrent.futures.wait(list(self.futures.values()), timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while True:   # waiting can start new futures (held-out views, redispatches): wait until none are left
+            pending = [f for f in list(self.futures.values()) if not f.done()]
+            if not pending or time.monotonic() > deadline:
+                return
+            concurrent.futures.wait(pending, timeout=max(0.0, deadline - time.monotonic()))

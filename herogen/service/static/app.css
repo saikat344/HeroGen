@@ -53,7 +53,7 @@ button.danger:not(.link) { border-color: var(--bad); margin-top: 8px; }
 .st-passed .dot { background: var(--ok); }
 .st-running .dot { background: var(--warn); }
 .st-rejected .dot, .st-failed .dot { background: var(--bad); }
-.st-skipped .dot { background: var(--muted); }
+.st-skipped .dot, .st-unavailable .dot { background: var(--muted); }
 .stages p { margin: 2px 0 6px 18px; color: var(--muted); }
 .images { display: flex; flex-wrap: wrap; gap: 10px; }
 .images figure { margin: 0; width: 150px; }

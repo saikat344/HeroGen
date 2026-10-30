@@ -163,7 +163,9 @@ async function openJob(id) {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (S.current !== id) return;
     renderJob(j);
-    if (j.state === 'queued' || j.state === 'running') S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
+    // Keep polling while the job runs, and while its quality check (beside the job) is still running after it.
+    const busy = j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.state === 'running');
+    if (busy) S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
   } catch (e) { banner(e.message); }
 }
 

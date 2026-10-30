@@ -828,7 +828,7 @@ modal deploy -m herogen.service.modal_app         # deploy (see "Deploying" belo
 | Metadata store | `store.py`, `snapshot.py`, Modal `StoreService` | Users, allowlist, invites, sign-in links, sessions, jobs, stages, audit log. The only writer. |
 | Upload cleaner | `uploads.py`, Modal `sanitize_image` | Opens and re-encodes uploads, with no network, no secrets, no volumes and no access to other Modal resources. |
 | Job orchestrator | `worker.py` `run_job`, Modal `run_job` | One per job attempt: claims the job, runs the stage groups in order, finishes the job. |
-| Stage groups | `worker.py` `run_group`, `runner.py`, Modal `model_stages`, `blender_stages`, `export_stages` | Run the pipeline's own CLIs on a local copy of the job's files, each group in a fresh container. |
+| Stage groups | `worker.py` `run_group`, `runner.py`, Modal `model_stages`, `blender_stages`, `export_stages`, `heldout_stages` (beside the job) | Run the pipeline's own CLIs on a local copy of the job's files, each group in a fresh container. |
 | Sweep, retention | `worker.py` `reconcile`, `purge`, Modal `sweep` (every minute), `retention` (daily 03:17 UTC) | Requeue jobs whose worker died, start queued jobs, delete expired files and records. |
 | Admin | `admin.py`, Modal `admin` entrypoint | Invites, allowlist, users, quotas, jobs, audit log. No admin web page. |
 
@@ -869,7 +869,8 @@ function is `nonpreemptible`. Instead:
 
 Stages run as the same commands a person types (`python3 -m herogen.pipeline run`, `python3 -m herogen.blender
 run`), each in a subprocess with a timeout and an environment that holds only what the stage needs:
-`MODEL_API_KEY` reaches the model stages only, and no stage sees the session key or the email key. Options that
+`MODEL_API_KEY` reaches the model stages and the held-out views only, and no stage sees the session key or the
+email key. Options that
 only some versions of a stage CLI have (`--profile`, `--remote-cache`) are passed only when that CLI's `--help`
 lists them. A job that starts from a description first runs stage `p` (`sketchgen.py`): one `muse-image-1.0`
 generation from a fixed pencil-sketch prompt around the description, recorded as `stage-p.json`; the pipeline then
@@ -877,17 +878,46 @@ starts at stage 0 from that sketch.
 
 | Group | Stages | Worker | Secret |
 | --- | --- | --- | --- |
-| model | p (described heroes only), 0, 1, 2 with 2h | 2 CPU, 4 GiB, 4.5 h | `<app>-model` |
+| model | p (described heroes only), 0, 1, 2 | 2 CPU, 4 GiB, 4.5 h | `<app>-model` |
 | blender | 3, 4 | 8 CPU, 32 GiB, 6.5 h, Blender 4.5.14 LTS | none |
 | export | 6 (Roblox rig: `python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`), 5 (results page) | 2 CPU, 4 GiB, 2.5 h | none |
+| heldout (beside the job) | 2h (held-out views, for scoring) | 2 CPU, 4 GiB, 1.5 h, at most `heldout_concurrency` (2) at once service-wide | `<app>-model` |
 
 The function timeouts follow the stage timeouts (`HEROGEN_SERVICE_STAGE_TIMEOUT`, 1 h per stage, and
 `HEROGEN_SERVICE_BLENDER_TIMEOUT`, 3 h per Blender stage): each group's function allows all its stages back to back
-plus 30 minutes, and the orchestrator (`run_job`, 14 h with the defaults) allows every group plus 30 minutes.
+plus 30 minutes, and the orchestrator (`run_job`, 14 h with the defaults) allows the job's own three groups plus 30
+minutes; it never waits for the held-out views.
 `modal_app` computes them at deploy time and refuses a configuration over Modal's 24-hour limit.
 
-Stage 2's outcome is decided by `stage-2.json`; the held-out view's record (`stage-2h.json`) adds its cost but its
-gate does not stop the job, since that view exists only for scoring. Stages 6 and 5 are optional: a rejection or
+**Held-out views (stage 2h) run beside the job and can never fail or delay it.** No building stage reads
+`heldout/`; the views exist only to score the body on views it was not built from. So:
+
+- The model group runs stage 2 alone (`pipestage.py`, through the same functions the pipeline CLI uses; the CLI
+  itself would follow stage 2 with 2h). Once stage 2 has passed, the orchestrator starts 2h in its own function
+  (`heldout_stages`, started with `spawn` and never awaited) and goes straight on to stages 3, 4, 6 and 5. The GLB
+  and the Roblox bundle are delivered as soon as those finish.
+- 2h runs at most once per job (`store.side_claim`) and is never retried. Whatever happens to it (a failed gate,
+  every view rejected, a Model API error, a timeout, a crash, a lost container, a rate or quota limit) is recorded
+  on the 2h stage only, as passed or "unavailable" with a sentence saying the hero is not affected; a lost worker
+  is marked unavailable by the sweep when its lease runs out. It never sets the job's state or error, never
+  requeues, retries or refunds it, and never changes whether the job counts toward the quota (its cost is left
+  out of the refund decision).
+- Its cost joins the job's recorded cost (`cost_detail.heldout_usd`), at the job's finish if 2h finished first,
+  else when 2h finishes. A 2h that finishes after the job, including a canceled job, attaches its record and cost
+  and changes nothing else.
+- Files: 2h works on a local copy and writes back only `heldout/` and `stage-2h.json`, only into a run folder that
+  still exists, and only while its claim holds and the job is not deleted, so it never brings back a deleted
+  hero. The job's own copy back neither copies nor deletes those two paths. The two never write the same file.
+- Model API share: 2h starts only after the job's own Model API calls (stages p and 0 to 2) are done, and at most
+  `heldout_concurrency` (default 2) held-out runs execute at once across the service (`max_containers` of
+  `heldout_stages`; more wait in Modal's queue), so they yield the API to other jobs' own stages. The pipeline's
+  shared limiter coordinates the processes of one container only (it locks a local file), so across containers
+  this cap is what bounds the held-out views' share.
+- The page lists 2h last as "quality check (held-out views)" and keeps polling while it runs after the job. The
+  results page (stage 5) is written when the job's own path ends, so it shows 2h only if 2h finished first; the
+  viewer always reads the current `stage-2h.json`.
+
+Stages 6 and 5 are optional: a rejection or
 error there is recorded on the stage and shown as the reason the Roblox bundle is unavailable, and the job still
 delivers its GLB. When the deployed code has no `herogen.roblox` package, stage 6 is recorded as skipped with
 that reason. The export writes `stage-6.json` at the run root with its `outputs` relative to it; an `error` line
@@ -1104,6 +1134,7 @@ deploying shell). The main ones:
 | `HEROGEN_SERVICE_TERMS_VERSION` | (empty) | The published terms version users accept; empty closes sign-in |
 | `HEROGEN_SERVICE_JOBS_PER_DAY`, `HEROGEN_SERVICE_JOBS_TOTAL` | 5, 50 | Default quota |
 | `HEROGEN_SERVICE_MAX_RUNNING`, `HEROGEN_SERVICE_MAX_ATTEMPTS` | 4, 2 | Jobs running at once; attempts per job |
+| `HEROGEN_SERVICE_HELDOUT_MAX` | 2 | Held-out view runs at once, service-wide |
 | `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
 | `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
 | `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `roblox-ingame` | Profiles offered, and the default |

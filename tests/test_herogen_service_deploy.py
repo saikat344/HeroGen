@@ -102,7 +102,8 @@ class TestModalApp(TempDirCase):
         mod, fake = self.load()
         f = fake.functions
         self.assertEqual(set(f), {"StoreService", "sanitize_image", "web", "run_job", "model_stages", "blender_stages",
-                                  "export_stages", "sweep", "retention", "admin_command", "selfcheck_report"})
+                                  "export_stages", "heldout_stages", "sweep", "retention", "admin_command",
+                                  "selfcheck_report"})
         for name, kw in f.items():
             self.assertNotIn("retries", kw, f"{name}: retries are the store's job, never Modal's")
         self.assertEqual((f["StoreService"]["max_containers"], f["StoreService"]["min_containers"]), (1, 1))
@@ -114,12 +115,14 @@ class TestModalApp(TempDirCase):
         secrets = {n: [s.name for s in kw.get("secrets", [])] for n, kw in f.items()}
         self.assertEqual(secrets["web"], ["herogen-service-web"])
         self.assertEqual(secrets["model_stages"], ["herogen-service-model"])
+        self.assertEqual(secrets["heldout_stages"], ["herogen-service-model"])
+        self.assertEqual(f["heldout_stages"]["max_containers"], 2, "held-out views yield to the jobs' own work")
         self.assertEqual(secrets["admin_command"], ["herogen-service-web", "herogen-service-admin"])
         self.assertEqual(secrets["StoreService"], ["herogen-service-admin"])
         for n in ("blender_stages", "export_stages", "run_job", "sweep", "retention"):
             self.assertEqual(secrets[n], [], f"{n} holds no secret")
         self.assertNotIn("herogen-service-admin", secrets["web"])
-        for n in ("run_job", "model_stages", "blender_stages", "export_stages"):
+        for n in ("run_job", "model_stages", "blender_stages", "export_stages", "heldout_stages"):
             self.assertTrue(f[n]["nonpreemptible"], n)
             self.assertTrue(f[n]["single_use_containers"], n)
         self.assertEqual(f["sweep"]["schedule"][0], "period")
@@ -169,6 +172,7 @@ class TestModalApp(TempDirCase):
         self.assertGreater(f["run_job"]["timeout"], sum(f[n]["timeout"] for n in ("model_stages", "blender_stages",
                                                                                "export_stages")))
         self.assertLessEqual(f["run_job"]["timeout"], 24 * 3600)
+        self.assertGreater(f["heldout_stages"]["timeout"], mod.DEPLOY.stage_timeout_s)
         with self.assertRaises(RuntimeError):
             self.load({**PROD, "HEROGEN_SERVICE_BLENDER_TIMEOUT": str(12 * 3600)})
 

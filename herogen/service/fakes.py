@@ -145,7 +145,11 @@ class FakeRunner:
         (run / "views" / "meta.json").write_text(json.dumps({"pixels_per_unit": 40.0, "height_units": 5.5,
                                                              "image_size": 256}))
         write_record(run, _record(2, "turnaround", ["02-turnaround.png"], cost=0.025))
-        write_record(run, _record("2h", "heldout", [], cost=0.0125))
+
+    def _stage_2h(self, ctx: StageContext, run: Path) -> None:
+        (run / "heldout").mkdir(exist_ok=True)
+        _figure(256, (40, 90, 200), 0.8).save(run / "heldout" / "front-left-34.png", format="PNG")
+        write_record(run, _record("2h", "heldout", ["heldout/front-left-34.png"], cost=0.0125))
 
     def _stage_3(self, ctx: StageContext, run: Path) -> None:
         (run / "03-mesh.glb").write_bytes(box_glb())

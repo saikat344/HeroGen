@@ -26,10 +26,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
+    2: ("ALTER TABLE job_stages ADD COLUMN claim TEXT", "ALTER TABLE job_stages ADD COLUMN lease_until REAL"),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -41,7 +42,10 @@ TRANSITIONS = {
     "running": {"succeeded", "rejected", "failed", "canceled", "queued"},
     "succeeded": set(), "rejected": set(), "failed": set(), "canceled": set(),
 }
-STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped")
+STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped", "unavailable")
+# Stages that run beside the job (they never decide or delay it): only the held-out views, used for scoring.
+SIDE_STAGES = ("2h",)
+SIDE_FINAL = ("passed", "unavailable")
 DISPATCH_GRACE_S = 300.0    # a queued job dispatched this recently is taken to be starting
 SEEN_EVERY_S = 300.0        # how often a session's last-seen time is written
 DAY_S = 86400.0
@@ -84,7 +88,8 @@ CREATE INDEX jobs_user ON jobs(user_id, created_at);
 CREATE INDEX jobs_state ON jobs(state);
 CREATE TABLE job_stages (
   job_id TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL,
-  started_at REAL, seconds REAL, cost_usd REAL, message TEXT NOT NULL DEFAULT '', PRIMARY KEY (job_id, stage)
+  started_at REAL, seconds REAL, cost_usd REAL, message TEXT NOT NULL DEFAULT '', claim TEXT, lease_until REAL,
+  PRIMARY KEY (job_id, stage)
 );
 CREATE TABLE job_runs (
   job_id TEXT NOT NULL, attempt INTEGER NOT NULL, grp TEXT NOT NULL, entries INTEGER NOT NULL,
@@ -171,6 +176,7 @@ class Store:
         "job_create", "job_get", "jobs_list", "job_dispatch", "job_claim", "job_current", "job_stage_set",
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
+        "side_claim", "side_live", "side_finish",
     })
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
@@ -680,8 +686,9 @@ class Store:
             c.execute("INSERT INTO job_stages(job_id, stage, state, attempt, started_at, seconds, cost_usd, message) "
                       "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(job_id, stage) DO UPDATE SET state=excluded.state, "
                       "attempt=excluded.attempt, started_at=COALESCE(CASE WHEN excluded.state='running' THEN "
-                      "excluded.started_at END, job_stages.started_at), seconds=excluded.seconds, "
-                      "cost_usd=excluded.cost_usd, message=excluded.message",
+                      "excluded.started_at END, job_stages.started_at), "
+                      "seconds=COALESCE(excluded.seconds, job_stages.seconds), "
+                      "cost_usd=COALESCE(excluded.cost_usd, job_stages.cost_usd), message=excluded.message",
                       (job_id, stage, state, attempt, now, seconds, cost_usd, message[:2000]))
             c.execute("UPDATE jobs SET stage=?, lease_until=COALESCE(?, lease_until) WHERE id=?",
                       (stage, now + lease_s if lease_s else None, job_id))
@@ -702,6 +709,10 @@ class Store:
             refunded = state == "failed" and refund and self._refund_ok(c, job, cost_usd)
             if refunded and error_message is not None:
                 error_message += REFUND_NOTE
+            side = self._side_cost(c, job_id)   # a side stage that finished first: its cost joins the job's
+            if side:
+                cost_usd = round((cost_usd or 0.0) + side, 6)
+                cost_detail = {**(cost_detail or {}), "heldout_usd": round(side, 6)}
             self._set_state(c, job, state, finished_at=self.clock(), error_code=error_code, error_stage=error_stage,
                             error_message=error_message, seconds=seconds, cost_usd=cost_usd,
                             cost_detail=json.dumps(cost_detail) if cost_detail is not None else None,
@@ -736,8 +747,9 @@ class Store:
         """A failed job gives its quota back only if it spent nothing (its stages' recorded cost, model calls and
         compute together, is zero) and the user has had fewer than `refunds_per_day` refunds in the last 24 hours.
         Otherwise a stage that fails after paid calls could be used to run paid work without limit."""
-        spent = c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=?",
-                          (job["id"],)).fetchone()[0]
+        # Side stages (the held-out views) are left out: they never change whether a job is refunded.
+        spent = c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage NOT IN "
+                          f"({','.join('?' * len(SIDE_STAGES))})", (job["id"], *SIDE_STAGES)).fetchone()[0]
         if spent + (extra_cost or 0.0) > 0:
             return False
         recent = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND refunded_at>?",
@@ -755,11 +767,66 @@ class Store:
         self._audit(c, "system", "job_failed", job["id"], {"code": error_code, "stage": error_stage,
                                                             "refunded": refunded})
 
+    # ---- side stages ----------------------------------------------------------------------------------------
+
+    def _side_cost(self, c: sqlite3.Connection, job_id: str) -> float:
+        return c.execute(f"SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage IN "
+                         f"({','.join('?' * len(SIDE_STAGES))}) AND state IN ('passed', 'unavailable')",
+                         (job_id, *SIDE_STAGES)).fetchone()[0]
+
+    def side_claim(self, job_id: str, stage: str, claim: str, lease_s: float) -> bool:
+        """Start a side stage for a job, at most once per job (no retries, whatever happens to it). Refused when
+        it already started, or the job was canceled, failed, rejected or deleted; the job's own state is never
+        changed."""
+        if stage not in SIDE_STAGES:
+            raise StoreError(f"{stage!r} is not a side stage")
+        now = self.clock()
+        with self._tx() as c:
+            job = c.execute("SELECT state, attempts, deleted_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None or job["deleted_at"] is not None or job["state"] not in ("running", "succeeded"):
+                return False
+            n = c.execute("INSERT INTO job_stages(job_id, stage, state, attempt, started_at, claim, lease_until) "
+                          "VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id, stage) DO NOTHING",
+                          (job_id, stage, "running", job["attempts"], now, claim, now + lease_s)).rowcount
+        return n == 1
+
+    def side_live(self, job_id: str, stage: str, claim: str) -> bool:
+        """True while `claim` holds the side stage and the job has not been deleted (its files may be written)."""
+        row = self._one("SELECT s.state, s.claim, j.deleted_at FROM job_stages s JOIN jobs j ON j.id=s.job_id "
+                        "WHERE s.job_id=? AND s.stage=?", (job_id, stage))
+        return bool(row and row["claim"] == claim and row["state"] == "running" and row["deleted_at"] is None)
+
+    def side_finish(self, job_id: str, stage: str, claim: str, state: str, *, seconds: float | None = None,
+                    cost_usd: float | None = None, message: str = "") -> bool:
+        """Record a side stage's outcome (passed or unavailable). Its cost joins the job's recorded cost, now if
+        the job has finished, else when it does. Nothing else about the job changes: not its state, error,
+        refund or quota."""
+        if state not in SIDE_FINAL:
+            raise StoreError(f"bad side-stage state {state!r}")
+        with self._tx() as c:
+            row = c.execute("SELECT * FROM job_stages WHERE job_id=? AND stage=?", (job_id, stage)).fetchone()
+            if row is None or row["claim"] != claim or row["state"] != "running":
+                return False
+            c.execute("UPDATE job_stages SET state=?, seconds=?, cost_usd=?, message=?, lease_until=NULL "
+                      "WHERE job_id=? AND stage=?", (state, seconds, cost_usd, message[:2000], job_id, stage))
+            job = c.execute("SELECT state, cost_usd, cost_detail FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is not None and job["state"] in TERMINAL_STATES and cost_usd:
+                detail = json.loads(job["cost_detail"]) if job["cost_detail"] else {}
+                detail["heldout_usd"] = round(cost_usd, 6)
+                c.execute("UPDATE jobs SET cost_usd=?, cost_detail=? WHERE id=?",
+                          (round((job["cost_usd"] or 0.0) + cost_usd, 6), json.dumps(detail), job_id))
+            self._audit(c, "system", "side_stage_finished", job_id, {"stage": stage, "state": state})
+        return True
+
     def reconcile_stale(self, max_attempts: int) -> list[tuple[str, str]]:
-        """Running jobs whose lease ran out (the worker died without reporting): requeue or fail each one."""
+        """Running jobs whose lease ran out (the worker died without reporting): requeue or fail each one. A side
+        stage whose lease ran out is recorded as unavailable; its job is not touched."""
         now = self.clock()
         out = []
         with self._tx() as c:
+            c.execute("UPDATE job_stages SET state='unavailable', lease_until=NULL, message=? WHERE state='running' "
+                      "AND claim IS NOT NULL AND lease_until<?",
+                      ("The quality check stopped before it finished; the hero is not affected.", now))
             for job in c.execute("SELECT * FROM jobs WHERE state='running' AND lease_until<?", (now,)).fetchall():
                 out.append((job["id"], self._requeue(c, job, max_attempts, "worker_lost", job["stage"],
                                                      "The worker stopped responding.")))
