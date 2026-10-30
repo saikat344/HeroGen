@@ -434,6 +434,55 @@ class _OkAnswer:
         return json.dumps(OK_IMAGE[2]).encode()
 
 
+@unittest.skipUnless(os.name == "nt", "Windows process API")
+class WindowsProcessProbeTest(unittest.TestCase):
+    def test_open_process_results(self):
+        for error, alive in ((8, True), (5, True), (87, False), (9999, True)):
+            with self.subTest(error=error), mock.patch.object(retry, "_kernel32") as kernel, \
+                    mock.patch.object(retry.ctypes, "get_last_error", return_value=error):
+                kernel.OpenProcess.return_value = None
+                self.assertEqual(retry._alive(os.getpid()), alive)
+                kernel.OpenProcess.assert_called_once_with(0x00100000, False, os.getpid())
+                kernel.WaitForSingleObject.assert_not_called()
+                kernel.CloseHandle.assert_not_called()
+
+    def test_wait_results_close_the_handle(self):
+        for result, alive in ((0xFFFFFFFF, True), (0x102, True), (0, False), (1, True)):
+            with self.subTest(result=result), mock.patch.object(retry, "_kernel32") as kernel:
+                kernel.OpenProcess.return_value = 123
+                kernel.WaitForSingleObject.return_value = result
+                self.assertEqual(retry._alive(os.getpid()), alive)
+                kernel.WaitForSingleObject.assert_called_once_with(123, 0)
+                kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_wait_exception_closes_the_handle(self):
+        with mock.patch.object(retry, "_kernel32") as kernel:
+            kernel.OpenProcess.return_value = 123
+            kernel.WaitForSingleObject.side_effect = OSError("probe failed")
+            with self.assertRaises(OSError):
+                retry._alive(os.getpid())
+            kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_failed_probe_keeps_the_only_slot(self):
+        for open_failed in (True, False):
+            with self.subTest(open_failed=open_failed), tempfile.TemporaryDirectory() as tmp:
+                clock = FakeTime()
+                options = dict(start=1, maximum=1, clock=clock.wall, sleep=clock.pass_time)
+                owner = retry.SharedLimiter(tmp, "k", **options)
+                claimer = retry.SharedLimiter(tmp, "k", **options)
+                slot, _ = owner.acquire(clock.wall() + 1)
+                self.assertIsNotNone(slot)
+                with mock.patch.object(retry, "_kernel32") as kernel, \
+                        mock.patch.object(retry.ctypes, "get_last_error", return_value=8):
+                    kernel.OpenProcess.return_value = None if open_failed else 123
+                    kernel.WaitForSingleObject.return_value = 0xFFFFFFFF
+                    second, waited = claimer.acquire(clock.wall() + 1)
+                self.assertIsNone(second)
+                self.assertGreaterEqual(waited, 1)
+                self.assertEqual(list(json.loads(owner.state_path.read_text())["slots"]), [slot])
+                owner.release(slot)
+
+
 class SharedLimiterTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

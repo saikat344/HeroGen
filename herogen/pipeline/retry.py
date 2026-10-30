@@ -18,7 +18,8 @@ named by a SHA-256 prefix of the key (never the key itself) and guarded by an ex
 (`herogen.pipeline.filelock`). A 429 halves the limit (never below 1) and, when its caller starts the wait it
 was given, holds every process off for that wait, at most HOLD_MAX_S (60 s); every
 SUCCESSES_PER_STEP successful calls since the last 429 raise the limit by one, up to its maximum. A slot whose
-process has died is freed when another process next looks.
+process has died is freed when another process next looks. An inconclusive Windows process probe retains
+the slot until a later probe confirms exit or the slot expires.
 """
 
 from __future__ import annotations
@@ -191,8 +192,8 @@ if os.name == "nt":
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _SYNCHRONIZE = 0x00100000
-    _ERROR_ACCESS_DENIED = 5
-    _WAIT_TIMEOUT = 0x102
+    _ERROR_INVALID_PARAMETER = 87
+    _WAIT_OBJECT_0 = 0
 
     def _alive(pid: int) -> bool:
         # Never os.kill(pid, 0) here: on Windows it terminates the process instead of probing it.
@@ -200,9 +201,11 @@ if os.name == "nt":
             return False
         handle = _kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
         if not handle:
-            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED  # it exists, but belongs to someone else
+            # Only a nonexistent pid confirms death; access denial and other probe failures do not.
+            return ctypes.get_last_error() != _ERROR_INVALID_PARAMETER
         try:
-            return _kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT  # not yet signalled: running
+            # Only a signalled process confirms exit; timeouts, failures and unknown results retain it.
+            return _kernel32.WaitForSingleObject(handle, 0) != _WAIT_OBJECT_0
         finally:
             _kernel32.CloseHandle(handle)
 else:
