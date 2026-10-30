@@ -153,6 +153,25 @@ def side_view_checks(masks: dict[str, np.ndarray], *, figures_found: int, figure
     return out
 
 
+def shortfall(c: Check) -> float:
+    """How far a failed check's value is on the wrong side of its threshold, as a fraction of the threshold
+    (0 for a check that passed)."""
+    if c["pass"]:
+        return 0.0
+    t = float(c["threshold"])
+    return abs(float(c["value"]) - t) / (abs(t) or 1.0)
+
+
+def attempt_rank(checks: list[Check], expected: tuple[str, ...]) -> tuple[int, float]:
+    """How bad one attempt's gated checks are, lower is better: (failed gates, their summed `shortfall`). A gate
+    in ``expected`` that was never measured (a sheet that could not be split has only `figures_found`) counts as
+    failed with a shortfall of 1, so an attempt is never ranked well for what it skipped."""
+    gated = [c for c in checks if c.get("gate", True)]
+    failed = [c for c in gated if not c["pass"]]
+    missing = [n for n in expected if n not in {c["name"] for c in gated}]
+    return len(failed) + len(missing), round(sum(shortfall(c) for c in failed) + len(missing), 6)
+
+
 def top_view_checks(masks: dict[str, np.ndarray], top: np.ndarray, *, prefix: str = "top", gate: bool = True,
                     note: str = "") -> list[Check]:
     """Top-view extents at the shared scale: X extent vs. front width, Y extent (depth) vs. side width."""

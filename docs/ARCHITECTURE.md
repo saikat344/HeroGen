@@ -77,6 +77,17 @@ RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, R
 }
 ```
 
+## Turnaround sheet (stage 2)
+
+Stage 2 asks Muse Image for a sheet of four views up to four times, stopping at the first sheet whose gated
+checks all pass. It keeps the best sheet, not the last: the fewest failed gated checks, then the smallest summed
+shortfall (`checks.shortfall`: how far each failed value is past its threshold, as a fraction of the
+threshold); a tie keeps the earlier sheet. A gate a sheet was never measured on counts as failed with a
+shortfall of 1, so a sheet that could not be split into four figures ranks below every sheet that could.
+`stage-2.json` lists every attempt with its checks and `rank`, and `details.kept_attempt` names the kept
+one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
+sheet's. The top view is asked for only when the kept sheet passed.
+
 ## Held-out views, mask method and covers
 
 **Held-out views (stage 2h).** After stage 2 passes, four extra images of the same character in the

@@ -418,6 +418,12 @@ def stage2_turnaround(
     return _stopping_on_api_error(lambda: _stage2(st, run, client, height_units, attempts), st)
 
 
+# Every gated check a sheet that splits into four figures is measured on (`attempt_rank` counts a missing one).
+SHEET_GATES = ("figures_found", "height_agreement_4_views", "front_back_width_agreement", "left_right_mirror_iou",
+               "a_pose_hand_span_over_shoulders", "right_profile_width_over_height", "left_profile_width_over_height",
+               "view_mask_sam_coverage_min")
+
+
 def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
     cov = split["sam_coverage"]
     if not cov:
@@ -431,6 +437,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             ) -> dict[str, Any]:
     cover = _load(run, "01-cover.png")
     tried = []
+    kept: tuple = ()
     for attempt in range(attempts):
         sheet = client.edit_image(TURNAROUND_PROMPT, [cover], size=SHEET_SIZE, attempt=attempt)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
@@ -458,17 +465,26 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             "assignment": assignment,
             "checks": side_checks,
         })
+        # Keep the best sheet, not the last: fewest failed gates, then the smallest summed shortfall; a tie
+        # keeps the earlier one.
+        rank = C.attempt_rank(side_checks, SHEET_GATES)
+        tried[-1]["rank"] = {"failed_gates": rank[0], "shortfall": rank[1]}
+        if not kept or rank < kept[0]:
+            kept = (rank, attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks)
         if C.gate_ok(side_checks):
             break
+    _, kept_attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks = kept
     st.save_image("02-turnaround.png", sheet)
     st.details = {
         "prompt": TURNAROUND_PROMPT,
         "sheet_size": list(sheet.size),
         "attempts": tried,
+        "kept_attempt": kept_attempt,
         "view_assignment": assignment,
     }
     if len(tried) > 1:
-        st.notes.append(f"Sheet generated {len(tried)} times; the last one is kept.")
+        st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (fewest failed "
+                        "gates, then the smallest shortfall).")
     st.checks = list(side_checks) + orient
     st.notes += orient_notes
     if not sq:
