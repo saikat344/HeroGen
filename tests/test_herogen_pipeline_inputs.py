@@ -23,6 +23,7 @@ from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import inputs, stages  # noqa: E402
 from herogen.pipeline.__main__ import run_pipeline  # noqa: E402
 from herogen.pipeline.client import ModelClient, SamInstance  # noqa: E402
+from fake_model_server import is_question  # noqa: E402
 from test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place  # noqa: E402
 
@@ -58,7 +59,7 @@ class PromptAPI(FakeAPI):
         self.sam_texts: list[str] = []
 
     def post(self, c, endpoint: str, body: dict) -> dict:
-        if endpoint == "responses":
+        if endpoint == "responses" and not is_question(body):
             self.sam_texts.append(body["input"][0]["content"][0]["text"])
         return super().post(c, endpoint, body)
 
@@ -370,6 +371,64 @@ class Stage1FacingTest(_SketchRun):
         self.assertEqual(self._live(self.img, api), 0)
         c = next(c for c in self._stage(1)["checks"] if c["name"] == "sketch_face_offset_in_head")
         self.assertEqual((c["value"], c["verdict"]), (None, "not_measured"))
+
+
+PHOTO = {"real_person_photo_probability": 0.97, "image_kind": "photo_of_real_person", "reason": "a camera photo"}
+
+
+class PhotoTest(unittest.TestCase):
+    def test_the_judge_is_frozen(self):
+        self.assertEqual(inputs.PHOTO_JUDGE["name"], "real-person-photo-v1")
+        self.assertEqual(inputs.photo_judge_sha256(), inputs.PHOTO_JUDGE_SHA256)
+        self.assertEqual(inputs.PHOTO_JUDGE_SHA256,
+                         "80bd2cbcdb54ae9a4355bf84bfb66b02b06365e2367eb4c7ffeef392f909335a")
+        changed = {**inputs.PHOTO_JUDGE, "prompt": inputs.PHOTO_JUDGE["prompt"] + " "}
+        with mock.patch.object(inputs, "PHOTO_JUDGE", changed), self.assertRaises(RuntimeError) as e:
+            inputs.judge_photo(None, Image.new("RGB", (8, 8)))  # refused before any call
+        self.assertIn("was changed", str(e.exception))
+
+    def test_verdicts(self):
+        c, det = inputs.photo_check(PHOTO)
+        self.assertEqual((c["value"], c["verdict"], c["gate"]), (0.97, "reject", True))
+        self.assertIn("Upload a drawing or artwork of a character, not a photo of a real person", c["message"])
+        self.assertEqual(det["judge"], {"name": "real-person-photo-v1", "sha256": inputs.PHOTO_JUDGE_SHA256,
+                                        "model": "muse-spark-1.3"})
+        self.assertEqual((det["image_kind"], det["probability"]), ("photo_of_real_person", 0.97))
+        drawing = {"real_person_photo_probability": 0.1, "image_kind": "render_or_cg", "reason": "cg"}
+        self.assertEqual(inputs.photo_check(drawing)[0]["verdict"], "pass")
+        at = {**drawing, "real_person_photo_probability": inputs.MAX_REAL_PERSON_PHOTO_PROB}
+        self.assertEqual(inputs.photo_check(at)[0]["verdict"], "reject")
+
+
+class Stage1PhotoTest(_SketchRun):
+    def setUp(self):
+        super().setUp()
+        self.img = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))
+
+    def test_a_photo_of_a_person_is_rejected_before_any_other_model_call(self):
+        api = PromptAPI()
+        api.photo_answer = dict(PHOTO)
+        self.assertEqual(self._live(self.img, api), 3)
+        s1 = self._stage(1)
+        self.assertEqual(s1["status"], "input_rejected")
+        self.assertEqual([(c["name"], c["verdict"]) for c in s1["checks"]],
+                         [("upload_real_person_photo_probability", "reject")])
+        self.assertIn("not a photo of a real person", s1["error"])
+        self.assertIn("input rejected: this looks like a photograph of a real person", self.err)
+        self.assertEqual(api.calls, ["question"])  # no SAM 3.1 call (no face or head prompt) and no edit
+        self.assertEqual(api.sam_texts, [])
+        self.assertEqual(s1["details"]["input"]["photo"]["judge"]["name"], "real-person-photo-v1")
+        self.assertEqual(s1["models"], ["muse-spark-1.3"])
+        self.assertGreater(s1["cost_usd"], 0)
+
+    def test_a_drawing_passes_and_the_check_is_recorded_first(self):
+        api = PromptAPI()
+        self.assertEqual(self._live(self.img, api), 0)
+        s1 = self._stage(1)
+        self.assertEqual(s1["checks"][0]["name"], "upload_real_person_photo_probability")
+        self.assertEqual(s1["checks"][0]["verdict"], "pass")
+        self.assertEqual(api.calls[0], "question")
+        self.assertEqual(s1["details"]["input"]["photo"]["image_kind"], "drawing_or_artwork")
 
 
 if __name__ == "__main__":

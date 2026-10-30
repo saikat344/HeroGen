@@ -288,11 +288,19 @@ def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch = _load(run, "00-sketch.png")
     w, h = sketch.size
-    # The sketch is segmented and its input checks run first: a sketch they reject costs no paid edit.
+    # The input checks run first: a sketch they reject costs no paid edit. The photo check comes before every
+    # other model call, so no other model (no SAM 3.1 face or head prompt) ever sees a photo of a real person.
+    photo, photo_details = inputs.photo_check(inputs.judge_photo(client, sketch))
+    if photo["verdict"] == "reject":
+        st.checks = [photo]
+        st.details = {"input": {"photo": photo_details}}
+        _finish_input_checks(st)
     sketch_inst, text = sam_instances(client, sketch)
     sketch_method = f"{SAM_MODEL}:{text}" if sketch_inst else SAM_NOTHING_FOUND
     input_checks, input_details = inputs.character_checks(
         sketch_inst, NO_CHARACTER.format(texts=", ".join(repr(t) for t in SAM_TEXTS)))
+    input_checks.insert(0, photo)
+    input_details["photo"] = photo_details
     if sketch_inst and not inputs.rejections(input_checks):
         # Only the main (largest) figure is the character; smaller figures are warned about.
         sketch_mask = inputs.by_area(sketch_inst)[0].mask

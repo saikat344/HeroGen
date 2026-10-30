@@ -25,6 +25,7 @@ from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMi
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
 from test_herogen_pipeline_heldout_synth import fake_heldout_image  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
+from fake_model_server import NOT_A_PHOTO, is_question, question_answer  # noqa: E402
 
 DUMMY_KEY = "dummy-test-key-not-real-0123456789"
 
@@ -56,9 +57,13 @@ class FakeAPI:
         self.calls: list[str] = []
         self.prompts: list[str] = []
         self.last_sam_image: Image.Image | None = None
+        self.photo_answer = dict(NOT_A_PHOTO)  # Muse Spark's answer to the photo question
 
     def post(self, _client, endpoint: str, body: dict) -> dict:
         assert os.environ.get("MODEL_API_KEY") == DUMMY_KEY
+        if endpoint == "responses" and is_question(body):  # the photo question: a drawing unless told otherwise
+            self.calls.append("question")
+            return question_answer(self.photo_answer)
         self.calls.append(endpoint)
         if endpoint == "responses":
             self.last_sam_image = _decode_data_url(body["input"][0]["content"][1]["image_url"])
@@ -216,8 +221,9 @@ class FlowTest(_RunsTest):
         s1 = json.loads((self.root / "rec" / "stage-1.json").read_text())
         self.assertEqual((s1["ok"], s1["status"]), (False, "error"))
         self.assertIn("HTTP 503", s1["error"])
-        self.assertEqual(api.calls, [])  # it failed on the sketch's first prompt, before any paid edit
-        self.assertEqual(list((self.root / "_cache").glob("*.json")), [])
+        self.assertEqual(api.calls, ["question"])  # the photo question, then the sketch's first SAM prompt failed
+        cached = [json.loads(p.read_text())["request"]["model"] for p in (self.root / "_cache").glob("*.json")]
+        self.assertEqual(cached, [client_mod.TEXT_MODEL])  # only the photo question's answer, no SAM entry
         self.assertEqual(self._replay("rep"), 1)
 
     def test_gate_failure_stops_and_still_reports(self):

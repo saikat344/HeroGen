@@ -7,6 +7,8 @@ check is gated and stops the run with the stage's status "input_rejected"; a war
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import numpy as np
@@ -14,11 +16,50 @@ from PIL import Image
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
-from herogen.pipeline.client import SamInstance
+from herogen.pipeline.client import TEXT_MODEL, ModelClient, SamInstance
 
 Check = dict[str, Any]
 
 VERDICTS = ("pass", "warn", "reject")
+
+# Stage 1, first of all: is the upload a photograph of a real person? Muse Spark answers this frozen question (a
+# change to any part of it needs a new name; `photo_judge_sha256` must equal PHOTO_JUDGE_SHA256). It runs before
+# any other model call on the upload, so nothing else (no SAM 3.1 face or head prompt) ever sees a rejected photo.
+PHOTO_JUDGE: dict[str, Any] = {
+    "name": "real-person-photo-v1",
+    "model": TEXT_MODEL,
+    "reasoning_effort": "low",
+    "image_max_side": 1024,
+    "prompt": (
+        "This image was uploaded to a tool that turns a drawing of a game character into a 3D model. Uploads must be "
+        "drawings or artwork of a character, never photographs of real people.\n\n"
+        "Decide whether the image is a PHOTOGRAPH OF A REAL PERSON: a camera or phone photo whose subject is a real "
+        "human being, including selfies, portraits, group photos, people in costumes, cosplay, armour or make-up, "
+        "black-and-white or old photos, and a photo of a real person shown on a screen or printed.\n\n"
+        "It is NOT a photograph of a real person when it is: a drawing, sketch, painting, illustration, comic, anime "
+        "or concept art (also when photographed or scanned on paper, even with a real hand or desk visible at the "
+        "edge); a 3D render or a game or film CG character, however realistic; a photo of a toy, figurine, doll, "
+        "statue or mannequin; or an image with no person in it.\n\n"
+        "Give real_person_photo_probability, from 0 (certainly not a photograph of a real person) to 1 (certainly a "
+        "photograph of a real person), the image_kind that fits best, and a one-sentence reason."
+    ),
+    "schema": {
+        "name": "real_person_photo",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "real_person_photo_probability": {"type": "number"},
+                "image_kind": {"type": "string", "enum": [
+                    "photo_of_real_person", "drawing_or_artwork", "photo_of_drawing_or_print", "render_or_cg",
+                    "photo_of_toy_or_statue", "no_person", "other"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["real_person_photo_probability", "image_kind", "reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+PHOTO_JUDGE_SHA256 = "80bd2cbcdb54ae9a4355bf84bfb66b02b06365e2367eb4c7ffeef392f909335a"
 
 # Stage 0. Muse Image works from the sketch's pixels; a side under 256 px leaves too little to keep.
 MIN_SIDE_PX = 256
@@ -27,6 +68,11 @@ MIN_SIDE_PX = 256
 # 2.7 from each) the lines are too faint: SAM 3.1 found no `character` in either faint sketch, and Muse Image
 # invented the detail it couldn't see.
 MIN_LINE_CONTRAST = 32
+# Stage 1. Photo of a real person: Muse Spark's probability (`PHOTO_JUDGE`) at or over this rejects. On the tuning
+# images (sketches s001-s045; 12 photo-style images of people made with Muse Image; 5 photo-realistic and 8 stylised
+# 3D renders of characters; 4 phone photos of drawings; 2 photos of a toy and a statue) the photos of people measure
+# 0.95-1.0 and everything else 0-0.10 (photo-realistic renders). 0.5 lies inside that gap.
+MAX_REAL_PERSON_PHOTO_PROB = 0.5
 # Stage 1. A SAM 3.1 instance of the figure prompt at least this share of the largest one's area is another
 # character; a smaller one is an inset or a detail drawing. On the tuning sketches the two multiple-character
 # sketches have a second instance at 0.66 and 0.77 of the largest, and every other sketch has a single instance,
@@ -193,3 +239,37 @@ def facing_check(face: SamInstance | None, head: SamInstance | None) -> tuple[Ch
         "a front-facing sketch works best",
     )
     return check, {"face_offset": round(off, 4)}
+
+
+def photo_judge_sha256(judge: dict[str, Any] | None = None) -> str:
+    """SHA-256 of a judge's canonical JSON (sorted keys, ASCII escapes): its name, model, settings, prompt and
+    schema. ``judge`` defaults to `PHOTO_JUDGE`."""
+    canon = json.dumps(PHOTO_JUDGE if judge is None else judge, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=True)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def judge_photo(client: ModelClient, img: Image.Image) -> dict[str, Any]:
+    """Muse Spark's answer to the frozen `PHOTO_JUDGE` question about ``img``. Refuses to run a judge whose
+    content no longer matches its pinned hash."""
+    actual = photo_judge_sha256()
+    if actual != PHOTO_JUDGE_SHA256:
+        raise RuntimeError(f"the frozen photo judge {PHOTO_JUDGE['name']} was changed (hash {actual[:12]} != "
+                           f"{PHOTO_JUDGE_SHA256[:12]}); a changed judge needs a new name and hash")
+    j = PHOTO_JUDGE
+    return client.compare_images(j["prompt"], [img], schema=j["schema"], model=j["model"],
+                                 reasoning_effort=j["reasoning_effort"], image_max_side=j["image_max_side"])
+
+
+def photo_check(answer: dict[str, Any]) -> tuple[Check, dict[str, Any]]:
+    """Reject a photograph of a real person: Muse Spark's probability that it is one, below
+    `MAX_REAL_PERSON_PHOTO_PROB`."""
+    p = float(answer["real_person_photo_probability"])
+    check = input_check(
+        "upload_real_person_photo_probability", p, MAX_REAL_PERSON_PHOTO_PROB, "<", "reject",
+        f"this looks like a photograph of a real person (Muse Spark: {answer['image_kind']}, probability {p:.2f}). "
+        "Upload a drawing or artwork of a character, not a photo of a real person",
+    )
+    details = {"judge": {"name": PHOTO_JUDGE["name"], "sha256": PHOTO_JUDGE_SHA256, "model": PHOTO_JUDGE["model"]},
+               "image_kind": answer["image_kind"], "reason": answer["reason"], "probability": round(p, 4)}
+    return check, details
