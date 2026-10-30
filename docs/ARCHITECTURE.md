@@ -264,9 +264,9 @@ carve check let through.
 
 `python3 -m herogen.blender run --stages 3 [--mesh-source carve|sam3d-objects] [--joints silhouette|sam3d-body]`.
 
-- `carve` (default): the visual hull of the observed masks, surfaced and smoothed. Its shape is built from every
+- `carve`: the visual hull of the observed masks, surfaced and smoothed. Its shape is built from every
   observed view.
-- `sam3d-objects`: SAM 3D Objects reconstructs a textured mesh from `views/front.png` and `masks/front.png` only;
+- `sam3d-objects` (default, with `sam3d-body` joints): SAM 3D Objects reconstructs a textured mesh from `views/front.png` and `masks/front.png` only;
   it is kept as `03-source.glb`, put in the contract frame and remeshed into one closed manifold surface
   (`herogen/blender/sam3d_mesh.py`). The front view decides the facing, a small yaw / roll and perspective fit
   and an outline conform onto the front mask; the pitch, a tilt the front view cannot see, is registered on the
@@ -348,8 +348,10 @@ tails/packs can bias its pitch before the later depth translation. Translation c
 turnarounds rendered from exact model masks the reconstructed side views stay 0.51-0.73 whatever the pitch,
 the figure too thin front to back. The remesh can drop thin parts and front detail (one source: front 0.952
 after conform, 0.794 after remeshing), so the front can move with small changes of pitch.
-Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A remote source that fails falls back to the local one
-(`carve`, `silhouette`) and the notes say so; `--no-fallback` stops the stage instead, with a one-line error.
+Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A failed hybrid build (including either unavailable SAM 3D source or Blender export failure) retries once
+with `carve` and `silhouette`. `fallback` records the constructor transition and reason,
+`mesh_source_requested` and `joints_source_requested` preserve the request, and the notes and CLI say so.
+Both attempts share cost accounting. A completed quality rejection never triggers this retry; `--no-fallback` stops the stage instead, with a one-line error.
 Every failure of a remote source counts: the call itself, its cached output (an unreadable GLB, a missing file)
 and mapping its result (a mesh that covers no pixel of the front view, say). Stage 3 removes its previous
 `stage-3.json` when it starts and writes each output only once it is complete, so a stage that stops never
@@ -1544,8 +1546,8 @@ viewer, which reads only that API. Both open `#run=r1/<job-id>`.
 herogen.blender's remote client starts `$HEROGEN_MODAL run <runner>.py::main --job ... --out ...`. The Blender
 worker image points `HEROGEN_MODAL` at `modal_bridge.py`, which takes the same arguments, calls the runner's `infer`
 in its deployed app (the runner's `APP` constant) and writes the files the runner's own `main` writes, so the
-client's cache, cost estimate and error handling are unchanged. Stage 3 uses the remote models only when
-`HEROGEN_SERVICE_STAGE3_ARGS` asks for them (for example `--mesh-source sam3d-objects --remote live`); by default it
+client's cache, cost estimate and error handling are unchanged. Stage 3 requests the live hybrid by default through
+`HEROGEN_SERVICE_STAGE3_ARGS` (`--mesh-source sam3d-objects --joints sam3d-body --remote live`); it
 runs with the pipeline's own defaults.
 
 ### Retention
@@ -1582,7 +1584,7 @@ deploying shell). The main ones:
 | `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
 | `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
 | `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `roblox-ingame` | Profiles offered, and the default |
-| `HEROGEN_SERVICE_STAGE3_ARGS` | (empty) | Extra `herogen.blender run` options for stage 3 |
+| `HEROGEN_SERVICE_STAGE3_ARGS` | `--mesh-source sam3d-objects --joints sam3d-body --remote live` | Extra `herogen.blender run` options for stage 3 |
 | `HEROGEN_SERVICE_IP_HEADER` | (empty) | Header holding the client address behind a proxy |
 
 `config.ENV` lists every variable, including the link and session lifetimes, the rate limits and the stage

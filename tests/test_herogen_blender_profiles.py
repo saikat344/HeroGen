@@ -84,7 +84,7 @@ class ProfilesEndToEnd(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="herogen-profiles-"))
         cls.rundir = cls.tmp / "run"
         synth.write_run(cls.rundir, synth.humanoid(), size=384, ppu=60.0)
-        assert run_stage3(cls.rundir, nz=96, timeout=300)["ok"]
+        assert run_stage3(cls.rundir, nz=96, timeout=300, mesh_source="carve", joints_source="silhouette")["ok"]
         cls.stage3_triangles = int(np.load(cls.rundir / "blender-work" / "03-mesh.npz")["faces"].shape[0])
 
     @classmethod

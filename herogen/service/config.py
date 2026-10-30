@@ -72,7 +72,7 @@ class Settings:
     # Pipeline
     default_profile: str = "roblox-ingame"
     profiles: tuple[str, ...] = PROFILES
-    stage3_args: str = ""
+    stage3_args: str = "--mesh-source sam3d-objects --joints sam3d-body --remote live"
     stage_timeout_s: int = 3600
     blender_timeout_s: int = 3 * 3600
     code_commit: str = ""

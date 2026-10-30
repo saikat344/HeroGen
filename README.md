@@ -14,7 +14,7 @@ sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joi
 | 0 input | Copies the sketch into a run folder; input checks here and at the start of stage 1 reject an unusable sketch before any image is generated, or warn | |
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1, Muse Spark (`muse-spark-1.3`, the input check for photos of real people) |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
-| 3 base mesh | Carves a mesh from the four view masks (default), or builds it with SAM 3D Objects from the front view (`--mesh-source sam3d-objects`, which today fails the side views' silhouette gate); finds the joints from the silhouettes (default) or with SAM 3D Body (`--joints sam3d-body`); checks the mesh's silhouettes against every observed view's mask | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
+| 3 base mesh | Builds a hybrid from SAM 3D Objects and SAM 3D Body joints (default), with an automatic, recorded carve fallback if the hybrid cannot build; `--mesh-source carve --joints silhouette` selects the local path; checks the mesh's silhouettes against every observed view's mask | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
 | 4 game body | Cuts the mesh at the joints into 15 rigid R15 sections, each pivoting at the centre of its cut, with shoulder covers; the neck, waist, elbow, wrist, knee and ankle cuts move off a costume ledge only where the gate poses show a gain beyond noise; at the detail a target profile asks for (default `best`: full detail, no triangle budget; `roblox-ingame`: high and low LODs within 24,000 / 6,000 triangles; `roblox-avatar`: one body within the triangle, watertight-part and texture limits of Roblox's character body specification, without its rig, attachments, facial animation or cages), bakes the turnaround colours into one atlas per LOD (1024 / 512 under `roblox-ingame`; under `best` and `roblox-avatar` the smallest size with a texel per view pixel, at most 4096 and 2048; a SAM 3D Objects mesh's own texture where no view faces the surface), and runs a pose test that measures visible joint gaps on 20 gate poses (8 more held out and reported, never used to choose) | Blender |
 | scores (after 4) | Scores every body, ours or another tool's GLB, on the turnaround views and every held-out view: silhouette IoU, colour error, SSIM, mesh sanity, and optionally a platform's limits | numpy (`herogen.blender.score`) |
 | 5 results | A static results page with every stage's images, checks, scores, time and cost | code |
@@ -67,15 +67,12 @@ of the specification is not built: the R15 bone rig with skinning, attachments, 
 and layered-clothing cages, so the body is not yet a complete avatar body. Budget gates apply only under a Roblox
 profile; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#target-profiles).
 
-The hybrid body (SAM 3D Objects shape, SAM 3D Body joints) instead of the carve. Its shape comes from the front
-view alone and does not yet match the side views: on the pencil-sketch run its silhouette IoU is 0.688 left and
-0.691 right against the 0.90 gate (front 0.965, back 0.944), so stage 3 fails and stage 4 needs `--force`:
-
-```bash
-python3 -m herogen.blender run --run runs/my-hero --stages 3 --mesh-source sam3d-objects \
-  --joints sam3d-body --remote live
-python3 -m herogen.blender run --run runs/my-hero --stages 4 --force
-```
+The hybrid body (SAM 3D Objects shape, SAM 3D Body joints) is the default. To populate its remote
+cache, use `--remote live`; the hosted service requests live hybrid builds by default. An unavailable
+SAM 3D source or a failed hybrid build retries the local carve with silhouette joints once. The stage
+record preserves the requested and used sources, the fallback reason and spend from both attempts;
+the CLI prints the fallback reason. `--no-fallback` stops instead. A quality rejection does not retry.
+The current silhouette acceptance check can still reject the hybrid on its side views.
 
 Without `--live` (stages 1 and 2) or `--remote live` (stage 3), model calls replay from the cache
 (`runs/_cache-remote/` for the SAM 3D calls), which is how the tests run; a remote source with no cached result

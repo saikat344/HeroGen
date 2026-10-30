@@ -726,6 +726,15 @@ class TestStageCommands(TempDirCase):
         (self.tmp / "in.png").write_bytes(png(300, 300))
         return StageContext(**base)
 
+    def test_default_stage3_uses_live_hybrid_with_body_joints(self):
+        from herogen.service.config import Settings
+        from herogen.service.runner import stage3_args
+
+        self.assertEqual(stage3_args(Settings().stage3_args),
+                         ("--mesh-source", "sam3d-objects", "--joints", "sam3d-body", "--remote", "live"))
+        self.assertEqual(stage3_args("--mesh-source carve --joints silhouette"),
+                         ("--mesh-source", "carve", "--joints", "silhouette"))
+
     def test_commands_follow_the_stage_clis(self):
         r = CliRunner(python="py")
         r._flags["herogen.blender"] = "usage: --run --stages --profile PROFILE --remote-cache DIR"
