@@ -12,9 +12,26 @@ Surfaces no view faces: with a source texture (mesh source `sam3d-objects`, whos
 surface), a texel whose best facing cosine among the views that see it is below `FALLBACK_FACING` takes the
 source texture's colour at the nearest source-surface point instead, blended linearly in between. Without one,
 such texels average the views that contain them (facing-weighted, ignoring occlusion): a smear.
+
+
+Close-ups (the face source, `herogen.pipeline.facesource`, stage 2f): stage 2f may leave sharp close-ups of the
+head for the front, left and right views, each with its affine A (close-up pixels to view pixels) and its footprint
+(`masks/closeup-<view>.png`). `load_closeups` takes the ones `views/closeup.json` marks used whose view image is
+still the one they were made from (its SHA-256), and feathers each footprint over `CLOSEUP_FEATHER_PX` (the
+footprint's alpha stays 1 inside and falls to 0 over about that width outside, never past the crop box). In `bake`,
+a close-up adds detail to its view, it never replaces the view's colour: inside the footprint (alpha-blended at
+its feathered edge) the view's colour gets the close-up at the texture's sampling density minus the close-up at
+the view's own density. Each is the close-up blurred with a Gaussian of sigma `CLOSEUP_PREFILTER` x close-up pixels
+per texel (per view pixel), about a box filter over one texel (view pixel); the texel density is the baked
+sections' texel count over their surface area. So the view keeps every colour it shows at its own resolution, and
+the close-up only adds what lies above it; where the texture is no finer than the view, nothing changes. Weights,
+visibility and masks are unchanged. Stage 4 passes close-ups only to the Head's own texture.
+
 """
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +42,108 @@ COLOUR_VIEWS = ("front", "back", "left", "right")
 FACING_POWER = 4.0
 DEPTH_TOL = 0.04          # studs: a texel within this of the view's nearest surface counts as visible
 FALLBACK_FACING = 0.3     # below this best facing cosine (about 72.5 degrees) the source texture takes over
+CLOSEUP_VIEWS = ("front", "left", "right")
+CLOSEUP_RECORD = "views/closeup.json"
+CLOSEUP_FEATHER_PX = 3.0  # view pixels
+# Gaussian sigma of the prefilter, in close-up pixels per texel: about a box filter over one texel.
+CLOSEUP_PREFILTER = 0.42
+
+
+@dataclass
+class Closeup:
+    """A close-up of one view (stage 2f): its image, the affine A from close-up pixel edge coordinates to view
+    pixel edge coordinates and the feathered footprint alpha in the view's pixels."""
+    view: str
+    img: np.ndarray             # float RGB [S, S, 3]
+    A: np.ndarray               # [2, 3]
+    alpha: np.ndarray           # float [rows, cols] in [0, 1], the view's shape
+
+
+def _blur(img: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian blur (edge-padded) of a [H, W] or [H, W, C] float image."""
+    if sigma < 0.3:
+        return img.astype(np.float64, copy=True)
+    r = max(1, int(np.ceil(3 * sigma)))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    out = img.astype(np.float64)
+    for axis in (0, 1):
+        pad = [(0, 0)] * out.ndim
+        pad[axis] = (r, r)
+        p = np.pad(out, pad, mode="edge")
+        n = out.shape[axis]
+        out = sum(w * np.take(p, np.arange(i, i + n), axis=axis) for i, w in enumerate(k))
+    return out
+
+
+def load_closeups(run: Path, vs: ViewSet) -> tuple[dict[str, Closeup], dict]:
+    """The usable close-ups of the run (module notes) and a record of what was used and why not."""
+    import hashlib
+
+    from PIL import Image
+
+    from .views import load_mask
+
+    p = run / CLOSEUP_RECORD
+    if not p.exists():
+        return {}, {"used": [], "notes": ["no close-ups in the run (stage 2f made none)"]}
+    try:
+        rec = json.loads(p.read_text())
+    except ValueError:
+        return {}, {"used": [], "notes": [f"{CLOSEUP_RECORD} could not be read"]}
+    out: dict[str, Closeup] = {}
+    notes: list[str] = []
+    for name in CLOSEUP_VIEWS:
+        r = (rec.get("views") or {}).get(name) or {}
+        if not r.get("used"):
+            continue
+        view = vs.views.get(name)
+        vpath = run / "views" / f"{name}.png"
+        if view is None or not vpath.exists():
+            notes.append(f"{name}: no such view")
+            continue
+        if hashlib.sha256(vpath.read_bytes()).hexdigest() != r.get("view_sha256"):
+            notes.append(f"{name}: made from another {name} view than the run's current one; not used")
+            continue
+        try:
+            with Image.open(run / r["file"]) as im:
+                img = np.asarray(im.convert("RGB"), dtype=np.float64)
+            foot = load_mask(run / r["footprint"])
+            A = np.asarray(r["A"], dtype=np.float64)
+            l, t, rgt, b = (float(x) for x in r["crop_box"])
+        except (OSError, KeyError, ValueError, TypeError) as e:
+            notes.append(f"{name}: could not be read ({type(e).__name__})")
+            continue
+        if foot.shape != view.mask.shape or img.shape[0] != img.shape[1] or A.shape != (2, 3):
+            notes.append(f"{name}: sizes do not match the view")
+            continue
+        rows = np.arange(foot.shape[0]) + 0.5
+        cols = np.arange(foot.shape[1]) + 0.5
+        box = ((rows >= t) & (rows < b))[:, None] & ((cols >= l) & (cols < rgt))[None, :]
+        alpha = np.minimum(_blur(foot.astype(np.float64), CLOSEUP_FEATHER_PX) * 2.0, 1.0) * box
+        out[name] = Closeup(name, img, A, alpha)
+    return out, {"used": sorted(out), "notes": notes}
+
+
+def _closeup_colour(cu: Closeup, view, row: np.ndarray, col: np.ndarray, colour: np.ndarray,
+                    texel_ppu: float | None) -> tuple[np.ndarray, np.ndarray]:
+    """The view's colour plus the close-up's detail inside its footprint (module notes), and the close-up's
+    alpha. ``row``, ``col`` are `_project`'s (pixel-centre based)."""
+    a = _bilinear(cu.alpha[..., None], row, col)[:, 0]
+    Ainv = np.linalg.inv(np.vstack([cu.A, [0.0, 0.0, 1.0]]))[:2]
+    x = Ainv[0, 0] * (col + 0.5) + Ainv[0, 1] * (row + 0.5) + Ainv[0, 2]
+    y = Ainv[1, 0] * (col + 0.5) + Ainv[1, 1] * (row + 0.5) + Ainv[1, 2]
+    S = cu.img.shape[0]
+    a = a * ((x >= 0) & (x < S) & (y >= 0) & (y < S))
+    per_view_px = 1.0 / float(np.sqrt(abs(np.linalg.det(cu.A[:, :2]))))       # close-up px per view px
+    per_texel = per_view_px * view.pps / texel_ppu if texel_ppu else 1.0       # close-up px per texel
+    if per_texel >= per_view_px:          # the texture is no finer than the view: nothing to add
+        return colour, np.zeros_like(a)
+    fine = _blur(cu.img, CLOSEUP_PREFILTER * per_texel) if per_texel > 1.05 else cu.img
+    coarse = _blur(cu.img, CLOSEUP_PREFILTER * per_view_px)
+    detail = _bilinear(fine, y - 0.5, x - 0.5) - _bilinear(coarse, y - 0.5, x - 0.5)
+    return colour + a[:, None] * detail, a
+
 
 
 class SourceColour:
@@ -140,10 +259,23 @@ def _bilinear(img: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
             + (img[r0 + 1, c0] * (1 - fc) + img[r0 + 1, c0 + 1] * fc) * fr)
 
 
+def texel_samples(sections: dict, uvs: dict, size: int) -> np.ndarray:
+    """The surface point of every texel the sections' UVs cover in a size x size texture."""
+    keep = [n for n, s in sections.items() if n in uvs and len(s.faces)]
+    if not keep:
+        return np.zeros((0, 3))
+    pos = np.concatenate([sections[n].verts[sections[n].faces] for n in keep])
+    return _texels(pos, np.concatenate([uvs[n] for n in keep]), size)[1]
+
+
 def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = None,
-         source: SourceColour | None = None, fallback_facing: float = FALLBACK_FACING, trust: dict | None = None):
-    """Bake one atlas for a LOD. `uvs[name]` is [faces, 3, 2] in [0, 1]. Returns (atlas uint8, stats, zbuf).
-    `trust` scales a view's weight (default 1 for every view)."""
+         source: SourceColour | None = None, fallback_facing: float = FALLBACK_FACING, trust: dict | None = None,
+         closeups: dict | None = None):
+    """Bake one texture of a LOD for the given sections. `uvs[name]` is [faces, 3, 2] in [0, 1]. Returns
+    (texture uint8, stats, zbuf); when only some of the body's sections are baked, pass the whole body's `zbuf`
+    (`depth_maps` of its `texel_samples`) so the rest still hides what it covers. `trust` scales a view's weight
+    (default 1 for every view). `closeups` ({view: Closeup}) the close-ups
+    (module notes)."""
     pos, uv, nrm = [], [], []
     for name, s in sections.items():
         if name not in uvs or len(s.faces) == 0:
@@ -156,6 +288,11 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     pos, uv, nrm = np.concatenate(pos), np.concatenate(uv), np.concatenate(nrm)
     tidx, p3, tri = _texels(pos, uv, size)
     n3 = nrm[tri]
+    texel_ppu = None
+    if closeups:
+        area = float(np.linalg.norm(np.cross(pos[:, 1] - pos[:, 0], pos[:, 2] - pos[:, 0]), axis=1).sum() / 2)
+        texel_ppu = float(np.sqrt(len(np.unique(tidx)) / area)) if area > 0 else None
+    cu_alpha: dict = {}
     if zbuf is None:
         zbuf = depth_maps(views, p3)
     acc = np.zeros((len(p3), 3))
@@ -174,10 +311,14 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         visible = (p3 @ fwd) <= zbuf[name][rr, cc] + DEPTH_TOL
         inmask = ok & view.mask[rr, cc]
         colour = _bilinear(img, row, col)
+        if closeups and name in closeups:
+            colour, cu_alpha[name] = _closeup_colour(closeups[name], view, row, col, colour, texel_ppu)
         w = facing ** FACING_POWER * (inmask & visible) * (1.0 if trust is None else trust.get(name, 1.0))
         best_facing = np.maximum(best_facing, facing * (inmask & visible))
         acc += w[:, None] * colour
         wsum += w
+        if name in cu_alpha:
+            cu_alpha[name] = (cu_alpha[name], w)
         fw = (facing + 1e-3) * inmask
         fallback += fw[:, None] * colour
         fb_w += fw
@@ -206,6 +347,14 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     stats = {"texels_used": int(filled.sum()), "atlas_fill": round(float(filled.mean()), 4),
              "texels_seen_by_a_view": round(float((wsum > 1e-6).mean()), 4),
              "texels_best_facing_below_fallback": round(float((best_facing < fallback_facing).mean()), 4), **src_stats}
+    if closeups:
+        share = sum((a * w for a, w in cu_alpha.values()), np.zeros(len(p3))) / np.maximum(wsum, 1e-12)
+        stats["closeups"] = {
+            "views": sorted(cu_alpha), "prefilter": CLOSEUP_PREFILTER,
+            "texels_per_stud": None if texel_ppu is None else round(texel_ppu, 2),
+            "texels_with_closeup_detail": int((share > 0.01).sum()),
+            "closeup_weight_share_mean": round(float(share.mean()), 4),
+            "texels_per_view": {v: int(((a > 0.01) & (w > 0)).sum()) for v, (a, w) in cu_alpha.items()}}
     atlas = atlas.reshape(size, size, 3)
     filled = filled.reshape(size, size)
     for _ in range(8):                      # pad islands outward
