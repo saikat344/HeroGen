@@ -98,6 +98,11 @@ class TestModalApp(TempDirCase):
             sys.modules.pop("herogen.service.modal_app", None)
         return mod, fake
 
+    def test_blender_image_installs_hybrid_dependencies(self):
+        _, fake = self.load()
+        packages = [p for name, args, _ in fake.image_log if name == "pip_install" for p in args]
+        self.assertIn("scipy==1.18.1", packages)
+
     def test_function_configuration(self):
         mod, fake = self.load()
         f = fake.functions
