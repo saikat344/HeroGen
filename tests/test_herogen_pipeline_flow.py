@@ -323,7 +323,7 @@ class APoseRecordedTest(_RunsTest):
 
 
 class CarveCheckFlowTest(_RunsTest):
-    """A sheet stage 3's carve would refuse is generated again, not kept."""
+    """A sheet stage 3's carve would refuse triggers another attempt before accepting the best sheet."""
 
     def test_a_sheet_that_does_not_carve_is_retried(self):
         good, _ = sheet()
@@ -351,7 +351,8 @@ class KeepBestSheetTest(_RunsTest):
         one = _one_legged_back_sheet()
         sheets = [unsplit, one, _two_gates_sheet(), unsplit]
         code, s2, api = self._sheets(sheets)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
+        self.assertTrue(s2["ok"])
         self.assertEqual(api.n, 4)
         ranks = [a["rank"]["failed_gates"] for a in s2["details"]["attempts"]]
         self.assertEqual(ranks[1], 1)
@@ -361,21 +362,29 @@ class KeepBestSheetTest(_RunsTest):
         self.assertEqual(s2["details"]["kept_attempt"], 1)
         self.assertIn("generation 2 is kept", s2["notes"])
         kept = s2["details"]["attempts"][1]
-        self.assertEqual([c for c in s2["checks"] if c["name"] in {k["name"] for k in kept["checks"]}], kept["checks"])
+        self.assertEqual([(c["name"], c["value"], c["pass"]) for c in s2["checks"]
+                          if c["name"] in {k["name"] for k in kept["checks"]}],
+                         [(c["name"], c["value"], c["pass"]) for c in kept["checks"]])
         self.assertEqual([c["name"] for c in s2["checks"] if not c["pass"] and c.get("gate", True)],
-                         [stages.CARVE_GATE])
+                         [])
+        carve = next(c for c in s2["checks"] if c["name"] == stages.CARVE_GATE)
+        self.assertEqual((carve["pass"], carve["gate"]), (False, False))
+        self.assertTrue(next(c for c in kept["checks"] if c["name"] == stages.CARVE_GATE)["gate"])
+        self.assertIn("carve fallback would be refused", s2["notes"])
         self.assertEqual(s2["details"]["view_assignment"], kept["assignment"])
         run = self.root / "k"
         self.assertEqual(np.asarray(_img(run / "02-turnaround.png")).tobytes(), np.asarray(one).tobytes())
         back = imaging.from_mask_image(_img(run / "masks/back.png"))
         front = imaging.from_mask_image(_img(run / "masks/front.png"))
         self.assertLess(back.sum(), front.sum())  # attempt 2's back, one leg hidden
-        self.assertNotIn(stages.TOP_PROMPT, api.prompts)
+        self.assertEqual(api.prompts.count(stages.TOP_PROMPT), 1)
+        self.assertTrue((run / "views/meta.json").exists())
+        self.assertTrue((run / "masks/parts.json").exists())
 
     def test_a_tie_keeps_the_earlier_sheet(self):
         one = _one_legged_back_sheet()
         code, s2, _ = self._sheets([one, one, one, one])
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
         self.assertEqual(s2["details"]["kept_attempt"], 0)
 
     def test_a_passing_sheet_is_kept_and_stops_the_attempts(self):
