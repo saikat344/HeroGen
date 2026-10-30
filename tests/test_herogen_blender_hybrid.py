@@ -228,7 +228,7 @@ class TestPitchRegistration(HybridBase):
         # without side views nothing can see the tilt: the pitch stays 0 and the record says why
         src0, v0, info0 = self.oriented("lean-front-only", 12.0, sides=False)
         self.assertEqual((info0["pose_fit"]["status"], info0["fit"]["pitch"]), ("fallback", 0.0))
-        self.assertIn("no observed side view", info0["pose_fit"]["reason"])
+        self.assertIn("needs both observed side views", info0["pose_fit"]["reason"])
         for k, s in self.side_iou(v0, src0.faces).items():
             self.assertLess(s, 0.80, k)
 
@@ -261,7 +261,7 @@ class TestPitchRegistration(HybridBase):
         use, skip = sam3d_mesh.pose_views(vs)
         self.assertEqual(use, {})
         self.assertEqual(skip, {"left": "derived view (visual_hull (front, top))",
-                                "right": "no usable mask (missing or empty)"})
+                                "right": "missing mask"})
         p = self.tmp / "derived.glb"
         self.source_glb(p, yaw_deg=0.0, pitch_deg=12.0)
         _, info = sam3d_mesh.orient(sam3d_mesh.load_source(p), vs.views["front"], None, 5.5, sides=use,
@@ -269,7 +269,37 @@ class TestPitchRegistration(HybridBase):
         pf = info["pose_fit"]
         self.assertEqual((pf["status"], pf["pitch_deg"], info["fit"]["pitch"]), ("fallback", 0.0, 0.0))
         self.assertIn("left: derived view", pf["reason"])
-        self.assertIn("right: no usable mask", pf["reason"])
+        self.assertIn("right: missing mask", pf["reason"])
+
+    def test_one_side_view_alone_falls_back_to_pitch_zero(self):
+        # a lean the left view alone would fit, but the pitch needs both observed side views
+        p = self.tmp / "one-side.glb"
+        self.source_glb(p, yaw_deg=0.0, pitch_deg=12.0)
+        src = sam3d_mesh.load_source(p)
+        held = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0, "distance": 0.0, "cam_height": 0.0}
+        for side in ("left", "right"):
+            for case in ("missing", "empty", "derived"):
+                run = self.tmp / f"one-side-{side}-{case}"
+                shutil.copytree(self.rundir, run)
+                if case == "missing":
+                    (run / "masks" / f"{side}.png").unlink()
+                elif case == "empty":
+                    Image.fromarray(np.zeros_like(self.vs.views[side].mask, np.uint8)).save(run / "masks" / f"{side}.png")
+                else:
+                    meta = json.loads((run / "views" / "meta.json").read_text())
+                    meta["mask_method"] = {**(meta.get("mask_method") or {}), side: "visual_hull (front, top)"}
+                    (run / "views" / "meta.json").write_text(json.dumps(meta))
+                vs = views.load_views(run, 5.5)
+                use, skip = sam3d_mesh.pose_views(vs)
+                self.assertEqual(set(use), {"left", "right"} - {side}, (side, case))
+                pitch, rec = sam3d_mesh.fit_pitch(src, held, use, 5.5, skip)
+                self.assertEqual((pitch, rec["status"], rec["pitch_deg"]), (0.0, "fallback", 0.0), (side, case))
+                self.assertIn(f"{side}: ", rec["reason"], (side, case))
+                self.assertIn({"missing": "missing", "empty": "empty", "derived": "derived"}[case], rec["reason"])
+        # a caller that passes one side view without saying why the other is absent
+        pitch, rec = sam3d_mesh.fit_pitch(src, held, {"left": self.vs.views["left"]}, 5.5)
+        self.assertEqual((pitch, rec["status"]), (0.0, "fallback"))
+        self.assertIn("right: not given", rec["reason"])
 
     def test_a_flat_or_ambiguous_side_fit_falls_back_to_pitch_zero(self):
         # a sphere looks the same at every pitch: nothing to register
