@@ -758,8 +758,16 @@ AnimationConstraint variant is not written.
 
 ## Model API calls: retries, shared limit, ledger
 
-All Muse Image and SAM 3.1 calls go through `herogen/pipeline/client.py`; the policy is in
+All Muse Image, SAM 3.1 and Muse Spark calls go through `herogen/pipeline/client.py`; the policy is in
 `herogen/pipeline/retry.py`.
+
+Muse Spark (`muse-spark-1.3`) answers questions about images (`ModelClient.compare_images`): one Responses API
+call with the prompt, the images as JPEG data URLs scaled to at most 1024 px, and a strict JSON schema. The answer
+is checked against the schema, live and on replay (types, required fields, enums, no extra fields; a schema keyword
+outside that subset is refused), so a non-conforming answer stops the stage instead of being guessed. It is
+cached like any result; an incomplete answer is never cached. Its cost is estimated from the token usage at
+$1.25 / $4.25 per million input / output tokens (reasoning counts as output) and logged per call; a call whose
+answer never came back is counted at 0, since its tokens are unknown.
 
 - **What is retried:** HTTP 408, 409, 425, 429 and 5xx, except 501 and 505 (they say the request can never
   work), and network errors (no HTTP status). Never any other 4xx, and never a 200 whose body is not a JSON
@@ -772,8 +780,8 @@ All Muse Image and SAM 3.1 calls go through `herogen/pipeline/client.py`; the po
   `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens`; an `x-ratelimit-reset` over 10^9 is read as an epoch
   time in seconds, over 10^11 in milliseconds) plus the same jitter; else full-jitter exponential backoff, a random time between 0 and
   min(60 s, 2 s x 2^n) before retry n + 1.
-- **Limits:** at most 8 attempts within a per-call time limit of 10 minutes for SAM 3.1 and 15 for Muse Image
-  (`DEADLINE_S`), separate from each attempt's 240 s socket timeout. A wait that would end past it is not started;
+- **Limits:** at most 8 attempts within a per-call time limit of 10 minutes for SAM 3.1 and Muse Spark and 15 for Muse
+  Image (`DEADLINE_S`), separate from each attempt's 240 s socket timeout. A wait that would end past it is not started;
   the call fails at once. A call that fails raises `ApiError`, which stops the stage (see "Mask method").
 - **Shared limit per key:** every process calling with one API key shares one limit on calls in flight, in a
   JSON state file under `HEROGEN_LIMITER_DIR` (default `~/.cache/herogen/api-limiter`) named by a 16-hex-digit

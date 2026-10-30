@@ -13,7 +13,7 @@ from PIL import Image
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging, inputs
 from herogen.pipeline.client import (
-    COST_BASIS, IMAGE_MODEL, PRICE_PER_IMAGE_USD, SAM_MODEL, ApiError, ModelClient, SamInstance,
+    COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, SamInstance, call_cost,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
 
@@ -102,7 +102,7 @@ class _Stage:
             "ok": C.gate_ok(self.checks),
             "started": self.started,
             "seconds": round(time.monotonic() - self.t0, 2),
-            "cost_usd": round(sum(PRICE_PER_IMAGE_USD.get(c["model"], 0.0) for c in live), 6),
+            "cost_usd": round(sum(call_cost(c) for c in live), 6),
             "cost_basis": COST_BASIS + "; replayed (cached) calls cost 0",
             "models": self.client.log.models(self.calls0) if self.client else [],
             "outputs": self.outputs,
