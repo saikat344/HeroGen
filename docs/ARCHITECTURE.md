@@ -68,7 +68,7 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | Check | Stage | Measures | Verdict when it fails |
 | --- | --- | --- | --- |
 | `min_side_px` | 0 | the sketch's shorter side in pixels, `>= 256` | reject |
-| `sketch_line_contrast` | 0 | how much darker the darkest lines are than the paper: the median luminance minus its 1st percentile (0-255), `>= 32`. No model call. Lines covering under 1% of the image (5.4% or more on the tuning sketches) and light lines on dark paper measure as faint | reject |
+| `sketch_line_contrast` | 0 | how much darker supported strokes are than the paper: median image luminance minus the 1st percentile within dark stroke samples (0-255), `>= 32`. A sample is the brightest pixel in a straight three-pixel run darker than the median; at each centre use the darkest horizontal, vertical or diagonal run. Paper pixels, isolated dark pixels and pairs are excluded from the percentile; no samples means 0. No minimum fraction of the page must be ink. Paper must occupy most of the image; light lines on dark paper measure as faint. No model call | reject |
 | `upload_real_person_photo_probability` | 1, before every other model call | Muse Spark's probability that the upload is a photograph of a real person, `< 0.5`, from the frozen question `real-person-photo-v1` (`inputs.PHOTO_JUDGE`: prompt, model, settings and strict schema, pinned by SHA-256 in `PHOTO_JUDGE_SHA256`; a changed question is refused until it gets a new name and hash). `details.input.photo` records the question's name and hash, the probability, the `image_kind` and the reason | reject |
 | `sketch_characters_found` | 1 | SAM 3.1 figure instances (the prompt that found the figure, see Mask method) at least 25% of the largest one's area, `== 1`. None is "no character found in the sketch"; two or more are several characters | reject |
 | `sketch_small_extra_figures` | 1 | the other, smaller figure instances (insets, detail drawings), `<= 0` | warn |
@@ -85,7 +85,9 @@ union with the smaller figures. `details.input` holds the measurements behind th
 instance's area over the largest one's).
 
 How the thresholds were set: on the tuning sketches s001-s045 only, with the unseen sketches s046-s058 kept for
-reporting. The two faint-pencil sketches measure a line contrast of 11 and 12 and the 43 others 85-253. The two
+reporting. With the supported-stroke measurement, the two faint-pencil sketches measure a line contrast of 11 and
+12 and the 43 others 88-253. The contrast cut stays at 32, approximately the geometric mean of 12 and 88 (32.5).
+The two
 multiple-character sketches have a second instance at 0.66 and 0.77 of the largest and every other sketch has one
 instance, so the tuning set bounds the character cut only to (0, 0.66]; 0.25 is kept from the diagnosis that
 proposed it.

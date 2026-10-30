@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 import numpy as np
@@ -64,7 +65,7 @@ PHOTO_JUDGE_SHA256 = "80bd2cbcdb54ae9a4355bf84bfb66b02b06365e2367eb4c7ffeef392f9
 # Stage 0. Muse Image works from the sketch's pixels; a side under 256 px leaves too little to keep.
 MIN_SIDE_PX = 256
 # Stage 0. Line contrast (`line_contrast`), in grey levels. On the tuning sketches s001-s045 the two faint-pencil
-# sketches measure 11 and 12 and the 43 others 85-253. Below 32 (about the geometric mean of 12 and 85, a factor of
+# sketches measure 11 and 12 and the 43 others 88-253. Below 32 (about the geometric mean of 12 and 88, a factor of
 # 2.7 from each) the lines are too faint: SAM 3.1 found no `character` in either faint sketch, and Muse Image
 # invented the detail it couldn't see.
 MIN_LINE_CONTRAST = 32
@@ -132,19 +133,33 @@ def size_check(width: int, height: int) -> Check:
 
 
 def line_contrast(img: Image.Image) -> float:
-    """How much darker the darkest lines are than the paper, in grey levels (0-255): the median luminance (the
-    paper, which covers most of a sketch) minus the 1st percentile (the darkest lines). Lines must cover at least
-    1% of the image to be measured (on the tuning sketches they cover 5.4% or more), and light lines on dark paper
-    measure as faint."""
+    """Paper median minus the 1st percentile of supported dark stroke luminances (0-255).
+
+    A stroke sample is the brightest pixel in a straight three-pixel run, all darker than the paper. At each
+    centre use the darkest supported run, horizontal, vertical or diagonal. This excludes isolated dark pixels
+    and pairs; taking the percentile only over stroke samples excludes paper regardless of its coverage.
+    Paper must occupy most of the image; light lines on dark paper still measure as faint. No samples means 0.
+    """
     grey = np.asarray(img.convert("L"), dtype=np.float32)
-    return float(np.median(grey) - np.percentile(grey, 1))
+    paper = float(np.median(grey))
+    h, w = grey.shape
+    padded = np.pad(grey, 1, constant_values=paper)
+    supported = np.full_like(grey, paper)
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        before = padded[1 - dy:h + 1 - dy, 1 - dx:w + 1 - dx]
+        after = padded[1 + dy:h + 1 + dy, 1 + dx:w + 1 + dx]
+        run = np.maximum(np.maximum(before, grey), after)
+        np.minimum(supported, run, out=supported)
+    strokes = supported[supported < paper]
+    return float(paper - np.percentile(strokes, 1)) if strokes.size else 0.0
 
 
 def contrast_check(img: Image.Image) -> Check:
     v = line_contrast(img)
+    shown = math.floor(v * 10) / 10  # never rounded up to the threshold it failed
     return input_check(
         "sketch_line_contrast", v, MIN_LINE_CONTRAST, ">=", "reject",
-        f"the lines are too faint: the darkest lines are only {v:.0f} grey levels darker than the paper and HeroGen "
+        f"the lines are too faint: the darkest lines are only {shown:g} grey levels darker than the paper and HeroGen "
         f"needs at least {MIN_LINE_CONTRAST}. Darken the lines, or scan or photograph the sketch with more contrast",
     )
 
