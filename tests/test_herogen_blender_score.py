@@ -124,6 +124,23 @@ def accept_heldout(run: Path) -> None:
                                                    "details": {"view": S.HELDOUT_VIEW}}))
 
 
+def record_views(run: Path, views: dict[str, dict], reference: str = "generated") -> None:
+    """A stage 2h per-view record as the pipeline writes it: each view accepted, made from the run's current
+    turnaround and holding its image's SHA-256, unless ``views[name]`` overrides a field."""
+    from herogen.pipeline import heldout as H
+    from herogen.pipeline.runfolder import RunFolder
+
+    identity = H.stage2_identity(RunFolder(run.parent, run.name))
+    rec = {}
+    for name, extra in views.items():
+        img = run / "heldout" / f"{name}.png"
+        rec[name] = {"status": "accepted", "stage2_identity": identity,
+                     "image_sha256": H.file_sha256(img) if img.exists() else None,
+                     "files": {"image": f"heldout/{name}.png", "mask": f"heldout/{name}-mask.png"}, **extra}
+    (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True, "reference": reference,
+                                                   "details": {"views": rec}}))
+
+
 def write_body(path: Path, boxes) -> Path:
     return G.write_glb(path, [(f"part{i}", *box(c, h)) for i, (c, h) in enumerate(boxes)])
 
@@ -241,12 +258,12 @@ class HeldoutYaw(Tmp):
             for f in ("front-right-60.png", "front-right-60-mask.png"):
                 (held / sub / f).write_bytes((held / "front-left-30.png").read_bytes())
         (held / "pose-reference.png").write_bytes((held / "front-left-30.png").read_bytes())   # no mask: input
-        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True, "details": {
-            "reference": "generated", "views": {"front-left-30": {"status": "accepted", "found_yaw_deg": 31.0,
-                                                                  "yaw_window_deg": [25.0, 35.0]}}}}))
+        record_views(run, {"front-left-30": {"found_yaw_deg": 31.0, "yaw_window_deg": [25.0, 35.0]},
+                           "front-left-60": {}, "front-right-30": {}})
         views = S.load_score_views(run)
-        self.assertEqual([v.name for v in views if v.heldout],
-                         ["front-left-30", "front-left-34", "front-left-60", "front-right-30"])
+        # front-left-34 sits in heldout/ but the record does not list it: not scored
+        self.assertEqual([v.name for v in views if v.heldout], ["front-left-30", "front-left-60", "front-right-30"])
+        self.assertEqual({v.source for v in views if v.heldout}, {"record"})
         e = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)), views=views)
         for name, target, drawn in (("front-left-30", 30, 31.0), ("front-left-60", 60, 58.0),
                                     ("front-right-30", -30, -29.0)):
@@ -257,11 +274,64 @@ class HeldoutYaw(Tmp):
             self.assertEqual((row["reference"], row["measures"]), ("generated", "consistency"))
             self.assertFalse(row["seen"])
         self.assertEqual(e["views"]["front-left-30"]["stage2h"]["found_yaw_deg"], 31.0)
-        self.assertNotIn("stage2h", e["views"]["front-left-60"])
+        self.assertNotIn("found_yaw_deg", e["views"]["front-left-60"].get("stage2h") or {})
         path = S.write_scores(run, [e], views)
         listed = {v["view"]: v for v in json.loads(path.read_text())["views"]}
         self.assertEqual(listed["front-left-30"]["measures"], "consistency")
         self.assertNotIn("front-right-60", listed)
+
+    def test_only_views_the_record_accepts_are_scored(self):
+        """Held-out views come from stage 2h's record (heldout.accepted_views), not from the folder: a view left
+        from an earlier turnaround, a view whose image changed and a view not accepted are not scored, and the
+        scores name why; an accepted view is scored."""
+        run = make_run(self.tmp, yaw_heldout=40.0, extra_heldout={"front-left-30": 31.0, "front-left-60": 58.0,
+                                                                   "front-right-30": -29.0})
+        record_views(run, {"front-left-30": {}, "front-left-60": {"stage2_identity": "an earlier turnaround"},
+                           "front-right-30": {}, S.HELDOUT_VIEW: {"status": "needs_review"}})
+        img = run / "heldout" / "front-right-30.png"
+        img.write_bytes(img.read_bytes() + b"\0")             # changed after stage 2h recorded its hash
+        held = S.heldout_sources(run)
+        self.assertEqual(held["source"], "record")
+        self.assertEqual(list(held["views"]), ["front-left-30"])
+        self.assertEqual(held["skipped"], {"front-left-34": "not accepted (status needs_review)",
+                                           "front-left-60": "made from an earlier turnaround",
+                                           "front-right-30": "its image changed since stage 2h recorded it"})
+        views = S.load_score_views(run)
+        self.assertEqual([v.name for v in views if v.heldout], ["front-left-30"])
+        e = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)), views=views)
+        self.assertGreater(e["views"]["front-left-30"]["iou"], 0.97)
+        self.assertNotIn("front-left-60", e["views"])
+        data = json.loads(S.write_scores(run, [e], views).read_text())
+        self.assertEqual(data["heldout_source"]["source"], "record")
+        self.assertEqual(data["heldout_source"]["skipped"]["front-left-60"], "made from an earlier turnaround")
+        self.assertEqual([v["source"] for v in data["views"] if v["heldout"]], ["record"])
+
+    def test_a_running_or_empty_record_scores_no_heldout_view(self):
+        run = make_run(self.tmp)
+        record_views(run, {S.HELDOUT_VIEW: {}})
+        rec = json.loads((run / "stage-2h.json").read_text())
+        (run / "stage-2h.json").write_text(json.dumps({**rec, "status": "running"}))
+        held = S.heldout_sources(run)
+        self.assertEqual((held["views"], held["skipped"]), ({}, {S.HELDOUT_VIEW: "stage 2h is running"}))
+        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True, "details": {}}))
+        self.assertEqual(S.heldout_sources(run)["source"], "record without views")
+        (run / "stage-2h.json").write_text("{ not json")
+        held = S.heldout_sources(run)
+        self.assertEqual((held["source"], held["views"]), ("unreadable record", {}))
+
+    def test_older_record_forms_are_read_as_main_allows(self):
+        run = make_run(self.tmp)
+        held = S.heldout_sources(run)                        # no stage-2h.json: the folder, named as such
+        self.assertEqual((held["source"], list(held["views"])), ("not recorded", [S.HELDOUT_VIEW]))
+        self.assertEqual([v.source for v in S.load_score_views(run) if v.heldout], ["not recorded"])
+        accept_heldout(run)                                  # the older one-view record that passed
+        held = S.heldout_sources(run)
+        self.assertEqual((held["source"], list(held["views"])), ("single-view record", [S.HELDOUT_VIEW]))
+        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": False,
+                                                       "outputs": [f"heldout/{S.HELDOUT_VIEW}.png"],
+                                                       "details": {"view": S.HELDOUT_VIEW}}))
+        held = S.heldout_sources(run)
+        self.assertEqual((held["views"], held["skipped"]), ({}, {S.HELDOUT_VIEW: "not admitted by stage-2h.json"}))
 
     def test_heldout_without_a_record_has_no_reference_label(self):
         run = make_run(self.tmp)
@@ -465,8 +535,10 @@ class AlphaMask(Tmp):
 
     def test_a_ground_truth_reference_measures_accuracy(self):
         run = make_run(self.tmp)
-        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True,
-                                                       "details": {"reference": "ground-truth"}}))
+        (run / "stage-2h.json").write_text(json.dumps({"stage": "2h", "ok": True, "reference": "ground-truth",
+            "details": {"views": {S.HELDOUT_VIEW: {"azimuth_deg": 40.0, "files": {
+                "colour": f"heldout/{S.HELDOUT_VIEW}.png", "mask": S.HELDOUT_MASK}}}}}))     # as the bench writes it
+        self.assertEqual(S.heldout_sources(run)["source"], "ground-truth record")
         row = S.score_body(run, "b", write_body(self.tmp / "b.glb", (BODY, ARM)))["views"][S.HELDOUT_VIEW]
         self.assertEqual((row["reference"], row["measures"]), ("ground-truth", "accuracy"))
         self.assertEqual(S.MEASURES, {"generated": "consistency", "ground-truth": "accuracy"})

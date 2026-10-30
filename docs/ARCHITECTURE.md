@@ -350,11 +350,10 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
   `carve` or `hybrid` by its mesh source, `04-body-<x>/high.glb` as `<x>`, and each `atlas-high-<variant>.png`
   next to one as `<name>-<variant>`, the same mesh with that atlas (`variant_of`). `--body NAME=GLB` scores any
   file, `--atlas NAME=PNG` gives it another atlas.
-- **Views.** The four turnaround views at their contract yaw, and every held-out view: each
-  `heldout/<name>.png` directly in `heldout/` with a matching `heldout/<name>-mask.png` (stage 2h makes
-  `front-left-30`, `front-right-30`, `front-left-60` and `front-right-60`; any other name is scored the same way).
-  Files in subfolders, such as `review/`, `rejected/` or `archive/`, are not scored, and an image without a mask
-  is skipped; the scorer does not consult the accepted views of `stage-2h.json` (see Held-out views).
+- **Views.** The four turnaround views at their contract yaw, and the held-out views `stage-2h.json` admits
+  (stage 2h makes `front-left-30`, `front-right-30`, `front-left-60` and `front-right-60`; any other name is
+  scored the same way), each image with its mask: see Held-out views for the rule. Files in subfolders, such
+  as `review/`, `rejected/` or `archive/`, are never scored.
 - **Placement.** Turnaround views use stage 3's mapping: one pixel scale (the front mask's height over the
   body's height), u = 0 on each mask's box centre, feet on its bottom edge. Stage 4 bodies are placed as built
   (`"frame": "contract"`), so a stage 4 body is scored with the same mapping and metric as stage 4's gates;
@@ -544,12 +543,22 @@ cost, and `cost_usd` counts both (`run_cost_usd` is the run that made the views)
 the body's render, for each held-out view the record accepts; other views the scores file names are listed as
 not accepted (see `herogen/pipeline/results.py` for the format).
 
-The blender scorer (`herogen.blender.score`) takes its held-out views from the folder, not from the record: any
-`heldout/<name>.png` directly in `heldout/` with a matching `heldout/<name>-mask.png` (files in subfolders are not
-scored); a name `front-left-<deg>` or `front-right-<deg>` gives the target yaw it searches around. It does not
-yet check `heldout.accepted_views`, so a view left directly in `heldout/` that the record does not accept (made
-from an earlier turnaround, or whose image changed) is still scored; each row carries the view's `status` from
-the record. A held-out row carries `reference` and `measures` from `stage-2h.json`: when the record says
+The blender scorer (`herogen.blender.score`) takes its held-out views from the record, by its form
+(`heldout_sources`; the formats the lab reads too):
+- a per-view record (`details.views` with statuses): the views `heldout.accepted_views` returns (status
+  accepted, made from the current turnaround, image still matching its recorded SHA-256), each with the mask
+  its `files` name (else `heldout/<name>-mask.png`);
+- the older one-view record (`details.view`): its view, when the record passed and lists the image;
+- a bench record (`"reference": "ground-truth"`, views rendered from a known body, no per-view status): every
+  view it lists whose image and mask exist;
+- no `stage-2h.json`: every `heldout/<name>.png` directly in `heldout/` with a matching `-mask.png`;
+- a record that cannot be read, that lists no view or whose stage is still running: no held-out view.
+
+`05-scores.json` names the form under `heldout_source` (`source`, the `rule` and `skipped`: each view file in
+`heldout/` that was not admitted and why, such as "made from an earlier turnaround" or "its image changed since
+stage 2h recorded it"), and each held-out entry of `views` carries its `source`. A name `front-left-<deg>` or
+`front-right-<deg>` gives the target yaw the scorer searches around, and each row carries the view's `status`
+from the record. A held-out row carries `reference` and `measures` from `stage-2h.json`: when the record says
 `"reference": "generated"`, the row is labelled `"measures": "consistency"`, since a generated view can invent
 detail and a score against it measures consistency with the generated character, not accuracy; a
 `"reference": "ground-truth"` view, a render of a known body, is labelled `"measures": "accuracy"`.
