@@ -178,14 +178,41 @@ LIMIT_MAX = 8
 SUCCESSES_PER_STEP = 20
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _SYNCHRONIZE = 0x00100000
+    _ERROR_ACCESS_DENIED = 5
+    _WAIT_TIMEOUT = 0x102
+
+    def _alive(pid: int) -> bool:
+        # Never os.kill(pid, 0) here: on Windows it terminates the process instead of probing it.
+        if not 0 < pid <= 0xFFFFFFFF:
+            return False
+        handle = _kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED  # it exists, but belongs to someone else
+        try:
+            return _kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT  # not yet signalled: running
+        finally:
+            _kernel32.CloseHandle(handle)
+else:
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
         return True
-    return True
 
 
 class SharedLimiter:
