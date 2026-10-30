@@ -251,18 +251,31 @@ and the best is kept if it lies within +-20 degrees. The front fit is then redon
 conform and the remesh. The pitch stays 0, with the reason recorded, unless both left and right are observed
 (present, non-empty and not derived; back, top and the held-out views are never used), when the sweep is flat (the
 side IoU varies by less than 0.02), when it is ambiguous (another peak more than 8 degrees away within 0.01 of the
-best) and when the best lies beyond +-20 degrees. No Y offset is fitted or applied: the frame stays centred on the
-bounding box. `mesh.source.pose_fit` in `stage-3.json` records the views used and those excluded with their
+best) and when the best lies beyond +-20 degrees. No Y offset is fitted or applied during pitch registration: the frame stays centred on the
+bounding box until the subsequent depth registration. `mesh.source.pose_fit` in `stage-3.json` records the views used and those excluded with their
 reasons, the status (`fitted` or `fallback`) and reason, `pitch_deg`, `limit_deg`, `y_offset_studs` (0) with a
 note, the sweep (`sweep_half_res`) and its scores at pitch 0 and at the fitted pitch (`side_iou_half_res`: the
 sweep's scores, not the final mesh's); `mesh.source.fit` holds the pitch with the rest of the fit, and
 `pose_views` lists the views the pitch was registered on (none after a fallback). The shape is still built from
 the front view alone (`shape_views` stays `["front"]`).
 
-**Measurements of this fit: to be measured.** The before/after on the 34 hybrid stage-3 records (32 distinct SAM
-3D Objects sources) and on 34 generated turnarounds, the generated turnaround above in Blender, and the synthetic
-humanoid's per-view IoU are to be re-measured on this code. Before it, stage 3 failed on every one of the 34
-records (worst side view median 0.666, front median 0.969).
+**Measured pitch registration.** NumPy replay of orientation, conform and remesh on 34 diagnosis records
+(32 distinct sources) improved median worst-side IoU from 0.6663 to 0.7378; median front/back/left/right IoU
+changed from 0.9688/0.8702/0.6744/0.6708 to 0.9698/0.8688/0.7436/0.7392. On 34 available of 36 listed scorecard
+turnarounds, worst-side median improved from 0.6704 to 0.7356 and worst-observed median from 0.6572 to 0.7056;
+two turnarounds lacked completed inputs. Every-observed-view silhouette passes stayed 0/34 in each set. These
+are observed-mask agreement measurements, not held-out generalization, and the overlapping sets are not pooled.
+Front minimum on the diagnosis fell from 0.9097 to 0.7864; the remesh can lose front detail after the conform.
+
+**Depth is registered after pitch and remeshing.** Each view's mask is placed by its own bounding box, so a
+mesh centred on its own Y extent can land off the side masks when a tail or pack sets different extents. After
+the pitch fit, front refit, conform and remesh, the mesh and the source vertices used by the texture fallback
+move together along Y. The whole-pixel offset maximises mean silhouette IoU on observed left/right masks and
+the top mask only when drawn, never derived or held out; shape and pitch are unchanged. `stage-3.json` records
+both `mesh.source.pose_fit` and `mesh.source.depth_register`, the latter holding offset in studs and pixels,
+views, and IoU before and after. Before integration, a local 64-source benchmark with pitch locked at zero
+improved worst-observed median from 0.7065 to 0.7319 with depth registration, with 0/64 silhouette passes in
+both variants; that pitch-zero measurement is a proxy, not a measurement of the combined pitch fit.
 
 **Causes that remain, each separate from the pitch.** Bounding-box centring: a part the mesh lacks or places
 differently (a tail, a pack) moves a side mask's box and so the view's centre, which a few degrees of pitch can

@@ -92,6 +92,12 @@ def _account(rec: StageRecord, model: str, res) -> None:
             "; replayed from the cache (no new spend)" if res.cached else "")
 
 
+def _derived(vs, view: str) -> bool:
+    """True when stage 2 derived `view` from the other masks (meta mask_method "visual_hull"): not an
+    observation."""
+    return "visual_hull" in str((vs.meta.get("mask_method") or {}).get(view, ""))
+
+
 def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
     """SAM 3D Objects on the front view and its mask, the mesh put in the contract frame. Returns the mesh, its
     record and the remote result; files are written only once everything succeeded (`03-source.glb` by the
@@ -109,6 +115,10 @@ def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
     src_verts, info = sam3d_mesh.orient(src, vs.views["front"], img, height, sides=sides,
                                         sides_excluded=excluded)
     verts, faces, info["remesh"] = sam3d_mesh.remesh(src_verts, src.faces, height)
+    depth_views = {v: vs.views[v] for v in sam3d_mesh.DEPTH_VIEWS if v in vs.views and not _derived(vs, v)}
+    dy, info["depth_register"] = sam3d_mesh.register_depth(verts, faces, depth_views)
+    shift = np.array([0.0, dy, 0.0])
+    verts, src_verts = verts + shift, src_verts + shift      # the texture fallback's source moves with the mesh
     work = work_dir(run)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -245,8 +255,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
                      "(arms hang over the torso in the side views and no view constrains their depth)")
         method = ("visual hull: voxel centre kept if inside every mask; arms rounded where no view constrains "
                   "their depth; gaussian blur; surface nets; Taubin smoothing")
-        shape_views = sorted(v for v in vs.views if "visual_hull" not in
-                             str((vs.meta.get("mask_method") or {}).get(v, "")))
+        shape_views = sorted(v for v in vs.views if not _derived(vs, v))
         pose_views = []
     else:
         from . import sam3d_mesh
@@ -304,7 +313,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
         # view is gated whatever the mesh source; a view the shape was not built from (sam3d-objects sees only
         # the front) carries a note saying so.
         method_v = str((vs.meta.get("mask_method") or {}).get(v, ""))
-        derived = "visual_hull" in method_v
+        derived = _derived(vs, v)
         unseen = v not in shape_views and not derived
         posed = "; its pitch was registered on this view" if v in pose_views else ""
         note = ({"note": f"derived view ({method_v}); not gated"} if derived else
@@ -336,6 +345,9 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     rec.data["mesh"] = {**info, "triangles": tri, "vertices": int(len(verts)), "height_studs": height,
                         "pixels_per_stud": round(vs.pps, 4), "figure_height_px": vs.height_px,
                         "views_missing": vs.missing, "iou": ious,
-                        "frame": "studs, +Z up, feet at z=0, faces -Y, x/y centred on the figure's bounding box",
+                        "frame": "studs, +Z up, feet at z=0, faces -Y, " + (
+                            "x/y centred on the figure's bounding box" if used_source == "carve" else
+                            "x centred on the mesh's bounding box (its front outline conformed to the front mask), "
+                            "y registered on the observed depth views"),
                         "method": method}
     return rec.finish()
