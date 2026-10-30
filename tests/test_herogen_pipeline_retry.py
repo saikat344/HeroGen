@@ -511,6 +511,41 @@ class SharedLimiterTest(unittest.TestCase):
         self.assertLessEqual(server.max_in_flight, 2)
         self.assertEqual(server.max_in_flight, 2)  # and the limit is used
 
+    def _children(self, code: str, n: int = 4) -> None:
+        """Run `code` in `n` processes at once (argv: repo root, this test's folder, child number)."""
+        root = os.path.dirname(_HERE)
+        procs = [subprocess.Popen([sys.executable, "-c", textwrap.dedent(code), root, self.tmp.name, str(i)])
+                 for i in range(n)]
+        self.assertEqual([p.wait(timeout=120) for p in procs], [0] * n)
+
+    def test_processes_never_lose_a_state_update(self):
+        # Every read-modify-write of the state file happens under the lock, so none overwrites another's.
+        self._children("""
+            import sys
+            sys.path[:0] = [sys.argv[1]]
+            from herogen.pipeline import retry
+            lim = retry.SharedLimiter(sys.argv[2], "k", start=3, maximum=5)
+            for _ in range(50):
+                lim._update(lambda st, now: st.__setitem__("n", st.get("n", 0) + 1))
+        """)
+        state = json.loads((Path(self.tmp.name) / "k.json").read_text())
+        self.assertEqual((state["n"], state["limit"], state["slots"]), (200, 3, {}))
+
+    def test_parallel_ledger_rows_never_interleave(self):
+        # Rows far larger than one write, from four processes at once: each lands whole, on its own line.
+        self._children("""
+            import sys
+            sys.path[:0] = [sys.argv[1]]
+            from herogen.pipeline.client import ModelClient
+            c = ModelClient(sys.argv[2] + "/cache", mode="replay")
+            for i in range(40):
+                c._ledger({"child": int(sys.argv[3]), "i": i, "pad": sys.argv[3] * 200000})
+        """)
+        rows = [json.loads(line) for line in (Path(self.tmp.name) / "cache" / client_mod.LEDGER).read_text()
+                .splitlines()]
+        self.assertEqual(sorted((r["child"], r["i"]) for r in rows), [(c, i) for c in range(4) for i in range(40)])
+        self.assertTrue(all(r["pad"] == str(r["child"]) * 200000 for r in rows))
+
 
 if __name__ == "__main__":
     unittest.main()
