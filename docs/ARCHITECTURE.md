@@ -746,34 +746,51 @@ by the same number of pixels on every side, so it stays square and centred and t
 never used to scale it, so `height_agreement_front` (at least 0.95 of the front view's height, both ways)
 measures whether the model drew the figure at the guide's size.
 
-Each view is checked against the turnaround: silhouette landmarks are placed in 3D from the front and profile
-views and fitted over yaw. The fit lets the arms be held a few degrees off the A-pose (each hand moves along
-its arm's tangent to the height it is seen at), so arm drift doesn't read as a turn; the pose error is measured
-at the found yaw against the turnaround's own arms. Facing is three votes (the fit, the toes, SAM 3.1 face
-inside head). The stage writes into `stage-2h.json` the building azimuths a body may be built or coloured from
-(`build_azimuths_deg`: 0 to 315 in 45-degree steps, the four turnaround views and the diagonals between them).
-A view is judged on a yaw range: from the drift-robust fit's yaw to the plain fit's (the hands where the
-turnaround has them), widened by 2 degrees on each side, the larger bound of `fit_error_deg` (found minus true
-yaw, -2 to +1 degrees, measured with arms drifted up to 8 degrees on synthetic figures). The whole range must be
-at least `azimuth_clearance_deg` (10) from every building azimuth. That this keeps the true yaw 10 degrees clear
-holds on synthetic outlines; it is not yet measured on real images. The yaw windows are 25-33 degrees for the
-30-degree views and 57-65 for the 60-degree views (the same 10 plus 2 degrees from every building azimuth); up
-to 5 degrees outside needs human review.
+Each view is checked against the turnaround with Sapiens 2 body keypoints (Meta's Sapiens 2 pose 1B,
+`herogen/pipeline/sapiens_app.py`, on a Modal L4; pinned code commit and weights, the weights checked by
+SHA-256). Stage 2h measures the turnaround's front view and profiles once and every generation once, each on the
+person box of its SAM 3.1 figure mask, through a record/replay cache in the Model API's cache folder
+(`herogen/pipeline/sapiens.py`: the deployed app `herogen-sapiens-pose` when it runs the same source, else an
+ephemeral run of it; a failed or timed-out call is tried three times, and a failure is recorded on the view,
+which then needs review, never raised). The record keeps the turnaround's keypoints
+(`details.turnaround_keypoints`), each generation's body joints and fits, and the keypoint calls and their
+estimated cost.
 
-Known limitation, measured on synthetic outlines: when a figure's arms are raised 3-8 degrees above the
-turnaround's and both of its hands are also measured 0.01-0.02 of the figure height too low, both fits read
-the turn too small. A 30-degree view drawn 35.5-37 degrees from the front can then pass with its true yaw
-8-9.5 degrees from the 45-degree diagonal instead of 10 (24 of 980 near-diagonal test views; none at 38 or
-beyond, none among the 60-degree views). It stays until the fit's error is measured on real images with known
-yaws.
+The joints are placed in 3D (`herogen/pipeline/keypoints.py`): x and height from the front view, depth from the
+two profiles, where each left/right pair gets one depth, the mean of the pair (a profile often swaps them).
+A generation's joints, scaled into turnaround pixels by the framing scale, are fitted over yaw with a free
+sideways shift (head, torso and legs; the arms are left out), separately facing image left and right:
+
+- **Turn.** The found yaw is the fit's on the view's side. Its error, measured on the bench-gt renders at known
+  yaws (21 characters, flat and lit, 25, 45 and 65 degrees, 217 views; found minus true |yaw|), is -8.6 to +2.1
+  degrees at the 5th and 95th percentiles (`fit_error_deg`), median -1.0; three characters in long clothes read
+  4-16 degrees short. A view's true yaw is taken to lie in that range around the found one, and the whole range
+  must be at least `azimuth_clearance_deg` (10) from every building azimuth (`build_azimuths_deg`: 0 to 315 in
+  45-degree steps, the four turnaround views and the diagonals between them). The yaw windows are what that
+  leaves of target ±5: 25-26.4 degrees for the 30-degree views (the target itself is not in it) and 57.1-65 for
+  the 60-degree views. Up to 5 degrees outside needs human review. Generations aim at the window's middle.
+- **Facing.** Two votes: the fit's side (its error facing the other way minus facing the view's way, at least
+  0.003 of the figure height) and SAM 3.1's face inside the head. Facing passes when one says the view's way
+  and none the other way; no deciding vote needs review.
+- **A-pose.** Each arm's angle below horizontal, from how far the wrist hangs below the shoulder over the arm's
+  length in the front view (a turn doesn't change it): the nearer arm must be found and between 35 and 72
+  degrees, and so must the farther one when both its joints score at least 0.5.
+
+The keypoints' whole-pose error at the found yaw and the silhouette landmark fit are recorded but not judged.
+Measured against the AI view labels `viewlabels-ai-v2` (tuning s001-s028 and s044-s045, test s029-s043), on
+tuning / test: facing falsely rejects 0.02 / 0.04 of the views facing the right way at 30 degrees and 0.00 /
+0.03 at 60, and falsely accepts 0.12 / 0.14 and 0.09 / 0.42 of those facing the wrong way; the A-pose check
+falsely rejects 0.02 / 0.13 and 0.00 / 0.14 of A-poses and accepts 0.60 / 0.67 (13 views) and 0.07 / 0.03 of the
+others. The turn has no label to measure against on generated views (the labels' turn bands are not
+reliable); on the labelled bench generations it reads the 30-degree views at 36-63 degrees (median 48).
 
 A view is generated up to four times, stopping at the first accepted generation. The first request is the
-target; each next one is the last request plus the target's |yaw| minus the last generation's found |yaw| (more
+middle of the window; each next one is the last request plus that middle minus the last generation's found |yaw| (more
 after an under-turn, less after an overshoot), kept within 5-85 degrees, with the nearer profile as the pose
 reference once it reaches 50. After a generation whose facing checks said the other way, or that had no figure
 or turnaround landmarks to measure, the same request is sent again as a new sample. The generation kept is the
 best by status (accepted, else needs human review because a check could not decide, else rejected because a
-gated check failed), then the smaller window miss, then the lower pose error. Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png` when
+gated check failed), then the smaller window miss, then the lower keypoint fit error. Its image, mask and raw generation go to `heldout/<view>.png`, `-mask.png` and `-raw.png` when
 accepted, and to `heldout/review/` or `heldout/rejected/` otherwise.
 
 A person decides views with
