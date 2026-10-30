@@ -105,12 +105,13 @@ def _excluded(rel: Path, exclude: tuple[str, ...]) -> bool:
     return bool(rel.parts) and rel.parts[0] in exclude
 
 
-def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -> None:
+def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -> list[Path]:
     """Make `dst` hold `src`'s files: copy new or changed ones (size or mtime), and with `delete` remove files
     `src` no longer has. Paths whose first part is in `exclude` are neither copied nor deleted. Links are never
-    followed or copied."""
+    followed or copied. Returns the files it wrote in `dst`."""
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
+    written: list[Path] = []
     for dirpath, dirs, files in os.walk(src):
         rel_dir = Path(dirpath).relative_to(src)
         dirs[:] = [d for d in dirs if not (Path(dirpath) / d).is_symlink()]
@@ -130,25 +131,55 @@ def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -
             part = d.with_name(d.name + ".part")
             shutil.copy2(s, part)
             os.replace(part, d)
+            written.append(d)
     if delete:
         for dirpath, _dirs, files in os.walk(dst):
             for f in files:
                 rel = Path(dirpath).relative_to(dst) / f
                 if rel not in seen and not _excluded(rel, exclude):
                     (dst / rel).unlink()
+    return written
+
+
+def _undo(written: list[Path], stop: Path) -> None:
+    """Remove files a copy back wrote, then the folders it left empty, up to (not including) `stop`."""
+    for p in written:
+        if p.is_file() or p.is_symlink():
+            p.unlink()
+    for p in sorted({q.parent for q in written}, key=lambda q: len(q.parts), reverse=True):
+        while p != stop and stop in p.parents and p.is_dir() and not any(p.iterdir()):
+            p.rmdir()
+            p = p.parent
 
 
 class CopyWorkdir:
     """Stages work on a local copy (Modal): the run folder, the input and this user's caches are copied from the
     data volume, and after each stage copied back and committed, but only while `still_current()` says this
-    attempt is the job's live one, so a stale worker never overwrites the files of a newer attempt."""
+    attempt is the job's live one, so a stale worker never overwrites the files of a newer attempt. With
+    `still_wanted`, a copy back whose job or account was deleted while it ran is removed again after its commit."""
 
-    def __init__(self, ctx: StageContext, local_root: Path, volume, still_current: Callable[[], bool]) -> None:
+    def __init__(self, ctx: StageContext, local_root: Path, volume, still_current: Callable[[], bool],
+                 still_wanted: Callable[[], bool] | None = None) -> None:
         self.remote = ctx
         self.local_root = Path(local_root)
         self.volume = volume
         self.still_current = still_current
+        # False once the job or its account is deleted; checked again after each commit (see `_settle`).
+        self.still_wanted = still_wanted
         self.local: StageContext | None = None
+
+    def _settle(self, written: list[Path], wanted: Callable[[], bool] | None) -> None:
+        """After a commit: if the job or account was deleted meanwhile (the delete sets `deleted_at` before the
+        web container removes the files, so a delete that raced this copy back is seen here), remove what this
+        copy back wrote and commit again, so a deleted hero's files never come back."""
+        if wanted is None or not written:
+            return
+        self.volume.reload()
+        if wanted():
+            return
+        _undo(written, self.remote.run_dir.parents[2])   # stop at <data>/users
+        self.volume.commit()
+        event("copy_back_undone", job=self.remote.job_id, files=len(written))
 
     def open(self) -> StageContext:
         r = self.remote
@@ -176,14 +207,16 @@ class CopyWorkdir:
         if not self.still_current():
             return
         r, loc = self.remote, self.local
-        _mirror(loc.run_dir, r.run_dir, delete=True, exclude=HELDOUT_PATHS)
-        _mirror(loc.cache_dir, r.cache_dir, delete=False)
-        _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
+        written = _mirror(loc.run_dir, r.run_dir, delete=True, exclude=HELDOUT_PATHS)
+        written += _mirror(loc.cache_dir, r.cache_dir, delete=False)
+        written += _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
         if loc.input_path.is_file():
             r.input_path.parent.mkdir(parents=True, exist_ok=True)
             if not r.input_path.exists() or r.input_path.stat().st_size != loc.input_path.stat().st_size:
                 shutil.copy2(loc.input_path, r.input_path)
+                written.append(r.input_path)
         self.volume.commit()
+        self._settle(written, self.still_wanted)
 
     def close(self) -> None:
         shutil.rmtree(self.local_root, ignore_errors=True)
@@ -193,7 +226,8 @@ class HeldoutWorkdir(CopyWorkdir):
     """The held-out views' work folder: a local copy like CopyWorkdir, but its copy back writes only `heldout/`
     and `stage-2h.json` (plus new cache entries), only into a run folder that still exists, and only while the
     side stage's claim holds and the job has not been deleted. So it never touches the job's own files, and never
-    brings back the files of a job or account deleted while it ran."""
+    brings back the files of a job or account deleted while it ran: a delete that lands between its check and
+    its commit is seen after the commit, and what it wrote is removed again (`_settle`)."""
 
     def sync(self) -> None:
         assert self.local is not None
@@ -201,16 +235,19 @@ class HeldoutWorkdir(CopyWorkdir):
         self.volume.reload()
         if not self.still_current() or not r.run_dir.is_dir():
             return
+        written: list[Path] = []
         if (loc.run_dir / "heldout").is_dir():
-            _mirror(loc.run_dir / "heldout", r.run_dir / "heldout", delete=True)
+            written += _mirror(loc.run_dir / "heldout", r.run_dir / "heldout", delete=True)
         rec = loc.run_dir / "stage-2h.json"
         if rec.is_file():
             part = r.run_dir / "stage-2h.json.part"
             shutil.copy2(rec, part)
             os.replace(part, r.run_dir / "stage-2h.json")
-        _mirror(loc.cache_dir, r.cache_dir, delete=False)
-        _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
+            written.append(r.run_dir / "stage-2h.json")
+        written += _mirror(loc.cache_dir, r.cache_dir, delete=False)
+        written += _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
         self.volume.commit()
+        self._settle(written, self.still_wanted or self.still_current)
 
 
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> StageContext:

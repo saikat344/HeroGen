@@ -905,9 +905,13 @@ minutes; it never waits for the held-out views.
 - Its cost joins the job's recorded cost (`cost_detail.heldout_usd`), at the job's finish if 2h finished first,
   else when 2h finishes. A 2h that finishes after the job, including a canceled job, attaches its record and cost
   and changes nothing else.
-- Files: 2h works on a local copy and writes back only `heldout/` and `stage-2h.json`, only into a run folder that
-  still exists, and only while its claim holds and the job is not deleted, so it never brings back a deleted
-  hero. The job's own copy back neither copies nor deletes those two paths. The two never write the same file.
+- Files: 2h works on a local copy and writes back only `heldout/` and `stage-2h.json` (and new cache entries), only
+  into a run folder that still exists, and only while its claim holds and the job is not deleted. After each
+  commit it reloads and checks again: deleting a hero or an account marks it deleted in the store before its files
+  are removed, so a delete that landed during the copy back is seen there, and every file the copy back wrote is
+  removed and committed again. The job's own copy back does the same. So a deleted hero's or account's files may
+  reappear only for the moment between those two commits, never for good. The job's own copy back neither copies
+  nor deletes 2h's two paths, so the two never write the same file.
 - Model API share: 2h starts only after the job's own Model API calls (stages p and 0 to 2) are done, and at most
   `heldout_concurrency` (default 2) held-out runs execute at once across the service (`max_containers` of
   `heldout_stages`; more wait in Modal's queue), so they yield the API to other jobs' own stages. The pipeline's

@@ -320,7 +320,8 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
     store = RemoteStore()
     ctx = make_context(s, Storage(Path(DATA)), job)
     work = CopyWorkdir(ctx, Path("/tmp/herogen-work") / job["id"], data_vol,
-                       lambda: store.job_current(job["id"], attempt))
+                       lambda: store.job_current(job["id"], attempt),
+                       still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)
     runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group == "model" else "")
     return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s(group)).to_dict()
 
