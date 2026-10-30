@@ -224,8 +224,14 @@ class TestStage(unittest.TestCase):
         self.assertTrue(rec["ok"])
         self.assertEqual(rec["details"]["used_views"], [])
         self.assertIn("NCC in the view", rec["details"]["closeups"]["front"]["reason"])
-        self.assertFalse((run.path / F.RECORD).exists())
         self.assertFalse(list((run.path / "views").glob("closeup-*")))
+        # every close-up gated out: the record is still written, with each view's reason for stage 4
+        saved = json.loads((run.path / F.RECORD).read_text())
+        self.assertEqual(saved["used_views"], [])
+        for v in F.VIEWS:
+            self.assertFalse(saved["views"][v]["used"])
+            self.assertIn("NCC in the view", saved["views"][v]["reason"])
+        self.assertIn(F.RECORD, rec["outputs"])
         self.assertIn("plain views", rec["notes"])
 
     def test_a_reframed_close_up_is_not_used(self):
@@ -242,7 +248,9 @@ class TestStage(unittest.TestCase):
         self.assertTrue(rec["ok"])
         self.assertIn("ApiError", rec["details"]["fallback"])
         self.assertEqual(rec["details"]["used_views"], [])
-        self.assertFalse((run.path / F.RECORD).exists())              # nothing stale for stage 4 to read
+        saved = json.loads((run.path / F.RECORD).read_text())          # nothing stale for stage 4 to read
+        self.assertEqual((saved["views"], saved["used_views"]), ({}, []))
+        self.assertIn("ApiError", saved["fallback"])
         self.assertFalse(list((run.path / "views").glob("closeup-*")))
         self.assertFalse(list((run.path / "masks").glob("closeup-*")))
 
