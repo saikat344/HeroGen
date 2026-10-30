@@ -736,6 +736,26 @@ class HeldoutTest(unittest.TestCase):
         Image.new("RGB", (8, 8), "red").save(run / "heldout/front-left-45-mask.png")
         self.assertEqual(sorted(heldout.accepted_views(RunFolder(self.root, "r"))), sorted(VIEWS[1:]))
 
+    def test_views_on_threshold_masks_are_never_accepted(self):
+        # Records written by earlier versions could measure a view on a background-threshold mask.
+        self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        run = RunFolder(self.root, "r")
+        rec = self._rec()
+        d = rec["details"]["views"]["front-left-30"]
+        d["mask_method"], d["mask_method_detail"] = "threshold", "threshold (sam under half the threshold area)"
+        for a in d["attempts"]:
+            a["mask_method"] = d["mask_method_detail"]
+            a["checks"] = [c for c in a["checks"] if c["name"] != "figure_mask_sam_coverage"]
+        run.write_json("stage-2h.json", rec)
+        self.assertEqual(sorted(heldout.accepted_views(run)), sorted(VIEWS[1:]))
+        self.assertEqual(stages.degraded_masks(rec), ["front-left-30: threshold (sam under half the threshold area)"])
+        # Judged again, it is rejected: a measurement on a threshold mask is not one.
+        new = heldout.recheck_heldout(run)
+        view = new["details"]["views"]["front-left-30"]
+        self.assertEqual(view["status"], "rejected")
+        failed = [c["name"] for c in view["attempts"][view["kept_attempt"]]["checks"] if not c["pass"]]
+        self.assertEqual(failed, ["figure_mask_sam_coverage"])
+
     def test_checks_version_follows_constants_and_code(self):
         base = heldout.checks_version()
         self.assertEqual(heldout.checks_version(), base)

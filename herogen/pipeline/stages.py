@@ -199,6 +199,28 @@ def sam_coverage(sam: np.ndarray, reference: np.ndarray) -> float:
     return 0.0 if s == 0 else s / max(1, int(reference.sum()))
 
 
+def degraded_masks(record: dict[str, Any]) -> list[str]:
+    """The masks a stage record was measured on that SAM 3.1 did not make (records from earlier versions,
+    which fell back to background-threshold masks): "<what>: <method>" for each. Such a record is not a
+    measurement and never counts as passed, whatever its `ok` says. Empty for every record made now."""
+    det = record.get("details") or {}
+    out = []
+    methods = det.get("mask_method_detail") or det.get("mask_method") or {}
+    if isinstance(methods, dict):
+        out += [f"{k}: {m}" for k, m in methods.items() if method_kind(str(m)) == "threshold"]
+    attempts = det.get("attempts") if record.get("stage") == 2 else None
+    if attempts:  # an earlier version split a sheet on the threshold mask when SAM's columns didn't
+        kept = det.get("kept_attempt", len(attempts) - 1)
+        source = str(attempts[kept].get("split_source") or SAM_MODEL)
+        if method_kind(source) == "threshold":
+            out.append(f"split: {source}")
+    for name, v in (det.get("views") or {}).items():  # stage 2h
+        m = str((v or {}).get("mask_method_detail") or (v or {}).get("mask_method") or SAM_MODEL)
+        if method_kind(m) == "threshold":
+            out.append(f"{name}: {m}")
+    return out
+
+
 # ---- stage 0 ----------------------------------------------------------------------------------------
 
 

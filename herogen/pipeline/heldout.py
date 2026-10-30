@@ -76,7 +76,7 @@ from herogen.pipeline.client import (
     IMAGE_MODEL, SAM_MODEL, ApiError, ModelClient, ReplayMiss, SamInstance,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
-from herogen.pipeline.stages import _load, _Stage, method_kind, sam_coverage, sam_figure_mask
+from herogen.pipeline.stages import _load, _Stage, degraded_masks, method_kind, sam_coverage, sam_figure_mask
 
 ATTEMPTS = 4  # generations per view before it is given up on
 # Orthographic views of one figure at one scale have equal heights; the same 0.95 as the turnaround sheet.
@@ -1265,6 +1265,8 @@ def recheck_view(run: RunFolder, name: str, d: dict[str, Any], model: Turnaround
     placed = imaging.from_mask_image(_load(run, rels["mask"]))
     area = next((c["value"] for c in kept["checks"] if c["name"] == "figure_area_frac"), 1.0)
     coverage = next((c["value"] for c in kept["checks"] if c["name"] == "figure_mask_sam_coverage"), None)
+    if coverage is None and method_kind(str(kept.get("mask_method", SAM_MODEL))) != SAM_MODEL:
+        coverage = 0.0  # an earlier version measured it on a threshold mask: not a measurement
     face = (kept.get("measured") or {}).get("face") or {"offset": None}
     checks, measured = view_checks(view, placed, model, profile_toe, area, face, profile_face,
                                    profile_face_error=profile_face_error, mask_sam_coverage=coverage)
@@ -1355,6 +1357,9 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
     s2 = run.read_stage(2)
     if not s2 or not s2.get("ok"):
         raise FileNotFoundError("stage 2 has not passed in this run folder; run stage 2 first")
+    if degraded_masks(s2):
+        raise ValueError(f"stage 2 passed on masks SAM 3.1 did not make ({'; '.join(degraded_masks(s2))}), "
+                         "written by an earlier version; run stage 2 again")
     names = [v.name for v in VIEWS] if not views else list(dict.fromkeys(views))
     unknown = [n for n in names if n not in VIEW_BY_NAME]
     if unknown:
@@ -1525,6 +1530,8 @@ def accepted_views(run: RunFolder) -> dict[str, str]:
     for name, d in (det.get("views") or {}).items():
         img = heldout_rel((d.get("files") or {}).get("image"))
         sha = d.get("image_sha256")
+        if method_kind(str(d.get("mask_method_detail") or d.get("mask_method") or SAM_MODEL)) != SAM_MODEL:
+            continue  # measured on a threshold mask by an earlier version: never counts as accepted
         if d.get("status") == "accepted" and img and sha and d.get("stage2_identity") == identity \
                 and (run.path / img).is_file() and file_sha256(run.path / img) == sha:
             out[name] = img
