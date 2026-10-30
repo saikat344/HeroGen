@@ -292,6 +292,59 @@ class TestJobs(StoreCase):
         with self.assertRaises(StoreError):
             self.store.job_finish(j["id"], 1, "queued")
 
+    def test_side_stage_runs_once_and_never_touches_the_job(self):
+        j, _ = self.create()
+        c = self.store.job_claim(j["id"], "c", 60, 2)
+        self.assertTrue(self.store.side_claim(j["id"], "2h", "k1", 600))
+        self.assertFalse(self.store.side_claim(j["id"], "2h", "k2", 600), "at most once per job")
+        self.assertTrue(self.store.side_live(j["id"], "2h", "k1"))
+        self.assertFalse(self.store.side_live(j["id"], "2h", "k2"))
+        self.store.job_finish(j["id"], c["attempt"], "succeeded", cost_usd=0.04, cost_detail={"basis": "x"})
+        self.assertTrue(self.store.side_finish(j["id"], "2h", "k1", "unavailable", cost_usd=0.01, message="m"))
+        self.assertFalse(self.store.side_finish(j["id"], "2h", "k1", "passed", cost_usd=0.01), "only once")
+        job = self.store.job_get(j["id"])
+        self.assertEqual((job["state"], job["error_code"], job["counts_quota"]), ("succeeded", None, 1))
+        self.assertAlmostEqual(job["cost_usd"], 0.05, places=6)
+        self.assertEqual(json.loads(job["cost_detail"]), {"basis": "x", "heldout_usd": 0.01})
+        with self.assertRaises(StoreError):
+            self.store.side_claim(j["id"], "3", "k", 60)
+
+    def test_side_stage_finishing_first_joins_the_jobs_cost(self):
+        j, _ = self.create()
+        c = self.store.job_claim(j["id"], "c", 60, 2)
+        self.store.side_claim(j["id"], "2h", "k", 600)
+        self.store.side_finish(j["id"], "2h", "k", "passed", cost_usd=0.0125)
+        self.store.job_finish(j["id"], c["attempt"], "succeeded", cost_usd=0.04)
+        self.assertAlmostEqual(self.store.job_get(j["id"])["cost_usd"], 0.0525, places=6)
+
+    def test_side_stage_is_refused_for_ended_or_deleted_jobs(self):
+        j, _ = self.create()
+        self.store.job_cancel(j["id"], self.user["id"])
+        self.assertFalse(self.store.side_claim(j["id"], "2h", "k", 60))
+        k, _ = self.create(key="key-0001")
+        self.store.job_claim(k["id"], "c", 60, 2)
+        self.store.side_claim(k["id"], "2h", "k", 60)
+        self.store.job_delete(k["id"], self.user["id"])
+        self.assertFalse(self.store.side_live(k["id"], "2h", "k"), "a deleted job's files are not written")
+
+    def test_side_stage_cost_never_decides_a_refund(self):
+        j, _ = self.create()
+        c = self.store.job_claim(j["id"], "c", 60, 2)
+        self.store.side_claim(j["id"], "2h", "k", 600)
+        self.store.side_finish(j["id"], "2h", "k", "passed", cost_usd=0.5)
+        self.store.job_finish(j["id"], c["attempt"], "failed", error_code="x", refund=True, error_message="E.")
+        self.assertEqual(self.store.job_get(j["id"])["counts_quota"], 0, "refunded exactly as without 2h")
+
+    def test_a_reused_stage_keeps_what_it_spent(self):
+        j, _ = self.create()
+        self.store.job_claim(j["id"], "c", 60, 2)
+        self.store.job_stage_set(j["id"], 1, "1", "passed", seconds=3.0, cost_usd=0.02)
+        self.store.job_requeue(j["id"], 1, 2, "timeout", "3", "slow")
+        self.store.job_claim(j["id"], "c2", 60, 2)
+        self.store.job_stage_set(j["id"], 2, "1", "passed", message="kept from an earlier attempt")
+        row = {r["stage"]: r for r in self.store.job_stages(j["id"])}["1"]
+        self.assertEqual((row["cost_usd"], row["seconds"]), (0.02, 3.0))
+
     def test_cancel_refunds_a_job_that_never_started(self):
         j, _ = self.create()
         out = self.store.job_cancel(j["id"], self.user["id"])
@@ -391,22 +444,37 @@ class TestSessions(StoreCase):
 
 
 class TestSchema(TempDirCase):
-    def test_a_version_1_database_is_upgraded(self):
+    def old_database(self, version: int) -> Path:
+        """A database made with the schema of an older version, holding one job."""
         from herogen.service import store as store_mod
 
-        path = self.tmp / "old.db"
+        schema = store_mod.SCHEMA.replace("claim TEXT, lease_until REAL,", "")
+        if version < 2:
+            schema = schema.replace(", refunded_at REAL", "")
+        path = self.tmp / f"v{version}.db"
         con = sqlite3.connect(str(path))
-        for stmt in filter(None, (x.strip() for x in store_mod.SCHEMA.split(";"))):
-            con.execute(stmt.replace(", refunded_at REAL", ""))
+        for stmt in filter(None, (x.strip() for x in schema.split(";"))):
+            con.execute(stmt)
         con.execute("INSERT INTO jobs(id, user_id, client_key, kind, profile, state, created_at) "
                     "VALUES ('j_x', 'u_x', 'k', 'sketch', 'best', 'succeeded', 1.0)")
-        con.execute("PRAGMA user_version=1")
+        con.execute("INSERT INTO job_stages(job_id, stage, state, attempt, cost_usd) VALUES ('j_x', '1', 'passed', 1, "
+                    "0.02)")
+        con.execute(f"PRAGMA user_version={version}")
         con.commit()
         con.close()
-        st = Store(path)
-        self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
-        self.assertIsNone(st.job_get("j_x")["refunded_at"], "existing rows keep their data")
-        st.close()
+        return path
+
+    def test_older_databases_are_upgraded_keeping_their_rows(self):
+        from herogen.service import store as store_mod
+
+        for version in (1, 2):
+            st = Store(self.old_database(version))
+            self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
+            self.assertIsNone(st.job_get("j_x")["refunded_at"], "existing rows keep their data")
+            self.assertEqual(st.job_stages("j_x")[0]["cost_usd"], 0.02)
+            cols = [r[1] for r in st.db.execute("PRAGMA table_info(job_stages)")]
+            self.assertIn("claim", cols)
+            st.close()
 
     def test_an_unknown_version_is_refused(self):
         path = self.tmp / "new.db"

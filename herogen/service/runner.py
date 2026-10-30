@@ -49,14 +49,17 @@ PLAN = (
     StageSpec("p", "sketch from your description", "model", "stage-p.json", prompt_only=True),
     StageSpec("0", "input", "model", "stage-0.json"),
     StageSpec("1", "cover art", "model", "stage-1.json"),
-    StageSpec("2", "turnaround", "model", "stage-2.json", extra=("stage-2h.json",)),
+    StageSpec("2", "turnaround", "model", "stage-2.json"),
     StageSpec("3", "base mesh", "blender", "stage-3.json"),
     StageSpec("4", "game body", "blender", "stage-4.json"),
     StageSpec("6", "Roblox rig", "export", "stage-6.json", optional=True),
     StageSpec("5", "results page", "export", "stage-5.json", optional=True),
+    # Beside the job, never part of it: started once stage 2 passes, it decides, delays and refunds nothing.
+    StageSpec("2h", "quality check (held-out views)", "heldout", "stage-2h.json", optional=True),
 )
-GROUPS = ("model", "blender", "export")
-STAGE_LABELS = {s.key: s.label for s in PLAN} | {"2h": "held-out view"}
+HELDOUT = next(s for s in PLAN if s.key == "2h")
+GROUPS = ("model", "blender", "export")      # the job's own path, in order; "heldout" runs beside it
+STAGE_LABELS = {s.key: s.label for s in PLAN}
 INPUT_LABELS = {"sketch": "uploaded sketch", "prompt": "sketch drawn from a description"}
 
 TIPS = ("Sketches work best with one character drawn full body from head to feet, standing and facing forward, "
@@ -289,8 +292,12 @@ class CliRunner:
                 shutil.copyfile(ctx.input_path, named)
                 src = named
             return pipe + [str(src), *common, "--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
-        if spec.key in ("1", "2"):
-            return pipe + common + ["--stages", spec.key, "--live"], None
+        if spec.key == "1":
+            return pipe + common + ["--stages", "1", "--live"], None
+        if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which runs beside the job
+            return [py, "-m", "herogen.service.pipestage", "2", *common], None
+        if spec.key == "2h":
+            return pipe + common + ["--stages", "2h", "--live"], None
         if spec.key == "5":
             return pipe + common + ["--stages", "5"], None
         if spec.key in ("3", "4"):
@@ -316,7 +323,7 @@ class CliRunner:
         if why:
             return Outcome("skipped", message=why, code="not_available")
         extra = dict(ctx.env)
-        if spec.group == "model" and self._model_key:
+        if spec.group in ("model", "heldout") and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
             env = base_env({"HOME": home, **extra})

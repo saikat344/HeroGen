@@ -48,6 +48,7 @@ class Settings:
     jobs_per_day: int = 5
     jobs_total: int = 50
     max_running_jobs: int = 4
+    heldout_concurrency: int = 2      # held-out view runs at once, service-wide (they yield to the jobs' own work)
     max_attempts: int = 2
     user_storage_max_bytes: int = 2 * 1024 ** 3
     upload_max_bytes: int = 12 * 1024 ** 2
@@ -122,6 +123,7 @@ ENV = {
     "jobs_per_day": "HEROGEN_SERVICE_JOBS_PER_DAY",
     "jobs_total": "HEROGEN_SERVICE_JOBS_TOTAL",
     "max_running_jobs": "HEROGEN_SERVICE_MAX_RUNNING",
+    "heldout_concurrency": "HEROGEN_SERVICE_HELDOUT_MAX",
     "max_attempts": "HEROGEN_SERVICE_MAX_ATTEMPTS",
     "user_storage_max_bytes": "HEROGEN_SERVICE_USER_STORAGE",
     "upload_max_bytes": "HEROGEN_SERVICE_UPLOAD_MAX_BYTES",
@@ -201,7 +203,8 @@ def validate(s: Settings, require_key: bool = True) -> None:
     if s.default_profile not in s.profiles or any(p not in PROFILES for p in s.profiles):
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
     for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
-                 "max_attempts", "upload_max_bytes", "upload_max_pixels", "upload_max_side", "upload_min_side",
+                 "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
+                 "upload_min_side",
                  "prompt_max_chars", "retention_days", "audit_retention_days", "stage_timeout_s",
                  "blender_timeout_s"):
         if getattr(s, name) <= 0:
