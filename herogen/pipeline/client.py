@@ -1,4 +1,4 @@
-"""The one model client for herogen/pipeline: Muse Image and SAM 3.1, with record and replay.
+"""The one model client for herogen/pipeline: Muse Image, SAM 3.1 and Muse Spark image comparison, with record and replay.
 
 Modes:
 - ``live``: call Meta's Model API, then save a request summary and the response to the cache.
@@ -36,9 +36,16 @@ API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
 SAM_MODEL = "sam-3.1"
 
+TEXT_MODEL = "muse-spark-1.3"
+
 # List-price estimates in USD used to report a cost per stage. Estimates, not billed actuals.
 PRICE_PER_IMAGE_USD = {IMAGE_MODEL: 0.01, SAM_MODEL: 2.50 / 1000.0}
-COST_BASIS = "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image)"
+# Text and vision calls are priced by tokens: (input, output) USD per million tokens; reasoning counts as output.
+PRICE_PER_MTOK_USD = {TEXT_MODEL: (1.25, 4.25)}
+COST_BASIS = (
+    "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image; "
+    "muse-spark-1.3 $1.25/$4.25 per million input/output tokens)"
+)
 
 ENV_KEY = "MODEL_API_KEY"
 TIMEOUT_S = 240.0
@@ -74,11 +81,14 @@ class CallLog:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def add(self, model: str, kind: str, key: str, cached: bool) -> None:
-        self.calls.append({"model": model, "kind": kind, "key": key, "cached": cached})
+    def add(self, model: str, kind: str, key: str, cached: bool, cost_usd: float | None = None) -> None:
+        call: dict[str, Any] = {"model": model, "kind": kind, "key": key, "cached": cached}
+        if cost_usd is not None:
+            call["cost_usd"] = round(cost_usd, 6)
+        self.calls.append(call)
 
     def cost_usd(self, since: int = 0) -> float:
-        return round(sum(PRICE_PER_IMAGE_USD.get(c["model"], 0.0) for c in self.calls[since:] if not c["cached"]), 6)
+        return round(sum(call_cost(c) for c in self.calls[since:] if not c["cached"]), 6)
 
     def models(self, since: int = 0) -> list[str]:
         seen: list[str] = []
@@ -86,6 +96,32 @@ class CallLog:
             if c["model"] not in seen:
                 seen.append(c["model"])
         return seen
+
+
+def call_cost(call: dict[str, Any]) -> float:
+    """Estimated USD of one logged call: its token-priced cost when it has one, else the per-image price."""
+    if "cost_usd" in call:
+        return float(call["cost_usd"])
+    return PRICE_PER_IMAGE_USD.get(call["model"], 0.0)
+
+
+def token_cost_usd(model: str, usage: dict[str, Any] | None) -> float:
+    if model not in PRICE_PER_MTOK_USD:
+        raise ClientError(f"no token price configured for {model}")
+    usage = usage or {}
+    pin, pout = PRICE_PER_MTOK_USD[model]
+    return (int(usage.get("input_tokens") or 0) * pin + int(usage.get("output_tokens") or 0) * pout) / 1e6
+
+
+def jpeg_bytes(img: Image.Image, max_side: int, quality: int) -> bytes:
+    """RGB JPEG, scaled down (Lanczos) so its longer side is at most ``max_side``."""
+    im = img.convert("RGB")
+    if max(im.size) > max_side:
+        s = max_side / max(im.size)
+        im = im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
 
 
 def png_bytes(img: Image.Image) -> bytes:
@@ -127,9 +163,13 @@ class ModelClient:
 
     # ---- public calls -------------------------------------------------------------------------------
 
-    def generate_image(self, prompt: str, *, size: str = "1024x1024") -> Image.Image:
+    def generate_image(self, prompt: str, *, size: str = "1024x1024", attempt: int = 0) -> Image.Image:
+        """Muse Image generation. ``attempt`` > 0 asks again for the same request (a new sample, its own cache key);
+        the API takes no seed, so a new sample is the only way to draw again."""
         body = {"model": IMAGE_MODEL, "prompt": prompt, "n": 1, "size": size, "output_format": "png"}
-        summary = {"endpoint": "images/generations", **body}
+        summary: dict[str, Any] = {"endpoint": "images/generations", **body}
+        if attempt:
+            summary["attempt"] = attempt
         return self._image_call("images/generations", body, summary, kind="generate")
 
     def edit_image(
@@ -208,6 +248,67 @@ class ModelClient:
                  "output_text": _output_text(resp)}
         self._save_entry(key, entry)
         return self._decode_and_save(key, entry, rgb.size)
+
+    def compare_images(
+        self,
+        prompt: str,
+        images: list[Image.Image],
+        *,
+        schema: dict[str, Any],
+        model: str = TEXT_MODEL,
+        reasoning_effort: str = "low",
+        max_output_tokens: int = 3000,
+        image_max_side: int = 1024,
+        jpeg_quality: int = 90,
+        attempt: int = 0,
+    ) -> dict[str, Any]:
+        """A Responses API call with images and a strict JSON schema; returns the parsed JSON object.
+
+        Images are sent as JPEG data URLs scaled to ``image_max_side``. Cost is estimated from the token usage.
+        An empty, unparsable or non-object answer raises ``ClientError`` (it is never guessed).
+        """
+        jpgs = [jpeg_bytes(im, image_max_side, jpeg_quality) for im in images]
+        summary: dict[str, Any] = {
+            "endpoint": "responses",
+            "model": model,
+            "prompt": prompt,
+            "images_sha256": [_sha(j) for j in jpgs],
+            "schema": schema,
+            "reasoning_effort": reasoning_effort,
+            "max_output_tokens": max_output_tokens,
+        }
+        if attempt:
+            summary["attempt"] = attempt
+        key = request_key(summary)
+        entry = self._load(key)
+        if entry is not None:
+            self.log.add(model, "compare", key, cached=True)
+            return _parse_json_object(entry["output_text"], key)
+        if self.mode == "replay":
+            raise ReplayMiss(f"no cached responses entry for key {key} (model={model})")
+        if model not in PRICE_PER_MTOK_USD:  # checked before the paid call, so its cost is never lost
+            raise ClientError(f"no token price configured for {model}")
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        content += [{"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(j).decode("ascii")}
+                    for j in jpgs]
+        body = {
+            "model": model,
+            "input": [{"type": "message", "role": "user", "content": content}],
+            "max_output_tokens": max_output_tokens,
+            "reasoning": {"effort": reasoning_effort},
+            "text": {"format": {"type": "json_schema", "name": schema["name"], "strict": True,
+                                "schema": schema["schema"]}},
+        }
+        started = time.monotonic()
+        resp = self._post("responses", body)
+        cost = token_cost_usd(model, resp.get("usage"))
+        self.log.add(model, "compare", key, cached=False, cost_usd=cost)
+        # An incomplete answer (out of output tokens, say) is a failure, not a result: raised and never cached.
+        require_completed("responses", resp, required=True)
+        entry = {"request": summary, "seconds": round(time.monotonic() - started, 2), "status": resp.get("status"),
+                 "output_text": _output_text(resp), "usage": resp.get("usage"), "cost_usd": round(cost, 6)}
+        self._save_entry(key, entry)
+        return _parse_json_object(entry["output_text"], key)
 
     def _decode_and_save(self, key: str, entry: dict[str, Any], size: tuple[int, int]) -> list[SamInstance]:
         instances = decode_sam_output(entry["output_text"], size)
@@ -328,6 +429,18 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
         detail = resp.get("error") or resp.get("incomplete_details")
         raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
                        + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
+
+
+def _parse_json_object(text: str, key: str) -> dict[str, Any]:
+    if not text.strip():
+        raise ClientError(f"responses entry {key} has no output text")
+    try:
+        out = json.loads(text)
+    except ValueError as e:
+        raise ClientError(f"responses entry {key} is not JSON: {e}") from e
+    if not isinstance(out, dict):
+        raise ClientError(f"responses entry {key} is not a JSON object")
+    return out
 
 
 def _output_text(resp: dict[str, Any]) -> str:
