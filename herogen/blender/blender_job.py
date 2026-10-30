@@ -28,7 +28,8 @@ def reset_scene():
     return scene
 
 
-def make_object(name, verts, faces, origin=(0.0, 0.0, 0.0), color=None, smooth=True, uv=None, image=None):
+def make_object(name, verts, faces, origin=(0.0, 0.0, 0.0), color=None, smooth=True, uv=None, image=None,
+                material="BodyAtlas"):
     me = bpy.data.meshes.new(name)
     o = np.asarray(origin, dtype=np.float64)
     me.from_pydata((np.asarray(verts) - o).tolist(), [], np.asarray(faces, dtype=np.int64).tolist())
@@ -43,7 +44,7 @@ def make_object(name, verts, faces, origin=(0.0, 0.0, 0.0), color=None, smooth=T
     obj.location = Vector(o.tolist())
     bpy.context.scene.collection.objects.link(obj)
     if image is not None:
-        me.materials.append(atlas_material(image))
+        me.materials.append(atlas_material(image, material))
     elif color is not None:
         mat = bpy.data.materials.new(name + "Mat")
         mat.diffuse_color = (*color, 1.0)
@@ -61,12 +62,13 @@ def make_object(name, verts, faces, origin=(0.0, 0.0, 0.0), color=None, smooth=T
 _MATERIALS = {}
 
 
-def atlas_material(path):
-    """One shared material per atlas: the image into Base Color, rough and non-metallic (reads as unlit)."""
+def atlas_material(path, name="BodyAtlas"):
+    """One shared material per texture image: the image into Base Color, rough and non-metallic (reads as
+    unlit). ``name`` names the material (the body atlas or the Head's own texture)."""
     if path in _MATERIALS and _MATERIALS[path].name in bpy.data.materials:
         return _MATERIALS[path]
     img = bpy.data.images.load(path, check_existing=True)
-    mat = bpy.data.materials.new("BodyAtlas")
+    mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
     bsdf = nodes.get("Principled BSDF")
@@ -226,35 +228,63 @@ def task_decimate(t):
     return out
 
 
+HEAD_TEXTURE_MATERIAL = "HeadTexture"
+
+
 def build_body(path, colors, image=None):
+    """The LOD's sections as objects. ``image`` is one texture for every section (a path), or a dict with the
+    shared atlas under "body" and a section's own texture under its name (the Head's, material "HeadTexture")."""
     d = np.load(path)
     names = sorted({k.split("__")[0] for k in d.files})
-    return {name: make_object(name, d[name + "__verts"], d[name + "__faces"], origin=d[name + "__pivot"],
-                              color=colors.get(name),
-                              uv=d[name + "__uv"] if (name + "__uv") in d.files else None,
-                              image=image) for name in names}
+    images = image if isinstance(image, dict) else {"body": image}
+
+    def texture(name):
+        own = images.get(name)
+        return (own, HEAD_TEXTURE_MATERIAL if name == "Head" else name + "Texture") if own else \
+            (images.get("body"), "BodyAtlas")
+
+    out = {}
+    for name in names:
+        img, mat = texture(name)
+        out[name] = make_object(name, d[name + "__verts"], d[name + "__faces"], origin=d[name + "__pivot"],
+                                color=colors.get(name), uv=d[name + "__uv"] if (name + "__uv") in d.files else None,
+                                image=img, material=mat)
+    return out
 
 
 def task_uv(t):
-    """Smart-project every section of each LOD together into one UV atlas; save per-corner UVs. Islands are
-    unwrapped without margin and packed by their concave shapes with a gutter of `margin[lod]` (a fraction of the
-    atlas side)."""
+    """Smart-project the sections of each LOD into one UV atlas; save per-corner UVs. Sections named in
+    ``separate`` (the Head, which has its own texture) are each unwrapped and packed alone into the whole UV
+    square; the others share one atlas. Islands are unwrapped without margin and packed by concave shape
+    with a gutter given as a fraction of each texture side."""
     out = {}
+    separate = list(t.get("separate", []))
     for lod, path in t["lods"].items():
         margin = t["margin"][lod] if isinstance(t.get("margin"), dict) else t.get("margin", 0.002)
         reset_scene()
         objs = build_body(path, {})
-        bpy.ops.object.select_all(action="DESELECT")
-        for o in objs.values():
-            o.select_set(True)
-        bpy.context.view_layer.objects.active = next(iter(objs.values()))
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.0,
-                                 area_weight=0.0, correct_aspect=True, scale_to_bounds=False)
-        bpy.ops.uv.select_all(action="SELECT")
-        bpy.ops.uv.pack_islands(rotate=True, margin=margin, shape_method="CONCAVE", margin_method="FRACTION")
-        bpy.ops.object.mode_set(mode="OBJECT")
+        groups = [[n for n in objs if n not in separate]] + [[n] for n in separate if n in objs]
+        for names in groups:
+            if not names:
+                continue
+            if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            bpy.ops.object.select_all(action="DESELECT")
+            for n in names:
+                objs[n].select_set(True)
+            bpy.context.view_layer.objects.active = objs[names[0]]
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_all(action="SELECT")
+            group_margin = margin
+            if names[0] in separate:
+                group_margin = (t["separate_margin"][lod] if isinstance(t.get("separate_margin"), dict)
+                                else t.get("separate_margin", margin))
+            bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.0,
+                                     area_weight=0.0, correct_aspect=True, scale_to_bounds=False)
+            bpy.ops.uv.select_all(action="SELECT")
+            bpy.ops.uv.pack_islands(rotate=True, margin=group_margin, shape_method="CONCAVE",
+                                     margin_method="FRACTION")
+            bpy.ops.object.mode_set(mode="OBJECT")
         arrs = {}
         for name, o in objs.items():
             me = o.data

@@ -95,8 +95,14 @@ class ProfilesEndToEnd(unittest.TestCase):
 
     def records(self):
         body = self.rundir / "04-body"
-        return (json.loads((self.rundir / "stage-4.json").read_text()),
-                json.loads((body / "sections.json").read_text()), body)
+        stage4 = json.loads((self.rundir / "stage-4.json").read_text())
+        sections = json.loads((body / "sections.json").read_text())
+        self.assertEqual(sections["texture"]["head_texture_sizes"], {"high": 1024})
+        self.assertEqual(stage4["body"]["texture"], sections["texture"])
+        from PIL import Image
+        with Image.open(body / "atlas-head-high.png") as im:
+            self.assertEqual(im.size, (1024, 1024))
+        return stage4, sections, body
 
     def test_best_keeps_full_detail_and_builds_no_low_lod(self):
         from herogen.blender.stage4 import run_stage4

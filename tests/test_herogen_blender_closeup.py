@@ -22,7 +22,7 @@ from PIL import Image
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
-from herogen.blender import texture, views  # noqa: E402
+from herogen.blender import score, texture, views  # noqa: E402
 from herogen.pipeline import imaging  # noqa: E402
 from herogen.blender.split import Section
 
@@ -275,6 +275,71 @@ class TestLoadCloseups(unittest.TestCase):
         cus, info = texture.load_closeups(self.run, self.vs)
         self.assertEqual(cus, {})
         self.assertIn("could not be read", info["notes"][0])
+
+
+class TestScoreHeadTexture(unittest.TestCase):
+    """`score.body_colour`: an atlas variant replaces the body atlas; the Head's own texture is replaced only by
+    a Head texture variant."""
+
+    def glb(self):
+        mats = [SimpleNamespace(name="BodyAtlas", image=0, base_color=(1, 1, 1, 1)),
+                SimpleNamespace(name=score.HEAD_MATERIAL, image=1, base_color=(1, 1, 1, 1))]
+        imgs = [np.full((4, 4, 4), 100.0), np.full((4, 4, 4), 200.0)]
+        return SimpleNamespace(materials=mats, meshes=[SimpleNamespace(colors=None)],
+                               merged_face_material=lambda: np.array([0, 1]),
+                               merged_uv=lambda: np.zeros((3, 2)), image=lambda i: imgs[i])
+
+    def test_textures(self):
+        faces = np.array([[0, 1, 2], [0, 1, 2]])
+        own = score.body_colour(self.glb(), faces)
+        self.assertAlmostEqual(own.textures[0][0, 0, 0], score._to_linear(np.array(100 / 255))[()], places=6)
+        atlas = np.full((4, 4, 3), 10.0)
+        head = np.full((4, 4, 3), 250.0)
+        v = score.body_colour(self.glb(), faces, atlas)
+        self.assertAlmostEqual(v.textures[0][0, 0, 0], score._to_linear(np.array(10 / 255))[()], places=6)
+        self.assertAlmostEqual(v.textures[1][0, 0, 0], score._to_linear(np.array(200 / 255))[()], places=6)
+        vh = score.body_colour(self.glb(), faces, atlas, head)
+        self.assertAlmostEqual(vh.textures[1][0, 0, 0], score._to_linear(np.array(250 / 255))[()], places=6)
+
+    def test_body_override_keeps_the_head_texture_in_the_profile_limit(self):
+        import io
+        from unittest.mock import patch
+        from herogen.blender.glb import load_glb, write_glb
+
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d)
+            buf = io.BytesIO()
+            Image.new("RGB", (4096, 2)).save(buf, format="PNG")
+            verts = np.array([[0., 0., 0.], [1., 0., 0.], [0., 0., 1.]])
+            body = write_glb(run / "head.glb", [("Head", verts, np.array([[0, 1, 2]]),
+                                                np.zeros((3, 2)))], texture_png=buf.getvalue())
+            glb = load_glb(body)
+            glb.materials[0].name = score.HEAD_MATERIAL
+            small = run / "small.png"
+            Image.new("RGB", (8, 8)).save(small)
+            with patch.object(score, "load_glb", return_value=glb):
+                kept = score.score_body(run, "kept", body, atlas=small, views=[], profile="roblox-avatar")
+                replaced = score.score_body(run, "replaced", body, atlas=small, head_atlas=small,
+                                             views=[], profile="roblox-avatar")
+            checks = {c["name"]: c for c in kept["profile"]["checks"]}
+            self.assertEqual(kept["atlas"], 4096)
+            self.assertFalse(checks["texture_max_px"]["pass"])
+            self.assertEqual(replaced["atlas"], 8)
+            self.assertEqual(replaced["head_atlas_image"], "small.png")
+
+    def test_discover_pairs_a_variant_with_its_head_texture(self):
+        with tempfile.TemporaryDirectory() as d:
+            body = Path(d) / "04-body"
+            body.mkdir()
+            (body / "high.glb").write_bytes(b"glTF")
+            for name in ("atlas-high.png", "atlas-head-high.png", "atlas-high-no-closeup.png",
+                         "atlas-head-high-no-closeup.png", "atlas-high-side-trust.png"):
+                Image.new("RGB", (4, 4)).save(body / name)
+            specs = {s.name: s for s in score.discover_bodies(Path(d))}
+            self.assertEqual(sorted(specs), ["carve", "carve-no-closeup", "carve-side-trust"])
+            self.assertEqual(specs["carve-no-closeup"].head_atlas.name, "atlas-head-high-no-closeup.png")
+            self.assertIsNone(specs["carve-side-trust"].head_atlas)
+            self.assertIsNone(specs["carve"].head_atlas)
 
 
 if __name__ == "__main__":

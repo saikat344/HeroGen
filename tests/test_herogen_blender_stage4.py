@@ -243,6 +243,9 @@ class TestEndToEndBlender(SyntheticBase):
             self.assertEqual(checks[f"rest_iou_with_covers_{v}"]["reference"], "turnaround")
             self.assertNotIn(f"rest_iou_with_covers_turnaround_{v}", checks)
         self.assertEqual(body["texture"]["atlas_sizes"], {"high": 1024, "low": 512})
+        self.assertEqual(body["texture"]["head_texture_sizes"], {"high": 1024, "low": 512})
+        for lod in ("high", "low"):
+            self.assertTrue((self.rundir / "04-body" / f"atlas-head-{lod}.png").exists(), lod)
         self.assertEqual(len(body["covers"]["pieces_high"]), 2)
         # the cuts were placed once, on the reference body, and the record says where and why
         cuts_rec = body["cuts"]
@@ -261,7 +264,8 @@ class TestEndToEndBlender(SyntheticBase):
             raw = (self.rundir / "04-body" / f"{lod}.glb").read_bytes()
             n = int.from_bytes(raw[12:16], "little")
             gltf = json.loads(raw[20:20 + n])
-            self.assertEqual(len(gltf.get("images", [])), 1, lod)
+            self.assertEqual(len(gltf.get("images", [])), 2, lod)        # the body atlas and the Head's own
+            self.assertEqual(sorted(m["name"] for m in gltf["materials"]), ["BodyAtlas", "HeadTexture"], lod)
             self.assertEqual(len(gltf["meshes"]), 15, lod)
 
 
