@@ -32,6 +32,15 @@ MIN_LINE_CONTRAST = 32
 # so the tuning set only bounds the cut to (0, 0.66]: it holds no small extra figures to place it against. 0.25 is
 # the diagnosis's proposal, measured there and kept unchanged; the unseen concept sheets s046-s058 are the test.
 OTHER_CHARACTER_MIN_FRAC = 0.25
+# Stage 1. Body parts are found with these SAM 3.1 prompts on the sketch, and belong to the main figure when at
+# least ON_FIGURE_MIN of their area lies on its mask (on the tuning sketches a part on the figure measures
+# 0.93-1.0 and one on another character 0.0).
+FOOT_TEXT, LEG_TEXT = "foot", "leg"
+ON_FIGURE_MIN = 0.5
+# Feet: no `foot` on the main figure means the feet can't be seen. On the tuning sketches every sketch whose
+# figure SAM found has at least one foot on it except five: the two cropped at the knees (s008, s041), where
+# `leg` finds two legs on the figure, and the two robes that hide the feet (s016, s031) and the side view s045,
+# where it finds none. So legs without feet reject the sketch as cropped, and neither feet nor legs warn.
 
 
 def input_check(name: str, value: float, threshold: float, op: str, on_fail: str, message: str,
@@ -117,3 +126,21 @@ def character_checks(instances: list[SamInstance], no_character: str) -> tuple[l
         ),
     ]
     return checks, {"figure_area_fracs": fracs}
+
+
+def parts_on(instances: list[SamInstance], figure: np.ndarray) -> int:
+    """How many of ``instances`` (a body part's) lie mostly on the ``figure`` mask."""
+    return sum(1 for i in instances if i.mask.any() and (i.mask & figure).sum() >= ON_FIGURE_MIN * i.mask.sum())
+
+
+def feet_check(feet: int, legs: int | None) -> Check:
+    """Feet found on the main figure, at least 1. ``legs`` (on the figure, asked only when there are no feet)
+    decides what a failure means: legs without feet are a cropped figure (reject), no legs either is a lower
+    body hidden, by a long robe say (warn)."""
+    cropped = bool(legs)
+    msg = ("the figure looks cropped: SAM 3.1 found its legs but no feet. HeroGen needs the whole body from the top "
+           "of the head to the feet; draw or scan the full figure" if cropped else
+           "no feet or legs found on the figure (a long robe or dress may hide them); HeroGen will have to guess "
+           "the feet and legs")
+    return input_check("sketch_feet_on_figure", feet, 1, ">=", "reject" if cropped else "warn", msg,
+                       note="without feet: reject when legs are found on the figure (cropped), else warn")

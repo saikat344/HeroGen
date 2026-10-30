@@ -71,8 +71,11 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | `sketch_line_contrast` | 0 | how much darker the darkest lines are than the paper: the median luminance minus its 1st percentile (0-255), `>= 32`. No model call. Lines covering under 1% of the image (5.4% or more on the tuning sketches) and light lines on dark paper measure as faint | reject |
 | `sketch_characters_found` | 1 | SAM 3.1 figure instances (the prompt that found the figure, see Mask method) at least 25% of the largest one's area, `== 1`. None is "no character found in the sketch"; two or more are several characters | reject |
 | `sketch_small_extra_figures` | 1 | the other, smaller figure instances (insets, detail drawings), `<= 0` | warn |
+| `sketch_feet_on_figure` | 1 | SAM 3.1 `foot` instances on the main figure (at least half their area on its mask), `>= 1`. With none, SAM 3.1 `leg` is asked too | reject when legs are found on the figure (it is cropped); warn when none are (a long robe hides the lower body) |
 
 Stage 1 runs its input checks on the sketch before it asks for the cover, so a rejected sketch costs no edit. The
+body-part checks are measured only on a sketch with exactly one character, and their prompts are listed in
+`details.input.sam_prompts`, with the counts behind them (`feet_on_figure`, `legs_on_figure`: null when not asked). The
 sketch's figure mask (`01-masks/sketch.png`, compared with the cover) is the largest instance alone, never a union
 with the smaller figures. `details.input` holds the measurements behind the checks (`figure_area_fracs`: each
 instance's area over the largest one's).
@@ -82,6 +85,9 @@ reporting. The two faint-pencil sketches measure a line contrast of 11 and 12 an
 multiple-character sketches have a second instance at 0.66 and 0.77 of the largest and every other sketch has one
 instance, so the tuning set bounds the character cut only to (0, 0.66]; 0.25 is kept from the diagnosis that
 proposed it.
+Every tuning sketch whose figure SAM found has a foot on it except five: the two cropped at the knees (s008, s041),
+where `leg` finds two legs on the figure, and the two robes hiding the feet (s016, s031) and the side view s045,
+where it finds none.
 
 ## Views and cameras
 
