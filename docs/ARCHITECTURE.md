@@ -68,6 +68,7 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | Check | Stage | Measures | Verdict when it fails |
 | --- | --- | --- | --- |
 | `min_side_px` | 0 | the sketch's shorter side in pixels, `>= 256` | reject |
+| `sketch_line_contrast` | 0 | how much darker the darkest lines are than the paper: the median luminance minus its 1st percentile (0-255), `>= 32`. No model call. Lines covering under 1% of the image (5.4% or more on the tuning sketches) and light lines on dark paper measure as faint | reject |
 
 ## Views and cameras
 

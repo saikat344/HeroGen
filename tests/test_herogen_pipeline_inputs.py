@@ -41,6 +41,16 @@ class InputCheckTest(unittest.TestCase):
         self.assertEqual((c["value"], c["verdict"]), (255, "reject"))
         self.assertIn("255 px", c["message"])
 
+    def test_line_contrast(self):
+        fig = place(figure_mask(400, "front"), (600, 560), (100, 80))
+        self.assertEqual(inputs.line_contrast(paint(fig, colour=(60, 60, 60), bg=(250, 250, 250))), 190)
+        faint = paint(fig, colour=(238, 238, 238), bg=(250, 250, 250))
+        self.assertEqual(inputs.line_contrast(faint), 12)
+        c = inputs.contrast_check(faint)
+        self.assertEqual((c["verdict"], c["threshold"]), ("reject", inputs.MIN_LINE_CONTRAST))
+        self.assertIn("only 12 grey levels darker than the paper", c["message"])
+        self.assertEqual(inputs.contrast_check(paint(fig, colour=(200, 200, 200)))["verdict"], "pass")
+
 
 class _SketchRun(unittest.TestCase):
     """A temporary runs root; runs replay from an empty cache, so any model call would stop the run."""
@@ -72,9 +82,28 @@ class Stage0Test(_SketchRun):
         s0 = self._stage(0)
         self.assertEqual((s0["ok"], s0["status"]), (False, "input_rejected"))
         self.assertIn("too small: its shorter side is 200 px", s0["error"])
-        self.assertEqual([(c["name"], c["verdict"]) for c in s0["checks"]], [("min_side_px", "reject")])
+        self.assertEqual({c["name"]: c["verdict"] for c in s0["checks"]},
+                         {"min_side_px": "reject", "sketch_line_contrast": "pass"})
         self.assertIn("input rejected: the sketch is too small", self.err)
         self.assertFalse((self.root / "r" / "stage-1.json").exists())
+
+    def test_faint_lines_are_rejected_before_any_model_call(self):
+        img = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(240, 240, 240))
+        self.assertEqual(self._run(img, (0, 1, 2)), 3)  # replays from an empty cache: a model call would stop it
+        s0 = self._stage(0)
+        self.assertEqual(s0["status"], "input_rejected")
+        self.assertEqual({c["name"]: c["verdict"] for c in s0["checks"]},
+                         {"min_side_px": "pass", "sketch_line_contrast": "reject"})
+        self.assertIn("the lines are too faint", s0["error"])
+        self.assertEqual(s0["calls"], [])
+        self.assertFalse((self.root / "r" / "stage-1.json").exists())
+
+    def test_every_rejection_is_reported_at_once(self):
+        img = paint(place(figure_mask(150, "front"), (200, 240), (25, 40)), colour=(240, 240, 240))
+        self.assertEqual(self._run(img), 3)
+        err = self._stage(0)["error"]
+        self.assertIn("too small", err)
+        self.assertIn("too faint", err)
 
     def test_a_good_sketch_passes(self):
         img = paint(place(figure_mask(400, "front"), (600, 560), (100, 80)), colour=(60, 60, 60))

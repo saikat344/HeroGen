@@ -22,6 +22,7 @@ POSE_WORDS = {"rest": "rest", "walk_a": "walk", "walk_b": "walk (other leg)", "a
 
 LABELS = {
     "min_side_px": "Sketch size, shortest side (px)",
+    "sketch_line_contrast": "Sketch lines dark enough (grey levels)",
     "sketch_mask_area_frac": "Figure found in the sketch (area share)",
     "cover_mask_area_frac": "Figure found in the artwork (area share)",
     "aspect_agreement": "Artwork keeps the sketch proportions",

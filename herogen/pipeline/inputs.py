@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 from herogen.pipeline import checks as C
 
 Check = dict[str, Any]
@@ -17,6 +20,11 @@ VERDICTS = ("pass", "warn", "reject")
 
 # Stage 0. Muse Image works from the sketch's pixels; a side under 256 px leaves too little to keep.
 MIN_SIDE_PX = 256
+# Stage 0. Line contrast (`line_contrast`), in grey levels. On the tuning sketches s001-s045 the two faint-pencil
+# sketches measure 11 and 12 and the 43 others 85-253. Below 32 (about the geometric mean of 12 and 85, a factor of
+# 2.7 from each) the lines are too faint: SAM 3.1 found no `character` in either faint sketch, and Muse Image
+# invented the detail it couldn't see.
+MIN_LINE_CONTRAST = 32
 
 
 def input_check(name: str, value: float, threshold: float, op: str, on_fail: str, message: str,
@@ -51,4 +59,22 @@ def size_check(width: int, height: int) -> Check:
         "min_side_px", side, MIN_SIDE_PX, ">=", "reject",
         f"the sketch is too small: its shorter side is {side} px and HeroGen needs at least {MIN_SIDE_PX} px. "
         "Scan or export it at a higher resolution",
+    )
+
+
+def line_contrast(img: Image.Image) -> float:
+    """How much darker the darkest lines are than the paper, in grey levels (0-255): the median luminance (the
+    paper, which covers most of a sketch) minus the 1st percentile (the darkest lines). Lines must cover at least
+    1% of the image to be measured (on the tuning sketches they cover 5.4% or more), and light lines on dark paper
+    measure as faint."""
+    grey = np.asarray(img.convert("L"), dtype=np.float32)
+    return float(np.median(grey) - np.percentile(grey, 1))
+
+
+def contrast_check(img: Image.Image) -> Check:
+    v = line_contrast(img)
+    return input_check(
+        "sketch_line_contrast", v, MIN_LINE_CONTRAST, ">=", "reject",
+        f"the lines are too faint: the darkest lines are only {v:.0f} grey levels darker than the paper and HeroGen "
+        f"needs at least {MIN_LINE_CONTRAST}. Darken the lines, or scan or photograph the sketch with more contrast",
     )
