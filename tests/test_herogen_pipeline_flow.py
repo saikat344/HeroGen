@@ -107,7 +107,7 @@ class FlowTest(unittest.TestCase):
 
     def _record(self, api: FakeAPI, run_id: str) -> int:
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
-                mock.patch.object(ModelClient, "_post", lambda c, e, b: api.post(c, e, b)), \
+                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: api.post(c, e, b)), \
                 mock.patch.object(client_mod, "decode_sam_output", api.decode):
             return run_pipeline(
                 self.sketch, run_id, [0, 1, 2, 5], mode="live", runs=str(self.root), label="test sketch"

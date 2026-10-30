@@ -55,7 +55,7 @@ class HeldoutTest(unittest.TestCase):
 
     def _live(self, api: FakeAPI, run_id: str, stage_list, cache: str | None = None, views=None) -> int:
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
-                mock.patch.object(ModelClient, "_post", lambda c, e, b: api.post(c, e, b)), \
+                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: api.post(c, e, b)), \
                 mock.patch.object(client_mod, "decode_sam_output", api.decode):
             return run_pipeline(self.sketch, run_id, stage_list, mode="live", runs=str(self.root), cache=cache,
                                 views=views)
