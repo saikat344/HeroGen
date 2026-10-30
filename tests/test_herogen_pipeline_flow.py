@@ -44,6 +44,9 @@ def _decode_data_url(url: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
 
 
+FEET_TEXTS = ("foot", "shoe", "boot")  # the held-out turn guide's foot prompts (`heldout.find_feet`)
+
+
 class FakeAPI:
     """Stands in for Meta's Model API. Draws every image by code; SAM masks come from thresholding."""
 
@@ -56,12 +59,14 @@ class FakeAPI:
         self.calls: list[str] = []
         self.prompts: list[str] = []
         self.last_sam_image: Image.Image | None = None
+        self.last_sam_text = ""
 
     def post(self, _client, endpoint: str, body: dict) -> dict:
         assert os.environ.get("MODEL_API_KEY") == DUMMY_KEY
         self.calls.append(endpoint)
         if endpoint == "responses":
             self.last_sam_image = _decode_data_url(body["input"][0]["content"][1]["image_url"])
+            self.last_sam_text = body["input"][0]["content"][0]["text"]
             return {"status": "completed",
                     "output": [{"type": "message", "content": [{"type": "output_text", "text": "fake"}]}]}
         prompt = body["prompt"]
@@ -86,6 +91,19 @@ class FakeAPI:
 
     def decode(self, text: str, size: tuple[int, int]) -> list[SamInstance]:
         mask = imaging.threshold_mask(self.last_sam_image)
+        if self.last_sam_text in FEET_TEXTS:  # each figure's feet: its lowest 5% of rows, one per column run
+            out = []
+            for x0, x1 in imaging.split_columns(mask):
+                fig = np.zeros_like(mask)
+                fig[:, x0:x1] = mask[:, x0:x1]
+                b = imaging.bbox(fig)
+                band = fig.copy()
+                band[: b[3] - max(1, int(0.05 * (b[3] - b[1])))] = False
+                for a, c in imaging.column_runs(band):
+                    m = np.zeros_like(mask)
+                    m[:, a:c] = band[:, a:c]
+                    out.append(SamInstance(mask=m, box=imaging.bbox(m), confidence=0.9))
+            return out
         out = []
         for x0, x1 in imaging.split_columns(mask):
             m = np.zeros_like(mask)

@@ -38,9 +38,9 @@ VIEWS = [v.name for v in heldout.VIEWS]
 SAM = client_mod.PRICE_PER_IMAGE_USD[client_mod.SAM_MODEL]
 IMG = client_mod.PRICE_PER_IMAGE_USD[client_mod.IMAGE_MODEL]
 # Per generation: the image, then SAM for the figure, the face and the head. Once per stage: face and head on
-# the two profile views.
+# the two profile views, then the feet on the front view (the fake SAM finds two with the first prompt).
 COST_PER_GENERATION = IMG + 3 * SAM
-COST_PROFILE_FACES = 4 * SAM
+COST_PER_STAGE = 4 * SAM + SAM
 
 
 class HeldoutTest(unittest.TestCase):
@@ -136,7 +136,10 @@ class HeldoutTest(unittest.TestCase):
             self.assertGreaterEqual(checks[f"{view.name}.height_agreement_front"]["value"], 0.99)
             self.assertTrue(all(c["pass"] for c in checks.values()))
         self.assertIsNone(rec["details"]["profile_face_offset"])
-        self.assertAlmostEqual(rec["cost_usd"], len(VIEWS) * COST_PER_GENERATION + COST_PROFILE_FACES)
+        self.assertAlmostEqual(rec["cost_usd"], len(VIEWS) * COST_PER_GENERATION + COST_PER_STAGE)
+        legs = rec["details"]["guide_legs"]
+        self.assertEqual(legs["method"], "sam-3.1:foot")  # the turn guide's legs stand on the feet found
+        self.assertEqual(len(legs["feet"]["found"]["foot"]), 2)
         prompts = [rec["details"]["views"][v]["attempts"][0]["prompt"] for v in VIEWS]
         self.assertEqual(len(set(prompts)), len(VIEWS))
         self.assertFalse((run / "heldout/rejected").exists() or (run / "heldout/review").exists())
@@ -182,7 +185,8 @@ class HeldoutTest(unittest.TestCase):
                 self.assertTrue(abs(h / cover[1] - heldout.POSE_REFERENCE_FILL) <= 0.02
                                 or abs(w / cover[0] - heldout.POSE_REFERENCE_MAX_WIDTH) <= 0.01, (rel, w, h))
                 self.assertLessEqual(abs((box[0] + box[2]) - cover[0]), 4, rel)
-        self.assertEqual(api.calls, ["responses"] * 4 + (["images/edits"] + ["responses"] * 3) * len(VIEWS))
+        # SAM on the profile views' face and head, then the feet; then each generation and its 3 SAM calls.
+        self.assertEqual(api.calls, ["responses"] * 5 + (["images/edits"] + ["responses"] * 3) * len(VIEWS))
         self.assertEqual(self._snapshot(run), before)
         for view in heldout.VIEWS:
             self.assertTrue((run / heldout.view_paths(view)["image"]).exists())
@@ -417,13 +421,13 @@ class HeldoutTest(unittest.TestCase):
         rec = self._rec()
         self.assertEqual((rec["ok"], rec["status"]), (False, "error"))
         self.assertIn("connection reset", rec["error"])
-        # The paid calls of the failed run are in the record: 4 profile SAM calls, then front-left-30's two
-        # generations before the third image call failed (the second drew the same image, so its 3 SAM calls
-        # came from the cache).
+        # The paid calls of the failed run are in the record: 4 profile SAM calls and the feet, then
+        # front-left-30's two generations before the third image call failed (the second drew the same image,
+        # so its 3 SAM calls came from the cache).
         stop = rec["stopped_runs"][-1]
         live = [c for c in stop["calls"] if not c["cached"]]
-        self.assertEqual(len(live), 4 + 4 + 1)
-        self.assertAlmostEqual(stop["cost_usd"], COST_PROFILE_FACES + COST_PER_GENERATION + IMG)
+        self.assertEqual(len(live), 5 + 4 + 1)
+        self.assertAlmostEqual(stop["cost_usd"], COST_PER_STAGE + COST_PER_GENERATION + IMG)
         # The earlier run's calls and cost are kept, and the total counts both.
         self.assertEqual(rec["calls"], old["calls"])
         self.assertAlmostEqual(rec["run_cost_usd"], old["cost_usd"])
@@ -579,7 +583,7 @@ class HeldoutTest(unittest.TestCase):
         api = FakeAPI()
         self.assertEqual(self._live(api, "r", ["2h"], cache=str(Path(self.tmp.name) / "fresh"),
                                     views=["front-left-60", "front-right-60"]), 0)
-        self.assertEqual(api.calls, ["responses"] * 4 + (["images/edits"] + ["responses"] * 3) * 2)
+        self.assertEqual(api.calls, ["responses"] * 5 + (["images/edits"] + ["responses"] * 3) * 2)
         rec = self._rec()
         self.assertTrue(rec["ok"])
         self.assertEqual(rec["details"]["accepted_views"], VIEWS)

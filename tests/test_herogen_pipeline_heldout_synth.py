@@ -34,6 +34,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.blender import synth  # noqa: E402  (read-only use of the stage-2 test humanoid)
 from herogen.pipeline import heldout, imaging  # noqa: E402
+from herogen.pipeline.client import ApiError, SamInstance  # noqa: E402
 
 SIZE = 512
 PPU = 80.0  # pixels per stud: the 5.5-stud figure is 440 px tall, the same scale as synth.render_masks
@@ -674,6 +675,276 @@ class InputImagesTest(unittest.TestCase):
         h = b[3] - b[1]
         for frac in (0.75, 0.9, 0.98):
             self.assertTrue(guide[b[1] + int(frac * h) - 1].any(), frac)
+
+
+    def test_central_run_of_a_parted_row(self):
+        row = np.zeros(100, dtype=bool)
+        for a, b in ((5, 10), (30, 45), (55, 70), (90, 95)):  # hand, body, body, hand
+            row[a:b] = True
+        self.assertEqual(heldout.central_run(row, 50.0), (30, 70))
+        self.assertEqual(heldout.central_run(row, 40.0), (30, 45))  # the run holding the centre
+        one_side = row.copy()
+        one_side[50:] = False
+        self.assertEqual(heldout.central_run(one_side, 50.0), (30, 45))
+        self.assertEqual(heldout.central_run(np.zeros(100, dtype=bool), 50.0), (49.0, 51.0))
+
+
+def _capsule(mask: np.ndarray, p: tuple[float, float], q: tuple[float, float], r: float) -> np.ndarray:
+    """``mask`` with a 2D capsule (x, y px) from ``p`` to ``q`` of radius ``r`` drawn in."""
+    yy, xx = np.mgrid[0 : mask.shape[0], 0 : mask.shape[1]]
+    p_, d = np.array(p, float), np.array(q, float) - np.array(p, float)
+    t = np.clip(((xx - p_[0]) * d[0] + (yy - p_[1]) * d[1]) / (d @ d), 0, 1)
+    return mask | ((xx - p_[0] - t * d[0]) ** 2 + (yy - p_[1] - t * d[1]) ** 2 <= r * r)
+
+
+class GuideLegsTest(unittest.TestCase):
+    """The turn guide's legs stand on the feet SAM finds: tails, staffs, swords, hands, capes and shields are
+    not legs. Without two feet, the outline rule (main's: the outermost runs).
+
+    The test humanoid (legs a little apart) stands 440 px tall from row 36: the hip row (0.52) is row 264,
+    the knee row (0.71) row 348, the sole row (0.98) row 467; its legs' knee runs are x 207-243 and 269-305,
+    its centre x 256."""
+
+    ROWS = heldout.GuideLegs.ROWS
+
+    def _front(self, parted: bool = True, arm: float = 50.0, **kw) -> np.ndarray:
+        fig = figure("lowered", clothed=False, arm_deg=arm, leg_spread=kw.get("leg_spread", 0.1))
+        if parted:  # a short pelvis: the legs part above the hip row
+            fig.parts[4] = synth.RBox((0.0, 0.0, 2.95), (0.56, 0.30, 0.15), 0.12)
+        return turnaround(fig)["front"]
+
+    def _feet(self, plain: np.ndarray) -> list[np.ndarray]:
+        """What a foot detector finds: each sole-row run's column span over the lowest 8% of the figure."""
+        b = imaging.bbox(plain)
+        out = []
+        for a, c in self._runs(plain, "sole"):
+            f = np.zeros_like(plain)
+            f[b[3] - int(0.08 * (b[3] - b[1])) : b[3], a:c] = True
+            out.append(f & plain)
+        return out
+
+    def _runs(self, front: np.ndarray, row: str) -> list[tuple[int, int]]:
+        return heldout._runs(front[heldout._row_at(front, self.ROWS[row])])
+
+    def _legs(self, front: np.ndarray, feet: list[np.ndarray]) -> heldout.GuideLegs:
+        return heldout.guide_legs(front, feet, "foot")
+
+    def _same_legs(self, plain: np.ndarray, front: np.ndarray) -> heldout.GuideLegs:
+        """The legs of ``front`` (``plain`` with something added that touches no leg) on the feet of
+        ``plain`` equal ``plain``'s: its knee and sole runs and, for the hips, the legs' span at the hip
+        row."""
+        feet = self._feet(plain)
+        want, got = self._legs(plain, feet), self._legs(front, feet)
+        self.assertEqual(got.method, "sam-3.1:foot")
+        self.assertEqual((got.hips, got.knees, got.soles), (want.hips, want.knees, want.soles))
+        self.assertEqual(want.knees, tuple(self._runs(plain, "knee")))
+        self.assertEqual(want.soles, tuple(self._runs(plain, "sole")))
+        return got
+
+    def _leg_lines(self, front: np.ndarray, legs: heldout.GuideLegs | None):
+        t = {"left": np.fliplr(front), "right": front}  # any profile: only the front's x is checked at yaw 0
+        shapes, h = heldout._guide_shapes(front, t["left"], t["right"], 0.0, legs)
+        lw = 0.035 * h
+        return [pts for kind, pts, w in shapes if kind == "line" and w == 1.3 * lw], shapes
+
+    def test_parted_hip_row_with_hands_in_it(self):
+        # RC7: the legs part above the hip row, so no run there holds the centre; with the arms at 40 degrees
+        # the hands reach into that row (the first run is a hand). Feet or no feet, the hips span the legs,
+        # each leg is straight, and the torso's lowest edge is the hips.
+        for arm in (40.0, 50.0):
+            front = self._front(arm=arm)
+            fb = imaging.bbox(front)
+            cx = (fb[0] + fb[2]) / 2
+            hip_runs = self._runs(front, "hip")
+            self.assertFalse([r for r in hip_runs if r[0] <= cx <= r[1]], arm)
+            if arm == 40.0:
+                self.assertEqual(len(hip_runs), 4)  # hand, leg, leg, hand
+            legs_at_hips = [r for r in hip_runs if abs((r[0] + r[1]) / 2 - cx) < 60]
+            for legs in (self._legs(front, self._feet(front)), heldout.guide_legs(front, [], None)):
+                self.assertEqual(legs.hips, (legs_at_hips[0][0], legs_at_hips[1][1]), (arm, legs.method))
+                lines, shapes = self._leg_lines(front, legs)
+                for pts, (ka, kb), sign in zip(lines, self._runs(front, "knee"), (-1, 1), strict=True):
+                    (hip_u, _), (knee_u, _) = pts[0], pts[1]
+                    self.assertGreater(sign * hip_u, 0, arm)
+                    self.assertAlmostEqual(knee_u, (ka + kb) / 2 - cx)
+                    # Neither crossed nor bent: the hip is above its knee, give or take a tenth of the height.
+                    self.assertLess(abs(hip_u - knee_u), 0.1 * (fb[3] - fb[1]), arm)
+                torso = next(pts for kind, pts, _ in shapes if kind == "polygon")
+                at_hips = sorted(u for u, v in torso if v == self.ROWS["hip"])
+                self.assertEqual(at_hips, [legs.hips[0] - cx, legs.hips[1] - cx])
+
+    def test_pelvis_covering_the_hip_row(self):
+        front = self._front(parted=False)
+        fb = imaging.bbox(front)
+        cx = (fb[0] + fb[2]) / 2
+        hit = [r for r in self._runs(front, "hip") if r[0] <= cx <= r[1]]
+        for legs in (self._legs(front, self._feet(front)), heldout.guide_legs(front, [], None)):
+            self.assertEqual(legs.hips, hit[0], legs.method)
+
+    def test_props_beside_the_legs(self):
+        for parted in (False, True):
+            plain = self._front(parted=parted)
+            cases = {
+                "vertical staff": _capsule(plain, (92.0, 60.0), (92.0, 468.0), 6.0),
+                "sword to the knee row": _capsule(plain, (100.0, 230.0), (115.0, 380.0), 5.0),
+                "hand at knee height": _capsule(plain, (178.0, 340.0), (178.0, 356.0), 14.0),
+                "tail to the knee row": _capsule(plain, (300.0, 290.0), (345.0, 380.0), 10.0),
+                "shield beside a leg": plain | _box(plain, 120, 250, 195, 420),
+            }
+            for name, front in cases.items():
+                self.assertGreater(len(self._runs(front, "knee")), 2, name)
+                with self.subTest(name, parted=parted):
+                    self._same_legs(plain, front)
+
+    def test_props_between_the_legs(self):
+        # Between the legs, nearer the centre than either: a tail to the floor or to the knee row, a staff
+        # planted between the feet, a prop off the centre.
+        plain = self._front()
+        cases = {
+            "tail to the floor": _capsule(plain, (256.0, 275.0), (256.0, 468.0), 6.0),
+            "tail to the knee row": _capsule(plain, (256.0, 275.0), (256.0, 370.0), 6.0),
+            "staff between the feet": _capsule(plain, (256.0, 120.0), (258.0, 470.0), 5.0),
+            "prop off the centre": _capsule(plain, (262.0, 275.0), (262.0, 470.0), 4.0),
+        }
+        for name, front in cases.items():
+            self.assertEqual(len(self._runs(front, "knee")), 3, name)
+            with self.subTest(name):
+                self._same_legs(plain, front)
+
+    def test_thin_legs_with_a_tail_between(self):
+        fig = figure("a", clothed=False, leg_spread=0.25)
+        for i in (8, 9, 14, 15):  # thighs and shins a third as thick
+            fig.parts[i] = synth.Capsule(fig.parts[i].a, fig.parts[i].b, fig.parts[i].r / 3)
+        plain = turnaround(fig)["front"]
+        knees = self._runs(plain, "knee")
+        self.assertEqual(len(knees), 2)
+        front = _capsule(plain, (256.0, 300.0), (256.0, 464.0), 10.0)  # thicker than either leg
+        self.assertEqual(len(self._runs(front, "knee")), 3)
+        self._same_legs(plain, front)
+
+    def test_one_sided_cape_backpack_or_armour(self):
+        # Something that widens the torso on one side only (a cape, a backpack, a pauldron) moves the
+        # figure's centre and the torso's middle, but not the feet.
+        plain = self._front()
+        for name, front in {"cape to 0.47": plain | _box(plain, 296, 90, 420, 243),
+                            "torso wider image-right": plain | _box(plain, 296, 110, 360, 250)}.items():
+            with self.subTest(name):
+                self._same_legs(plain, front)
+
+    def test_shield_covering_the_centre(self):
+        # The legs are hidden behind a shield from the hips to below the knees: the soles still stand on
+        # the feet, the knees split the shield's run and the hips are its run.
+        plain = self._front()
+        front = plain | _box(plain, 180, 240, 332, 400)
+        legs = self._legs(front, self._feet(plain))
+        self.assertEqual(legs.soles, tuple(self._runs(plain, "sole")))
+        (shield,) = self._runs(front, "knee")
+        self.assertEqual(legs.knees, ((shield[0], sum(shield) / 2), (sum(shield) / 2, shield[1])))
+        self.assertEqual(legs.hips, self._runs(front, "hip")[0] if len(self._runs(front, "hip")) == 1
+                         else next(r for r in self._runs(front, "hip") if r[0] <= 256 < r[1]))
+
+    def test_arm_thicker_than_the_thigh_it_touches(self):
+        # An arm 40 px thick (the thigh is 36) that touches the image-left thigh between the hip and knee
+        # rows and is apart from it at the hip row: the hips stay on the legs.
+        plain = self._front()
+        front = _capsule(plain, (170.0, 150.0), (200.0, 320.0), 20.0)
+        self.assertEqual(len(self._runs(front, "hip")), 3)  # arm, thigh, thigh
+        self._same_legs(plain, front)
+
+    def test_fragment_at_the_sole_row(self):
+        plain = self._front(parted=False)
+        front = plain.copy()
+        front[455:476, 255:257] = True  # a 2 px sliver between the feet
+        self._same_legs(plain, front)
+
+    def test_feet_together(self):
+        # Legs pressed together (one run at the knee row) and feet touching (one run at the sole row): the
+        # sole run is split halfway between the two feet, the knee run at its middle.
+        plain = turnaround(figure("a", clothed=False, leg_spread=-0.3))["front"]
+        feet = self._feet(plain)
+        (fl, fr) = self._runs(plain, "sole")
+        b = imaging.bbox(plain)
+        plain[b[3] - 20 : b[3], fl[1] : fr[0]] = True  # the feet touch
+        (sole,) = self._runs(plain, "sole")
+        m = (fl[1] + fr[0]) / 2
+        legs = self._legs(plain, feet)
+        self.assertEqual(legs.soles, ((sole[0], m), (m, sole[1])))
+        (knee,) = self._runs(plain, "knee")
+        self.assertEqual(legs.knees, ((knee[0], sum(knee) / 2), (sum(knee) / 2, knee[1])))
+        front = _capsule(plain, (150.0, 60.0), (150.0, 468.0), 6.0)  # and a staff beside them
+        got = self._legs(front, feet)
+        self.assertEqual((got.knees, got.soles), (legs.knees, legs.soles))
+
+    def test_without_feet_the_outline_rule(self):
+        # No two feet (a long robe; SAM found one or none): main's rule, the outermost runs, which a staff
+        # beside the legs fools. The record says which rule drew the guide.
+        plain = self._front(parted=False)
+        front = _capsule(plain, (92.0, 60.0), (92.0, 468.0), 6.0)
+        for feet in ([], self._feet(plain)[:1]):
+            legs = heldout.guide_legs(front, feet, "foot" if feet else None)
+            self.assertEqual(legs.method, "outline")
+            self.assertEqual(legs.knees[0], self._runs(front, "knee")[0])  # the staff
+            self.assertEqual(legs.hips, heldout.legs_from_outline(plain).hips)
+        # A "foot" with no pixel on the sole row can't anchor a leg.
+        floating = self._feet(plain)
+        floating[0] = np.roll(floating[0], -60, axis=0)
+        self.assertEqual(heldout.guide_legs(plain, floating, "foot").method, "outline")
+
+
+def _box(mask: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+    out = np.zeros_like(mask)
+    out[y0:y1, x0:x1] = True
+    return out
+
+
+class FindFeetTest(unittest.TestCase):
+    """`find_feet`: which SAM instances count as feet, and the prompts tried in turn."""
+
+    class _Client:
+        def __init__(self, answers):
+            self.answers, self.asked = answers, []
+
+        def segment(self, _img, text):
+            self.asked.append(text)
+            return self.answers.get(text, [])
+
+    def _inst(self, m, conf=0.9):
+        return SamInstance(mask=m, box=imaging.bbox(m), confidence=conf)
+
+    def setUp(self):
+        self.front = turnaround(figure("a", clothed=False, leg_spread=0.1))["front"]
+        b = imaging.bbox(self.front)
+        self.feet = []
+        for a, c in heldout._runs(self.front[heldout._row_at(self.front, 0.98)]):
+            f = np.zeros_like(self.front)
+            f[b[3] - 30 : b[3], a:c] = True
+            self.feet.append(f & self.front)
+
+    def test_first_prompt_with_two_feet(self):
+        left, right = self.feet
+        off_figure = np.zeros_like(self.front)
+        off_figure[5:30, 5:30] = True
+        high = np.roll(left, -120, axis=0) & self.front  # on the figure, but not on the sole row
+        shoes = [self._inst(right, 0.7), self._inst(right, 0.8), self._inst(left, 0.6)]
+        client = self._Client({"foot": [self._inst(right), self._inst(off_figure), self._inst(high)],
+                               "shoe": shoes})
+        feet, found = heldout.find_feet(client, None, self.front)
+        self.assertEqual(client.asked, ["foot", "shoe"])  # "foot" found one foot; "boot" not needed
+        self.assertEqual(found["prompt"], "shoe")
+        self.assertEqual(len(found["found"]["shoe"]), 2)  # the duplicate right foot kept once
+        self.assertTrue(np.array_equal(feet[0], left) and np.array_equal(feet[1], right))  # image-left first
+
+    def test_no_feet(self):
+        client = self._Client({})
+        self.assertEqual(heldout.find_feet(client, None, self.front)[0], [])
+        self.assertEqual(client.asked, ["foot", "shoe", "boot"])
+
+    def test_model_api_failure_stops(self):
+        class Broken:
+            def segment(self, *_a):
+                raise ApiError("HTTP 500")
+        with self.assertRaises(ApiError):
+            heldout.find_feet(Broken(), None, self.front)
 
 
 class MeasureFaceTest(unittest.TestCase):

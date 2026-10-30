@@ -301,7 +301,28 @@ turnaround's A-pose, each its own edit of the cover: `front-left-30`, `front-rig
 `front-right-60`, named by their target yaw (front-left views face image left). No building stage reads
 `heldout/`; the views exist so a body can be scored on views it was not built from. Each generation sends the
 cover, a pose reference (the front view, or the nearer profile for turns of 50 degrees or more) and a grey
-mannequin of the turnaround's pose drawn at the requested yaw, both at one shared scale.
+mannequin of the turnaround's pose drawn at the requested yaw, both at one shared scale. The mannequin takes
+only landmark positions from the turnaround: the torso is the run holding the front figure's centre in each
+torso row (or, in a row parted at the centre, the span of the nearest runs on either side). The legs stand on
+the feet, since a silhouette alone can't tell a leg from a tail, a staff or a cape, but a foot is never one of
+those. Once per run, SAM 3.1 is asked for `foot`, then `shoe`, then `boot` on the turnaround's front view,
+stopping at the first prompt that finds two feet. A foot is an instance with half its pixels or more on the
+figure and pixels on its sole row (0.98 of the height); overlapping instances count once. Each foot's leg is
+the sole-row run it overlaps most (feet on one run, standing together, split it halfway between them). Each
+leg is then followed up the front outline, row by row, to the knee row (0.71) and on to the hip row (0.52).
+On each row the trace keeps, of the runs overlapping the last one, the one overlapping the leg's own starting
+run most, so a hand, an arm or a tail that touches the leg for some rows and parts again is left behind.
+Legs on one run at the knee row split it at its middle. The hips span from the image-left leg's left edge to
+the image-right leg's right edge, so legs that join below the hip row give the run they join. A tail or a
+staff between the legs, a sword, a hand or a shield beside them, a one-sided cape, backpack or pauldron, and a
+thin leg are therefore never mistaken for legs. Something still touching a leg in the hip row itself (a hand
+resting on the hip, a tail growing from it) is part of that row's run and widens the hips. When no prompt
+finds two feet on the sole row (a long robe hides them), the guide uses the outline rule: the outermost runs
+of the knee and sole rows, and for the hips the hip row's run holding the figure's centre (the span of the
+nearest runs either side when the row is parted there). `stage-2h.json` records which rule drew the guide
+(`details.guide_legs.method`: `sam-3.1:<prompt>` or `outline`), the legs' runs and what each prompt found. A
+SAM failure on the feet stops the stage like any other. A replay of a run recorded before feet were asked
+for misses at the first foot prompt.
 
 The prompt asks for the figure at the mannequin's size and place, so a generation's pixels map to the views'
 pixels by one over the shared framing scale (times the input width over the generated width). The generated
