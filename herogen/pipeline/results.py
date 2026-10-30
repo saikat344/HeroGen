@@ -23,6 +23,8 @@ STAGES = [
 
 # The held-out views' record, reported after stage 2 when it exists.
 HELDOUT_STAGE = ("2h", "held-out views")
+# The prompt-to-sketch record, reported first when the run started from a text prompt.
+PROMPT_STAGE = ("p", "prompt sketch")
 
 # Images shown per stage beyond its record's `outputs` (stages 3-4 write folders of renders).
 EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
@@ -115,6 +117,8 @@ def collect(run: RunFolder) -> dict[str, Any]:
     order: list[tuple[Any, str]] = list(STAGES)
     if run.read_stage(HELDOUT_STAGE[0]) is not None:
         order.insert(3, HELDOUT_STAGE)
+    if run.read_stage(PROMPT_STAGE[0]) is not None:
+        order.insert(0, PROMPT_STAGE)
     for n, label in order:
         rec = run.read_stage(n)
         if rec is None:
