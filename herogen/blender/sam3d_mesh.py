@@ -14,17 +14,18 @@ pitch, a rigid tilt the front view cannot see, which is registered on the observ
 3. Fit: small yaw / roll and a perspective-to-orthographic correction (the model assumes a perspective camera;
    points farther from that camera are scaled up about its height so the orthographic front outline matches the
    drawing), coordinate descent on the front IoU at half resolution with the pitch held.
-3b. Pitch: a tilt about X barely changes the front outline (foreshortening and the renormalised height move the
-   front IoU by a few hundredths over 20 degrees, enough for a front-only fit to drift towards its limit) but
-   tips the side profile. With the step 3 fit held, the pitch is swept from -30 to 30 degrees in 2 degree
-   steps, scored by the mean IoU of the left and right masks at half resolution, and the peaks refined to 1
-   degree; the front fit is then redone with that pitch. The pitch stays 0, with the reason recorded, when no
-   side view is observed (a missing, empty or derived mask), the side IoU varies by less than 0.02 over the
-   sweep (flat), another peak more than 8 degrees away comes within 0.01 of the best (ambiguous), or the best
-   lies beyond the +-20 degree limit. No Y offset is fitted: the frame stays centred on the bounding box (step
-   4), as each view's u is centred on its mask's box, and the pitch is chosen in that frame, so a part the mesh
-   lacks or places differently (a tail, a pack), which moves a mask's box, can pull the pitch. This registers
-   the model's pose only: the side masks never change its shape.
+3b. Pitch: a tilt about X (the body's side-to-side axis once the facing is applied; `rotation`) barely changes
+   the front outline (foreshortening and the renormalised height move the front IoU by a few hundredths over 20
+   degrees, enough for a front-only fit to drift towards its limit) but tips the side profile. With the step 3
+   fit held, the pitch is swept from -30 to 30 degrees in 2 degree steps, scored by the mean IoU of the left and
+   right masks at half resolution, and the peaks refined to 1 degree; the front fit is then redone with that
+   pitch. The pitch stays 0, with the reason recorded, unless both side views are observed (a missing, empty or
+   derived mask counts as not), and when the side IoU varies by less than 0.02 over the sweep (flat), another
+   peak more than 8 degrees away comes within 0.01 of the best (ambiguous), or the best lies beyond the +-20
+   degree limit. No Y offset is fitted: the frame stays centred on the bounding box (step 4), as each view's u
+   is centred on its mask's box, and the pitch is chosen in that frame, so a part the mesh lacks or places
+   differently (a tail, a pack), which moves a mask's box, can pull the pitch. This registers the model's pose
+   only: the side masks never change its shape.
 4. Normalise: height `height` studs, feet at Z = 0, X/Y centred on the bounding box (the contract frame).
 5. Conform: the front outline is pulled onto the front mask with a smooth 2D displacement field in X/Z
    (silhouette-rim pixels move to the nearest mask edge, outward moves only along the rim's outward normal,
@@ -200,13 +201,14 @@ def conform(verts: np.ndarray, faces: np.ndarray, front: View, iters: int = CONF
 
 def pose_views(vs) -> tuple[dict, dict]:
     """The observed side views (`POSE_VIEWS`) the pitch is registered on, and why each other one is not used. A
-    view stage 2 derived from the others (mask_method "visual_hull") is not an observation; `load_views` lists a
-    missing or empty mask as missing. Held-out views are never in a `ViewSet`."""
+    view stage 2 derived from the others (mask_method "visual_hull") is not an observation; `load_views` skips a
+    missing or empty mask (and notes an empty one). Held-out views are never in a `ViewSet`."""
     method = vs.meta.get("mask_method") or {}
     use, skip = {}, {}
     for name in POSE_VIEWS:
         if name not in vs.views:
-            skip[name] = "no usable mask (missing or empty)"
+            empty = any(n.startswith(f"{name} mask is empty") for n in vs.notes)
+            skip[name] = "empty mask" if empty else "missing mask"
         elif "visual_hull" in str(method.get(name, "")):
             skip[name] = f"derived view ({method[name]})"
         else:
@@ -225,9 +227,10 @@ def fit_pitch(src: SourceMesh, p: dict, sides: dict, height: float, excluded: di
         rec.update(status="fallback", reason=reason, pitch_deg=0.0)
         return 0.0, rec
 
-    if not sides:
-        why = "; ".join(f"{k}: {v}" for k, v in sorted(rec["excluded"].items())) or "none given"
-        return fallback(f"no observed side view ({why})")
+    absent = {k: rec["excluded"].get(k, "not given") for k in POSE_VIEWS if k not in sides}
+    if absent:                          # one profile alone cannot be told from a figure seen slightly turned
+        why = "; ".join(f"{k}: {v}" for k, v in sorted(absent.items()))
+        return fallback(f"needs both observed side views ({why})")
     small = {k: _downsample(v.mask, (int(round(v.mask.shape[0] * scale)), int(round(v.mask.shape[1] * scale))))
              for k, v in sides.items()}
     cache: dict[float, float] = {}
