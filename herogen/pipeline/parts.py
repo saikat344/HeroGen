@@ -7,8 +7,10 @@ does not find on the figure gets no file. `masks/parts.json` records, per part, 
 (`sam-3.1:<text>`), the number of instances SAM returned, the kept instance's confidence and its pixel count. A
 Model API failure (`ApiError`, after the client's retries) is recorded with `api_error` and no file, so a reader
 can tell a failed call from SAM finding nothing, and the stage goes on; anything else (a replay miss, a corrupt
-cache entry, a bug) is raised. A failed call is not cached, so replaying such a run raises a replay miss for that
-part.
+cache entry, a bug) is raised. A call that fails without a usable response (a transport or HTTP error after
+the retries) is not cached, so replaying such a run raises a replay miss for that part. A response that
+arrives but cannot be read as masks is cached like any response, so a replay records the same `api_error`
+again.
 
 The record has its own file, not a key in `views/meta.json`: the held-out views are tied to the turnaround by a
 hash of the stage 2 files they are made from (`heldout.IDENTITY_FILES`, which include `views/meta.json`). The
