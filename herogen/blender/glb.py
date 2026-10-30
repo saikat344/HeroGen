@@ -50,6 +50,7 @@ class Material:
     texcoord: int                                    # which TEXCOORD_n the texture reads
     alpha_mode: str = "OPAQUE"                       # glTF alphaMode: OPAQUE, MASK or BLEND
     alpha_cutoff: float = 0.5                        # glTF alphaCutoff (MASK only)
+    name: str = ""                                   # the material's name ("" when it has none)
 
 
 @dataclass
@@ -246,7 +247,7 @@ def _materials(doc: dict, notes: list[str]) -> list[Material]:
             notes.append(f"material {i}: alphaMode {mode!r} is not glTF; read as OPAQUE")
             mode = "OPAQUE"
         out.append(Material(factor[:4] + (1.0,) * (4 - len(factor[:4])), image, texcoord, mode,
-                            float(mat.get("alphaCutoff", 0.5))))
+                            float(mat.get("alphaCutoff", 0.5)), name=str(mat.get("name") or "")))
     return out
 
 
