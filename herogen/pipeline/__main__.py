@@ -14,6 +14,11 @@ recorded held-out view again under the current checks, with no model calls.
 and 1, before any image is generated) and 1 on an error, such as the Model API failing after its retries; the
 stage record then holds the error and every call made. An input check that only warns is printed and the run goes
 on.
+
+`python3 -m herogen.pipeline parts --run-id <id> [--live]` writes the front view's part masks
+(`masks/front-face.png`, `masks/front-head.png` and their record `masks/parts.json`; `herogen.pipeline.parts`)
+for a run whose stage 2 already passed. It writes no other file, so the held-out views stay valid. Stage 2
+writes them itself; this adds them to an older run.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import sys
 from pathlib import Path
 
 from herogen.pipeline import inputs
-from herogen.pipeline.client import ApiError, ModelClient
+from herogen.pipeline.client import ApiError, ClientError, ModelClient
 from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
 from herogen.pipeline.stages import GateFailed, InputRejected, stage0_input, stage1_cover, stage2_turnaround
@@ -165,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--note", default="", help="why, e.g. 'arms not in A-pose'")
     v.add_argument("--by", default=None, help="who decided (default: the login name)")
     v.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
+    p = sub.add_parser("parts", help="write the front view's part masks (face, head) for an existing run")
+    p.add_argument("--run-id", "--run", dest="run_id", required=True)
+    p.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
+    p.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
+    p.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
     s = sub.add_parser("stand-in", help="draw a stand-in pencil sketch with muse-image-1.0")
     s.add_argument("out", type=Path)
     s.add_argument("--live", action="store_true")
@@ -206,6 +216,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     root = runs_root(a.runs)
     client = ModelClient(Path(a.cache) if a.cache else root / "_cache", mode="live" if a.live else "replay")
+    if a.cmd == "parts":
+        from herogen.pipeline.parts import write_part_masks
+
+        try:
+            info = write_part_masks(RunFolder(root, a.run_id), client)
+        except (OSError, ValueError, ClientError) as e:  # a missing file, a replay miss, no key: one line
+            print(f"parts: {e}", file=sys.stderr)
+            return 1
+        for part, rec in info.items():
+            found = rec["file"] or ("model error" if rec.get("api_error") else "not found")
+            print(f"  {part}: {found}")
+        return 0
     img = client.generate_image(STAND_IN_PROMPT, size="1024x1536")
     a.out.parent.mkdir(parents=True, exist_ok=True)
     img.save(a.out, format="PNG")

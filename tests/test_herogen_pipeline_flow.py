@@ -154,7 +154,8 @@ class FlowTest(_RunsTest):
         run = self.root / "rec"
         for rel in ["00-sketch.png", "01-cover.png", "02-turnaround.png", "views/meta.json", "results.html",
                     "results.json"] + [f"views/{v}.png" for v in ("front", "back", "left", "right", "top")] \
-                + [f"masks/{v}.png" for v in ("front", "back", "left", "right", "top")]:
+                + [f"masks/{v}.png" for v in ("front", "back", "left", "right", "top")] \
+                + ["masks/front-face.png", "masks/front-head.png"]:
             self.assertTrue((run / rel).exists(), rel)
         meta = json.loads((run / "views/meta.json").read_text())
         self.assertEqual(set(meta) >= {"pixels_per_unit", "height_units", "image_size"}, True)
@@ -174,7 +175,8 @@ class FlowTest(_RunsTest):
         s2 = json.loads((run / "stage-2.json").read_text())
         self.assertTrue(s2["ok"])
         self.assertEqual(len(s2["details"]["attempts"]), 1)
-        self.assertAlmostEqual(s2["cost_usd"], 0.01 + 0.0025 + 0.01 + 0.0025)  # sheet+SAM, top+SAM
+        # sheet and top view; SAM on the sheet, the top view and the front view's face and head
+        self.assertAlmostEqual(s2["cost_usd"], 0.01 + 0.0025 + 0.01 + 0.0025 + 2 * 0.0025)
         # Never write the key anywhere.
         for p in self.root.rglob("*"):
             if p.is_file() and p.suffix in (".json", ".html"):
