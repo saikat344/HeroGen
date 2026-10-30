@@ -38,6 +38,7 @@ print("versions found:", ", ".join(names))
 FROZEN = {
     "hero-sketch-v1": "ca48ac85c697a97b61865c45cf5886adaffa88f9e71851d0649923e568620624",
     "same-character-v1": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9",
+    "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
 }
 
 
@@ -90,7 +91,7 @@ class FrozenVersions(unittest.TestCase):
 class Selection(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v1")
-        self.assertEqual(prompts.selected("same_character").name, "same-character-v1")
+        self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
 
     def test_env_override_and_explicit(self):
         with mock.patch.dict(os.environ, {"HEROGEN_PROMPT_SKETCH_VERSION": "no-such-v9"}):
