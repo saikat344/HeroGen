@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
@@ -77,9 +77,9 @@ class FakeAPI:
     from a script. ``edits`` and ``verdicts`` are consumed in order (the last one repeats)."""
 
     def __init__(self, edits=("ok",), verdicts=("yes",), added=(), fail=None, fail_text="HTTP 500: upstream error",
-                 body=(), same=SAME):
+                 body=(), same=SAME, answer=None):
         self.edits, self.verdicts, self.added, self.fail = list(edits), list(verdicts), list(added), fail
-        self.body, self.same = list(body), same
+        self.body, self.same, self.answer = list(body), same, answer
         self.fail_text = fail_text
         self.calls: list[str] = []
         self.gen_prompts: list[str] = []
@@ -106,6 +106,8 @@ class FakeAPI:
             self.edit_prompts.append(body["prompt"])
             scenario = self.edits[min(self.n_edit, len(self.edits) - 1)]
             self.n_edit += 1
+            if scenario == "garbage":  # bytes that are not an image
+                return {"data": [{"b64_json": base64.b64encode(b"not an image at all").decode("ascii")}]}
             img = draw(scenario, self.n_edit - 1)
             self.scenario_by_sha[_sha(img)] = scenario
             return {"data": [{"b64_json": _b64png(img)}]}
@@ -118,6 +120,8 @@ class FakeAPI:
                       "added_props": self.added, "removed_props": [], "changed_hand": []}
             if "body_changes" in self.same.step("compare")["schema"]["schema"]["properties"]:
                 answer["body_changes"] = self.body
+            if self.answer is not None:
+                answer = self.answer(answer)
             return {"status": "completed", "usage": {"input_tokens": 2000, "output_tokens": 1800},
                     "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(answer)}]}]}
         concept = body["input"][0]["content"][0]["text"]
@@ -399,6 +403,86 @@ class StageTest(_Base):
         self.assertEqual(api.calls, ["images/generations"])
         rec = json.loads((self.root / "r/stage-p.json").read_text())
         self.assertTrue(rec["error"].startswith("refused by the Model API's content policy"))
+
+    def _assert_failed_record(self, run_id: str, error_part: str):
+        rec = json.loads((self.root / run_id / "stage-p.json").read_text())
+        self.assertFalse(rec["ok"])
+        self.assertEqual(rec["status"], "error")
+        self.assertIn(error_part, rec["error"])
+        self.assertFalse((self.root / run_id / P.SKETCH).exists())
+        return rec
+
+    def test_bad_image_bytes_after_a_pass_leave_a_failed_record(self):
+        _run, first = self.stage(FakeAPI())
+        self.assertTrue(first["ok"])
+        with self.assertRaises(UnidentifiedImageError):  # unexpected: recorded, then re-raised as it is
+            self.stage(FakeAPI(edits=("garbage",)), text="another character", cache=self.cache / "second")
+        rec = self._assert_failed_record("r", "UnidentifiedImageError")
+        self.assertIn("UnidentifiedImageError", rec["details"]["attempts"][0]["error"])
+        self.assertNotIn("checks", rec["details"]["attempts"][0])
+
+    def test_registry_and_decoder_errors_leave_a_failed_record(self):
+        self.stage(FakeAPI())
+        data = json.loads(json.dumps(V1.data))
+        data["steps"][0]["model"] = "other-image-model"
+        odd = prompts.PromptVersion(name=V1.name, kind=V1.kind, sha256=V1.sha256, data=data)
+        run = RunFolder(self.root, "r")
+        with self.live(FakeAPI()), self.assertRaises(prompts.RegistryError):
+            P.stagep_prompt(run, ModelClient(self.cache, mode="live"), "a mage", version=odd, same_version=SAME)
+        self._assert_failed_record("r", "RegistryError")
+
+        api = FakeAPI()
+
+        def broken_decoder(text, size):
+            raise RuntimeError("parser broke")
+
+        with self.live(api), mock.patch.object(client_mod, "decode_sam_output", broken_decoder), \
+                self.assertRaises(Exception):
+            P.stagep_prompt(RunFolder(self.root, "d"), ModelClient(self.cache / "d", mode="live"), "a mage",
+                            version=V1, same_version=SAME)
+        self._assert_failed_record("d", "parser broke")
+
+    def test_unknown_selected_version_leaves_a_failed_record(self):
+        self.stage(FakeAPI())
+        with mock.patch.dict(os.environ, {"HEROGEN_PROMPT_SKETCH_VERSION": "no-such-v9"}), \
+                self.assertRaises(prompts.RegistryError):
+            P.stagep_prompt(RunFolder(self.root, "r"), ModelClient(self.cache, mode="replay"), "a mage")
+        self._assert_failed_record("r", "unknown prompt version")
+
+    def test_a_failed_first_record_write_leaves_no_earlier_record(self):
+        _run, first = self.stage(FakeAPI())
+        self.assertTrue(first["ok"])
+        real = RunFolder.write_json
+        calls = []
+
+        def full_disk(folder, rel, data):
+            calls.append(rel)
+            if len(calls) == 1:
+                raise OSError(28, "No space left on device")
+            return real(folder, rel, data)
+
+        with mock.patch.object(RunFolder, "write_json", full_disk), self.assertRaises(OSError):
+            P.stagep_prompt(RunFolder(self.root, "r"), ModelClient(self.cache, mode="replay"), "a mage",
+                            version=V1, same_version=SAME)
+        self.assertEqual(calls, ["stage-p.json"])  # the running record was the first write
+        self.assertFalse((self.root / "r/stage-p.json").exists())
+        self.assertFalse((self.root / "r" / P.SKETCH).exists())
+        self.assertFalse((self.root / "r" / P.DESIGN).exists())
+
+    def test_a_record_says_running_while_the_stage_runs(self):
+        seen = []
+
+        def spy(img_self, *a, **k):
+            seen.append(json.loads((self.root / "r/stage-p.json").read_text()))
+            raise KeyboardInterrupt  # not an Exception: the running record is what remains
+
+        self.stage(FakeAPI())
+        with mock.patch.object(ModelClient, "generate_image", spy), self.assertRaises(KeyboardInterrupt):
+            P.stagep_prompt(RunFolder(self.root, "r"), ModelClient(self.cache, mode="replay"), "x y",
+                            version=V1, same_version=SAME)
+        self.assertEqual((seen[0]["ok"], seen[0]["status"]), (False, "running"))
+        rec = json.loads((self.root / "r/stage-p.json").read_text())
+        self.assertEqual((rec["ok"], rec["status"]), (False, "running"))
 
     def test_unusable_answer_is_an_error(self):
         api = FakeAPI(verdicts=("maybe",))
