@@ -483,8 +483,22 @@ class StageTest(_Base):
 
     def test_unusable_answer_is_an_error(self):
         api = FakeAPI(verdicts=("maybe",))
-        with self.assertRaisesRegex(P.PromptStageError, "same_character='maybe'"):
+        with self.assertRaisesRegex(P.PromptStageError, r"answer.same_character is 'maybe', not one of"):
             self.stage(api)
+
+    def test_answers_that_break_the_schema_stop_the_stage(self):
+        cases = {
+            "missing": (lambda a: {k: v for k, v in a.items() if k != "body_changes"}, "answer.body_changes is missing"),
+            "wrong-type": (lambda a: {**a, "body_changes": "none"}, "answer.body_changes should be array"),
+            "item-type": (lambda a: {**a, "added_props": [3]}, r"answer.added_props\[0\] should be string"),
+            "extra": (lambda a: {**a, "confidence": 0.9}, "answer.confidence is not in the schema"),
+        }
+        for name, (edit, msg) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(P.PromptStageError, msg):
+                    self.stage(FakeAPI(answer=edit), run_id=name, cache=self.cache / name)
+                rec = self._assert_failed_record(name, "does not match schema")
+                self.assertNotIn("identity", rec["details"]["attempts"][0])
 
     def test_rejected_prompt_makes_no_calls_and_is_recorded(self):
         api = FakeAPI()

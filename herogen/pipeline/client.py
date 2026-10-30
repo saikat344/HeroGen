@@ -265,7 +265,8 @@ class ModelClient:
         """A Responses API call with images and a strict JSON schema; returns the parsed JSON object.
 
         Images are sent as JPEG data URLs scaled to ``image_max_side``. Cost is estimated from the token usage.
-        An empty, unparsable or non-object answer raises ``ClientError`` (it is never guessed).
+        The answer is checked against ``schema`` here too (``schema_errors``), live and on replay: an empty,
+        unparsable or non-conforming answer raises ``ClientError`` naming what is wrong (it is never guessed).
         """
         jpgs = [jpeg_bytes(im, image_max_side, jpeg_quality) for im in images]
         summary: dict[str, Any] = {
@@ -283,7 +284,7 @@ class ModelClient:
         entry = self._load(key)
         if entry is not None:
             self.log.add(model, "compare", key, cached=True)
-            return _parse_json_object(entry["output_text"], key)
+            return _conforming(_parse_json_object(entry["output_text"], key), schema, key)
         if self.mode == "replay":
             raise ReplayMiss(f"no cached responses entry for key {key} (model={model})")
         if model not in PRICE_PER_MTOK_USD:  # checked before the paid call, so its cost is never lost
@@ -308,7 +309,7 @@ class ModelClient:
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2), "status": resp.get("status"),
                  "output_text": _output_text(resp), "usage": resp.get("usage"), "cost_usd": round(cost, 6)}
         self._save_entry(key, entry)
-        return _parse_json_object(entry["output_text"], key)
+        return _conforming(_parse_json_object(entry["output_text"], key), schema, key)
 
     def _decode_and_save(self, key: str, entry: dict[str, Any], size: tuple[int, int]) -> list[SamInstance]:
         instances = decode_sam_output(entry["output_text"], size)
@@ -429,6 +430,51 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
         detail = resp.get("error") or resp.get("incomplete_details")
         raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
                        + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
+
+
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "object": (dict,), "array": (list,), "string": (str,), "boolean": (bool,), "integer": (int,),
+    "number": (int, float), "null": (type(None),),
+}
+_SCHEMA_KEYWORDS = {"type", "properties", "required", "additionalProperties", "items", "enum", "description"}
+
+
+def schema_errors(value: Any, schema: dict[str, Any], path: str = "answer") -> list[str]:
+    """Where ``value`` breaks ``schema``: the JSON Schema subset the comparison schemas use (type, properties,
+    required, additionalProperties false, items, enum). A keyword outside that subset is an error, so a schema
+    is never checked only in part."""
+    unknown = sorted(set(schema) - _SCHEMA_KEYWORDS)
+    if unknown:
+        return [f"{path}: schema keyword(s) {', '.join(unknown)} can't be checked"]
+    kind = schema.get("type")
+    if kind is not None:
+        if kind not in _JSON_TYPES:
+            return [f"{path}: schema type {kind!r} can't be checked"]
+        ok = isinstance(value, _JSON_TYPES[kind]) and not (kind in ("integer", "number") and isinstance(value, bool))
+        if not ok:
+            return [f"{path} should be {kind}, got {type(value).__name__}"]
+    errors: list[str] = []
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path} is {value!r}, not one of {schema['enum']}")
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        errors += [f"{path}.{k} is missing" for k in schema.get("required", []) if k not in value]
+        if schema.get("additionalProperties") is False:
+            errors += [f"{path}.{k} is not in the schema" for k in value if k not in props]
+        for k, sub in props.items():
+            if k in value:
+                errors += schema_errors(value[k], sub, f"{path}.{k}")
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            errors += schema_errors(item, schema["items"], f"{path}[{i}]")
+    return errors
+
+
+def _conforming(answer: dict[str, Any], schema: dict[str, Any], key: str) -> dict[str, Any]:
+    errors = schema_errors(answer, schema["schema"])
+    if errors:
+        raise ClientError(f"responses entry {key} does not match schema {schema['name']!r}: " + "; ".join(errors))
+    return answer
 
 
 def _parse_json_object(text: str, key: str) -> dict[str, Any]:

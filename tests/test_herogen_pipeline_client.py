@@ -153,9 +153,36 @@ class CompareImagesTest(unittest.TestCase):
         self.assertEqual(list(Path(self.tmp.name).glob("*.json")), [])
         self.assertGreater(c.log.cost_usd(), 0)  # answered, so billed and logged
 
+    def test_non_conforming_answers_raise_live_and_on_replay(self):
+        with mock.patch.object(ModelClient, "_post", lambda c, e, b: self._resp('{"same": 1}')):
+            with self.assertRaisesRegex(ClientError, "answer.same should be string"):
+                ModelClient(self.tmp.name, mode="live").compare_images("q", self.images, schema=SCHEMA)
+        with self.assertRaisesRegex(ClientError, "does not match schema 'verdict'"):
+            ModelClient(self.tmp.name, mode="replay").compare_images("q", self.images, schema=SCHEMA)
+
     def test_unpriced_model_is_an_error(self):
         with self.assertRaises(ClientError):
             client_mod.token_cost_usd("no-such-model", {"input_tokens": 1})
+
+
+class SchemaErrorsTest(unittest.TestCase):
+    S = {"type": "object", "additionalProperties": False, "required": ["v", "xs"],
+         "properties": {"v": {"type": "string", "enum": ["yes", "no"]}, "xs": {"type": "array", "items": {"type": "string"}},
+                        "n": {"type": "integer"}}}
+
+    def test_valid(self):
+        self.assertEqual(client_mod.schema_errors({"v": "yes", "xs": ["a"], "n": 2}, self.S), [])
+
+    def test_each_kind_of_error(self):
+        errs = client_mod.schema_errors({"v": "maybe", "xs": ["a", 1], "n": True, "z": 0}, self.S)
+        self.assertEqual(errs, ["answer.z is not in the schema", "answer.v is 'maybe', not one of ['yes', 'no']",
+                                "answer.xs[1] should be string, got int", "answer.n should be integer, got bool"])
+        self.assertEqual(client_mod.schema_errors({}, self.S), ["answer.v is missing", "answer.xs is missing"])
+        self.assertEqual(client_mod.schema_errors([], self.S), ["answer should be object, got list"])
+
+    def test_unsupported_keywords_are_errors_not_skipped(self):
+        self.assertIn("can't be checked", client_mod.schema_errors("x", {"type": "string", "pattern": "^x$"})[0])
+        self.assertIn("can't be checked", client_mod.schema_errors("x", {"type": "date"})[0])
 
 
 if __name__ == "__main__":
