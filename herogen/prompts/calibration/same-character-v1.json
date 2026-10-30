@@ -1,0 +1,29 @@
+{
+  "version": "same-character-v1",
+  "version_sha256": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9",
+  "rating_set_source": "the rating set of the hero-sketch-v1 prompt experiments: 16 design and full-body redraw pairs people rated as the same character (4-5 of 5), each redraw also paired with a design from the other design prompt and with another design from its own prompt; every pair asked twice. Noted prop changes: the two edits people noted (a sword added; a weapon moved to the other hand)",
+  "rating_set": {
+    "true_pairs": {
+      "answers": 32,
+      "same": 32,
+      "added_prop_listed": 13
+    },
+    "other_prompt_pairs": {
+      "answers": 32,
+      "same": 0
+    },
+    "same_prompt_pairs": {
+      "answers": 32,
+      "same": 9
+    },
+    "noted_prop_changes": {
+      "answers": 4,
+      "found": 4
+    }
+  },
+  "live_pairs": {
+    "answers": 25,
+    "same": 25,
+    "note": "chosen pairs of the 25 live stage p runs, measured before same-character-v2 existed"
+  }
+}

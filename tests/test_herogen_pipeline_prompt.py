@@ -380,6 +380,7 @@ class StageTest(_Base):
         self.assertTrue(rec["ok"])
         c = next(c for c in rec["checks"] if c["name"] == "prop_changes_reported")
         self.assertEqual((c["value"], c["pass"], c["gate"]), (1, False, False))
+        self.assertIn("15 of 32 same-character-v2 answers", c["note"])  # from calibration/, not typed in
         self.assertIn("added props: sword", rec["notes"])
 
     def test_api_failure_is_an_error_not_a_retry_or_substitute(self):

@@ -6,6 +6,10 @@ refuses a file whose content no longer matches, so changing any text or paramete
 
 Which version a stage uses comes from ``defaults.json`` (one entry per kind), overridden by the environment variable
 named there or by an explicit name (a CLI flag); call sites never name a version themselves.
+
+What a version was measured to do lives beside it in ``calibration/<name>.json``: numbers, not prompt content, so
+they sit outside the hash, bound to it by ``version_sha256`` so they can only describe the text they were measured
+on. Code that reports a version's limits reads them from there instead of typing them in.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 VERSIONS = HERE / "versions"
 DEFAULTS = HERE / "defaults.json"
+CALIBRATION = HERE / "calibration"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]*-v[0-9]+$")
 
 
@@ -79,6 +84,22 @@ def load(name: str) -> PromptVersion:
             "frozen versions never change, so put the new text under a new version name"
         )
     return PromptVersion(name=name, kind=data["kind"], sha256=actual, data=data)
+
+
+def calibration(version: PromptVersion) -> dict[str, Any] | None:
+    """The measured numbers recorded for ``version``, or None when none are recorded. A file that names another
+    version or another hash is refused."""
+    path = CALIBRATION / f"{version.name}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise RegistryError(f"calibration for {version.name} is not valid JSON: {e}") from e
+    if data.get("version") != version.name or data.get("version_sha256") != version.sha256:
+        raise RegistryError(f"calibration/{path.name} was measured on another version than {version.name} "
+                            f"{version.sha256[:12]}")
+    return data
 
 
 def selected(kind: str, explicit: str | None = None) -> PromptVersion:

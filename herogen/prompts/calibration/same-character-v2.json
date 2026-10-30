@@ -1,0 +1,30 @@
+{
+  "version": "same-character-v2",
+  "version_sha256": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
+  "rating_set_source": "the rating set of the hero-sketch-v1 prompt experiments: 16 design and full-body redraw pairs people rated as the same character (4-5 of 5), each redraw also paired with a design from the other design prompt and with another design from its own prompt; every pair asked twice. Noted prop changes: the two edits people noted (a sword added; a weapon moved to the other hand)",
+  "rating_set": {
+    "true_pairs": {
+      "answers": 32,
+      "same": 32,
+      "added_prop_listed": 15,
+      "body_change_listed": 0
+    },
+    "other_prompt_pairs": {
+      "answers": 32,
+      "same": 0
+    },
+    "same_prompt_pairs": {
+      "answers": 32,
+      "same": 8
+    },
+    "noted_prop_changes": {
+      "answers": 4,
+      "found": 3
+    }
+  },
+  "live_pairs": {
+    "answers": 25,
+    "same": 24,
+    "note": "chosen pairs of the 25 live stage p runs; v2 was written after seeing them (the mermaid), so this is not unseen evidence"
+  }
+}
