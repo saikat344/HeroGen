@@ -21,8 +21,9 @@ STAGES = [
     (4, "game body"),
 ]
 
-# The held-out views' record, reported after stage 2 when it exists.
+# The held-out views' and the face source's records, reported after stage 2 when they exist.
 HELDOUT_STAGE = ("2h", "held-out views")
+FACE_STAGE = ("2f", "face source")
 
 # Images shown per stage beyond its record's `outputs` (stages 3-4 write folders of renders).
 EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
@@ -113,8 +114,9 @@ def collect(run: RunFolder) -> dict[str, Any]:
     total_cost = 0.0
     total_seconds = 0.0
     order: list[tuple[Any, str]] = list(STAGES)
-    if run.read_stage(HELDOUT_STAGE[0]) is not None:
-        order.insert(3, HELDOUT_STAGE)
+    for extra in (FACE_STAGE, HELDOUT_STAGE):
+        if run.read_stage(extra[0]) is not None:
+            order.insert(3, extra)
     for n, label in order:
         rec = run.read_stage(n)
         if rec is None:

@@ -1,6 +1,9 @@
 """CLI: `python3 -m herogen.pipeline run <sketch.png> --run-id <id> [--stages 0-2,5] [--live]`.
 
-Stage 2 is followed by the held-out views (`2h`) when it passes. `--stages 2h` makes only the held-out views
+Stage 2 is followed by the held-out views (`2h`) and the face source (`2f`, `herogen.pipeline.facesource`: sharp
+head close-ups for stage 4's Head texture) when it passes. `--stages 2f` makes only the close-ups, for a run whose
+stage 2 already passed; stage 2f never stops the run (a failure is recorded and stage 4 bakes the plain views).
+`--stages 2h` makes only the held-out views
 for a run whose stage 2 already passed, leaving every earlier output untouched; it prints each view's status
 (accepted, needs review or rejected), found yaw and file. `--views front-left-60,front-right-60` makes only
 those views and keeps the others from the earlier stage 2h record.
@@ -30,6 +33,7 @@ from pathlib import Path
 
 from herogen.pipeline import inputs
 from herogen.pipeline.client import ApiError, ClientError, ModelClient
+from herogen.pipeline.facesource import stage2f_face_source
 from herogen.pipeline.heldout import DECISIONS, recheck_heldout, review_view, stage2h_heldout
 from herogen.pipeline.runfolder import RunFolder, now_iso, runs_root
 from herogen.pipeline.stages import GateFailed, InputRejected, stage0_input, stage1_cover, stage2_turnaround
@@ -37,11 +41,12 @@ from herogen.pipeline.results import stage5_results
 
 OWN_STAGES = {0, 1, 2, 5}
 HELDOUT = "2h"
-Stage = int | str  # 0, 1, 2, 5 or "2h"
+FACE_SOURCE = "2f"
+Stage = int | str  # 0, 1, 2, 5, "2h" or "2f"
 
 
 def _order(s: Stage) -> float:
-    return 2.5 if s == HELDOUT else float(s)
+    return {HELDOUT: 2.5, FACE_SOURCE: 2.6}.get(s, s)  # type: ignore[arg-type,return-value]
 
 STAND_IN_PROMPT = (
     "A rough hand-drawn pencil sketch on plain white paper of a video game hero character, full body, standing, "
@@ -51,14 +56,14 @@ STAND_IN_PROMPT = (
 
 
 def parse_stages(spec: str) -> list[Stage]:
-    """'0-2,5' -> [0, 1, 2, 5]; '2h' -> ['2h']. Only stages this package owns are accepted."""
+    """'0-2,5' -> [0, 1, 2, 5]; '2h' -> ['2h']; '2f' -> ['2f']. Only stages this package owns are accepted."""
     out: set[Stage] = set()
     for part in spec.split(","):
         part = part.strip().lower()
         if not part:
             continue
-        if part == HELDOUT:
-            out.add(HELDOUT)
+        if part in (HELDOUT, FACE_SOURCE):
+            out.add(part)
         elif "-" in part:
             a, b = (int(x) for x in part.split("-", 1))
             if a > b:
@@ -66,7 +71,7 @@ def parse_stages(spec: str) -> list[Stage]:
             out.update(range(a, b + 1))
         else:
             out.add(int(part))
-    foreign = sorted(s for s in out if s != HELDOUT and s not in OWN_STAGES)
+    foreign = sorted(s for s in out if s not in (HELDOUT, FACE_SOURCE) and s not in OWN_STAGES)
     if foreign:
         raise ValueError(f"stages {foreign} are not run by herogen.pipeline (3-4 are herogen/blender)")
     return sorted(out, key=_order)
@@ -97,8 +102,8 @@ def run_pipeline(
     run = RunFolder(root, run_id)
     client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode)
     pipeline = [s for s in stages if s != 5]
-    if 2 in pipeline and HELDOUT not in pipeline:
-        pipeline.append(HELDOUT)  # the held-out views follow a passing stage 2
+    if 2 in pipeline:  # the held-out views and the face source follow a passing stage 2
+        pipeline += [s for s in (HELDOUT, FACE_SOURCE) if s not in pipeline]
     pipeline.sort(key=_order)
     status = 0
     for n in pipeline:
@@ -112,6 +117,11 @@ def run_pipeline(
                 rec = stage1_cover(run, client)
             elif n == 2:
                 rec = stage2_turnaround(run, client)
+            elif n == FACE_SOURCE:
+                rec = stage2f_face_source(run, client)
+                used = rec["details"].get("used_views") or []
+                print(f"stage {n} {rec['name']}: close-ups used for {', '.join(used) or 'no view'}")
+                continue
             else:
                 rec = stage2h_heldout(run, client, views=views)
             print(f"stage {n} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
@@ -150,7 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("sketch", nargs="?", type=Path)
     r.add_argument("--run-id", required=True)
     r.add_argument("--stages", default="0-2,5",
-                   help="e.g. 0-2,5; 2 is followed by the held-out views 2h; 2h alone")
+                   help="e.g. 0-2,5; 2 is followed by the held-out views 2h and the face source 2f; 2h or 2f "
+                        "alone")
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
