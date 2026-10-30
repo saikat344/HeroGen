@@ -461,8 +461,9 @@ all three. The profiles' `texture_max_px` check counts the Head texture with the
 2048 cap.
 
 **Close-ups in the Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
-image is unchanged (its SHA-256) and the view is a colour view. Each footprint is feathered over 3 view pixels and
-cut at the crop box.
+image is unchanged (its SHA-256) and the view is a colour view. A malformed record (wrong JSON types, a singular
+or non-finite transform, an empty crop box) is skipped with a note, never an error. Each footprint is feathered
+over 3 view pixels and cut at the crop box.
 
 Close-ups never replace a view's colour. Inside the footprint, the Head bake adds the close-up's detail to the
 view's colour: the close-up blurred to the texture's density minus the close-up blurred to the view's density. Both
