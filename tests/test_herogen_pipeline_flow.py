@@ -95,7 +95,9 @@ class FakeAPI:
         return out
 
 
-class FlowTest(unittest.TestCase):
+class _RunsTest(unittest.TestCase):
+    """A temporary runs root and a sketch, recorded through a fake API and replayed with the network blocked."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "runs"
@@ -121,6 +123,8 @@ class FlowTest(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(ModelClient, "_post", no_network):
             return run_pipeline(self.sketch, run_id, [0, 1, 2, 5], mode="replay", runs=str(self.root))
 
+
+class FlowTest(_RunsTest):
     def test_record_then_replay(self):
         api = FakeAPI()
         self.assertEqual(self._record(api, "rec"), 0)
@@ -229,6 +233,85 @@ class FlowTest(unittest.TestCase):
         status = {s["stage"]: s["status"] for s in res["stages"]}
         self.assertEqual(status, {0: "pass", 1: "pass", 2: "gate failed", 3: "not run", 4: "not run"})
         self.assertIn("gate failed", (run / "results.html").read_text())
+
+
+class SheetsAPI(FakeAPI):
+    """A fake API that answers the n-th turnaround request with ``sheets[n]``."""
+
+    def __init__(self, sheets) -> None:
+        super().__init__()
+        self.sheets = sheets
+        self.n = 0
+
+    def post(self, c, endpoint, body):
+        if endpoint == "images/edits" and body["prompt"] == stages.TURNAROUND_PROMPT:
+            img = self.sheets[min(self.n, len(self.sheets) - 1)]
+            self.n += 1
+            self.calls.append(endpoint)
+            self.prompts.append(body["prompt"])
+            return {"data": [{"b64_json": _b64png(img)}], "usage": {"input_tokens": 1}}
+        return super().post(c, endpoint, body)
+
+
+def _two_gates_sheet() -> Image.Image:
+    """Arms down (fails the A-pose gate) and a short left profile (fails the height gate, and more)."""
+    figs = [figure_mask(200, "front", "down"), figure_mask(200, "right"), figure_mask(200, "front", "down"),
+            figure_mask(150, "left")]
+    gap = 40
+    mask = np.zeros((280, sum(f.shape[1] for f in figs) + gap * 5), dtype=bool)
+    x = gap
+    for f in figs:
+        mask[240 - f.shape[0] : 240, x : x + f.shape[1]] = f
+        x += f.shape[1] + gap
+    return paint(mask)
+
+
+class KeepBestSheetTest(_RunsTest):
+    """Stage 2 keeps its best sheet (fewest failed gates, then the smallest shortfall), not its last."""
+
+    def _sheets(self, sheets) -> tuple[int, dict, SheetsAPI]:
+        api = SheetsAPI(sheets)
+        code = self._record(api, "k")
+        return code, json.loads((self.root / "k" / "stage-2.json").read_text()), api
+
+    def test_keeps_the_sheet_with_the_fewest_failed_gates(self):
+        unsplit, _ = sheet(order=("front", "right", "front"))
+        one, _ = sheet(arms="down")
+        sheets = [unsplit, one, _two_gates_sheet(), unsplit]
+        code, s2, api = self._sheets(sheets)
+        self.assertEqual(code, 2)
+        self.assertEqual(api.n, 4)
+        ranks = [a["rank"]["failed_gates"] for a in s2["details"]["attempts"]]
+        self.assertEqual(ranks[1], 1)
+        self.assertGreaterEqual(ranks[2], 2)
+        self.assertEqual(ranks[0], ranks[3])
+        self.assertGreater(ranks[0], ranks[2])  # a sheet that can't be split ranks below any that can
+        self.assertEqual(s2["details"]["kept_attempt"], 1)
+        self.assertIn("generation 2 is kept", s2["notes"])
+        kept = s2["details"]["attempts"][1]
+        self.assertEqual([c for c in s2["checks"] if c["name"] in {k["name"] for k in kept["checks"]}], kept["checks"])
+        self.assertEqual([c["name"] for c in s2["checks"] if not c["pass"] and c.get("gate", True)],
+                         ["a_pose_hand_span_over_shoulders"])
+        self.assertEqual(s2["details"]["view_assignment"], kept["assignment"])
+        run = self.root / "k"
+        self.assertEqual(np.asarray(_img(run / "02-turnaround.png")).tobytes(), np.asarray(one).tobytes())
+        front = imaging.from_mask_image(_img(run / "masks/front.png"))
+        self.assertLess(stages.C.a_pose_spread(front), stages.C.A_POSE_SPREAD_MIN)  # attempt 2's front, arms down
+        self.assertNotIn(stages.TOP_PROMPT, api.prompts)
+
+    def test_a_tie_keeps_the_earlier_sheet(self):
+        one, _ = sheet(arms="down")
+        code, s2, _ = self._sheets([one, one, one, one])
+        self.assertEqual(code, 2)
+        self.assertEqual(s2["details"]["kept_attempt"], 0)
+
+    def test_a_passing_sheet_is_kept_and_stops_the_attempts(self):
+        unsplit, _ = sheet(order=("front", "right", "front"))
+        good, _ = sheet()
+        code, s2, api = self._sheets([unsplit, good])
+        self.assertEqual(code, 0)
+        self.assertEqual((api.n, s2["details"]["kept_attempt"]), (2, 1))
+        self.assertTrue(s2["ok"])
 
 
 class ClientTest(unittest.TestCase):

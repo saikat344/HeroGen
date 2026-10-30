@@ -56,6 +56,32 @@ class BasicsTest(unittest.TestCase):
         self.assertEqual(C.aspect(np.zeros((5, 5), dtype=bool)), 0.0)
 
 
+class AttemptRankTest(unittest.TestCase):
+    EXPECTED = ("figures_found", "a", "b")
+
+    def test_fewest_failed_gates_then_smallest_shortfall(self):
+        one_far = [C.check("figures_found", 4, 4, op="=="), C.check("a", 0.5, 0.9), C.check("b", 0.2, 0.33, op="<=")]
+        one_near = [C.check("figures_found", 4, 4, op="=="), C.check("a", 0.89, 0.9), C.check("b", 0.2, 0.33, op="<=")]
+        two = [C.check("figures_found", 4, 4, op="=="), C.check("a", 0.89, 0.9), C.check("b", 0.34, 0.33, op="<=")]
+        r_far, r_near, r_two = (C.attempt_rank(x, self.EXPECTED) for x in (one_far, one_near, two))
+        self.assertEqual(r_near, (1, round(0.01 / 0.9, 6)))
+        self.assertEqual(r_far[0], 1)
+        self.assertLess(r_near, r_far)
+        self.assertLess(r_far, r_two)  # one failed gate, however far, beats two
+        self.assertEqual(r_two, (2, round(0.01 / 0.9 + 0.01 / 0.33, 6)))
+
+    def test_unmeasured_gates_count_as_failed(self):
+        unsplit = [C.check("figures_found", 3, 4, op="==")]
+        self.assertEqual(C.attempt_rank(unsplit, self.EXPECTED), (3, 2.25))
+        two = [C.check("figures_found", 4, 4, op="=="), C.check("a", 0.1, 0.9), C.check("b", 0.9, 0.33, op="<=")]
+        self.assertLess(C.attempt_rank(two, self.EXPECTED), C.attempt_rank(unsplit, self.EXPECTED))
+
+    def test_non_gating_checks_do_not_count(self):
+        checks = [C.check("figures_found", 4, 4, op="=="), C.check("a", 0.95, 0.9), C.check("b", 0.2, 0.33, op="<="),
+                  C.check("info", 0.0, 1.0, gate=False)]
+        self.assertEqual(C.attempt_rank(checks, self.EXPECTED), (0, 0.0))
+
+
 class CoverChecksTest(unittest.TestCase):
     def test_same_figure_at_another_scale_passes(self):
         sketch = place(figure_mask(200, "front"), (400, 400), (60, 100))
