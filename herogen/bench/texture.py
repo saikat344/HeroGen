@@ -50,6 +50,45 @@ def sample(values: np.ndarray, u: float, v: float, interpolation: str = "Linear"
     return total
 
 
+def wrap_many(i: np.ndarray, n: int, extension: str) -> tuple[np.ndarray, np.ndarray]:
+    """`wrap` for an array of texel indices."""
+    i = np.asarray(i, dtype=np.int64)
+    if extension == "REPEAT":
+        return np.mod(i, n), np.ones(i.shape, dtype=bool)
+    if extension == "MIRROR":
+        p = np.mod(i, 2 * n)
+        return np.where(p < n, p, 2 * n - 1 - p), np.ones(i.shape, dtype=bool)
+    if extension == "EXTEND":
+        return np.clip(i, 0, n - 1), np.ones(i.shape, dtype=bool)
+    if extension == "CLIP":
+        inside = (i >= 0) & (i < n)
+        return np.clip(i, 0, n - 1), inside
+    raise ValueError(f"unsupported extension {extension!r} (use {', '.join(EXTENSIONS)})")
+
+
+def sample_many(values: np.ndarray, u: np.ndarray, v: np.ndarray, interpolation: str = "Linear",
+                extension: str = "REPEAT") -> np.ndarray:
+    """`sample` at many UVs at once."""
+    h, w = values.shape
+    u, v = np.asarray(u, dtype=np.float64), np.asarray(v, dtype=np.float64)
+    if interpolation == "Closest":
+        ix, okx = wrap_many(np.floor(u * w), w, extension)
+        iy, oky = wrap_many(np.floor(v * h), h, extension)
+        return np.where(okx & oky, values[iy, ix], 0.0).astype(np.float64)
+    if interpolation != "Linear":
+        raise ValueError(f"unsupported interpolation {interpolation!r} (use {', '.join(INTERPOLATIONS)})")
+    fx, fy = u * w - 0.5, v * h - 0.5
+    x0, y0 = np.floor(fx), np.floor(fy)
+    tx, ty = fx - x0, fy - y0
+    total = np.zeros(u.shape, dtype=np.float64)
+    for dx, wx in ((0, 1.0 - tx), (1, tx)):
+        ix, okx = wrap_many(x0 + dx, w, extension)
+        for dy, wy in ((0, 1.0 - ty), (1, ty)):
+            iy, oky = wrap_many(y0 + dy, h, extension)
+            total += np.where(okx & oky, wx * wy * values[iy, ix], 0.0)
+    return total
+
+
 def barycentric_uv(a, b, c, point, uv_a, uv_b, uv_c) -> np.ndarray:
     """UV at `point` on triangle (a, b, c) with corner UVs, by barycentric weights; the centroid's UV for a
     degenerate triangle."""
