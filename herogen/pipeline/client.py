@@ -18,8 +18,9 @@ Live calls follow the retry policy and the shared per-key limiter in `herogen.pi
 attempt is appended to ``<cache>/calls-ledger.jsonl`` (model, endpoint, request key, status, outcome, time
 taken, wait before the next attempt; never a header or the key). An attempt that may have reached the model
 without an answer coming back (it timed out or was cut off on our side) is recorded there and in the call log
-as outcome "unknown": it may be billed, so the cost estimate counts it (a Muse Spark attempt, priced by
-tokens, at its output-token cap, since no usage came back).
+as outcome "unknown": it may be billed, so the cost estimate counts it. A Muse Spark call is priced by the
+token usage it reports, with a count it did not report at its bound (`answer_cost_usd`): so an attempt of
+unknown outcome, with no usage, is counted at its output-token cap.
 """
 
 from __future__ import annotations
@@ -135,6 +136,21 @@ def token_cost_usd(model: str, usage: dict[str, Any] | None) -> float:
     usage = usage or {}
     pin, pout = PRICE_PER_MTOK_USD[model]
     return (int(usage.get("input_tokens") or 0) * pin + int(usage.get("output_tokens") or 0) * pout) / 1e6
+
+
+def answer_cost_usd(model: str, usage: Any, max_output_tokens: int) -> float:
+    """Estimated USD of a token-priced attempt that may be billed, from the usage it reported. A count it did not
+    report (no usage, or no such field) is taken at its bound: output at ``max_output_tokens``, the most the call
+    allows, and input at 0. So an attempt that may be billed is never counted at $0 unless it reported that."""
+    u = usage if isinstance(usage, dict) else {}
+
+    def count(name: str) -> int | None:
+        v = u.get(name)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+    out = count("output_tokens")
+    return token_cost_usd(model, {"input_tokens": count("input_tokens") or 0,
+                                  "output_tokens": max_output_tokens if out is None else out})
 
 
 def jpeg_bytes(img: Image.Image, max_side: int, quality: int) -> bytes:
@@ -293,10 +309,11 @@ class ModelClient:
     ) -> dict[str, Any]:
         """A Responses API call with images and a strict JSON schema; returns the parsed JSON object.
 
-        Images are sent as JPEG data URLs scaled to ``image_max_side``. Cost is estimated from the token usage.
-        The answer is checked against ``schema`` (`schema_errors`), live and on replay: an empty, unparsable or
-        non-conforming answer raises ``ClientError`` naming what is wrong (it is never guessed). An incomplete
-        answer raises `ApiError` and is never cached.
+        Images are sent as JPEG data URLs scaled to ``image_max_side``. Cost is estimated from the token usage
+        (`answer_cost_usd`: a count the answer did not report is taken at its bound).
+        The answer is checked against ``schema`` here too (``schema_errors``), live and on replay: an empty,
+        unparsable or non-conforming answer raises ``ClientError`` naming what is wrong (it is never guessed).
+        An incomplete answer raises `ApiError` and is never cached.
         """
         jpgs = [jpeg_bytes(im, image_max_side, jpeg_quality) for im in images]
         summary: dict[str, Any] = {
@@ -333,8 +350,9 @@ class ModelClient:
         started = time.monotonic()
         # An attempt of unknown outcome has no usage to price, so it is counted at its output-token cap.
         resp = self._post("responses", body, model=model, kind="compare", key=key,
-                          unknown_cost_usd=token_cost_usd(model, {"output_tokens": max_output_tokens}))
-        cost = token_cost_usd(model, resp.get("usage"))
+                          unknown_cost_usd=answer_cost_usd(model, None, max_output_tokens))
+        # Answered, so it may be billed: priced from its usage, with any count it did not report at its bound.
+        cost = answer_cost_usd(model, resp.get("usage"), max_output_tokens)
         self.log.add(model, "compare", key, cached=False, cost_usd=cost)
         # An incomplete answer (out of output tokens, say) is a failure, not a result: raised and never cached.
         require_completed("responses", resp, required=True)
