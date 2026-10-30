@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import uvicorn
     except ImportError:
-        print("dev mode needs the service dependencies: pip install -r herogen/service/requirements.txt",
+        print("dev mode needs the dev dependencies: pip install -r herogen/service/requirements-dev.txt",
               file=sys.stderr)
         return 1
     from herogen.service.web import create_app

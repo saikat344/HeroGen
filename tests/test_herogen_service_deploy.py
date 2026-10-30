@@ -337,3 +337,32 @@ class TestBridge(TempDirCase):
             self.assertEqual(modal_bridge.main(["deploy", "x"]), 2)
         with self.assertRaises(modal_bridge.BridgeError):
             modal_bridge.write_outputs(self.tmp, {"runs": {"job": {}}}, {"job": {"../evil": b"x"}})
+
+
+class TestPins(TempDirCase):
+    """The service's pins (the Modal images and dev mode) and the test suite's pins (CI) name one version of every
+    package they share, so CI tests what is deployed."""
+
+    @staticmethod
+    def pins(path: Path) -> dict[str, str]:
+        out = {}
+        for line in path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line and not line.startswith("-r"):
+                name, sep, version = line.partition("==")
+                if not sep:
+                    raise AssertionError(f"{path.name}: {line!r} is not pinned with ==")
+                out[name.strip().lower().replace("_", "-")] = version.strip()
+        return out
+
+    def test_service_pins_match_the_test_pins(self):
+        root = Path(__file__).resolve().parents[1]
+        test = self.pins(root / "requirements-test.txt")
+        service = root / "herogen" / "service"
+        for name in ("requirements.txt", "requirements-dev.txt"):
+            for pkg, version in self.pins(service / name).items():
+                if pkg in test:
+                    self.assertEqual(version, test[pkg], f"{name} pins {pkg}=={version}, requirements-test.txt "
+                                                         f"{test[pkg]}")
+        for pkg in self.pins(service / "requirements.txt"):
+            self.assertIn(pkg, test, f"CI does not install {pkg}, which the service deploys")
