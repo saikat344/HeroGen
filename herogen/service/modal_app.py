@@ -15,8 +15,8 @@ What runs where:
   which only `StoreService` and `admin_command` hold.
 - `sanitize_image`: opens uploads, with no network, no secrets and no volumes.
 - `run_job`: one orchestrator per job attempt; `model_stages` (holds `<app>-model`: MODEL_API_KEY),
-  `blender_stages` (Blender 4.5 LTS; SAM 3D through the deployed GPU apps when stage 3 is configured to use
-  them) and `export_stages` run the stage groups on local copies of the job's files, each in a fresh container
+  `blender_stages` (Blender 4.5 LTS; SAM 3D through the deployed GPU apps by default, and
+  the model secret for stage 3's usability question) and `export_stages` run the stage groups on local copies of the job's files, each in a fresh container
   (`single_use_containers`), so nothing of one job is left where another job runs.
 - `sweep` (every minute): requeues jobs whose worker died and starts queued jobs; `retention` (daily) deletes
   expired files and records.
@@ -323,7 +323,7 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
     work = CopyWorkdir(ctx, Path("/tmp/herogen-work") / job["id"], data_vol,
                        lambda: store.job_current(job["id"], attempt),
                        still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)
-    runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group == "model" else "")
+    runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group in ("model", "blender") else "")
     return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s(group)).to_dict()
 
 
@@ -334,7 +334,7 @@ def model_stages(job: dict, attempt: int, resume: int) -> dict:
     return _group(job, attempt, resume, "model")
 
 
-@app.function(image=blender_image, volumes={DATA: data_vol}, cpu=WORKERS["blender"][0],
+@app.function(image=blender_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["blender"][0],
               memory=WORKERS["blender"][1], timeout=TIMEOUTS["blender"], nonpreemptible=True, single_use_containers=True,
               max_containers=20)
 def blender_stages(job: dict, attempt: int, resume: int) -> dict:

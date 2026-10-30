@@ -67,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--remote-timeout", type=float, default=1800.0, help="seconds allowed per Modal call")
     r.add_argument("--objects-gpu", default=None, help="Modal GPU for SAM 3D Objects (default A100-40GB)")
     r.add_argument("--body-gpu", default=None, help="Modal GPU for SAM 3D Body (default A10G; none = CPU)")
+    r.add_argument("--quality", choices=("live", "replay"), default="live",
+                   help="body usability question: live (default) or cached replay; errors stop the stage")
+    r.add_argument("--quality-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
     r.add_argument("--no-fallback", action="store_true", help="fail instead of falling back to carve/silhouette")
     s = sub.add_parser("synth", help="write a synthetic A-pose humanoid's masks (stage-2 output) to a run folder")
     s.add_argument("--run", required=True, type=Path)
@@ -99,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     from .bl import BlenderError
 
     if 3 in stages:
+        from herogen.pipeline.client import ModelClient
+        from .body_acceptance import BodyQualityError
         from .remote.client import DEFAULT_BODY_GPU, DEFAULT_OBJECTS_GPU, RemoteClient, RemoteError
         from .stage3 import DEFAULT_NZ, error_text, run_stage3
 
@@ -109,8 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             rec = run_stage3(a.run, a.height, a.voxels or DEFAULT_NZ, timeout=a.timeout,
                              mesh_source=a.mesh_source, joints_source=a.joints, remote=remote,
                              fallback=not a.no_fallback, y_method=a.y_method, limb_roots=a.limb_roots,
-                             body_detector=None if a.body_detector == "none" else a.body_detector)
-        except (RemoteError, BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
+                             body_detector=None if a.body_detector == "none" else a.body_detector,
+                             quality_client=ModelClient(a.quality_cache or a.run.parent / "_cache-model",
+                                                        mode=a.quality))
+        except (BodyQualityError, RemoteError, BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
             print(f"stage 3 stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
         if rec.get("fallback"):
