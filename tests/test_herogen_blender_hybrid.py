@@ -254,6 +254,29 @@ class TestPitchRegistration(HybridBase):
         for k, s in self.side_iou(v, src.faces).items():
             self.assertGreater(s, 0.90, k)
 
+    def test_the_pitch_is_bounded(self):
+        # a block whose side masks show it tilted by a known angle: within +-20 degrees the angle is recovered,
+        # beyond it the pitch stays 0 with the reason
+        corners = np.array([[x, y, z] for x in (-0.5, 0.5) for y in (-0.4, 0.4) for z in (0.0, 5.5)])
+        quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+        tris = np.array([t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))])
+        block = sam3d_mesh.SourceMesh(corners, tris, np.zeros((len(tris), 3, 2)), None)
+        p = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0, "distance": 0.0, "cam_height": 0.0}
+        for tilt, expect in ((-20.0, -20.0), (20.0, 20.0), (-25.0, None), (25.0, None)):
+            placed = sam3d_mesh._place(block, {**p, "pitch": tilt}, 5.5)
+            sides = {}
+            for k in ("left", "right"):
+                v = self.vs.views[k]
+                m = raster.render_view(v, placed, tris).mask
+                sides[k] = views.View(k, m, v.pps, v.cmid, v.vref)
+            pitch, rec = sam3d_mesh.fit_pitch(block, p, sides, 5.5)
+            if expect is None:
+                self.assertEqual((pitch, rec["status"]), (0.0, "fallback"), tilt)
+                self.assertIn("beyond the 20 degree limit", rec["reason"])
+            else:
+                self.assertEqual(rec["status"], "fitted", tilt)
+                self.assertLessEqual(abs(pitch - expect), 1.0, tilt)
+
     def test_pose_views_skip_derived_and_missing_side_masks(self):
         kept = {k: v for k, v in self.vs.views.items() if k != "right"}
         meta = {"mask_method": {"left": "visual_hull (front, top)"}}
