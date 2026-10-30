@@ -19,8 +19,8 @@ attempt is appended to ``<cache>/calls-ledger.jsonl`` (model, endpoint, request 
 taken, wait before the next attempt; never a header or the key). An attempt that may have reached the model
 without an answer coming back (it timed out or was cut off on our side) is recorded there and in the call log
 as outcome "unknown": it may be billed, so the cost estimate counts it. A Muse Spark call is priced by the
-token usage it reports, with a count it did not report at its bound (`answer_cost_usd`): so an attempt of
-unknown outcome, with no usage, is counted at its output-token cap.
+token usage it reports, with a count it did not report at its bound (`answer_cost_usd`): so a failed answer
+that is retried is priced from its usage, and an attempt with no answer at its output-token cap.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -348,9 +348,9 @@ class ModelClient:
                                 "schema": schema["schema"]}},
         }
         started = time.monotonic()
-        # An attempt of unknown outcome has no usage to price, so it is counted at its output-token cap.
+        # An attempt that may be billed is priced from the usage it reported, if any (else at the output cap).
         resp = self._post("responses", body, model=model, kind="compare", key=key,
-                          unknown_cost_usd=answer_cost_usd(model, None, max_output_tokens))
+                          usage_cost_usd=lambda usage: answer_cost_usd(model, usage, max_output_tokens))
         # Answered, so it may be billed: priced from its usage, with any count it did not report at its bound.
         cost = answer_cost_usd(model, resp.get("usage"), max_output_tokens)
         self.log.add(model, "compare", key, cached=False, cost_usd=cost)
@@ -410,18 +410,20 @@ class ModelClient:
         return img
 
     def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str,
-              unknown_cost_usd: float | None = None) -> dict[str, Any]:
+              usage_cost_usd: Callable[[Any], float] | None = None) -> dict[str, Any]:
         """POST to the Model API under the retry policy and the shared limiter (`herogen.pipeline.retry`),
         each attempt a line in the ledger and each retry a logged warning. Raises `ApiError` when the
         attempts or the deadline run out, or at once on a status that is never retried.
 
-        ``unknown_cost_usd``: what an attempt of unknown outcome is counted at, required for a token-priced
-        model (it has no per-image price); other models are counted at their per-image price."""
-        if model in PRICE_PER_MTOK_USD and unknown_cost_usd is None:
+        ``usage_cost_usd``: what an attempt of unknown outcome is counted at, given the usage it reported (None
+        when no usage came back); required for a token-priced model, which has no per-image price. Other models
+        are counted at their per-image price."""
+        if model in PRICE_PER_MTOK_USD and usage_cost_usd is None:
             raise ClientError(f"a {model} call needs the cost to count for an attempt of unknown outcome")
 
-        def unknown_outcome() -> None:  # the attempt may have reached the model: logged, counted in the cost
-            self.log.add(model, kind, key, cached=False, outcome="unknown", cost_usd=unknown_cost_usd)
+        def unknown_outcome(usage: Any = None) -> None:  # it may have reached the model: logged, counted in the cost
+            cost = usage_cost_usd(usage) if usage_cost_usd is not None else None
+            self.log.add(model, kind, key, cached=False, outcome="unknown", cost_usd=cost)
 
         api_key = os.environ.get(ENV_KEY, "").strip()
         if not api_key:
@@ -462,7 +464,7 @@ class ModelClient:
                 if as_http is not None:  # answered "failed" for a transient reason: retried like that status
                     last = f"HTTP {status} with status 'failed' ({_scrub(json.dumps(parsed.get('error')))[:200]})"
                     status, outcome = as_http, "failed"
-                    unknown_outcome()  # answered: may be billed
+                    unknown_outcome(parsed.get("usage"))  # answered: may be billed, priced from its usage
             except urllib.error.HTTPError as e:
                 status, headers = e.code, dict(e.headers.items()) if e.headers else {}
                 last = f"HTTP {e.code}: {_error_body(e)}"
