@@ -477,7 +477,8 @@ def stage2_turnaround(
 
 # Stage 3's carve of a sheet's views, gated by stage 3's own silhouette-IoU gate (see `carve_check`).
 CARVE_GATE = "carve_silhouette_iou_min"
-# Every gated check a sheet that splits into four figures is measured on (`attempt_rank` counts a missing one).
+# Retry/ranking gates; after exhaustion, a carve-only failure does not fail stage 2.
+# `attempt_rank` counts a missing gate as failed.
 SHEET_GATES = ("figures_found", "height_agreement_4_views", "front_back_width_agreement", "left_right_mirror_iou",
                "view_mask_sam_coverage_min", CARVE_GATE)
 
@@ -489,7 +490,8 @@ def carve_check(masks: dict[str, np.ndarray], height_units: float, *, derived_to
 
     Generated views that disagree (a staff in the back view only, arms angled differently front and back, a
     profile wider than the other) carve into a body that loses whatever any view lacks, and stage 3 then
-    refuses it. Checked here, such a sheet is generated again instead of ending the run at stage 3.
+    refuses a carve fallback. Checked here, such a sheet is retried; exhaustion does not block the hybrid
+    when only this check fails.
     """
     from herogen.blender import stage3 as s3
     from herogen.blender.views import views_from_masks
@@ -595,7 +597,9 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         top_raw = None
         top_details: dict[str, Any] = {}
         top_notes: list[str] = []
-        if C.gate_ok(side_checks):
+        # Select and measure the saved top whenever the other side gates pass, even if the preliminary
+        # carve fails. The hybrid still needs complete views if no retry produces a passing carve.
+        if sq and C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE]):
             top, top_raw, top_checks, top_details, top_notes = _sheet_top(
                 client, cover, sq, size, bg, height_units
             )
@@ -634,7 +638,18 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     if len(tried) > 1:
         st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (fewest failed "
                         "gates, then the smallest shortfall).")
-    st.checks = list(side_checks) + orient
+    # Attempts retain their gated measurements for retries and ranking. Only the kept stage record can
+    # become advisory, after retrying is over, and only when no other gated check failed.
+    st.checks = [dict(c) for c in side_checks + orient]
+    failed = {c["name"] for c in st.checks if c.get("gate", True) and not c["pass"]}
+    if failed == {CARVE_GATE}:
+        note = ("The carve of these views would fail stage 3's IoU gate, so a carve fallback would be "
+                "refused. Sheet attempts are exhausted; this check does not fail stage 2 for the hybrid.")
+        for c in st.checks:
+            if c["name"] == CARVE_GATE:
+                c["gate"] = False
+                c["note"] = c.get("note", "") + "; " + note
+        st.notes.append(note)
     st.notes += orient_notes + top_notes
     if top is not None:
         st.save_image("02-top-drawn.png", top_raw)

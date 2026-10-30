@@ -206,16 +206,23 @@ threshold); a tie keeps the earlier sheet. A gate a sheet was never measured on 
 shortfall of 1, so a sheet that could not be split into four figures ranks below every sheet that could.
 `stage-2.json` lists every attempt with its checks and `rank`, and `details.kept_attempt` names the kept
 one; `02-turnaround.png`, `views/`, `masks/`, the record's checks and `view_assignment` are all the kept
-sheet's. A top view is requested only for an attempt whose side checks and preliminary carve pass.
+sheet's. A top view is requested for an attempt whose non-carve side gates pass, even if its preliminary
+carve fails, so every such attempt is ranked on the masks that would be saved.
 
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the
 same joints, arm prior, voxel resolution and smoothing, with the mesh rasterised in numpy instead of rendered
-by Blender; on six stage-3 runs the two agreed to 1e-4 in every view). The worst view's silhouette IoU is gated
-with stage 3's own gate, `IOU_GATE` (0.90), and the note names the worst view and lists every IoU. Views that
+by Blender; on six stage-3 runs the two agreed to 1e-4 in every view). The worst view's silhouette IoU is checked
+against stage 3's carve gate, `IOU_GATE` (0.90), and the note names the worst view and lists every IoU. Views that
 disagree (a staff in one view only, arms angled differently front and back, one leg hidden in the back) carve
-into a body that keeps only what every view shows, which stage 3 refuses; checked here, the sheet is generated
-again instead. A drawn top view is used only if the carve with it still passes the gate (stage 3 carves with
+into a body that keeps only what every view shows, which stage 3's carve gate refuses; checked here, the sheet
+is retried. The MVP body is the hybrid (SAM 3D Objects plus Body), with carve only a fallback. The carve check
+remains one of the six side-sheet retry/ranking gates; after attempts are exhausted, a kept sheet failing
+only this check passes stage 2. Its stage record preserves the failed value and `pass: false`, sets
+`gate: false`, and notes that the carve of these views would fail stage 3's gate, so a carve fallback would
+be refused. Attempt records retain `gate: true` and their original ranks. The other five side gates and all
+top-view gates still fail the stage as before; a carve failure alongside another gate remains a stage failure.
+A drawn top view is used only if the carve with it still passes the gate (stage 3 carves with
 an observed top view and gates its IoU); otherwise the visual-hull top is used and a note says why, and
 `details.carve_ious_with_drawn_top` records the IoUs that decided it. The final carve includes whichever top
 will be saved, including a visual-hull fallback; the derived top constrains the geometry but its own IoU is
