@@ -1,0 +1,4 @@
+{
+  "prompt_sketch": {"version": "hero-sketch-v1", "env": "HEROGEN_PROMPT_SKETCH_VERSION"},
+  "same_character": {"version": "same-character-v1", "env": "HEROGEN_SAME_CHARACTER_VERSION"}
+}

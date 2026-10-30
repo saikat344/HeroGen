@@ -18,6 +18,7 @@ include = ["herogen*"]
 
 [tool.setuptools.package-data]
 "herogen.roblox" = ["templates/*.luau", "templates/*.txt"]
+"herogen.prompts" = ["defaults.json", "versions/*.json"]
 
 [tool.ruff]
 line-length = 110
