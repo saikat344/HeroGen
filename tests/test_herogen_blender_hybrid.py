@@ -501,6 +501,7 @@ class TestStage3HybridBlender(HybridBase):
         self.assertEqual(rec["mesh_source"], "sam3d-objects")
         self.assertEqual(rec["joints_source"], "sam3d-body")
         self.assertEqual(rec["shape_views"], ["front"])
+        self.assertEqual(rec["pose_views"], ["left", "right"])
         chk = {c["name"]: c for c in rec["checks"]}
         self.assertTrue(chk["silhouette_iou_front"]["gate"])
         self.assertGreater(chk["silhouette_iou_front"]["value"], 0.90)
@@ -514,6 +515,9 @@ class TestStage3HybridBlender(HybridBase):
         self.assertLessEqual(abs(pose["pitch_deg"]), 1.0)
         for v in ("front", "back", "left", "right"):
             self.assertTrue(chk[f"silhouette_iou_{v}"]["pass"], v)
+        for v in ("left", "right"):
+            self.assertIn("pitch was registered on this view", chk[f"silhouette_iou_{v}"]["note"])
+        self.assertNotIn("pitch was registered", chk["silhouette_iou_back"]["note"])
         self.assertEqual(chk["front_view_present"]["value"], 1)
         self.assertEqual(chk["open_edges"]["value"], 0)
         self.assertIn("03-source.glb", rec["outputs"])

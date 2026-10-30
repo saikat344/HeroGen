@@ -247,12 +247,15 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
                   "their depth; gaussian blur; surface nets; Taubin smoothing")
         shape_views = sorted(v for v in vs.views if "visual_hull" not in
                              str((vs.meta.get("mask_method") or {}).get(v, "")))
+        pose_views = []
     else:
         from . import sam3d_mesh
 
         info = {"source": source_info}
         method = sam3d_mesh.__doc__.strip()
         shape_views = ["front"]
+        pose = source_info.get("pose_fit") or {}
+        pose_views = pose.get("views", []) if pose.get("status") == "fitted" else []
     work.mkdir(parents=True, exist_ok=True)
     mesh_npz = work / "03-mesh.npz"
 
@@ -303,9 +306,10 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
         method_v = str((vs.meta.get("mask_method") or {}).get(v, ""))
         derived = "visual_hull" in method_v
         unseen = v not in shape_views and not derived
+        posed = "; its pitch was registered on this view" if v in pose_views else ""
         note = ({"note": f"derived view ({method_v}); not gated"} if derived else
                 {"note": f"shape not built from this view (mesh source {used_source} saw only "
-                         f"{', '.join(shape_views)})"} if unseen else {})
+                         f"{', '.join(shape_views)}){posed}"} if unseen else {})
         rec.add(check(f"silhouette_iou_{v}", ious[v], IOU_GATE, gate=not derived, **note))
     if used_source == "carve":
         # front/back and left/right are mirror silhouettes, so only three directions are independent; the carve
@@ -328,6 +332,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     rec.data["mesh_source_requested"] = mesh_source
     rec.data["joints_source"] = joints_used
     rec.data["shape_views"] = shape_views
+    rec.data["pose_views"] = pose_views
     rec.data["mesh"] = {**info, "triangles": tri, "vertices": int(len(verts)), "height_studs": height,
                         "pixels_per_stud": round(vs.pps, 4), "figure_height_px": vs.height_px,
                         "views_missing": vs.missing, "iou": ious,
