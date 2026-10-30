@@ -109,11 +109,12 @@ python3 -m herogen.pipeline prompt "a knight in battered plate armour" --run-id 
 ```
 
 Stage p writes `p-design.png`, `p-full-body.png` and every attempt under `p-attempts/`, then stage 0 copies
-`p-full-body.png` as the sketch. The prompt is limited to 300 characters and sits in a bounded slot of the
-design prompt, so it describes the character but can't change the drawing style or the full-body edit. The
-prompt text, models and parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/`
-(`hero-sketch-v1` by default), recorded in `stage-p.json`. The checks, their thresholds and the measurements
-behind them are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
+`p-full-body.png` as the sketch. The prompt is limited to 300 characters. The user's text sits in a bounded
+slot of the design prompt, introduced as describing only the character and never how the picture is drawn, and
+the full-body edit never sees it; no check measures the drawing style yet. The prompt text, models and
+parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/` (`hero-sketch-v1` by
+default), recorded in `stage-p.json`. The checks, their thresholds and the measurements behind them are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
 
 ## Lab
 
