@@ -6,18 +6,21 @@ model and nothing generated is written inside the repository.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image, ImageDraw
 
 from herogen.pipeline import facesource as F
 from herogen.pipeline import imaging
-from herogen.pipeline.client import ApiError, CallLog, SamInstance
+from herogen.pipeline.client import ApiError, CallLog, ReplayMiss, SamInstance
 from herogen.pipeline.runfolder import RunFolder
 
 SIZE = 512
@@ -253,6 +256,34 @@ class TestStage(unittest.TestCase):
         self.assertIn("ApiError", saved["fallback"])
         self.assertFalse(list((run.path / "views").glob("closeup-*")))
         self.assertFalse(list((run.path / "masks").glob("closeup-*")))
+
+    def test_a_replay_miss_is_raised(self):
+        # a replay with no cached answer is a broken cache, not a model failure: it stops the run
+        run = write_run(self.root)
+        F.stage2f_face_source(run, FakeClient())                    # an earlier, successful run
+        with mock.patch.object(F, "make_face_source", side_effect=ReplayMiss("no cached response for key k")):
+            with self.assertRaises(ReplayMiss):
+                F.stage2f_face_source(run, FakeClient())
+        self.assertFalse(list((run.path / "views").glob("closeup-*")))   # nothing stale left behind
+
+    def test_the_cli_reports_a_fallback_on_stderr_and_goes_on(self):
+        from herogen.pipeline.__main__ import run_pipeline
+
+        write_run(self.root)
+        err, out = io.StringIO(), io.StringIO()
+        with mock.patch.object(F, "make_face_source", side_effect=ApiError("images/edits failed: HTTP 500")),                 contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            status = run_pipeline(None, "r", ["2f"], mode="replay", runs=str(self.root))
+        self.assertEqual(status, 0)
+        self.assertIn("stage 2f face source fell back: ApiError: images/edits failed: HTTP 500", err.getvalue())
+        self.assertIn("fell back to the plain views", out.getvalue())
+        self.assertNotIn("close-ups used for", out.getvalue())
+
+    def test_the_cli_stops_on_a_replay_miss(self):
+        from herogen.pipeline.__main__ import run_pipeline
+
+        write_run(self.root)
+        with mock.patch.object(F, "make_face_source", side_effect=ReplayMiss("no cached response for key k")),                 contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_pipeline(None, "r", ["2f"], mode="replay", runs=str(self.root)), 1)
 
     def test_no_part_masks_means_no_crop(self):
         run = write_run(self.root, parts=False)

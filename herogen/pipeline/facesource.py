@@ -45,9 +45,11 @@ it was made from, so stage 4 ignores a close-up of an older turnaround. A view t
 record is written in every case, also when no view is used (then with each view's reason, or the stage's
 `fallback`).
 
-This stage never fails a hero. Any error (a Model API failure after the client's retries, a replay miss, a missing
-input, a bug) is recorded with its reason (`fallback`), no close-up image is written, and stage 4 bakes the plain
-views as before.
+This stage never fails a hero over its own failure. Any error (a Model API failure after the client's retries, a
+missing input, a bug) is recorded with its reason (`fallback`), no close-up image is written, and stage 4 bakes the
+plain views as before; the fallback is loud: the CLI prints it to stderr, and stage 4's record notes it. A replay
+miss (no cached answer when replaying) is not a model failure but a broken cache or run, and is raised, as in every
+other stage.
 Its record is `stage-2f.json` (the same record, per view under `details.closeups`); no check is gated. No file
 another stage reads is changed (`views/<view>.png`, `masks/<view>.png` and `views/meta.json` are untouched), so the
 held-out views stay valid.
@@ -64,7 +66,7 @@ from PIL import Image
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
-from herogen.pipeline.client import SAM_MODEL, ModelClient
+from herogen.pipeline.client import SAM_MODEL, ModelClient, ReplayMiss
 from herogen.pipeline.runfolder import RunFolder
 
 STAGE = "2f"
@@ -99,6 +101,7 @@ EDIT_SIZE = "1024x1024"
 WORK = 512                 # registration resolution of the crop (px)
 MAX_RESCALE = 1.6          # a fitted transform may change the crop box's scale by less than this factor
 FOOTPRINT_GROW_PX = 2
+FALLBACK_CHARS = 600       # a fallback's reason is kept to this many characters
 
 # Gates, set on the tuning characters only (ground-truth C01-C09, generated s002-s028, s044, s045: 35 front and
 # 69 profile close-ups made with these prompts and crops), NCC in the view (`ncc_view`): front min 0.968, median
@@ -513,9 +516,14 @@ def stage2f_face_source(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     _clear(run)
     try:
         record = make_face_source(run, client)
-    except Exception as e:  # noqa: BLE001  (any failure falls back to the plain views; the reason is kept)
+    except ReplayMiss:
+        # a replay with no cached answer is a broken cache or run, not a model failure: it stops the run, as in
+        # every other stage
         _clear(run)
-        record = {"stage": STAGE, "views": {}, "fallback": f"{type(e).__name__}: {e}"[:600]}
+        raise
+    except Exception as e:  # noqa: BLE001  (any other failure falls back to the plain views; the reason is kept)
+        _clear(run)
+        record = {"stage": STAGE, "views": {}, "fallback": f"{type(e).__name__}: {e}"[:FALLBACK_CHARS]}
     used = sorted(v for v, r in record["views"].items() if r.get("used"))
     record["used_views"] = used
     # The record is written even when no close-up is used, so stage 4 can say why for each view.
