@@ -12,7 +12,7 @@ import numpy as np
 from . import (DEFAULT_PROFILE, HEIGHT_STUDS, PARENT, PIVOT_JOINT, PROFILES, SECTIONS, VIEWS, bl, body_joints,
                covers, cuts, joints, pose, split, texture)
 from .carve import winding_inside
-from .stage3 import IOU_GATE, iou
+from .stage3 import IOU_GATE, MESH_SOURCES, iou
 from .views import load_mask
 from .record import StageRecord, check, write_atomic
 from .stage3 import work_dir
@@ -213,6 +213,35 @@ def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
     return out
 
 
+def _shape_views(run: Path, vs) -> tuple[str, set[str], dict]:
+    """Validate stage 3's shape provenance before selecting any rest reference."""
+    path = run / "stage-3.json"
+    if not path.exists():
+        raise ValueError("stage 4 needs stage-3.json to identify the mesh source and shape_views")
+    try:
+        s3 = json.loads(path.read_text())
+    except (ValueError, OSError) as exc:
+        raise ValueError("stage 4 cannot read stage-3.json as JSON") from exc
+    if not isinstance(s3, dict) or s3.get("mesh_source") not in MESH_SOURCES:
+        raise ValueError("stage-3.json mesh_source must be carve or sam3d-objects")
+    mesh_source = s3["mesh_source"]
+    note = {}
+    if "shape_views" not in s3:
+        method = vs.meta.get("mask_method") or {}
+        names = (["front"] if mesh_source == "sam3d-objects" else
+                 sorted(v for v in vs.views if "visual_hull" not in str(method.get(v, ""))))
+        note["note"] = (f"older stage-3.json has no shape_views; using the {mesh_source} default: "
+                        + ", ".join(names))
+    else:
+        names = s3["shape_views"]
+    if not isinstance(names, list) or not names or any(not isinstance(v, str) or v not in VIEWS for v in names):
+        raise ValueError("stage-3.json shape_views must be a non-empty list of known view names: "
+                         + ", ".join(VIEWS))
+    if mesh_source == "sam3d-objects" and "front" not in names:
+        raise ValueError('stage-3.json shape_views for sam3d-objects must include "front"')
+    return mesh_source, set(names), check("shape_views", names, **note)
+
+
 def _rest_iou_checks(vs, shape_views: set[str], mesh_source: str, rest_silhouettes: dict,
                      stage3_silhouettes: dict) -> tuple[dict, list[dict]]:
     """Check shape preservation; retain turnaround agreement as a diagnostic for unseen shape views."""
@@ -251,6 +280,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     if not mesh_src.exists():
         raise FileNotFoundError("stage 4 needs stage 3's mesh (03-mesh.glb)")
     vs = load_views(run, height)
+    try:
+        mesh_source, shape_views, shape_check = _shape_views(run, vs)
+    except ValueError as exc:
+        rec.add(check("shape_views", None, passed=False, note=str(exc)))
+        rec.finish()
+        raise
+    rec.add(shape_check)
     sk = joints.estimate(vs, height)
     silhouette_joints = sk.as_json()
     jrec = body_joints.load_joints(run / "03-joints.json")
@@ -258,10 +294,6 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     if jrec is not None and jrec.get("source") == "sam3d-body":
         sk = body_joints.apply_to_skeleton(sk, jrec)
         joints_source = "sam3d-body"
-    s3_path = run / "stage-3.json"
-    s3 = json.loads(s3_path.read_text()) if s3_path.exists() else {}
-    mesh_source = s3.get("mesh_source", "carve")
-    shape_views = set(s3.get("shape_views") or vs.views)
     source = None
     src_uv, src_tex = work / "03-source-uv.npz", work / "03-source-texture.png"
     if mesh_source == "sam3d-objects" and src_uv.exists() and src_tex.exists():
@@ -556,7 +588,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         pivot_rows[n] = {"inside_section": inside, "offset_from_mask_joint": round(off, 4),
                          "rim_radius": None if rim_r is None else round(rim_r, 4), "ok": ok}
     rec.add(check("pivots_in_joint_region", int(sum(r["ok"] for r in pivot_rows.values())), 15,
-                  rule=">=", note="pivot inside its section and within one cut radius of the mask joint",
+                  rule=">=", note="pivot inside its section and, when a parent rim exists, within the larger of "
+                  "its mean cut radius and 0.05 studs of the selected skeleton joint",
                   worst_offset_over_radius=round(worst_off, 3)))
     gated = {lod: max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
              for lod, g in gaps.items()}

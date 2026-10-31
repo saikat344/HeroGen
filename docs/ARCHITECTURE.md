@@ -159,6 +159,10 @@ same `View.camera()` definitions as the sectioned rest body. The reference rende
 in `rest_iou_with_covers_turnaround_<view>` with `gate: false` and the shape-not-built-from-this-view note.
 Derived visual-hull views keep their ungated turnaround comparison. `rest_iou_with_covers` in the body records
 holds the IoUs against each view's selected reference. Pivots, joint gaps and texture gates are separate.
+Stage 4 requires `stage-3.json` with a known `mesh_source` and validates `shape_views` as a non-empty list
+of names from `herogen.blender.VIEWS`; `sam3d-objects` must include `front`. An older record that omits
+`shape_views` uses every observed (non-derived) view for `carve`, or `["front"]` for `sam3d-objects`, with
+the default stated on the `shape_views` check. Invalid provenance stops stage 4 with a failed record.
 
 **Cuts and pivots.** Each cut is a plane through a joint (`herogen/blender/split.py`); the pivot is the area
 centroid of the child's largest opening there (largest by area), so it depends only on the cut's shape, not on
