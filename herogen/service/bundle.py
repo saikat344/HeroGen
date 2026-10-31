@@ -39,6 +39,10 @@ class BundleUnavailable(Exception):
 def glb_path(run_dir: Path, lod: str = "high") -> Path | None:
     if lod not in LODS:
         return None
+    if lod == "high":
+        from herogen.blender.final_model import final_model
+
+        return final_model(run_dir)
     p = run_dir / "04-body" / f"{lod}.glb"
     try:
         if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(run_dir.resolve()):
@@ -97,7 +101,7 @@ def roblox_readme(run_dir: Path) -> str | None:
 
 def roblox_bundle(run_dir: Path) -> bytes:
     files = roblox_files(run_dir)
-    glb = glb_path(run_dir, "high")
+    glb = _inside(run_dir, GLB)
     if glb is None:
         raise BundleUnavailable("The body's GLB is missing for this hero.")
     buf = io.BytesIO()

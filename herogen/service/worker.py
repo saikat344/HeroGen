@@ -294,14 +294,14 @@ def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> S
                         run_dir=storage.run_dir(uid, jid), input_path=storage.input_path(uid, jid),
                         cache_dir=storage.cache_dir(uid), remote_cache_dir=storage.remote_cache_dir(uid),
                         stage3_args=stage3_args(settings.stage3_args), timeout_s=settings.stage_timeout_s,
-                        blender_timeout_s=settings.blender_timeout_s)
+                        blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd)
 
 
 def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
               runner: StageRunner, workdir: Workdir, compute_price_per_s: float = 0.0) -> GroupResult:
     """Run the stages of one group for one attempt; see the module docstring."""
     jid = job["id"]
-    plan = plan_for(job["kind"])
+    plan = plan_for(job["kind"], job["profile"])
     mine = [(i, s) for i, s in enumerate(plan) if s.group == group]
     total = GroupResult("ok")
     if not mine:
@@ -430,14 +430,14 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
         if volume is not None:
             volume.reload()
         run_dir = storage.run_dir(job["user_id"], job_id)
-        resume = resume_index(run_dir, plan_for(job["kind"])) if attempt > 1 else 0
+        resume = resume_index(run_dir, plan_for(job["kind"], job["profile"])) if attempt > 1 else 0
         if job["kind"] == "sketch" and not storage.input_path(job["user_id"], job_id).is_file():
             store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0", refund=True,
                              error_message="The uploaded sketch was not saved.")
             return "failed"
         seconds = cost = compute = 0.0
         # Outcomes count new work. Stored stage rows also include earlier attempts and restarted groups.
-        own_stages = {s.key for s in plan_for(job["kind"]) if s.group in GROUPS}
+        own_stages = {s.key for s in plan_for(job["kind"], job["profile"]) if s.group in GROUPS}
         for group in GROUPS:
             try:
                 res = execute(job, attempt, group, resume)

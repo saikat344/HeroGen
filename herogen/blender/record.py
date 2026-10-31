@@ -55,7 +55,7 @@ def check(name: str, value, threshold=None, passed: bool | None = None, gate: bo
 
 
 class StageRecord:
-    def __init__(self, run: Path, stage: int, name: str):
+    def __init__(self, run: Path, stage: int | str, name: str):
         self.run = run
         self.data = {
             "stage": stage, "name": name, "ok": False,

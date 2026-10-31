@@ -16,7 +16,7 @@ from typing import Any
 
 ROOT_KEY = "r1"
 ROOT_LABEL = "Your heroes"
-STAGES = [("0", "input"), ("1", "cover art"), ("2", "turnaround"), ("2h", "held-out view"), ("3", "base mesh"),
+STAGES = [("0", "input"), ("1", "cover art"), ("2", "turnaround"), ("2h", "held-out view"), ("3", "base mesh"), ("3f", "texture refine"),
           ("4", "game body"), ("5", "results")]
 IMAGES = {"sketch": "00-sketch.png", "cover": "01-cover.png", "turnaround": "02-turnaround.png",
           "front": "views/front.png", "back": "views/back.png", "left": "views/left.png", "right": "views/right.png",
@@ -78,13 +78,19 @@ def _files(run: Path) -> dict[str, dict[str, Any]]:
 
 
 def _minimal_detail(run: Path, run_id: str) -> dict[str, Any]:
+    from herogen.blender.final_model import final_model
+
     stages = [_stage(run, k, label) for k, label in STAGES]
-    glbs = [f"04-body/{n}" for n in ("high.glb", "low.glb") if (run / "04-body" / n).is_file()]
+    high = final_model(run)
+    glbs = ([high.relative_to(run).as_posix()] if high else [])
+    if (run / "04-body/low.glb").is_file():
+        glbs.append("04-body/low.glb")
     secs = [s["seconds"] for s in stages if isinstance(s.get("seconds"), (int, float))]
     costs = [s["cost_usd"] for s in stages if isinstance(s.get("cost_usd"), (int, float))]
     return {"id": run_id, "root": ROOT_KEY, "name": run.name, "path": f"{ROOT_LABEL}/{run.name}", "stages": stages,
             "images": _files(run), "bodies": [{"dir": "04-body", "files": [{"path": g} for g in glbs]}] if glbs else [],
-            "deliverables": [{"kind": "GLB " + g.split("/")[-1][:-4], "status": "built", "path": g} for g in glbs],
+            "deliverables": [{"kind": "GLB low" if g.endswith("/low.glb") else "GLB high",
+                              "status": "built", "path": g} for g in glbs],
             "total_seconds": round(sum(secs), 2) if secs else None,
             "total_cost_usd": round(sum(costs), 6) if costs else None, "cost_is_estimate": True}
 

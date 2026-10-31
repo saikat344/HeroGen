@@ -15,6 +15,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from herogen.blender.final_model import final_model
+
 # Stage records in pipeline order; "2h" is the held-out view (see docs/ARCHITECTURE.md).
 STAGES = [
     ("0", "input"),
@@ -22,6 +24,7 @@ STAGES = [
     ("2", "turnaround"),
     ("2h", "held-out view"),
     ("3", "base mesh"),
+    ("3f", "texture refine"),
     ("4", "game body"),
     ("5", "results"),
 ]
@@ -476,8 +479,10 @@ def bodies(run: Path, score_bodies: list[dict[str, Any]] | None = None) -> list[
         dirs = sorted(p for p in run.iterdir() if BODY_DIR.match(p.name) and not p.is_symlink() and p.is_dir())
     except OSError:
         return []
+    if final_model(run) is not None and run / "04-body" not in dirs:
+        dirs.insert(0, run / "04-body")
     for d in dirs:
-        high = d / "high.glb"
+        high = (final_model(run) or d / "high.glb") if d.name == "04-body" else d / "high.glb"
         low = d / "low.glb"
         if not high.is_file() and not low.is_file():
             continue
@@ -710,6 +715,8 @@ def deliverables(run: Path, body: dict[str, Any] | None, stage4: dict[str, Any] 
     if body is None:
         return [{"kind": "Game body", "status": "not built", "reason": "stage 4 has not written 04-body/ in this run"}]
     files = {f["path"].split("/")[-1]: f for f in body["files"]}
+    if body.get("high"):
+        files["high.glb"] = file_entry(run, body["high"])
     sec = body.get("sections") or {}
     profile = _dict((stage4 or {}).get("profile"))
     profile_lods = [x for x in _list(profile.get("lods")) if isinstance(x, str)]

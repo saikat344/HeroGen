@@ -532,7 +532,7 @@ class App:
         rows = {r["stage"]: r for r in await self.call(self.svc.store.job_stages, job_id)}
         files = await self.call(self._files, user_id, job)
         stages = []
-        for spec in plan_for(job["kind"]):
+        for spec in plan_for(job["kind"], job["profile"]):
             r = rows.get(spec.key)
             stages.append({"key": spec.key, "label": spec.label, "state": r["state"] if r else "pending",
                            "side": spec.key in SIDE_STAGES,

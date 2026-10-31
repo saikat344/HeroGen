@@ -51,6 +51,7 @@ PLAN = (
     StageSpec("1", "cover art", "model", "stage-1.json"),
     StageSpec("2", "turnaround", "model", "stage-2.json"),
     StageSpec("3", "base mesh", "blender", "stage-3.json"),
+    StageSpec("3f", "texture refine", "blender", "stage-3f.json"),
     StageSpec("4", "game body", "blender", "stage-4.json"),
     StageSpec("6", "Roblox rig", "export", "stage-6.json", optional=True),
     StageSpec("5", "results page", "export", "stage-5.json", optional=True),
@@ -112,6 +113,7 @@ class StageContext:
     timeout_s: float = 3600.0
     blender_timeout_s: float = 3 * 3600.0
     env: dict[str, str] = field(default_factory=dict)
+    refine_cap_usd: float = 0.80
 
     @property
     def runs_root(self) -> Path:
@@ -136,8 +138,8 @@ def roblox_available() -> bool:
         return False
 
 
-def plan_for(kind: str) -> list[StageSpec]:
-    return [s for s in PLAN if kind == "prompt" or not s.prompt_only]
+def plan_for(kind: str, profile: str = "best") -> list[StageSpec]:
+    return [s for s in PLAN if (kind == "prompt" or not s.prompt_only) and (s.key != "3f" or profile == "best")]
 
 
 def read_record(run_dir: Path, name: str) -> dict[str, Any] | None:
@@ -320,7 +322,7 @@ class CliRunner:
             return pipe + common + ["--stages", "2h", "--live"], None
         if spec.key == "5":
             return pipe + common + ["--stages", "5"], None
-        if spec.key in ("3", "4"):
+        if spec.key in ("3", "3f", "4"):
             help_text = self.flags("herogen.blender", env)
             argv = [py, "-m", "herogen.blender", "run", "--run", str(ctx.run_dir), "--stages", spec.key,
                     "--timeout", str(int(ctx.blender_timeout_s))]
@@ -332,6 +334,9 @@ class CliRunner:
                     argv += ["--quality-cache", str(ctx.cache_dir)]
             if spec.key == "4" and "--profile" in help_text:
                 argv += ["--profile", ctx.profile]
+            if spec.key == "3f":
+                argv += ["--refine", "live", "--refine-cache", str(ctx.cache_dir), "--profile", ctx.profile,
+                         "--refine-cap-usd", str(ctx.refine_cap_usd)]
             return argv, None
         if spec.key == "6":
             # With --out a run's 06-roblox folder, the export writes stage-6.json at the run root, its
@@ -345,14 +350,14 @@ class CliRunner:
         if why:
             return Outcome("skipped", message=why, code="not_available")
         extra = dict(ctx.env)
-        if (spec.group in ("model", "heldout") or spec.key == "3") and self._model_key:
+        if (spec.group in ("model", "heldout") or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
             env = base_env({"HOME": home, **extra})
             argv, stdin = self.command(spec, ctx, env, Path(home))
             for stale in (spec.record, *spec.extra):
                 p = ctx.run_dir / stale
-                if p.exists():
+                if p.exists() and spec.key != "3f":  # preserve the per-run API spend across retries
                     p.unlink()
             timeout = ctx.blender_timeout_s if spec.group == "blender" else ctx.timeout_s
             t0 = time.monotonic()

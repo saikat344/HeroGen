@@ -23,7 +23,7 @@ async function open(id) {
     const fig = el('figure'); const img = el('img'); img.src = `/runs/${enc(id)}/${enc(f.path)}`; img.alt = k;
     fig.append(img, el('figcaption', k)); return fig;
   }));
-  const glb = (run.deliverables || []).find((d) => d.status === 'built' && d.path && d.path.endsWith('high.glb'));
+  const glb = (run.deliverables || []).find((d) => d.status === 'built' && d.path && d.kind === 'GLB high');
   if (glb) (await import('/assets/preview.js')).show($('#preview'), `/runs/${enc(id)}/${enc(glb.path)}`);
 }
 
