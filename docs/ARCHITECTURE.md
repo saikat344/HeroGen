@@ -334,7 +334,7 @@ stored scorecard runs and matched their original hashes. Median IoUs are:
 | All cases (66) | pitch fit + depth | 0.96555 | 0.83505 | 0.76435 | 0.76045 | 0.55950 | 0.74090 | 0/66 |
 
 Top medians include derived views (28 offload and 20 scorecard top masks, only two observed, both offload);
-only observed masks enter the worst-view score and the unchanged >=0.90 silhouette gate. The benchmark also
+only observed masks enter the worst-view score and the >=0.90 silhouette check, now a diagnostic. The benchmark also
 requires zero open edges, met by every mesh; it does not establish full stage-3 pipeline success. Its final IoUs
 use the original finite observation cameras, while `depth_register` separately records complete-silhouette IoU.
 The 66 cases contain 65 distinct source meshes, with one shared across sets, and are not independent held-out
