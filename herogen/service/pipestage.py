@@ -2,7 +2,8 @@
 
 Stage p reads the description as UTF-8 on stdin and calls the pipeline's stagep_prompt, which owns the prompt
 versions, checks, images and stage-p.json. No description or model error text is printed: API errors may echo
-the description. The runner reads the record to classify errors and count costs.
+the description. The runner reads the record for costs and gates, and exit codes for errors: 3 input rejected,
+4 content policy, 5 transient model error, 1 permanent error. Exception messages never decide these codes.
 
 The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service runs 2h beside the
 rest of the job instead (see `worker.run_heldout`), so it starts stage 2 through the same public functions the
@@ -15,6 +16,21 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+
+def prompt_error_exit(error: BaseException | None) -> int:
+    """Inspect explicit exception causes: stage p wraps client errors in PromptStageError."""
+    from herogen.pipeline.client import ApiError
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ApiError):
+            if error.error_code == "content_policy_violation":
+                return 4
+            return 5 if error.transient else 1
+        error = error.__cause__
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:  # noqa: BLE001  (one line for the runner; the record holds the rest)
         print("stage p: error; stopping" if a.stage == "p" else f"stage 2: error: {type(e).__name__}: {e}; stopping",
               file=sys.stderr)
-        return 1
+        return prompt_error_exit(e) if a.stage == "p" else 1
     print(f"stage {a.stage} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
     return 0
 

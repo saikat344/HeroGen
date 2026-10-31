@@ -16,7 +16,7 @@ from herogen import prompts
 from herogen.pipeline import client as client_mod
 from herogen.pipeline import prompt_sketch
 from herogen.pipeline.__main__ import main as pipeline_main
-from herogen.pipeline.client import ClientError, ModelClient
+from herogen.pipeline.client import ApiError, ModelClient
 from herogen.pipeline.runfolder import RunFolder
 from herogen.service import bundle, labapi, pipestage
 from herogen.service.runner import PLAN, CliRunner, INPUT_LABELS
@@ -31,6 +31,20 @@ def _write_json(folder, rel, data):
     path = folder.file(rel)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+class StructuredAPI(FakeAPI):
+    """A fake transport failure with independent machine fields and untrusted message text."""
+
+    def __init__(self, *, error, **kw):
+        super().__init__(**kw)
+        self.error = error
+
+    def post(self, client, endpoint, body, **kw):
+        if self.fail == endpoint:
+            self.calls.append(endpoint)
+            raise self.error
+        return super().post(client, endpoint, body, **kw)
 
 
 class PromptJobTest(JobCase):
@@ -78,6 +92,7 @@ class PromptJobTest(JobCase):
                 code = pipeline_main(argv[3:])
             else:
                 raise AssertionError(f"unexpected stage module {argv[2]}")
+        self.subprocess_exit_code = code
         return subprocess.CompletedProcess(argv, code, stdout.getvalue(), stderr.getvalue())
 
     def prompt_job(self, text=None, name=""):
@@ -133,7 +148,7 @@ class PromptJobTest(JobCase):
 
         def interrupted(*a, **kw):
             identity(*a, **kw)  # every model answer is cached, but the stage has not finished
-            raise ClientError(f"HTTP 503: {self.description}")
+            raise ApiError(f"HTTP 503: {self.description}", http_status=503, transient=True)
 
         with self.assertLogs("herogen.service", "INFO") as logs:
             with mock.patch.object(prompt_sketch, "identity_checks", side_effect=interrupted):
@@ -170,8 +185,8 @@ class PromptJobTest(JobCase):
         self.assertEqual(self.api.calls, [])
 
     def test_content_policy_refusal_rejects_without_echoing_the_description(self):
-        self.api = FakeAPI(fail="images/generations",
-                           fail_text=f"HTTP 400: content_policy_violation: {self.description}")
+        self.api = StructuredAPI(fail="images/generations", error=ApiError(
+            self.description, http_status=400, error_code="content_policy_violation"))
         job = self.prompt_job()
         with self.assertLogs("herogen.service", "INFO") as logs:
             self.assertEqual(self.go(job), "rejected")
@@ -184,7 +199,8 @@ class PromptJobTest(JobCase):
     def test_recorded_transient_failure_retries_and_permanent_failure_does_not(self):
         for status, expected in ((503, "queued"), (400, "failed")):
             with self.subTest(status=status):
-                self.api = FakeAPI(fail="images/edits", fail_text=f"HTTP {status}: {self.description}")
+                self.api = StructuredAPI(fail="images/edits", error=ApiError(
+                    self.description, http_status=status, transient=status == 503))
                 job = self.prompt_job(f"{self.description} number {status}")
                 with self.assertLogs("herogen.service", "INFO") as logs:
                     self.assertEqual(self.go(job), expected)
@@ -196,7 +212,8 @@ class PromptJobTest(JobCase):
                 self.assertGreater(self.stages(job)["p"]["cost_usd"], 0, "the design already spent money")
 
     def test_exhausted_transient_failure_retains_stage_p_cost(self):
-        self.api = FakeAPI(fail="images/edits", fail_text="HTTP 503: unavailable")
+        self.api = StructuredAPI(fail="images/edits", error=ApiError(
+            "unavailable", http_status=503, transient=True))
         job = self.prompt_job()
         self.assertEqual(self.go(job), "queued")
         first_cost = self.record(job, "p")["cost_usd"]
@@ -217,12 +234,83 @@ class PromptJobTest(JobCase):
         with mock.patch("herogen.service.runner.subprocess.run", return_value=subprocess.CompletedProcess(
                 [], 1, self.description, f"HTTP 503: {self.description}")):
             with self.assertLogs("herogen.service", "INFO") as logs:
-                self.assertEqual(self.go(job), "queued")
+                self.assertEqual(self.go(job), "failed")
         self.assertNotIn(self.description, "\n".join(logs.output))
         out = CliRunner.outcome(spec, ctx, 1, 1, self.description, self.description, False)
         self.assertEqual((out.state, out.detail), ("failed", ""))
         out = CliRunner.outcome(spec, ctx, 1, -1, self.description, self.description, True)
         self.assertEqual((out.state, out.code, out.detail), ("failed", "timeout", ""))
+
+    def test_structured_outcomes_ignore_description_and_output_markers(self):
+        from herogen.pipeline.stages import GateFailed, InputRejected
+        from herogen.service.runner import describe_error, describe_rejection
+        from herogen.service.worker import make_context
+
+        spec = next(s for s in PLAN if s.key == "p")
+        job = self.prompt_job()
+        ctx = make_context(self.s, self.storage, job)
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        descriptions = ("a plain knight", "a content_policy_violation knight", "a HTTP 503 knight",
+                        "a timed out knight", "a ReplayMiss knight", "a TimeoutError URLError knight")
+        for case, exit_code, expected in (
+                ("pass", 0, ("passed", "", False)),
+                ("input", 3, ("rejected", "rejected", False)),
+                ("policy", 4, ("rejected", "rejected", False)),
+                ("transient", 5, ("failed", "model_unavailable", True)),
+                ("permanent", 1, ("failed", "stage_error", False)),
+                ("gate", 2, ("rejected", "rejected", False))):
+            reference = None
+            for description in descriptions:
+                with self.subTest(case=case, description=description):
+                    ctx.prompt = description
+
+                    def stage(run, client, text):
+                        rec = {"ok": case == "pass", "status": "input_rejected" if case == "input" else
+                               ("passed" if case == "pass" else "error"), "error": text,
+                               "details": {"user_text": text}, "name": "prompt_sketch",
+                               "checks": [], "seconds": 0, "cost_usd": 0}
+                        _write_json(run, "stage-p.json", rec)
+                        if case == "pass":
+                            return rec
+                        if case == "input":
+                            raise InputRejected("p", rec)
+                        if case == "gate":
+                            raise GateFailed("p", rec)
+                        try:
+                            raise ApiError(text, http_status=503 if case == "transient" else 400,
+                                           error_code="content_policy_violation" if case == "policy" else None,
+                                           transient=case == "transient")
+                        except ApiError as e:
+                            raise prompt_sketch.PromptStageError(text) from e
+
+                    with mock.patch.object(prompt_sketch, "stagep_prompt", side_effect=stage), \
+                            self.assertNoLogs("herogen.service"):
+                        outcome = self.cli.run(spec, ctx)
+                    self.assertEqual((outcome.state, outcome.code, outcome.transient), expected)
+                    self.assertNotIn(description, outcome.message + outcome.detail)
+                    if reference is None:
+                        reference = outcome.message
+                    self.assertEqual(outcome.message, reference)
+                    self.assertEqual(self.subprocess_exit_code, exit_code)
+                    # Even direct callers of the helpers cannot classify stage p from error text.
+                    self.assertFalse(describe_error(spec, description, False)[2])
+                    self.assertNotIn("content policy", describe_rejection(spec, {"error": description}))
+
+    def test_exit_codes_work_without_a_record_and_timeout_takes_priority(self):
+        from herogen.service.worker import make_context
+
+        spec = next(s for s in PLAN if s.key == "p")
+        job = self.prompt_job()
+        ctx = make_context(self.s, self.storage, job)
+        for code, state in ((1, "failed"), (2, "rejected"), (3, "rejected"), (4, "rejected"), (5, "failed")):
+            with self.subTest(code=code):
+                outcome = CliRunner.outcome(spec, ctx, 1, code, self.description, self.description, False)
+                self.assertEqual(outcome.state, state)
+                self.assertEqual(outcome.transient, code == 5)
+                self.assertEqual(outcome.detail, "")
+                self.assertNotIn(self.description, outcome.message)
+                timeout = CliRunner.outcome(spec, ctx, 1, code, self.description, self.description, True)
+                self.assertEqual((timeout.state, timeout.code, timeout.transient), ("failed", "timeout", True))
 
     def test_unicode_description_travels_on_utf8_stdin_only(self):
         job = self.prompt_job("a knight called \u96ea with a caf\u00e9 shield")
