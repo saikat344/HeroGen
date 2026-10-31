@@ -1,6 +1,6 @@
 """Pose test: rotate sections about their pivots and measure how far the joints open.
 
-Gap measure, per joint and pose: the rim of a cut (the loop both sections shared at rest) is carried along by
+Gap measure, per joint and pose: the rim of a cut (the qualifying boundary both sections shared at rest) is carried along by
 the parent and by the child. A rim point carried by one section that ends up outside the other section's
 closed surface marks an exposed cut; its distance to that surface is the gap there. The joint's gap is the
 largest such distance over both sides, in studs. At rest every rim point lies on both surfaces, so the gap is
@@ -244,7 +244,7 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
 
     missing = cuts.unmeasurable_sections(sections, joints)
     if missing:
-        raise cuts.UnmeasurableJoints(missing)
+        raise cuts.UnmeasurableJoints(missing, cuts.rim_topology(sections))
     query = MeshIndex if fast else _Brute
     index: dict[str, object] = {}
 
@@ -260,7 +260,7 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
         if parent is None:
             continue
         pts = [r["points"][ids] for r in s.rims if r["neighbour"] == parent
-               and len(ids := split.rim_loop_vertices(r))]
+               and len(ids := split.rim_measurement_vertices(r, s.cut_radius))]
         if pts and len(sections[parent].faces) and len(s.faces) and (joints is None or PIVOT_JOINT[name] in joints):
             rims[name] = np.concatenate(pts)
     result: dict[str, dict[str, float]] = {}

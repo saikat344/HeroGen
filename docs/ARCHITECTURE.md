@@ -455,18 +455,25 @@ the reason for retaining or replacing them, the measured radii, whether they wer
 scores and changes no gate. Carve skeletons retain their original radii and joints.
 
 A cut opening can border several sections, for example a lower arm meeting its upper arm and the torso.
-Gap measurements require at least one closed loop of edges present in both sections' uncapped mesh boundaries.
-Biconnected boundary blocks admit separate loops, loops sharing vertices and loops meeting at junctions; gap
-samples include every nondegenerate cyclic block and exclude dangling edges.
-Point contacts, open chains and collinear cycles cannot measure a joint; they cause a recorded
-`measurable_joints` failure if no closed shared ring remains. Only genuine rings contribute gap samples,
-including when another neighbour owns most of the opening. This rule applies to the reference body and every
-selected LOD; per-LOD `joint_rims` records the vertex and edge counts and ring validity. Body-joint skeletons'
+Gap measurements use edges present in both sections' uncapped mesh boundaries. A joint is measurable
+when it has a nondegenerate closed loop or an open chain whose arc length is at least the joint's cut radius
+(the child bone radius already used by stage 4). This is one structural, scale-relative bound; a single edge
+can qualify if long enough. Single vertices and shorter chains cannot measure a joint.
+Biconnected blocks preserve every nondegenerate loop, including multiple loops and junctions. The remaining
+bridge edges form maximal open chains, split at branch vertices; lengths are not pooled across branches or
+components. Collinear cycles do not become open chains. Every qualifying loop and chain contributes gap
+samples, and the maximum over those samples is measured. No closing chord is inferred.
+If no qualifying boundary remains, stage 4 writes a failed `measurable_joints` record and leaves the gap unknown.
+The same rule applies to the reference body, cut candidates and every selected LOD. Per-LOD `joint_rims`
+records each joint's `boundary_type` (`loops`, `open_chain`, `loops+open_chain`, or `none`), `cut_radius_studs`,
+and component vertex/edge counts, loop validity and every open chain's `length_studs`, `length_over_radius`
+and `measurable` flag. Failed stage records also carry `joint_rims` for the failing reference body or LOD.
+Body-joint skeletons'
 openings with two contiguous neighbour runs are capped separately along a shared chord. A cap chord does not
 invent a shared measurement boundary. Silhouette skeletons retain the original chord rule, which splits only
 openings with two joint-adjacent neighbours; their section geometry and pivots are unchanged.
-Silhouette shoulder covers retain their original cap-owner samples for sizing, separately from the closed
-shared rings used to measure joints.
+Silhouette shoulder covers retain their original cap-owner samples for sizing, separately from the qualifying
+shared boundaries used to measure joints.
 
 ## Stage 4 texture: colour projection
 

@@ -59,8 +59,9 @@ REFERENCE_TRIANGLES = 20000
 class UnmeasurableJoints(ValueError):
     """A cut has no shared rim between two nonempty sections; its gap is unknown."""
 
-    def __init__(self, reasons: dict[str, str]):
+    def __init__(self, reasons: dict[str, str], boundaries: dict | None = None):
         self.reasons = reasons
+        self.boundaries = boundaries or {}
         detail = "; ".join(f"{j}: {reason}" for j, reason in sorted(reasons.items()))
         super().__init__(f"cannot measure cut gaps ({detail}); check the stage 3 mesh and joint placement")
 
@@ -92,22 +93,40 @@ def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, st
         empty = [n for n in (child, parent) if not len(secs[n].faces)]
         if empty:
             missing[j] = "empty section " + ", ".join(empty)
-        elif not any(r["neighbour"] == parent and split.is_closed_rim(r) for r in secs[child].rims):
+        elif not any(r["neighbour"] == parent and len(split.rim_measurement_vertices(r, secs[child].cut_radius)) for r in secs[child].rims):
             missing[j] = f"no shared rim between {child} and {parent}"
             contacts = [r for r in secs[child].rims if r["neighbour"] == parent and len(r["points"])]
             if contacts:
                 sizes = ", ".join(f"{len(r['points'])} vertices/{len(r.get('edges', []))} edges" for r in contacts)
-                missing[j] += f" (contacts have no closed loop: {sizes})"
+                missing[j] += f" (no qualifying loop or chain: {sizes}; cut radius {secs[child].cut_radius:.6g})"
     return missing
 
 
 def rim_topology(secs: dict) -> dict:
     """Per joint, the sizes and structural validity of all parent/child boundary components."""
-    return {PIVOT_JOINT[child]: [{"vertices": len(r["points"]), "edges": len(r.get("edges", [])),
-                                "closed_ring": split.is_closed_rim(r),
-                                "loop_vertices": len(split.rim_loop_vertices(r))}
-                               for r in secs[child].rims if r["neighbour"] == parent]
-            for child, parent in PARENT.items() if parent is not None}
+    result = {}
+    for child, parent in PARENT.items():
+        if parent is None:
+            continue
+        section = secs[child]
+        components = []
+        for rim in section.rims:
+            if rim["neighbour"] != parent:
+                continue
+            loops = len(split.rim_loop_vertices(rim))
+            chains = [{"length_studs": length,
+                       "length_over_radius": length / section.cut_radius if section.cut_radius > 0 else None,
+                       "measurable": bool(section.cut_radius > 0 and length >= section.cut_radius)}
+                      for _, length in split.rim_open_chains(rim)]
+            kinds = (["loops"] if loops else []) + (["open_chain"] if any(c["measurable"] for c in chains) else [])
+            components.append({"vertices": len(rim["points"]), "edges": len(rim.get("edges", [])),
+                               "closed_ring": bool(loops), "loop_vertices": loops,
+                               "boundary_type": "+".join(kinds) or "none", "open_chains": chains})
+        kinds = sorted({kind for c in components for kind in c["boundary_type"].split("+") if kind != "none"})
+        empty = any(not len(secs[n].faces) for n in (child, parent))
+        result[PIVOT_JOINT[child]] = {"boundary_type": "+".join(kinds) if kinds and not empty else "none",
+                                    "cut_radius_studs": section.cut_radius, "components": components}
+    return result
 
 
 def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
@@ -120,7 +139,7 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
     # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
     missing = unmeasurable_sections(secs, joints)
     if missing:
-        raise UnmeasurableJoints(missing)
+        raise UnmeasurableJoints(missing, rim_topology(secs))
     covered, _ = covers.add_covers(secs, cover_mesh[0], cover_mesh[1], **cover)
     out = {}
     for name, poses in pose_sets.items():

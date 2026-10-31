@@ -86,7 +86,8 @@ class TestCutMeasurements(unittest.TestCase):
         np.testing.assert_array_equal(np.unique(points, axis=0), np.unique(rim[:3], axis=0))
         self.assertEqual({r["neighbour"] for r in section.rims}, {parent})
         self.assertFalse(split.is_closed_rim(section.rims[0]))
-        self.assertIn("3 vertices/2 edges", cuts.unmeasurable_sections(secs, {"LeftElbow"})["LeftElbow"])
+        self.assertEqual(cuts.unmeasurable_sections(secs, {"LeftElbow"}), {})
+        np.testing.assert_array_equal(split.rim_measurement_vertices(section.rims[0], section.cut_radius), [0, 1, 2])
 
     def test_rim_requires_a_nondegenerate_cycle(self):
         triangle = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0]])
@@ -141,7 +142,7 @@ class TestCutMeasurements(unittest.TestCase):
 
         def measure(rim):
             secs = dict(self.secs)
-            secs[child.name] = replace(child, rims=[rim])
+            secs[child.name] = replace(child, rims=[rim], cut_radius=1000.0)
             return pose.joint_gaps(secs, poses, joints={"LeftElbow"})
 
         a, b = measure(first), measure(second)
@@ -150,13 +151,86 @@ class TestCutMeasurements(unittest.TestCase):
         self.assertEqual(measure(multiple), expected)
         self.assertEqual(measure(branch), expected)
 
+    def test_open_chains_use_arc_length_and_one_cut_radius_at_every_scale(self):
+        points = np.array([[0., 0, 0], [0.5, 0, 0], [0.5, 0.5, 0]])
+        for scale in (1e-9, 1.0, 1e9):
+            rim = {"points": points * scale, "edges": [[0, 1], [1, 2]]}
+            chains = split.rim_open_chains(rim)
+            self.assertEqual(len(chains), 1)
+            self.assertEqual(chains[0][1], scale)
+            for radius, expected in ((scale, [0, 1, 2]), (scale * 1.01, []), (scale * 0.99, [0, 1, 2])):
+                np.testing.assert_array_equal(split.rim_measurement_vertices(rim, radius), expected)
+        # One real edge is a chain; coincident points and isolated vertices have zero length.
+        for points, edges, expected in (([[0., 0, 0], [1, 0, 0]], [[0, 1]], [0, 1]),
+                                        ([[0., 0, 0], [0, 0, 0]], [[0, 1]], []),
+                                        ([[0., 0, 0]], [], [])):
+            np.testing.assert_array_equal(split.rim_measurement_vertices({"points": points, "edges": edges}, 1),
+                                          expected)
+
+    def test_chains_are_not_pooled_across_components_or_branches(self):
+        points = np.array([[0., 0, 0], [0.75, 0, 0], [0, 0.75, 0], [0, 0, 0.75]])
+        for edges in ([[0, 1], [0, 2], [0, 3]], [[0, 1], [2, 3]]):
+            rim = {"points": points, "edges": edges}
+            radius = 2.0 if len(edges) == 2 else 1.0
+            np.testing.assert_array_equal(split.rim_measurement_vertices(rim, radius), [])
+        # Two short bridges incident on a loop junction cannot be pooled through that junction.
+        rim = {"points": np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0],
+                                    [-0.75, 0, 0], [0, -0.75, 0]]),
+               "edges": [[0, 1], [1, 2], [2, 0], [0, 3], [0, 4]]}
+        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 1.0), [0, 1, 2])
+        # A collinear cycle must not be reinterpreted as several long open chains.
+        rim = {"points": points * [1, 0, 0], "edges": [[0, 1], [1, 2], [2, 0]]}
+        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 0.1), [])
+
+    def test_gap_uses_every_qualifying_chain_and_loop(self):
+        from herogen.blender import pose
+
+        child = self.secs["LeftLowerArm"]
+        original = next(r for r in child.rims if r["neighbour"] == "LeftUpperArm")
+        points = original["points"][[0, 7, 14, 21, 28, 35]]
+        chain = [[0, 1], [1, 2]]
+        loop = chain + [[2, 0]]
+        poses = pose.pose_library(pose.bone_directions(self.sk))
+
+        def measure(rims):
+            secs = dict(self.secs)
+            secs[child.name] = replace(child, rims=rims, cut_radius=0.01)
+            return pose.joint_gaps(secs, poses, joints={"LeftElbow"})
+
+        first = dict(original, points=points[:3], edges=loop)
+        second = dict(original, points=points[3:], edges=chain)
+        third = dict(original, points=points[:3], edges=chain)
+        a, b, c = measure([first]), measure([second]), measure([third])
+        expected = {p: {"LeftElbow": max(a[p]["LeftElbow"], b[p]["LeftElbow"], c[p]["LeftElbow"])} for p in poses}
+        self.assertEqual(measure([first, second, third]), expected)
+        mixed = dict(original, points=points, edges=loop + [[0, 3], [3, 4], [4, 5]])
+        ids = split.rim_measurement_vertices(mixed, 0.01)
+        np.testing.assert_array_equal(ids, np.arange(6))
+
+    def test_chain_metadata_records_qualified_short_and_absent_boundaries(self):
+        child = self.secs["LeftLowerArm"]
+        original = next(r for r in child.rims if r["neighbour"] == "LeftUpperArm")
+        for length, kind in ((0.5, "none"), (1.0, "open_chain"), (2.0, "open_chain")):
+            secs = dict(self.secs)
+            rim = dict(original, points=np.array([[0., 0, 0], [length, 0, 0]]), edges=[[0, 1]])
+            secs[child.name] = replace(child, rims=[rim], cut_radius=1.0)
+            record = cuts.rim_topology(secs)["LeftElbow"]
+            self.assertEqual(record["boundary_type"], kind)
+            self.assertEqual(record["components"][0]["open_chains"][0]["length_over_radius"], length)
+            self.assertEqual(bool(cuts.unmeasurable_sections(secs, {"LeftElbow"})), length < 1)
+        secs[child.name] = replace(child, rims=[])
+        self.assertEqual(cuts.rim_topology(secs)["LeftElbow"]["boundary_type"], "none")
+        self.assertEqual(cuts.rim_topology(secs)["LeftElbow"]["components"], [])
+
     def test_rim_topology_records_are_json_serializable(self):
         record = cuts.rim_topology(self.secs)
         self.assertEqual(json.loads(json.dumps(record)), record)
-        self.assertIs(record["LeftElbow"][0]["closed_ring"], True)
-        self.assertEqual(record["LeftElbow"][0]["vertices"], 43)
-        self.assertEqual(record["LeftElbow"][0]["edges"], 43)
-        self.assertEqual(record["LeftElbow"][0]["loop_vertices"], 43)
+        self.assertEqual(record["LeftElbow"]["boundary_type"], "loops")
+        self.assertEqual(record["LeftElbow"]["cut_radius_studs"], self.secs["LeftLowerArm"].cut_radius)
+        self.assertIs(record["LeftElbow"]["components"][0]["closed_ring"], True)
+        self.assertEqual(record["LeftElbow"]["components"][0]["vertices"], 43)
+        self.assertEqual(record["LeftElbow"]["components"][0]["edges"], 43)
+        self.assertEqual(record["LeftElbow"]["components"][0]["loop_vertices"], 43)
 
     def test_touching_rings_and_dangling_contacts_do_not_erase_real_rims(self):
         child, parent = "LeftLowerArm", "LeftUpperArm"
@@ -230,6 +304,10 @@ class TestCutMeasurements(unittest.TestCase):
                 self.assertFalse(rec["ok"])
                 self.assertIn(f"{count} vertices/{len(edges)} edges", rec["unmeasurable_joints"]["LeftElbow"])
                 self.assertIn("low LOD", rec["unmeasurable_joints"]["LeftElbow"])
+                boundary = rec["joint_rims"]["low"]["LeftElbow"]
+                self.assertEqual(boundary["boundary_type"], "none")
+                if count == 3:
+                    self.assertLess(boundary["components"][0]["open_chains"][0]["length_over_radius"], 1)
                 self.assertEqual(json.loads((Path(tmp) / "stage-4.json").read_text()), rec)
 
     def test_unmeasurable_stage_writes_failure_and_replaces_stale_pass(self):
@@ -339,12 +417,12 @@ class TestCutMeasurements(unittest.TestCase):
 
 
 class TestCarveGeometry(unittest.TestCase):
-    def test_carve_gaps_match_frozen_real_loops(self):
+    def test_carve_gaps_match_frozen_qualifying_boundaries(self):
         from herogen.blender import pose
 
-        # Frozen e3d2b4c gaps (flat, dome) over the pose library. For arm10, the old Waist and
-        # RightShoulder samples also included open chains: those samples are excluded, using only
-        # vertices on real shared loops. None marks a contact with no cycle in the uncapped mesh.
+        # Frozen full pose maps on synthetic bodies, with unchanged section geometry. Thirteen cases
+        # match e3d2b4c exactly. arm10 flat/dome exclude sub-radius waist chains and include shared
+        # shoulder endpoints missing from cap-owner samples; clothed dome includes hip endpoints.
         names = ['Neck', 'Waist', 'LeftShoulder', 'LeftElbow', 'LeftWrist', 'RightShoulder', 'RightElbow']
         names += ['RightWrist', 'LeftHip', 'LeftKnee', 'LeftAnkle', 'RightHip', 'RightKnee', 'RightAnkle']
         fixtures = [
@@ -357,12 +435,12 @@ class TestCarveGeometry(unittest.TestCase):
                  "2a2b87a43409412a27cbd19b1a3e9d7d0eb75a8f377e0be7b23f85c19d476f44"),
             )),
             ({'arm_angle_deg': 10}, (
-                ((0.0824, 0.184, None, None, 0.1251, 0.5648, None,
+                ((0.0824, 0.184, 0.7183, 0.1868, 0.1251, 0.7231, 0.2145,
                   0.1233, 0.2365, 0.2254, 0.1832, 0.2373, 0.2255, 0.1865),
-                 "0ef71eb6b720848389e5852d7020cd76f580575d718cd0e13dc13f59f0d329c7"),
-                ((0.0415, 0.1752, None, None, 0.0244, 0.4718, None,
+                 "f733ea19ad7357025295a0b17edf87ef92e8970fe45f3089d21dccfcfc3e03b6"),
+                ((0.0415, 0.1752, 0.7084, 0.1868, 0.0244, 0.5606, 0.2145,
                   0.033, 0.0724, 0.0605, 0.1507, 0.0691, 0.0608, 0.1689),
-                 "3f7f816e7f39102849d4938ce59841db00b202d70afad9643f8b6b0c7fdefe3d"),
+                 "aed7643c4c8cb8d6f795eebc2df9b14c525de69ecd74936817d4a45d22c06ddd"),
             )),
             ({'arm_angle_deg': 30}, (
                 ((0.0826, 0.1936, 0.3066, 0.1647, 0.123, 0.3159, 0.1735,
@@ -406,11 +484,11 @@ class TestCarveGeometry(unittest.TestCase):
             )),
             ({'clothed': True}, (
                 ((0.1241, 0.258, 0.2063, 0.1637, 0.1206, 0.2031, 0.1669,
-                  0.1143, None, 0.2294, 0.1866, None, 0.2288, 0.182),
-                 "68bdb1d999ac4750ccbf3834bd29f9f38b8d2550264a95a8eeb14914416cab34"),
+                  0.1143, 0.2744, 0.2294, 0.1866, 0.2789, 0.2288, 0.182),
+                 "dec86aa5bc78e06c048dccf89dd0d6b1308f0a6ec8f5abdf366f50b7f8daaa7c"),
                 ((0.1001, 0.1711, 0.0873, 0.0369, 0.0306, 0.047, 0.0312,
-                  0.029, None, 0.0663, 0.1485, None, 0.062, 0.1649),
-                 "ea09e6d7eab68ccd27ee4b51d899d11a649d1d064c24ac2e7476db542259cd0f"),
+                  0.029, 0.0721, 0.0663, 0.1485, 0.0679, 0.062, 0.1649),
+                 "0f4ec5cf29b2cdadb81635d94fad29ed7c368bfdc7bc122b354bd9edb8dcf2a1"),
             )),
         ]
 

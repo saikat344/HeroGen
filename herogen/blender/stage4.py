@@ -277,7 +277,8 @@ def _require_measurable_lods(lods: dict) -> None:
     for lod, sections in lods.items():
         missing = cuts.unmeasurable_sections(sections)
         if missing:
-            raise cuts.UnmeasurableJoints({j: f"{lod} LOD: {reason}" for j, reason in missing.items()})
+            raise cuts.UnmeasurableJoints({j: f"{lod} LOD: {reason}" for j, reason in missing.items()},
+                                          {lod: cuts.rim_topology(sections)})
 
 
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
@@ -298,7 +299,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
 
         rec.add(check("measurable_joints", False, passed=False, reasons=exc.reasons))
         rec.note(error_text(exc, run))
-        return rec.finish({"error": error_text(exc, run), "unmeasurable_joints": exc.reasons})
+        return rec.finish({"error": error_text(exc, run), "unmeasurable_joints": exc.reasons,
+                           "joint_rims": exc.boundaries})
 
 
 def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
@@ -654,7 +656,8 @@ def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
         s = hi[n]
         jn = PIVOT_JOINT[n]
         est = np.asarray(sk.joints[jn], float)
-        rim = [r["points"] for r in s.rims if r["neighbour"] == PARENT[n] and split.is_closed_rim(r)]
+        rim = [r["points"][ids] for r in s.rims if r["neighbour"] == PARENT[n]
+               and len(ids := split.rim_measurement_vertices(r, s.cut_radius))]
         rim_r = float(np.linalg.norm(np.concatenate(rim) - s.pivot, axis=1).mean()) if rim else None
         inside = bool(winding_inside(s.pivot[None], s.verts, s.faces)[0]) if len(s.faces) else False
         off = float(np.linalg.norm(s.pivot - est))
