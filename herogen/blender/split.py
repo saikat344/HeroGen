@@ -488,35 +488,76 @@ def boundary_edges(faces: np.ndarray) -> set[tuple[int, int]]:
     return set(map(tuple, unique[counts == 1].tolist()))
 
 
-def is_closed_rim(rim: dict) -> bool:
-    """A connected, nondegenerate ring of shared mesh edges; a point or open contact cannot measure a cut."""
+def rim_loop_vertices(rim: dict) -> np.ndarray:
+    """Vertices on nondegenerate closed loops of shared edges, excluding dangling contacts.
+
+    Biconnected blocks separate loops that touch at a vertex from bridges and open chains. A block with
+    at least three noncollinear vertices encloses an opening; every edge in that block belongs to a cycle.
+    This also admits several loops joined at junctions, without inventing an edge between chain endpoints.
+    """
     points = np.asarray(rim["points"])
     edges = np.asarray(rim.get("edges", []), dtype=np.int64)
     n = len(points)
-    if n < 3 or edges.shape != (n, 2) or np.any(edges < 0) or np.any(edges >= n):
-        return False
-    if np.any(edges[:, 0] == edges[:, 1]) or len(np.unique(np.sort(edges, axis=1), axis=0)) != n:
-        return False
-    if not np.all(np.bincount(edges.ravel(), minlength=n) == 2) or not np.isfinite(points).all():
-        return False
-    adjacent = defaultdict(set)
-    for a, b in edges:
-        adjacent[int(a)].add(int(b))
-        adjacent[int(b)].add(int(a))
-    seen, pending = set(), [0]
-    while pending:
-        v = pending.pop()
-        if v not in seen:
-            seen.add(v)
-            pending.extend(adjacent[v] - seen)
-    # Collinear or coincident vertices do not enclose an opening. Rank is a degeneracy check, not a size gate.
-    return bool(len(seen) == n and np.linalg.matrix_rank(points - points[0]) >= 2)
+    empty = np.empty(0, dtype=np.int64)
+    if n < 3 or edges.ndim != 2 or edges.shape[1] != 2 or len(edges) < 3:
+        return empty
+    if np.any(edges < 0) or np.any(edges >= n) or not np.isfinite(points).all():
+        return empty
+    if np.any(edges[:, 0] == edges[:, 1]) or len(np.unique(np.sort(edges, axis=1), axis=0)) != len(edges):
+        return empty
+    adjacent = defaultdict(list)
+    for a, b in edges.tolist():
+        adjacent[a].append(b)
+        adjacent[b].append(a)
+    discovered, low, parent = {}, {}, {}
+    selected = set()
+    # Iterative depth-first search avoids a recursion limit on densely sampled openings.
+    for root in sorted(adjacent):
+        if root in discovered:
+            continue
+        discovered[root] = low[root] = len(discovered)
+        pending, path = [(root, iter(adjacent[root]))], []
+        while pending:
+            v, neighbours = pending[-1]
+            w = next(neighbours, None)
+            if w is not None:
+                if w not in discovered:
+                    parent[w] = v
+                    path.append((v, w))
+                    discovered[w] = low[w] = len(discovered)
+                    pending.append((w, iter(adjacent[w])))
+                elif w != parent.get(v) and discovered[w] < discovered[v]:
+                    path.append((v, w))
+                    low[v] = min(low[v], discovered[w])
+                continue
+            pending.pop()
+            if v not in parent:
+                continue
+            p = parent[v]
+            low[p] = min(low[p], low[v])
+            if low[v] >= discovered[p]:
+                block = set()
+                while path:
+                    edge = path.pop()
+                    block.update(edge)
+                    if edge == (p, v):
+                        break
+                ids = sorted(block)
+                # Rank is a degeneracy check, not a size gate. Collinear cycles enclose no opening.
+                if len(ids) >= 3 and np.linalg.matrix_rank(points[ids] - points[ids[0]]) >= 2:
+                    selected.update(ids)
+    return np.asarray(sorted(selected), dtype=np.int64)
 
 
-def _shared_rims(name: str, boundaries: dict, pos: np.ndarray, loops: dict) -> list:
+def is_closed_rim(rim: dict) -> bool:
+    """Whether a contact contains at least one closed loop with enclosed area."""
+    return bool(len(rim_loop_vertices(rim)))
+
+
+def _shared_rims(name: str, boundaries: dict, pos: np.ndarray) -> list:
     """Rings present in both sections' uncapped boundaries, including junction vertices.
 
-    Open chains are retained as diagnostic contacts, but only closed rings can be used for gap measurements.
+    Open chains are retained as diagnostic contacts; only vertices on closed loops measure gaps.
     Cap chords are deliberately absent: a cap cannot invent a shared boundary on the original body.
     """
     rims = []
@@ -524,15 +565,6 @@ def _shared_rims(name: str, boundaries: dict, pos: np.ndarray, loops: dict) -> l
         if nb == name:
             continue
         shared = boundaries[name] & boundaries[nb]
-        # Trace the actual face boundary first: two openings can touch at one vertex, and a real ring can
-        # have a dangling contact. Neither erases the ring. Cap chords never enter these uncapped loops.
-        for loop in loops[name]:
-            ring_edges = {tuple(sorted((a, b))) for a, b in zip(loop, loop[1:] + loop[:1])}
-            if ring_edges <= shared:
-                count = len(loop)
-                rims.append({"neighbour": nb, "joint": joint_between(name, nb), "points": pos[loop],
-                             "edges": np.array([(i, (i + 1) % count) for i in range(count)], dtype=np.int64)})
-                shared -= ring_edges
         adjacent = defaultdict(set)
         for a, b in shared:
             adjacent[a].add(b)
@@ -707,7 +739,6 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         return flat_cache[name]
 
     boundaries = {name: boundary_edges(fs) for name, fs in sec_faces.items()}
-    boundary_rings = {name: boundary_loops(fs) for name, fs in sec_faces.items()}
     out = {}
     for name in SECTIONS:
         fs = sec_faces.get(name)
@@ -722,7 +753,7 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         remap[used] = np.arange(len(used))
         lv, lf = pos[used], remap[fs]
         loops, caps = [], []
-        rims = _shared_rims(name, boundaries, pos, boundary_rings)
+        rims = _shared_rims(name, boundaries, pos)
         sec_centroid = pos[np.unique(fs)].mean(axis=0)
         for info in infos:
             loops.append([int(remap[g]) for g in info["loop"]])

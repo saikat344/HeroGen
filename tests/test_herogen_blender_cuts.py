@@ -88,7 +88,7 @@ class TestCutMeasurements(unittest.TestCase):
         self.assertFalse(split.is_closed_rim(section.rims[0]))
         self.assertIn("3 vertices/2 edges", cuts.unmeasurable_sections(secs, {"LeftElbow"})["LeftElbow"])
 
-    def test_rim_requires_a_connected_nondegenerate_cycle(self):
+    def test_rim_requires_a_nondegenerate_cycle(self):
         triangle = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0]])
         ring = np.array([[0, 1], [1, 2], [2, 0]])
         self.assertTrue(split.is_closed_rim({"points": triangle, "edges": ring}))
@@ -96,10 +96,59 @@ class TestCutMeasurements(unittest.TestCase):
         self.assertTrue(split.is_closed_rim({"points": triangle * 1e-9, "edges": ring}))
         for points, edges in ((triangle[:1], []), (triangle[:2], [[0, 1]]),
                               (triangle, ring[:2]), (triangle, [[0, 1], [1, 0], [2, 2]]),
-                              (triangle * [1, 0, 0], ring), (triangle[:1], ring),
-                              (np.concatenate([triangle, triangle + 2]), np.concatenate([ring, ring + 3]))):
+                              (triangle * [1, 0, 0], ring), (triangle[:1], ring)):
             with self.subTest(points=points, edges=edges):
                 self.assertFalse(split.is_closed_rim({"points": points, "edges": edges}))
+
+    def test_multiple_loops_and_junctions_keep_all_cyclic_vertices(self):
+        child, parent = "LeftLowerArm", "LeftUpperArm"
+        points = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0], [2, 0, 0], [3, 0, 0], [2, 1, 0],
+                           [0, -1, 0], [0, -2, 0]])
+        cases = [
+            # Disconnected openings, a repeated/shared vertex, and a theta graph with shared edges.
+            ([(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)], [0, 1, 2, 3, 4, 5]),
+            ([(0, 1), (1, 2), (0, 2), (0, 3), (3, 5), (0, 5)], [0, 1, 2, 3, 5]),
+            ([(0, 1), (1, 2), (0, 2), (1, 5), (2, 5)], [0, 1, 2, 5]),
+            # A T-junction's dangling chain and a collinear cycle contribute no opening samples.
+            ([(0, 1), (1, 2), (0, 2), (0, 6), (6, 7), (0, 7)], [0, 1, 2]),
+            ([(0, 1), (1, 2), (0, 2), (0, 6), (6, 7)], [0, 1, 2]),
+        ]
+        for edges, expected in cases:
+            with self.subTest(edges=edges):
+                rim = {"points": points, "edges": np.array(edges)}
+                self.assertTrue(split.is_closed_rim(rim))
+                np.testing.assert_array_equal(split.rim_loop_vertices(rim), expected)
+                boundaries = {n: set() for n in SECTIONS}
+                boundaries[child] = boundaries[parent] = {tuple(sorted(e)) for e in edges}
+                rims = split._shared_rims(child, boundaries, points)
+                samples = np.concatenate([r["points"][split.rim_loop_vertices(r)] for r in rims])
+                np.testing.assert_array_equal(np.unique(samples, axis=0), np.unique(points[expected], axis=0))
+
+    def test_joint_gap_uses_every_loop_but_no_dangling_branch(self):
+        from herogen.blender import pose
+
+        child = self.secs["LeftLowerArm"]
+        original = next(r for r in child.rims if r["neighbour"] == "LeftUpperArm")
+        points = original["points"][[0, 7, 14, 21, 28, 35]]
+        ring = np.array([[0, 1], [1, 2], [2, 0]])
+        first = dict(original, points=points[:3], edges=ring)
+        second = dict(original, points=points[3:], edges=ring)
+        multiple = dict(original, points=points, edges=np.concatenate([ring, ring + 3]))
+        # A very distant contact would dominate the gap if it leaked into the samples.
+        branch = dict(multiple, points=np.concatenate([points, [[100., 100, 100]]]),
+                      edges=np.concatenate([multiple["edges"], [[0, 6]]]))
+        poses = pose.pose_library(pose.bone_directions(self.sk))
+
+        def measure(rim):
+            secs = dict(self.secs)
+            secs[child.name] = replace(child, rims=[rim])
+            return pose.joint_gaps(secs, poses, joints={"LeftElbow"})
+
+        a, b = measure(first), measure(second)
+        expected = {p: {"LeftElbow": max(a[p]["LeftElbow"], b[p]["LeftElbow"])} for p in poses}
+        self.assertNotEqual(a, b)
+        self.assertEqual(measure(multiple), expected)
+        self.assertEqual(measure(branch), expected)
 
     def test_rim_topology_records_are_json_serializable(self):
         record = cuts.rim_topology(self.secs)
@@ -107,20 +156,21 @@ class TestCutMeasurements(unittest.TestCase):
         self.assertIs(record["LeftElbow"][0]["closed_ring"], True)
         self.assertEqual(record["LeftElbow"][0]["vertices"], 43)
         self.assertEqual(record["LeftElbow"][0]["edges"], 43)
+        self.assertEqual(record["LeftElbow"][0]["loop_vertices"], 43)
 
     def test_touching_rings_and_dangling_contacts_do_not_erase_real_rims(self):
         child, parent = "LeftLowerArm", "LeftUpperArm"
         points = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0], [-1, 0, 0], [0, -1, 0], [0, 0, 1]])
         faces = np.array([[0, 1, 2], [0, 3, 4]])
         ring_edges = split.boundary_edges(faces)
-        loops = {child: split.boundary_loops(faces)}
         for dangling in (False, True):
             edges = ring_edges | ({(0, 5)} if dangling else set())
             boundaries = {n: set() for n in SECTIONS}
             boundaries.update({child: edges, parent: edges})
-            rims = split._shared_rims(child, boundaries, points, loops)
-            self.assertEqual(sum(split.is_closed_rim(r) for r in rims), 2)
-            self.assertEqual(len(rims), 3 if dangling else 2)
+            rims = split._shared_rims(child, boundaries, points)
+            self.assertEqual(len(rims), 1)
+            self.assertTrue(split.is_closed_rim(rims[0]))
+            np.testing.assert_array_equal(split.rim_loop_vertices(rims[0]), np.arange(5))
 
     def test_truncated_rim_is_unknown_and_cannot_hide_the_elbow_gap(self):
         from herogen.blender import pose
@@ -289,6 +339,104 @@ class TestCutMeasurements(unittest.TestCase):
 
 
 class TestCarveGeometry(unittest.TestCase):
+    def test_carve_gaps_match_frozen_real_loops(self):
+        from herogen.blender import pose
+
+        # Frozen e3d2b4c gaps (flat, dome) over the pose library. For arm10, the old Waist and
+        # RightShoulder samples also included open chains: those samples are excluded, using only
+        # vertices on real shared loops. None marks a contact with no cycle in the uncapped mesh.
+        names = ['Neck', 'Waist', 'LeftShoulder', 'LeftElbow', 'LeftWrist', 'RightShoulder', 'RightElbow']
+        names += ['RightWrist', 'LeftHip', 'LeftKnee', 'LeftAnkle', 'RightHip', 'RightKnee', 'RightAnkle']
+        fixtures = [
+            ({}, (
+                ((0.0825, 0.184, 0.185, 0.1557, 0.1215, 0.1934, 0.1577,
+                  0.1222, 0.2364, 0.2254, 0.1874, 0.2368, 0.2255, 0.182),
+                 "77e1fba39722c3b1d8d201e1be710c2a797259e2debe17ca33cb58d74c25de73"),
+                ((0.04, 0.1752, 0.038, 0.0287, 0.033, 0.0479, 0.0347,
+                  0.0362, 0.07, 0.0605, 0.1575, 0.0597, 0.0609, 0.1648),
+                 "2a2b87a43409412a27cbd19b1a3e9d7d0eb75a8f377e0be7b23f85c19d476f44"),
+            )),
+            ({'arm_angle_deg': 10}, (
+                ((0.0824, 0.184, None, None, 0.1251, 0.5648, None,
+                  0.1233, 0.2365, 0.2254, 0.1832, 0.2373, 0.2255, 0.1865),
+                 "0ef71eb6b720848389e5852d7020cd76f580575d718cd0e13dc13f59f0d329c7"),
+                ((0.0415, 0.1752, None, None, 0.0244, 0.4718, None,
+                  0.033, 0.0724, 0.0605, 0.1507, 0.0691, 0.0608, 0.1689),
+                 "3f7f816e7f39102849d4938ce59841db00b202d70afad9643f8b6b0c7fdefe3d"),
+            )),
+            ({'arm_angle_deg': 30}, (
+                ((0.0826, 0.1936, 0.3066, 0.1647, 0.123, 0.3159, 0.1735,
+                  0.123, 0.236, 0.2253, 0.1857, 0.2367, 0.2256, 0.1898),
+                 "2af907b68ffc84d0e98d1eb99eeec7cf6ecd1209f09471b2587af02936af2d42"),
+                ((0.0373, 0.1898, 0.1954, 0.0338, 0.0332, 0.2832, 0.0389,
+                  0.0325, 0.0608, 0.0623, 0.1483, 0.0599, 0.0628, 0.1706),
+                 "2e8270dc2ca3ff48e090d2894f7521ec1abc09e14a7749a685737322f3a37184"),
+            )),
+            ({'arm_angle_deg': 70}, (
+                ((0.0825, 0.1936, 0.2119, 0.1675, 0.1231, 0.2167, 0.1604,
+                  0.1235, 0.2368, 0.2255, 0.1897, 0.2368, 0.2256, 0.1842),
+                 "21b644885d995ae354534cdd33e9f545f8112d9dffc47bc2e4491329352ca185"),
+                ((0.04, 0.1898, 0.0935, 0.0368, 0.03, 0.1259, 0.0375,
+                  0.0283, 0.0613, 0.0623, 0.1616, 0.0634, 0.0609, 0.1655),
+                 "5b42cff8376f30bc8fd4771cfd3f2647a0812281c9b7c963d24e529c05a69384"),
+            )),
+            ({'head_scale': 1.2}, (
+                ((0.1289, 0.1949, 0.1853, 0.1737, 0.1169, 0.1935, 0.1656,
+                  0.1224, 0.236, 0.2286, 0.1877, 0.2359, 0.2287, 0.1824),
+                 "38e78fb012258908b516e7d147174aefc79334e85c9dd102957b30bbf70096e7"),
+                ((0.0904, 0.1717, 0.0413, 0.0359, 0.0278, 0.0478, 0.0338,
+                  0.0248, 0.0698, 0.0615, 0.1569, 0.0601, 0.0621, 0.1664),
+                 "9b3d9ae94c026e58ed594cfa85846464445666db79c3dcae0d6ed8f869e8be49"),
+            )),
+            ({'leg_spread': 0.1}, (
+                ((0.0825, 0.184, 0.1846, 0.1557, 0.1215, 0.1931, 0.1577,
+                  0.1222, 0.2373, 0.2266, 0.187, 0.2381, 0.2266, 0.1853),
+                 "f2f55bb32ad9a90f8fb2070f0eb691f8b59871eb17e5f3f1aca79c12b15aaa56"),
+                ((0.04, 0.1752, 0.0379, 0.0287, 0.033, 0.0478, 0.0347,
+                  0.0362, 0.0641, 0.0629, 0.1575, 0.0623, 0.0603, 0.1675),
+                 "c3521dfd29cae64f4bf307cded8be90ab13cd84592faa8807c0a032c609d8d4c"),
+            )),
+            ({'leg_spread': 0.2}, (
+                ((0.0825, 0.184, 0.2597, 0.1546, 0.1215, 0.2479, 0.1587,
+                  0.1222, 0.2378, 0.2218, 0.191, 0.2388, 0.2224, 0.1889),
+                 "1e0a0c89d1ee2e6b0c276b333193c2acda0bf8b24687106f43b68eaca7d9b6a9"),
+                ((0.04, 0.1752, 0.2017, 0.0309, 0.033, 0.1482, 0.0343,
+                  0.0362, 0.0613, 0.0701, 0.1623, 0.0612, 0.0769, 0.1702),
+                 "b559d8d5beba6c8604e7263b4b88c7524568369d74653b2e05f348c70c01b549"),
+            )),
+            ({'clothed': True}, (
+                ((0.1241, 0.258, 0.2063, 0.1637, 0.1206, 0.2031, 0.1669,
+                  0.1143, None, 0.2294, 0.1866, None, 0.2288, 0.182),
+                 "68bdb1d999ac4750ccbf3834bd29f9f38b8d2550264a95a8eeb14914416cab34"),
+                ((0.1001, 0.1711, 0.0873, 0.0369, 0.0306, 0.047, 0.0312,
+                  0.029, None, 0.0663, 0.1485, None, 0.062, 0.1649),
+                 "ea09e6d7eab68ccd27ee4b51d899d11a649d1d064c24ac2e7476db542259cd0f"),
+            )),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, (variant, expected) in enumerate(fixtures):
+                run = Path(tmp) / str(i)
+                synth.write_run(run, synth.humanoid(**variant), size=384, ppu=60.0)
+                vs = views.load_views(run, 5.5)
+                sk = joints.estimate(vs, 5.5)
+                verts, faces, _ = carve.build_mesh(vs, 5.5, 96)
+                poses = pose.pose_library(pose.bone_directions(sk))
+                for cap, (values, digest) in zip(("flat", "dome"), expected):
+                    with self.subTest(variant=variant, cap=cap):
+                        secs, _ = split.build_sections(verts, faces, sk, cap=cap, rings=1, ring_points=8)
+                        frozen = {j: v for j, v in zip(names, values) if v is not None}
+                        missing = {j for j, v in zip(names, values) if v is None}
+                        self.assertEqual(set(cuts.unmeasurable_sections(secs)), missing)
+                        if missing:
+                            with self.assertRaises(cuts.UnmeasurableJoints):
+                                pose.joint_gaps(secs, poses)
+                        gaps = pose.joint_gaps(secs, poses, joints=set(frozen))
+                        self.assertEqual({j: max(r[j] for r in gaps.values()) for j in frozen}, frozen)
+                        self.assertEqual(hashlib.sha256(json.dumps(gaps, sort_keys=True,
+                                                                   separators=(",", ":")).encode()).hexdigest(),
+                                         digest)
+
     def test_sections_match_frozen_silhouette_geometry(self):
         # SHA-256 of every section's vertices, faces, pivot and cap counts at e3d2b4c. Inputs are synthetic;
         # the arm-down and costume variants exercise openings beside both joint and non-joint neighbours.

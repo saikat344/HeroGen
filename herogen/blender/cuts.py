@@ -97,14 +97,15 @@ def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, st
             contacts = [r for r in secs[child].rims if r["neighbour"] == parent and len(r["points"])]
             if contacts:
                 sizes = ", ".join(f"{len(r['points'])} vertices/{len(r.get('edges', []))} edges" for r in contacts)
-                missing[j] += f" (contacts are not closed rings: {sizes})"
+                missing[j] += f" (contacts have no closed loop: {sizes})"
     return missing
 
 
 def rim_topology(secs: dict) -> dict:
     """Per joint, the sizes and structural validity of all parent/child boundary components."""
     return {PIVOT_JOINT[child]: [{"vertices": len(r["points"]), "edges": len(r.get("edges", [])),
-                                "closed_ring": split.is_closed_rim(r)}
+                                "closed_ring": split.is_closed_rim(r),
+                                "loop_vertices": len(split.rim_loop_vertices(r))}
                                for r in secs[child].rims if r["neighbour"] == parent]
             for child, parent in PARENT.items() if parent is not None}
 

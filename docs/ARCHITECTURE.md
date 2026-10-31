@@ -455,8 +455,10 @@ the reason for retaining or replacing them, the measured radii, whether they wer
 scores and changes no gate. Carve skeletons retain their original radii and joints.
 
 A cut opening can border several sections, for example a lower arm meeting its upper arm and the torso.
-Gap measurements require a connected closed ring of edges present in both sections' uncapped mesh boundaries.
-Point contacts, open chains and degenerate rings cannot measure a joint; they cause a recorded
+Gap measurements require at least one closed loop of edges present in both sections' uncapped mesh boundaries.
+Biconnected boundary blocks admit separate loops, loops sharing vertices and loops meeting at junctions; gap
+samples include every nondegenerate cyclic block and exclude dangling edges.
+Point contacts, open chains and collinear cycles cannot measure a joint; they cause a recorded
 `measurable_joints` failure if no closed shared ring remains. Only genuine rings contribute gap samples,
 including when another neighbour owns most of the opening. This rule applies to the reference body and every
 selected LOD; per-LOD `joint_rims` records the vertex and edge counts and ring validity. Body-joint skeletons'
