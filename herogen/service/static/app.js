@@ -1,5 +1,6 @@
 // HeroGen service page: sign in with an emailed link, start a hero from a sketch or a description, follow its
 // stages, download the GLB and the Roblox bundle. Every value from the server is shown with textContent.
+import { developerMode } from '/assets/developer.js';
 
 const $ = (s) => document.querySelector(s);
 const S = { csrf: null, session: null, current: null, timer: null };
@@ -60,6 +61,9 @@ async function loadSession() {
   return S.session;
 }
 
+const developer = developerMode($('#developerMode'), $('#developerPanel'),
+  (id) => api(`/api/runs/r1/${encodeURIComponent(id)}`));
+
 // ---- sign in -------------------------------------------------------------------------------------------
 
 function initSignin() {
@@ -116,6 +120,7 @@ async function refreshList() {
 }
 
 function renderJob(j) {
+  developer.update(j);
   show('#detail');
   $('#detailH').textContent = j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero');
   const st = $('#state'); st.textContent = j.state; st.className = `state s-${j.state}`;
@@ -165,6 +170,7 @@ function polls(j) {
 
 async function openJob(id) {
   clearTimeout(S.timer);
+  if (S.current !== id) developer.update(null);
   S.current = id;
   try {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
@@ -252,7 +258,7 @@ function initJobs() {
   });
   $('#deleteJob').addEventListener('click', async () => {
     if (!confirm('Delete this hero and all of its files?')) return;
-    try { await api(`/api/jobs/${encodeURIComponent(S.current)}`, { method: 'DELETE', json: {} }); show('#detail', false); clearTimeout(S.timer); await refreshList(); }
+    try { await api(`/api/jobs/${encodeURIComponent(S.current)}`, { method: 'DELETE', json: {} }); show('#detail', false); developer.update(null); S.current = null; clearTimeout(S.timer); await refreshList(); }
     catch (e) { banner(e.message); }
   });
   $('#deleteAccount').addEventListener('click', async () => {
@@ -268,6 +274,7 @@ async function boot() {
   if (location.pathname === '/signin') return initVerify();
   if (!S.session.signed_in) { show('#signin'); initSignin(); return; }
   $('#who').textContent = S.session.user.email; show('#who'); show('#signOut');
+  show('#developerMode');
   $('#signOut').addEventListener('click', async () => { await api('/api/auth/logout', { method: 'POST', json: {} }).catch(() => {}); location.replace('/'); });
   show('#app');
   renderQuota(S.session.usage);

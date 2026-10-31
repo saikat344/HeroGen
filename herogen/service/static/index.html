@@ -26,6 +26,7 @@
 <header class="top">
   <a class="brand" href="/">HeroGen <span class="beta">beta</span></a>
   <div class="spacer"></div>
+  <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
 </header>
@@ -115,6 +116,8 @@
       </div>
       <p class="small"><a id="viewerLink" href="/viewer">Open in the viewer</a></p>
     </section>
+
+    <section id="developerPanel" class="card developer" aria-labelledby="developerH" hidden></section>
 
     <details class="card account"><summary>Account</summary>
       <p class="muted small">Heroes and their files are deleted <span id="retention"></span> days after they finish. Deleting your account removes them all now.</p>
