@@ -364,7 +364,7 @@ def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, 
     try:
         done = imaging.complete_attached_foreground(sheet, sam, panel_runs=runs)
         done_runs = imaging.completed_panel_columns(sam, done, runs)
-    except ValueError as e:  # invalid background or cross-panel additions: keep SAM and say why
+    except ValueError as e:  # refused background, size or geometry: keep SAM and say why
         done, completion = None, {"method": "none", "reason": str(e)}
     if done is not None:
         fig_mask, runs = done, done_runs
@@ -466,7 +466,7 @@ def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], 
     completion = {"method": "attached_foreground"}
     try:
         mask = imaging.complete_attached_foreground(img, sam)
-    except ValueError as e:  # not a plain white image: keep SAM's mask and say why
+    except ValueError as e:  # refused background, size or geometry: keep SAM's mask and say why
         mask, completion = sam, {"method": "none", "reason": str(e)}
     tb = imaging.bbox(mask)
     fb = imaging.bbox(sq["front"]["mask"])
