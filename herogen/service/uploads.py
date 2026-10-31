@@ -163,16 +163,26 @@ def _to_rgb(img):
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
 
+def prompt_limit(max_chars: int) -> int:
+    """The service's limit, capped by the selected pipeline prompt version."""
+    from herogen import prompts
+
+    return min(max_chars, int(prompts.selected("prompt_sketch").data["user_text"]["max_chars"]))
+
+
 def clean_prompt(raw: object, max_chars: int) -> str:
-    """A prompt as sent to the image model: Unicode NFC, control and direction characters removed, whitespace
-    collapsed. UploadRejected when empty or too long."""
-    if not isinstance(raw, str):
-        raise UploadRejected("Describe the hero in a few words.")
-    text = " ".join(_CONTROL.sub(" ", unicodedata.normalize("NFC", raw)).split())
+    """Apply the selected pipeline prompt's text rules before a job is created; never truncate a description."""
+    from herogen import prompts
+    from herogen.pipeline.prompt_sketch import PromptRejected, clean_user_text
+
+    rules = prompts.selected("prompt_sketch").data["user_text"]
+    try:
+        text = clean_user_text(raw, max_chars=min(max_chars, int(rules["max_chars"])),
+                               delimiters=(rules["open"], rules["close"]))
+    except PromptRejected as e:
+        raise UploadRejected(str(e)) from None
     if len(text) < 3:
         raise UploadRejected("Describe the hero in a few words.")
-    if len(text) > max_chars:
-        raise UploadRejected(f"The description is longer than {max_chars} characters.")
     return text
 
 
