@@ -14,7 +14,7 @@ export function entryPage($, onChange) {
     selected = file;
     if (preview) URL.revokeObjectURL(preview);
     preview = file ? URL.createObjectURL(file) : null;
-    $('#uploadPreview').src = preview || '';
+    if (preview) $('#uploadPreview').src = preview; else $('#uploadPreview').removeAttribute('src');
     $('#uploadName').textContent = file ? file.name : '';
     $('#sketchIn').hidden = !file;
     $('#promptIn').hidden = !!file;

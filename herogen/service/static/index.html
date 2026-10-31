@@ -27,7 +27,7 @@
   <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
   <div class="spacer"></div>
   <nav aria-label="Main"><button type="button" class="link" id="howButton">How it works</button><a href="#gallery">Gallery</a><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
-  <button type="button" id="headerSignIn">Sign in</button>
+  <button type="button" id="headerSignIn" disabled>Sign in</button>
   <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
@@ -103,7 +103,7 @@
       </section>
     </div>
 
-    <section id="detail" class="card" hidden aria-labelledby="detailH">
+    <section id="detail" class="card" tabindex="-1" hidden aria-labelledby="detailH">
       <div class="row"><h2 id="detailH"></h2><span id="state" class="state"></span><div class="spacer"></div>
         <button type="button" id="cancelJob" class="link" hidden>Cancel</button>
         <button type="button" id="deleteJob" class="link danger">Delete</button></div>
