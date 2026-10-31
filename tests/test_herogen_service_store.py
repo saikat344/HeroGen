@@ -13,6 +13,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import ClassVar
+from unittest.mock import Mock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
@@ -546,9 +547,35 @@ class TestSchema(TempDirCase):
         con = sqlite3.connect(str(path))
         con.execute("PRAGMA user_version=99")
         con.close()
-        with self.assertRaises(RuntimeError) as cm:
-            Store(path)
+        connection = sqlite3.connect(str(path))
+        self.addCleanup(connection.close)
+        with patch("herogen.service.store.sqlite3.connect", return_value=connection):
+            with self.assertRaises(RuntimeError) as cm:
+                Store(path)
         self.assertIn("schema version 99", str(cm.exception))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
+    def test_connection_is_closed_when_configuration_fails(self):
+        connection = Mock()
+        error = sqlite3.OperationalError("configuration failed")
+        connection.execute.side_effect = error
+        with patch("herogen.service.store.sqlite3.connect", return_value=connection):
+            with self.assertRaises(sqlite3.OperationalError) as cm:
+                Store(self.tmp / "configuration.db")
+        self.assertIs(cm.exception, error)
+        connection.close.assert_called_once_with()
+
+    def test_connection_is_closed_when_persist_fails(self):
+        connection = sqlite3.connect(str(self.tmp / "persist.db"), isolation_level=None)
+        self.addCleanup(connection.close)
+        error = KeyboardInterrupt()
+        with patch("herogen.service.store.sqlite3.connect", return_value=connection):
+            with self.assertRaises(KeyboardInterrupt) as cm:
+                Store(self.tmp / "persist.db", persist=Mock(side_effect=error))
+        self.assertIs(cm.exception, error)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
 
 class SimVolume:

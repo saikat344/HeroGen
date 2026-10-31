@@ -198,11 +198,15 @@ class Store:
         self.lock = threading.RLock()
         self.rates = RateLimiter(clock)
         self.db = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False, timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
+        try:
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self._migrate()
+        except BaseException:
+            self.db.close()
+            raise
 
     def close(self) -> None:
         with self.lock:
