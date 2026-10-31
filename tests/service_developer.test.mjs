@@ -35,6 +35,15 @@ test('inspection-only stages and recorded provenance survive incomplete service 
   assert.equal(stages[0].code.dirty, false);
 });
 
+test('review-tier checks can pass; a review flag alone is not a failing verdict', () => {
+  const [stage] = inspectionStages({ stages: [{ key: '2h' }] }, { stages: [{ stage: '2h', checks: [
+    { name: 'accepted_yaw', pass: true, review: true, gate: false },
+    { name: 'pose_drift', pass: false, review: true, gate: false },
+    { name: 'unknown', review: true, gate: false },
+  ] }] });
+  assert.deepEqual(stage.checks.map((c) => c.verdict), ['Passed', 'Needs review', 'Not recorded']);
+});
+
 // Small DOM harness exercises requests and stale responses without a browser or model calls.
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.events = {}; this.value = ''; }
