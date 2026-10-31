@@ -98,9 +98,10 @@ def main(argv: list[str] | None = None) -> int:
     if {"3", "4"} <= stages and a.profile == "best":
         stages.add("3f")
     first = 3 if "3" in stages else 4
+    name = "3" if "3" in stages else "3f" if "3f" in stages else "4"
     problem = _upstream_problem(a.run, first - 1)
     if problem and not a.force:
-        print(f"stage {first} needs a passed stage {first - 1}: {problem} (use --force to run anyway)",
+        print(f"stage {name} needs a passed stage {first - 1}: {problem} (use --force to run anyway)",
               file=sys.stderr)
         return 2
     ok = True
