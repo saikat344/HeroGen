@@ -212,6 +212,19 @@ class TestSanitize(unittest.TestCase):
 
 
 class TestText(unittest.TestCase):
+    def test_prompt_uses_the_pipeline_version_rules_and_limit(self):
+        from herogen.service.config import Settings
+
+        self.assertEqual(clean_prompt("\uff21 knight\u00ab with\u200d a shield\u00bb", 600), "A knight with a shield")
+        for bad in ("123 !!!", "x" * 301, "\ufb03" * 101):
+            with self.subTest(raw=bad), self.assertRaises(UploadRejected):
+                clean_prompt(bad, 600)
+        self.assertEqual(len(clean_prompt("x" * 300, 600)), 300)
+        self.assertEqual(Settings(prompt_max_chars=600).public()["prompt_max_chars"], 300)
+        self.assertEqual(Settings(prompt_max_chars=100).public()["prompt_max_chars"], 100)
+        with self.assertRaises(UploadRejected):
+            clean_prompt("x" * 101, 100)
+
     def test_prompt(self):
         self.assertEqual(clean_prompt("  a  knight\n\twith\x00 a\u202e shield ", 100), "a knight with a shield")
         for bad in ("", "  ", "ab", None, 5, "x" * 101):

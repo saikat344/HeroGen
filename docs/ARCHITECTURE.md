@@ -1693,6 +1693,10 @@ carried amount as `previous_work_usd`, including spending from restarted groups 
 failed retries also retain their recorded spending. Studio character titles use saved job names when present, so a generated
 sketch's fixed file name does not replace the hero's name.
 
+The form applies the selected prompt version's text rules before creating a job (NFKC, controls and slot
+delimiters removed, whitespace collapsed, at least one letter). The description limit is the smaller of
+`HEROGEN_SERVICE_PROMPT_MAX` (default 300) and the selected version's limit (300 for `hero-sketch-v1`); longer
+descriptions are refused, never truncated.
 `HEROGEN_PROMPT_SKETCH_VERSION` and `HEROGEN_SAME_CHARACTER_VERSION` select the pipeline's frozen versions;
 both non-secret selectors are baked into deployed images and passed to stage subprocesses.
 Retries of older description jobs keep completed stage-0 conversions. When only the old service's stage p
@@ -1863,8 +1867,9 @@ day).
 - What is kept is a new RGB image made from the pixels alone, with transparency on white and at most 2048 pixels on
   its long side. It is saved as a PNG with no metadata: no EXIF, GPS, XMP, ICC profile, text or time chunks. The
   client's file name is never stored.
-- Descriptions are normalised (NFC, control and direction characters removed, at most 600 characters) and passed
-  to the stage on stdin, never on a command line. Hero names keep letters, digits, spaces and `' - . _` (at most 60).
+- Descriptions follow the selected pipeline prompt's rules (NFKC, control and slot delimiters removed,
+  whitespace collapsed; 300 characters by default) and reach stage p on UTF-8 stdin, never a command line.
+  Hero names keep letters, digits, spaces and `' - . _` (at most 60).
 
 **Downloads.** `GET /api/jobs/<id>/download/glb` sends `04-body/high.glb` (`?lod=low` for `low.glb` when the
 profile builds it). `GET /api/jobs/<id>/download/roblox` sends a zip of exactly the files `stage-6.json` lists in its

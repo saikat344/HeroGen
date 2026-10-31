@@ -55,7 +55,7 @@ class Settings:
     upload_max_pixels: int = 40_000_000
     upload_max_side: int = 2048
     upload_min_side: int = 256
-    prompt_max_chars: int = 600
+    prompt_max_chars: int = 300
     name_max_chars: int = 60
     # Rate limits: (count, window seconds)
     rate_auth_ip: tuple[int, int] = (20, 3600)
@@ -95,9 +95,11 @@ class Settings:
 
     def public(self) -> dict[str, Any]:
         """The limits a signed-in user may see."""
+        from herogen.service.uploads import prompt_limit
+
         return {"jobs_per_day": self.jobs_per_day, "jobs_total": self.jobs_total,
                 "upload_max_bytes": self.upload_max_bytes, "upload_min_side": self.upload_min_side,
-                "prompt_max_chars": self.prompt_max_chars, "name_max_chars": self.name_max_chars,
+                "prompt_max_chars": prompt_limit(self.prompt_max_chars), "name_max_chars": self.name_max_chars,
                 "retention_days": self.retention_days, "profiles": list(self.profiles),
                 "default_profile": self.default_profile, "terms_version": self.terms_version}
 
