@@ -773,6 +773,7 @@ class HeldoutTest(unittest.TestCase):
         self.assertEqual(det["keypoint_model"], heldout.POSE_MODEL)
         self.assertEqual(len(det["keypoint_calls"]), 3 + len(VIEWS))  # the turnaround's three, one per generation
         self.assertIn(heldout.POSE_MODEL, self._rec()["models"])
+        self.assertEqual(det["keypoint_fallbacks"], [])
         for view in heldout.VIEWS:
             m = det["views"][view.name]["attempts"][0]["measured"]
             self.assertEqual(m["keypoints"]["bottom"], m["keypoints"]["box"][3])
@@ -791,6 +792,15 @@ class HeldoutTest(unittest.TestCase):
         for view in heldout.VIEWS:
             m = det["views"][view.name]["attempts"][0]["measured"]
             self.assertIsNone(m["keypoint_fit"])
+
+    def test_keypoint_fallback_is_recorded(self):
+        self.poses[:] = []
+        why = "no deployment of herogen-sapiens-pose: NotFoundError: not found"
+        with mock.patch.object(heldout, "PoseClient", lambda *_a, **_k: FakePose(fallback=why)):
+            self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)
+        det = self._rec()["details"]
+        self.assertEqual(det["keypoint_fallbacks"], [why])
+        self.assertTrue(all(c["route"] == "ephemeral" for c in det["keypoint_calls"]))
 
     def test_recheck_uses_the_recorded_keypoints(self):
         self.assertEqual(self._live(FakeAPI(), "r", [0, 1, 2]), 0)

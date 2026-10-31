@@ -120,9 +120,16 @@ class PoseClientTest(unittest.TestCase):
         with mock.patch.object(sapiens.PoseClient, "_open", no_modal), self.assertRaises(sapiens.PoseError):
             c.keypoints(self.img, [0, 0, 64, 64])
 
-    def _open_with(self, deployed_sha):
-        """`PoseClient._open` against a fake modal: a deployment answering ``deployed_sha`` (None: none)."""
+    def _open_with(self, deployed_sha, lookup_error=None):
+        """`PoseClient._open` against a fake modal: a deployment answering ``deployed_sha`` (None: none, Modal's
+        NotFoundError), or ``lookup_error`` raised by the lookup. Returns the client, the ephemeral app's
+        events and what was written to stderr."""
+        import contextlib
+        import io
         import types
+
+        class NotFoundError(Exception):
+            pass
 
         ran = []
 
@@ -133,8 +140,10 @@ class PoseClientTest(unittest.TestCase):
                     return deployed_sha
 
         def from_name(app, cls):
+            if lookup_error is not None:
+                raise lookup_error
             if deployed_sha is None:
-                raise LookupError("not deployed")
+                raise NotFoundError("App 'herogen-sapiens-pose' not found")
             self.assertEqual((app, cls), ("herogen-sapiens-pose", "Pose"))
             return lambda: Deployed()
 
@@ -145,25 +154,47 @@ class PoseClientTest(unittest.TestCase):
             def __exit__(self, *a):
                 ran.append("exit")
 
-        fake_modal = types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=from_name))
+        fake_modal = types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=from_name),
+                                           exception=types.SimpleNamespace(NotFoundError=NotFoundError))
         fake_app = types.SimpleNamespace(APP_NAME="herogen-sapiens-pose", CLASS_NAME="Pose",
                                          app=types.SimpleNamespace(run=Run), Pose=lambda: "ephemeral")
         c = sapiens.PoseClient(self.cache, mode="live")
-        with mock.patch.dict(sys.modules, {"modal": fake_modal, "herogen.pipeline.sapiens_app": fake_app}):
+        err = io.StringIO()
+        with mock.patch.dict(sys.modules, {"modal": fake_modal, "herogen.pipeline.sapiens_app": fake_app}), \
+                contextlib.redirect_stderr(err):
             c._open()
-        return c, ran
+        return c, ran, err.getvalue()
 
     def test_uses_a_deployment_of_the_same_source(self):
-        c, ran = self._open_with(sapiens.app_pins()["app_sha256"])
+        c, ran, err = self._open_with(sapiens.app_pins()["app_sha256"])
         self.assertIsNot(c._pose, "ephemeral")
-        self.assertEqual(ran, [])
+        self.assertEqual((ran, err, c.route, c.fallback), ([], "", "deployed", None))
 
-    def test_other_or_no_deployment_runs_ephemerally(self):
-        for sha in ("0" * 16, None):
-            c, ran = self._open_with(sha)
-            self.assertEqual((c._pose, ran), ("ephemeral", ["enter"]))
+    def test_other_or_no_deployment_runs_ephemerally_and_says_why(self):
+        for sha, why in (("0" * 16, "runs other source"), (None, "no deployment of herogen-sapiens-pose")):
+            c, ran, err = self._open_with(sha)
+            self.assertEqual((c._pose, ran, c.route), ("ephemeral", ["enter"], "ephemeral"))
+            self.assertIn(why, c.fallback)
+            self.assertIn("warning", err)
+            self.assertIn(why, err)
             c.close()
             self.assertEqual(ran, ["enter", "exit"])
+
+    def test_other_lookup_errors_are_raised_not_swallowed(self):
+        with self.assertRaises(PermissionError):
+            self._open_with(None, lookup_error=PermissionError("token rejected"))
+
+    def test_a_fallback_is_recorded_on_every_call(self):
+        c = sapiens.PoseClient(self.cache, mode="live")
+        pose = _Pose([ANSWER])
+
+        def fake_open(client):
+            client._pose, client.route, client.fallback = pose, "ephemeral", "no deployment of herogen-sapiens-pose"
+
+        with mock.patch.object(sapiens.PoseClient, "_open", fake_open), mock.patch.object(sapiens.time, "sleep"):
+            c.keypoints(self.img, [0, 0, 64, 64])
+        self.assertEqual((c.log.calls[0]["route"], c.log.calls[0]["fallback"]),
+                         ("ephemeral", "no deployment of herogen-sapiens-pose"))
 
     def test_pins_follow_the_app(self):
         pins = sapiens.app_pins()

@@ -270,10 +270,10 @@ class FakePose:
     N = 48  # height of the normalised comparison grid, px
     _CANDS: list | None = None  # shared: [(pose, yaw, figure, box, normalised mask)], the masks stacked
 
-    def __init__(self, fail: bool = False, mode: str = "live") -> None:
+    def __init__(self, fail: bool = False, mode: str = "live", fallback: str | None = None) -> None:
         from herogen.pipeline.sapiens import PoseLog  # noqa: PLC0415
 
-        self.fail, self.mode, self.calls = fail, mode, []
+        self.fail, self.mode, self.calls, self.fallback = fail, mode, [], fallback
         self.log = PoseLog()
 
     @classmethod
@@ -306,7 +306,8 @@ class FakePose:
         from herogen.pipeline.sapiens import PoseError  # noqa: PLC0415
 
         self.calls.append(list(box))
-        self.log.calls.append({"model": "fake-pose", "cached": False, "cost_usd": 0.0})
+        self.log.calls.append({"model": "fake-pose", "cached": False, "cost_usd": 0.0,
+                               "route": "ephemeral" if self.fallback else "deployed", "fallback": self.fallback})
         if self.fail:
             raise PoseError("fake Sapiens is down")
         mask = np.asarray(image.convert("L")) < 200  # the fakes paint the figure on white
