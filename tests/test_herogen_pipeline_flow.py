@@ -23,7 +23,7 @@ from herogen.pipeline import facesource, imaging, stages  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
 from test_herogen_pipeline_heldout_synth import REQUEST as HELDOUT_REQUEST  # noqa: E402
-from test_herogen_pipeline_heldout_synth import fake_heldout_image, use_fake_pose  # noqa: E402
+from test_herogen_pipeline_heldout_synth import DRAWN, _pixels, fake_heldout_image, use_fake_pose  # noqa: E402
 from test_herogen_pipeline_synth import figure_mask, paint, place, sheet  # noqa: E402
 from fake_model_server import NOT_A_PHOTO, is_question, question_answer  # noqa: E402
 
@@ -114,6 +114,23 @@ class FakeAPI:
                     m[:, a:c] = band[:, a:c]
                     out.append(SamInstance(mask=m, box=imaging.bbox(m), confidence=0.9))
             return out
+        drawn = DRAWN.get(_pixels(self.last_sam_image))
+        if self.last_sam_text in ("face", "head") and drawn is not None and drawn[1]:
+            # A held-out view: the head is the figure's top 14% (the stick figure's head), the face the third of
+            # it on the side the figure turns to (image left for a positive yaw).
+            b = imaging.bbox(mask)
+            head = np.zeros_like(mask)
+            head[b[1] : b[1] + int(0.14 * (b[3] - b[1]))] = True
+            head &= mask
+            hb = imaging.bbox(head)
+            part = np.zeros_like(mask)
+            third = (hb[2] - hb[0]) // 3
+            if drawn[1] > 0:
+                part[:, hb[0] : hb[0] + third] = True
+            else:
+                part[:, hb[2] - third : hb[2]] = True
+            m = head if self.last_sam_text == "head" else head & part
+            return [SamInstance(mask=m, box=imaging.bbox(m), confidence=0.9)]
         out = []
         for x0, x1 in imaging.split_columns(mask):
             m = np.zeros_like(mask)
