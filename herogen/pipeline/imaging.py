@@ -75,6 +75,84 @@ def threshold_mask(img: Image.Image, tol: float = 40.0, close_px: int = 2) -> np
     return fill_holes(fg)
 
 
+def _components8(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """8-connected labels and areas, using row runs so thin lines survive without SciPy."""
+    labels = np.zeros(mask.shape, dtype=np.int32)
+    parents = [0]
+
+    def root(i: int) -> int:
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+
+    previous = []
+    for y, row in enumerate(mask):
+        edges = np.flatnonzero(np.diff(np.pad(row.astype(np.int8), (1, 1))))
+        current = []
+        j = 0
+        for x0, x1 in zip(edges[::2], edges[1::2], strict=True):
+            while j < len(previous) and previous[j][1] < x0:
+                j += 1
+            neighbours = []
+            k = j
+            while k < len(previous) and previous[k][0] <= x1:
+                neighbours.append(root(previous[k][2]))
+                k += 1
+            if neighbours:
+                label = min(neighbours)
+                for other in neighbours:
+                    parents[other] = label
+            else:
+                label = len(parents)
+                parents.append(label)
+            labels[y, x0:x1] = label
+            current.append((x0, x1, label))
+        previous = current
+    lookup = np.array([root(i) for i in range(len(parents))], dtype=np.int32)
+    labels = lookup[labels]
+    return labels, np.bincount(labels.ravel(), minlength=len(parents))
+
+
+def light_background_foreground(img: Image.Image, tolerance: int = 40, min_pixels: int = 16) -> np.ndarray:
+    """Reference on plain white paper: complement of border-reachable near-white pixels.
+
+    Near-white means every channel is at least 255 - tolerance. Fill enclosed white regions and remove
+    8-connected components smaller than min_pixels, without opening away one-pixel poles or straps.
+    This is for generated white-background views, not arbitrary sketches or photographs.
+    """
+    if not 0 <= tolerance < 255 or min_pixels < 1:
+        raise ValueError("foreground tolerance must be in [0, 255) and min_pixels positive")
+    rgb = np.asarray(img.convert("RGB"))
+    if np.any(background_colour(rgb) < 255 - tolerance):
+        raise ValueError("attached foreground requires a plain near-white image background")
+    foreground = fill_holes(rgb.min(axis=2) < 255 - tolerance)
+    labels, areas = _components8(foreground)
+    keep = areas >= min_pixels
+    keep[0] = False
+    return keep[labels]
+
+
+def complete_attached_foreground(img: Image.Image, sam: np.ndarray) -> np.ndarray:
+    """Union SAM with reference components overlapping or touching it (8 neighbours, at most one pixel).
+
+    SAM remains the required seed; empty SAM stays empty. Detached clutter and border-reachable light
+    shadows are excluded. Dark shadows touching the figure cannot be distinguished from dark props by
+    this colour/connectivity rule; generated views must still have the requested plain white background.
+    No dilation or closing is applied to the output, so thin items and gaps retain their pixel geometry.
+    """
+    if sam.dtype != np.bool_ or sam.shape != (img.height, img.width):
+        raise ValueError("attached foreground needs a boolean SAM mask matching the image size")
+    if not sam.any():
+        return sam.copy()
+    reference = light_background_foreground(img)
+    labels, _ = _components8(reference)
+    keep = np.zeros(int(labels.max()) + 1, dtype=bool)
+    keep[np.unique(labels[dilate(sam, 1)])] = True
+    keep[0] = False
+    return sam | keep[labels]
+
+
 def bbox(mask: np.ndarray) -> Box | None:
     rows = np.flatnonzero(mask.any(axis=1))
     cols = np.flatnonzero(mask.any(axis=0))

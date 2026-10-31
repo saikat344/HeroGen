@@ -865,9 +865,10 @@ from the record. A held-out row carries `reference` and `measures` from `stage-2
 detail and a score against it measures consistency with the generated character, not accuracy; a
 `"reference": "ground-truth"` view, a render of a known body, is labelled `"measures": "accuracy"`.
 
-**Mask method.** Every figure mask is SAM 3.1's: the first of the prompts `character` and `person` that finds
+**Mask method.** Every figure mask starts with SAM 3.1: the first of the prompts `character` and `person` that finds
 something, recorded per mask as `sam-3.1:<prompt>` (`sam-3.1:none` when neither finds anything, an empty mask).
-No mask is ever made another way, and nothing is measured on a mask SAM did not make:
+The instances at least 20% as large as the largest are unioned. Stage 2 completes attached items before
+cropping; other stages keep their existing SAM masks. An empty segmentation never becomes a threshold mask:
 
 - A SAM or Muse Image call that fails after the client's retries stops the stage (record status `"error"`,
   with the error and every call made). So does an answer whose `status` is not `completed` (or that carries an
@@ -881,17 +882,27 @@ No mask is ever made another way, and nothing is measured on a mask SAM did not 
   cover's `cover_mask_area_frac`, a turnaround sheet's `figures_found` (it is generated again), a held-out
   generation's `figure_mask_sam_coverage` (rejected, measured no further, generated again). Nothing found in
   the drawn top view means it is not used, so the top view is the visual hull.
-- A turnaround sheet is split into its four figures on the SAM mask only; when SAM's columns don't give four
-  figures, `figures_found` fails. The background-threshold mask is only a reference: the gated
+- SAM's columns must first give four figures; otherwise `figures_found` fails. Before crop bounds are
+  computed, `imaging.complete_attached_foreground` unions the SAM mask with foreground components that
+  overlap or touch it within one pixel (8 neighbours). Foreground is everything unreachable from the border
+  through near-white pixels (all channels at least 215); enclosed white regions are filled, and components
+  smaller than 16 pixels are removed. No opening removes thin poles or straps. Detached clutter and light
+  border-reachable shadows stay out; dark shadows touching the character remain ambiguous under this rule,
+  so the generated views still require the requested plain white background. The same completion applies
+  to a drawn top before cropping and scaling; a derived top uses the completed side masks. Cropping after
+  completion preserves staff tips and backpacks that extend outside SAM's original box.
+- The background-threshold mask remains the coverage reference: the gated
   `view_mask_sam_coverage_min` (stage 2) and `figure_mask_sam_coverage` (stage 2h) checks require SAM's mask to
   cover at least half (`SAM_COVERAGE_MIN`, 0.5) of the threshold area of each figure, so a figure SAM half
-  missed fails its gate instead of being measured.
+  missed fails its gate instead of being measured. Stage 2 coverage uses the original SAM pixels in the
+  completed crop's columns; completion cannot raise that coverage.
 - The client never caches a failed call, so a replay never repeats a failure: a call that failed live has no
   cache entry, and its replay stops with `ReplayMiss`, as does an entry for a failed call that an earlier
   version cached. A replay miss, a corrupt cache entry or any other error stops the stage.
 
 `views/meta.json` records `"mask_method": {"front": "sam-3.1", ...}` (`"sam-3.1"` or `"visual_hull"`, the top
-silhouette implied by the four side views' SAM masks, whose top-view checks gate), the detailed method per view
+silhouette implied by the four side masks, whose top-view checks gate), the detailed method per view,
+`"mask_completion"` (method `"attached_foreground"` and added pixels before padding/scaling, per drawn view)
 and `"top_method"`. Records written by earlier versions can hold `"threshold"` masks, from a fallback that no
 longer exists; such a record is not a measurement and never counts as passed, whatever its `ok`: the results
 page shows it as "degraded: threshold masks", stage 2h refuses to start from such a stage 2, `herogen.blender`
