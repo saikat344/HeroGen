@@ -73,27 +73,41 @@ class AttachedForegroundTest(unittest.TestCase):
     def test_gray_background_inside_white_margins_is_refused(self):
         self.rgb[5:75, 10:70] = 200
         self.rgb[self.sam] = (70, 90, 130)
-        with self.assertRaisesRegex(ValueError, 'near-white.*background'):
+        with self.assertRaisesRegex(ValueError, 'size cap'):
             self.complete()
 
-    def test_panel_background_share_boundary(self):
-        self.rgb[9:15, 30:50] = 200  # 120 of the 600 non-SAM pixels: exactly 80% white
-        self.assertTrue(self.complete()[self.sam].all())
-        self.rgb[8, 30] = 200
-        with self.assertRaisesRegex(ValueError, 'at least 80% required'):
+    def test_added_size_cap_boundary_and_total_across_components(self):
+        self.rgb[5:15, 30:50] = 60   # 200-pixel head extension
+        self.rgb[20:50, 50:60] = 60  # 300-pixel backpack: exactly half the 1000-pixel seed
+        self.assertEqual(int((self.complete() & ~self.sam).sum()), 500)
+        self.rgb[50, 50] = 60
+        with self.assertRaisesRegex(ValueError, '501/1000.*50%'):
             self.complete()
 
     def test_near_white_cutoff_checks_every_channel(self):
         self.rgb[5:15, 30:50] = (215, 255, 255)
         np.testing.assert_array_equal(self.complete(), self.sam)
         self.rgb[5:15, 30:50, 0] = 214
-        with self.assertRaisesRegex(ValueError, 'near-white panel background'):
-            self.complete()
+        self.assertEqual(int((self.complete() & ~self.sam).sum()), 200)
 
-    def test_no_non_sam_background_is_refused(self):
+    def test_sam_at_image_border_without_additions_is_preserved(self):
         self.sam[:, 30:50] = True
-        with self.assertRaisesRegex(ValueError, '0/0 non-SAM pixels'):
-            self.complete()
+        np.testing.assert_array_equal(self.complete(), self.sam)
+
+    def test_added_pixels_touching_each_image_border_are_refused(self):
+        for edge in ('top', 'bottom', 'left', 'right'):
+            with self.subTest(edge=edge):
+                rgb = self.rgb.copy()
+                if edge == 'top':
+                    rgb[:15, 30] = 60
+                elif edge == 'bottom':
+                    rgb[65:, 30] = 60
+                elif edge == 'left':
+                    rgb[30, :30] = 60
+                else:
+                    rgb[30, 50:] = 60
+                with self.assertRaisesRegex(ValueError, 'image border'):
+                    imaging.complete_attached_foreground(Image.fromarray(rgb), self.sam)
 
     def test_empty_sam_never_becomes_a_threshold_fallback(self):
         self.sam[:] = False
@@ -246,9 +260,52 @@ class Stage2CompletionTest(unittest.TestCase):
                 image = Image.fromarray(rgb)
                 reference = imaging.threshold_mask(image)
                 out = stages.split_sheet(image, sam, reference, 'sam-3.1:character')
-                self.assert_refused(out, sam, 'near-white')
+                self.assert_refused(out, sam, 'size cap')
                 for i in gray_panels:
                     self.assertEqual(out['sam_coverage'][f'panel{i}'], 0.7143)
+
+    def test_large_white_margins_cannot_hide_gray_panel_additions(self):
+        sam = np.zeros((160, 320), dtype=bool)
+        rgb = np.full((*sam.shape, 3), 255, dtype=np.uint8)
+        for x in (30, 110, 190, 270):
+            rgb[45:115, x-20:x+40] = 200
+            sam[55:105, x:x+20] = True
+        rgb[sam] = 60
+        image = Image.fromarray(rgb)
+        out = stages.split_sheet(image, sam, imaging.threshold_mask(image), 'sam-3.1:character')
+        self.assert_refused(out, sam, '3200/1000')
+        self.assertEqual(set(out['sam_coverage'].values()), {0.7143})
+
+    def test_missing_head_arm_and_pole_are_all_recovered(self):
+        image, sam, full = self.sheet()
+        rgb = np.array(image)
+        for x in (30, 110, 190, 270):
+            rgb[7:65, x:x+20] = 60
+            full[7:65, x:x+20] = True
+        image = Image.fromarray(rgb)
+        out = stages.split_sheet(image, sam, imaging.threshold_mask(image), 'sam-3.1:character')
+        for view in out['views'].values():
+            x0, y0, x1, y1 = view['sheet_box']
+            np.testing.assert_array_equal(view['mask'], full[y0:y1, x0:x1])
+            self.assertEqual(view['mask_completion']['added_pixels'], 274)
+        self.assertEqual(set(out['sam_coverage'].values()), {0.8251})
+
+    def test_gray_slab_at_midpoint_column_edges_refuses_entire_sheet(self):
+        image, sam, _ = self.sheet()
+        # Panel1 owns [80, 160); both outermost columns are forbidden to additions.
+        for start, end in ((80, 110), (130, 160)):
+            with self.subTest(start=start, end=end):
+                rgb = np.full((*sam.shape, 3), 255, dtype=np.uint8)
+                rgb[sam] = 60
+                rgb[30:34, start:end] = 200  # only 120 added pixels: size cap alone accepts this
+                out = stages.split_sheet(Image.fromarray(rgb), sam, sam, 'sam-3.1:character')
+                self.assert_refused(out, sam, 'panel column edge')
+                self.assertEqual(set(out['sam_coverage'].values()), {1.0})
+                # Stopping one column short of the same edge must permit completion.
+                rgb[30:34, start if start == 80 else end-1] = 255
+                out = stages.split_sheet(Image.fromarray(rgb), sam, sam, 'sam-3.1:character')
+                self.assertEqual(out['views']['panel1']['mask_completion']['added_pixels'], 116)
+                self.assertEqual(out['views']['panel1']['mask_completion']['method'], 'attached_foreground')
 
     def test_sheet_preserves_enclosed_arm_openings(self):
         _, sam, _ = self.sheet()
@@ -291,9 +348,25 @@ class Stage2CompletionTest(unittest.TestCase):
         with mock.patch.object(stages, 'sam_figure_mask', return_value=(sam, 'sam-3.1:character', 1)):
             top = stages.model_top_view(client, image, {'front': {'mask': sam}}, 100, (255, 255, 255))
         self.assertEqual(top['mask_completion']['method'], 'none')
-        self.assertIn('near-white', top['mask_completion']['reason'])
+        self.assertIn('size cap', top['mask_completion']['reason'])
         self.assertEqual(top['mask_completion']['added_pixels'], 0)
         self.assertEqual(int(top['mask'].sum()), int(sam.sum()))
+
+    def test_top_border_addition_refuses_only_the_top_image(self):
+        image, sam, _ = self.sheet()
+        sam = sam[:, :80]
+        rgb = np.array(image)[:, :80]
+        rgb[:15, 30] = 60  # below the size cap, but attached to the top image border
+        client = mock.Mock()
+        client.edit_image.return_value = Image.fromarray(rgb)
+        front = sam.copy()
+        with mock.patch.object(stages, 'sam_figure_mask', return_value=(sam, 'sam-3.1:character', 1)):
+            top = stages.model_top_view(client, image, {'front': {'mask': front}}, 100, (255, 255, 255))
+        self.assertEqual(top['mask_completion']['method'], 'none')
+        self.assertIn('image border', top['mask_completion']['reason'])
+        self.assertEqual(top['mask_completion']['added_pixels'], 0)
+        self.assertEqual(int(top['mask'].sum()), int(sam.sum()))
+        np.testing.assert_array_equal(front, sam)
 
     def test_top_completion_precedes_crop_and_scale(self):
         image, sam, full = self.sheet()

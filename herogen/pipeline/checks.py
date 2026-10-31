@@ -122,6 +122,9 @@ SIDE_VIEWS = ("front", "right", "back", "left")
 # the gate instead. On a replay of the 45-sketch benchmark the lowest values were 0.83 (87 split sheets) and
 # 0.76 (413 held-out generations), so none failed it.
 SAM_COVERAGE_MIN = 0.5
+# Attached props may add at most half the original SAM area per figure; larger additions can be
+# background slabs. Refuse the whole sheet (or drawn top image) if any figure exceeds this cap.
+ATTACHED_FOREGROUND_MAX_ADDED_SHARE = 0.5
 
 
 def band_span(mask: np.ndarray, lo: float, hi: float) -> int:

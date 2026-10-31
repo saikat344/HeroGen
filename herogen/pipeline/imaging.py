@@ -138,9 +138,9 @@ def complete_attached_foreground(
 ) -> np.ndarray:
     """Union SAM with reference components overlapping or touching it (8 neighbours, at most one pixel).
 
-    SAM remains the required seed; empty SAM stays empty. Each original panel's columns must have at
-    least 80% near-white pixels outside SAM, over the full image height. A single view uses its SAM
-    column extent. This refuses inset coloured backgrounds even when the outer image border is white.
+    SAM remains the required seed; empty SAM stays empty. Additions may be at most half each figure's
+    SAM area and must stay inside the image and its panel's midpoint boundaries between SAM runs.
+    Any violation refuses the whole sheet; a single view uses the image boundaries.
     Detached clutter and light shadows are excluded. Dark shadows touching the figure cannot be
     distinguished from dark props by this colour/connectivity rule; generated views must still have
     the requested plain white background.
@@ -151,22 +151,34 @@ def complete_attached_foreground(
     if not sam.any():
         return sam.copy()
     reference = light_background_foreground(img)
-    near_white = np.asarray(img.convert("RGB")).min(axis=2) >= 215
     if panel_runs is None:
         x0, _, x1, _ = bbox(sam)
         panel_runs = [(x0, x1)]
-    for i, (x0, x1) in enumerate(panel_runs):
-        outside = ~sam[:, x0:x1]
-        white = int((near_white[:, x0:x1] & outside).sum())
-        total = int(outside.sum())
-        if total == 0 or 5 * white < 4 * total:
-            raise ValueError(f"attached foreground requires a near-white panel background (panel {i}: "
-                             f"{white}/{total} non-SAM pixels near-white; at least 80% required)")
     labels, _ = _components8(reference)
     keep = np.zeros(int(labels.max()) + 1, dtype=bool)
     keep[np.unique(labels[dilate(sam, 1)])] = True
     keep[0] = False
-    return sam | keep[labels]
+    completed = sam | keep[labels]
+    expanded = completed_panel_columns(sam, completed, panel_runs)
+    # checks imports imaging for geometry; load the stage-2 cap after both modules are initialized.
+    from herogen.pipeline.checks import ATTACHED_FOREGROUND_MAX_ADDED_SHARE
+
+    boundaries = [0] + [(a[1] + b[0]) // 2 for a, b in zip(panel_runs, panel_runs[1:])] + [img.width]
+    for i, ((x0, x1), (cx0, cx1)) in enumerate(zip(panel_runs, expanded, strict=True)):
+        added = completed[:, cx0:cx1] & ~sam[:, cx0:cx1]
+        count = int(added.sum())
+        seed_count = int(sam[:, x0:x1].sum())
+        if count > ATTACHED_FOREGROUND_MAX_ADDED_SHARE * seed_count:
+            raise ValueError(f"attached foreground exceeds size cap (panel {i}: {count}/{seed_count} "
+                             f"added/SAM pixels; at most {ATTACHED_FOREGROUND_MAX_ADDED_SHARE:.0%} allowed)")
+        box = bbox(added)
+        if box is None:
+            continue
+        if box[1] == 0 or box[3] == img.height or box[0] + cx0 == 0 or box[2] + cx0 == img.width:
+            raise ValueError(f"attached foreground touches image border (panel {i})")
+        if box[0] + cx0 <= boundaries[i] or box[2] + cx0 >= boundaries[i + 1]:
+            raise ValueError(f"attached foreground touches panel column edge (panel {i})")
+    return completed
 
 
 def completed_panel_columns(

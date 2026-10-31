@@ -889,14 +889,16 @@ cropping; other stages keep their existing SAM masks. An empty segmentation neve
   SAM already included them; original SAM pixels are never removed. No opening removes thin poles or
   straps. Detached clutter and light shadows stay out; dark shadows touching the character remain
   ambiguous under this rule, so generated views still require the requested plain white background.
-  Besides a near-white median outer border, at least 80% of the non-SAM pixels in each original panel's
-  column range, over the full image height, must be near-white (all channels at least 215). No non-SAM
-  pixels to check also refuses completion. Failure in any panel keeps SAM for the entire sheet and records
+  Besides a near-white median outer border, additions must be at most 50% of each figure's original SAM
+  pixels (`ATTACHED_FOREGROUND_MAX_ADDED_SHARE`). Added pixels must not touch the image border or either
+  outer column of the panel range: original SAM runs widened to the midpoint of each neighbouring gap,
+  with the first and last panels extending to the image edges. Midpoints use integer floor division;
+  column ranges are right-exclusive. Failure in any panel keeps SAM for the entire sheet and records
   `mask_completion.method: "none"` and the reason. Original panel membership is retained when expanding
   crops: a component containing additions that touches two original column ranges (including one adjacent
   column), or SAM pixels in two panels, refuses the whole completion. Overlapping expanded crops also
   refuse completion. Counting the completed sheet's column runs cannot establish panel membership.
-  The same foreground and background checks apply to a drawn top, using its SAM column extent, before
+  The same foreground, size and edge checks apply to a drawn top, using the whole image as its panel, before
   cropping and scaling; a derived top uses the completed side masks. Cropping after completion preserves
   staff tips and backpacks that extend outside SAM's original box.
 - The background-threshold mask remains the coverage reference: the gated
