@@ -884,13 +884,21 @@ cropping; other stages keep their existing SAM masks. An empty segmentation neve
   the drawn top view means it is not used, so the top view is the visual hull.
 - SAM's columns must first give four figures; otherwise `figures_found` fails. Before crop bounds are
   computed, `imaging.complete_attached_foreground` unions the SAM mask with foreground components that
-  overlap or touch it within one pixel (8 neighbours). Foreground is everything unreachable from the border
-  through near-white pixels (all channels at least 215); enclosed white regions are filled, and components
-  smaller than 16 pixels are removed. No opening removes thin poles or straps. Detached clutter and light
-  border-reachable shadows stay out; dark shadows touching the character remain ambiguous under this rule,
-  so the generated views still require the requested plain white background. The same completion applies
-  to a drawn top before cropping and scaling; a derived top uses the completed side masks. Cropping after
-  completion preserves staff tips and backpacks that extend outside SAM's original box.
+  overlap or touch it within one pixel (8 neighbours). Foreground contains pixels with any RGB channel
+  below 215, with components smaller than 16 pixels removed. Enclosed near-white regions stay empty unless
+  SAM already included them; original SAM pixels are never removed. No opening removes thin poles or
+  straps. Detached clutter and light shadows stay out; dark shadows touching the character remain
+  ambiguous under this rule, so generated views still require the requested plain white background.
+  Besides a near-white median outer border, at least 80% of the non-SAM pixels in each original panel's
+  column range, over the full image height, must be near-white (all channels at least 215). No non-SAM
+  pixels to check also refuses completion. Failure in any panel keeps SAM for the entire sheet and records
+  `mask_completion.method: "none"` and the reason. Original panel membership is retained when expanding
+  crops: a component containing additions that touches two original column ranges (including one adjacent
+  column), or SAM pixels in two panels, refuses the whole completion. Overlapping expanded crops also
+  refuse completion. Counting the completed sheet's column runs cannot establish panel membership.
+  The same foreground and background checks apply to a drawn top, using its SAM column extent, before
+  cropping and scaling; a derived top uses the completed side masks. Cropping after completion preserves
+  staff tips and backpacks that extend outside SAM's original box.
 - The background-threshold mask remains the coverage reference: the gated
   `view_mask_sam_coverage_min` (stage 2) and `figure_mask_sam_coverage` (stage 2h) checks require SAM's mask to
   cover at least half (`SAM_COVERAGE_MIN`, 0.5) of the threshold area of each figure, so a figure SAM half

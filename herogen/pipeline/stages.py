@@ -362,12 +362,10 @@ def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, 
         return out
     completion = {"method": "attached_foreground"}
     try:
-        done = imaging.complete_attached_foreground(sheet, sam)
-    except ValueError as e:  # not a plain white sheet: keep SAM's mask and say why
+        done = imaging.complete_attached_foreground(sheet, sam, panel_runs=runs)
+        done_runs = imaging.completed_panel_columns(sam, done, runs)
+    except ValueError as e:  # invalid background or cross-panel additions: keep SAM and say why
         done, completion = None, {"method": "none", "reason": str(e)}
-    done_runs = imaging.split_columns(done, expected=len(names)) if done is not None else []
-    if done is not None and len(done_runs) != len(names):  # a prop bridged two figures
-        done, completion = None, {"method": "none", "reason": "completion merged figures"}
     if done is not None:
         fig_mask, runs = done, done_runs
     out["runs"] = runs
