@@ -119,6 +119,30 @@ class RetryHeaderTest(unittest.TestCase):
 
 
 class RetryThroughServerTest(unittest.TestCase):
+    def test_api_error_fields_and_logs_ignore_echoed_descriptions(self):
+        description = 'a content_policy_violation HTTP 503 timed out ReplayMiss knight'
+        self.policy.max_attempts = 2
+        for status, code, transient in ((400, 'content_policy_violation', False),
+                                         (503, 'server_error', True), (400, 'invalid_request', False)):
+            with self.subTest(status=status, code=code):
+                answer = (status, {}, {'error': {'code': code, 'message': description}})
+                _, error = self._call(Script(answer), muse=True)
+                self.assertEqual((error.http_status, error.error_code, error.transient),
+                                 (status, code, transient))
+                self.assertNotIn(description, '\n'.join(self.logs) + self.ledger_text())
+
+    def test_failed_answer_exposes_structured_code_without_message_parsing(self):
+        description = 'content_policy_violation HTTP 503 timed out ReplayMiss'
+        self.policy.max_attempts = 1
+        for code, status, transient in (('content_policy_violation', None, False),
+                                         ('server_error', 500, True), ('invalid_request', None, False)):
+            with self.subTest(code=code):
+                answer = (200, {}, {'status': 'failed', 'error': {'code': code, 'message': description}})
+                _, error = self._call(Script(answer), muse=True)
+                self.assertEqual((error.http_status, error.error_code, error.transient),
+                                 (status, code, transient))
+                self.assertNotIn(description, '\n'.join(self.logs) + self.ledger_text())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.time = FakeTime()

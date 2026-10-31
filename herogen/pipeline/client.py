@@ -82,7 +82,16 @@ class ReplayMiss(ClientError):
 class ApiError(ClientError):
     """The Model API itself failed: an HTTP or network error after the retries, or a response that can't be
     read. Never cached as a result, so a replay never repeats it. A stage stops on it; the one caller that
-    records it instead is the held-out face cue, which then sends the view to human review."""
+    records it instead is the held-out face cue, which then sends the view to human review.
+
+    Classification attributes come from response fields and transport state, never from message text."""
+
+    def __init__(self, message: str, *, http_status: int | None = None, error_code: str | None = None,
+                 transient: bool = False) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.error_code = error_code
+        self.transient = transient
 
 
 @dataclass
@@ -439,12 +448,14 @@ class ModelClient:
             slot, slot_wait = limiter.acquire(policy.wall() + (deadline - policy.clock()))
             if slot is None:
                 raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "
-                               f"(attempt {attempt}; last: {last})")
+                               f"(attempt {attempt}; last: {last})", transient=True)
             started = policy.clock()
             status: int | None = None
             headers: dict[str, str] = {}
             outcome = "failed"
             parsed: Any = None
+            error_code = None
+            network_class = "network error"
             try:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
@@ -459,6 +470,7 @@ class ModelClient:
                     parsed = json.loads(raw)
                 except ValueError:
                     parsed = None
+                error_code = _response_error_code(parsed)
                 outcome = "ok" if isinstance(parsed, dict) else "unreadable"
                 last = f"HTTP {status}" if outcome == "ok" else f"HTTP {status}: the response is not a JSON object"
                 if outcome == "unreadable":  # answered, so it may be billed
@@ -470,13 +482,15 @@ class ModelClient:
                     unknown_outcome(parsed.get("usage"))  # answered: may be billed, priced from its usage
             except urllib.error.HTTPError as e:
                 status, headers = e.code, dict(e.headers.items()) if e.headers else {}
-                last = f"HTTP {e.code}: {_error_body(e)}"
+                error_body, error_code = _error_body(e)
+                last = f"HTTP {e.code}: {error_body}"
                 if retry.maybe_billed(status, paid_edit=paid_edit):  # a gateway error after generating, maybe
                     outcome = "unknown"
                     unknown_outcome()
             except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
                 sending = isinstance(e, urllib.error.URLError)
                 reason = e.reason if sending else e
+                network_class = type(reason).__name__
                 status = None  # no whole answer came back, whatever status line came first
                 # urllib wraps only errors while connecting or sending in URLError. Any other error came while
                 # waiting for or reading the answer, so the request went out and may have reached the model;
@@ -497,7 +511,8 @@ class ModelClient:
             self._ledger({"model": model, "endpoint": endpoint, "key": key, "attempt": attempt, "status": status,
                           "outcome": outcome, "seconds": round(seconds, 3), "slot_wait_s": round(slot_wait, 3),
                           "wait_s": None if final or gives_up else round(wait, 3), "wait_reason": why or None,
-                          "error": None if outcome == "ok" else last})
+                          "error": None if outcome == "ok" else
+                          (f"HTTP {status}" if status is not None else network_class)})
             if outcome == "ok":
                 return parsed
             if outcome == "unreadable":
@@ -505,17 +520,18 @@ class ModelClient:
             if final or gives_up:
                 break
             log.warning("%s %s attempt %d/%d failed (%s); retrying in %.1f s (%s)", model, endpoint, attempt,
-                        policy.max_attempts, last[:120], wait, why)
+                        policy.max_attempts, f"HTTP {status}" if status is not None else network_class, wait, why)
             policy.sleep(wait)
         if not retry.retryable(status, paid_edit=paid_edit):
-            raise ApiError(f"{endpoint} failed: {last} (not retried)")
+            raise ApiError(f"{endpoint} failed: {last} (not retried)", http_status=status, error_code=error_code)
         if attempt == policy.max_attempts:
-            raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}")
+            raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}", http_status=status,
+                           error_code=error_code, transient=True)
         if left <= 0.0:
             raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the {deadline_s:g} s deadline "
-                           f"has passed")
+                           f"has passed", http_status=status, error_code=error_code, transient=True)
         raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the next wait would pass the "
-                       f"{deadline_s:.0f} s deadline")
+                       f"{deadline_s:.0f} s deadline", http_status=status, error_code=error_code, transient=True)
 
     def _ledger(self, row: dict[str, Any]) -> None:
         """Append one attempt to the cache's ledger (under an exclusive lock, so parallel runs never interleave)."""
@@ -558,7 +574,8 @@ def require_completed(endpoint: str, resp: dict[str, Any], *, required: bool) ->
     if ((required or status is not None) and status != "completed") or resp.get("error"):
         detail = resp.get("error") or resp.get("incomplete_details")
         raise ApiError(f"{endpoint}: the response status is {status!r}, not 'completed'"
-                       + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""))
+                       + (f" ({_scrub(json.dumps(detail))[:200]})" if detail else ""),
+                       error_code=_response_error_code(resp))
 
 
 class _GuardedRaw(io.RawIOBase):
@@ -638,11 +655,22 @@ def _open(req: urllib.request.Request, timeout: float, guard: _ReadGuard) -> Any
     return opener.open(req, timeout=timeout)
 
 
-def _error_body(e: urllib.error.HTTPError) -> str:
+def _response_error_code(response: Any) -> str | None:
+    error = response.get("error") if isinstance(response, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _error_body(e: urllib.error.HTTPError) -> tuple[str, str | None]:
     try:
-        return _scrub(e.read().decode("utf-8", "replace")[:300])
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            code = _response_error_code(json.loads(raw))
+        except ValueError:
+            code = None
+        return _scrub(raw[:300]), code
     except (OSError, http.client.HTTPException) as err:  # the body itself can be cut off
-        return f"(body unreadable: {type(err).__name__})"
+        return f"(body unreadable: {type(err).__name__})", None
 
 
 _JSON_TYPES: dict[str, tuple[type, ...]] = {

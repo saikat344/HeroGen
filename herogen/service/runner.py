@@ -196,7 +196,7 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
     if spec.key == "p" and rec.get("status") == "input_rejected":
         return ("The description could not be used. Describe one character in words within the description's "
                 "length limit, then try again.")
-    if spec.key == "p" and "content_policy_violation" in str(rec.get("error", "")):
+    if spec.key == "p" and rec.get("status") == "content_policy":
         return "The image model refused this description under its content policy. Try rewording the description."
     checks = failed_checks(rec)
     reason = next((text for stage, prefix, text in REASONS
@@ -240,7 +240,7 @@ def describe_error(spec: StageSpec, text: str, timed_out: bool) -> tuple[str, st
     """(code, user message, transient) for a stage that stopped without a record."""
     if timed_out:
         return "timeout", f"The {spec.label} stage took too long and was stopped.", True
-    if spec.group == "model" and transient_failure(text):
+    if spec.key != "p" and spec.group == "model" and transient_failure(text):
         return "model_unavailable", "The image model service did not answer properly.", True
     if spec.group == "blender" and "RemoteError" in text and transient_failure(text):
         return "gpu_unavailable", "The 3D reconstruction service did not answer properly.", True
@@ -384,12 +384,17 @@ class CliRunner:
             # never their text as a message or log detail, including output from a killed subprocess.
             if rec and rec.get("ok") is True and not timed_out:
                 return Outcome("passed", seconds, cost)
-            error = str(rec.get("error", "")) if rec else ""
-            if rec and not timed_out and (rec.get("status") == "input_rejected" or
-                                         "content_policy_violation" in error or
-                                         (rec.get("ok") is False and not error)):
-                return Outcome("rejected", seconds, cost, describe_rejection(spec, rec), "rejected")
-            code_s, message, transient = describe_error(spec, error + "\n" + tail, timed_out)
+            if not timed_out and (code in (2, 3, 4) or (rec and rec.get("status") == "input_rejected")):
+                status = {3: "input_rejected", 4: "content_policy"}.get(code)
+                safe = {"status": status or (rec or {}).get("status")}
+                # Gate checks come from the record; input and policy refusals need no model-supplied text.
+                if code == 2 and rec:
+                    safe["checks"] = rec.get("checks")
+                return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected")
+            if not timed_out and code == 5:
+                return Outcome("failed", seconds, cost, "The image model service did not answer properly.",
+                               "model_unavailable", True)
+            code_s, message, transient = describe_error(spec, "", timed_out)
             return Outcome("failed", seconds, cost, message, code_s, transient)
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
