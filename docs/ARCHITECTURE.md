@@ -2092,6 +2092,13 @@ restoring all positions before baking. The original colours are baked first. Pos
 maps provide visibility and facing weights; uncovered atlas margins take their nearest covered colour. The
 export embeds a PNG base-colour image and preserves the source geometry and frame.
 
+If SAM 3.1 finds no head on a nonempty front probe, `head_found` records false with the note
+"no head on the front render; head views skipped". Head cameras and extra head atlas allocation are omitted;
+their view records have reason `head_not_found` and zero attempts. Body and upper-body passes still run,
+with face exclusion disabled and the hair disagreement rule intact. A head with no face keeps its cameras;
+the empty face mask excludes no pixels. Empty hair detections are also valid. The face containment gate
+continues to reject newly painted faces, including when the render has none. An empty front probe is an error.
+
 The frozen named prompts `RF2R` and `RF3H` live in `refine/prompts.py`; editing a prompt requires a new name.
 Every call supplies the current mesh render first and the cover second, including hair mode. Normal passes
 run head angles 0, 40, -40, 90, -90, 180, then body angles 0, 45, -45, 90, -90, 180. Head renders are 1024

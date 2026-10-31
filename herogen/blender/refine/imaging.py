@@ -179,7 +179,7 @@ def hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy, face_r
     fig_r = alpha > 0.5
     _, agree, _ = interior_agreement(render_rgb, warped, fig_r, figure_mask(warped))
     w = cv2.GaussianBlur(agree.astype(np.float32), (0, 0), 2.0)
-    if face_r.any():
+    if face_r is not None and face_r.any():
         w *= ~ndimage.binary_dilation(face_r, iterations=max(1, round(FACE_KEEP_PX * max(fig_r.shape) / 1024)))
     return w * (agree > 0) * hair_allowed(client, inp, edit, mapx, mapy, fig_r.shape)
 

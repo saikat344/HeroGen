@@ -4,6 +4,7 @@ The head is found by SAM 3.1 `face` and `head` on a flat front render of SAM's m
 from the head box; its y is the middle of the mesh vertices inside the head box (so profile cameras turn about the
 skull, not the face surface). The head sphere that gets extra texels while unwrapping has the head box's larger
 half-side as radius.
+Without a detected head, setup keeps the body bounds and omits head cameras and extra head texel allocation.
 """
 import json
 from pathlib import Path
@@ -53,7 +54,10 @@ def setup(glb, work, client, timeout=900.0):
     centre = (lo + hi) / 2
     body0 = camera("probe0", centre, 0, H * BODY_FRAME, BODY_RES)
     blender("probe", {"glb": str(glb), "cams": [body0], "out": str(work / "probe")}, work / "blender.log", timeout=timeout)
-    img, _ = composite(Image.open(work / "probe" / "probe0.png"))
+    with Image.open(work / "probe" / "probe0.png") as rgba:
+        img, alpha = composite(rgba.convert("RGBA"))
+    if not (alpha > 0.5).any():
+        raise ValueError("the front render is empty")
     img.save(work / "probe" / "probe0-grey.png")
     boxes = {}
     for text in ("face", "head"):
@@ -61,10 +65,17 @@ def setup(glb, work, client, timeout=900.0):
         if ins:
             best = max(ins, key=lambda i: i.confidence or 0)
             boxes[text] = list(best.box)
-    if "head" not in boxes:
-        raise RuntimeError("SAM 3.1 found no head on the front render")
+    info = {"lo": lo.tolist(), "hi": hi.tolist(), "height": float(H),
+            "body_centre": centre.tolist(), "boxes_px": boxes, "head_centre": None, "head_side": None}
+    if "head" in boxes:
+        info.update(locate_head(pts, centre, body0, boxes["head"]))
+    info_path.write_text(json.dumps(info, indent=1))
+    return info
+
+
+def locate_head(pts, centre, body0, box):
     k = max(BODY_RES) / body0["ortho"]
-    l, t, r, b = boxes["head"]
+    l, t, r, b = box
     x0 = centre[0] + (l - BODY_RES[0] / 2) / k
     x1 = centre[0] + (r - BODY_RES[0] / 2) / k
     z1 = centre[2] + (BODY_RES[1] / 2 - t) / k
@@ -75,16 +86,15 @@ def setup(glb, work, client, timeout=900.0):
         raise ValueError("the detected head contains no mesh vertices")
     hc = [(x0 + x1) / 2, float((np.quantile(ys, 0.02) + np.quantile(ys, 0.98)) / 2), (z0 + z1) / 2]
     side = max(x1 - x0, z1 - z0)
-    info = {"lo": lo.tolist(), "hi": hi.tolist(), "height": float(H),
-            "body_centre": centre.tolist(), "boxes_px": boxes, "head_centre": hc, "head_side": float(side)}
-    info_path.write_text(json.dumps(info, indent=1))
-    return info
+    return {"head_centre": hc, "head_side": float(side)}
 
 
 def cameras_for(info):
     H, c = info["height"], info["body_centre"]
-    cams = [camera(f"head{a:+d}", info["head_centre"], a, info["head_side"] * HEAD_FRAME, HEAD_RES)
-            for a in HEAD_ANGLES]
+    cams = []
+    if info["head_centre"] is not None:
+        cams = [camera(f"head{a:+d}", info["head_centre"], a, info["head_side"] * HEAD_FRAME, HEAD_RES)
+                for a in HEAD_ANGLES]
     cams += [camera(f"body{a:+d}", c, a, H * BODY_FRAME, BODY_RES) for a in BODY_ANGLES]
     top = info["hi"][2]
     uc = [c[0], c[1], top - 0.5 * UPPER_FRAME * H]
@@ -94,7 +104,9 @@ def cameras_for(info):
 
 def prep(glb, info, work, timeout=900.0):
     work = Path(work)
-    head = {"centre": info["head_centre"], "radius": info["head_side"] / 2, "gain": HEAD_GAIN}
+    head = None
+    if info["head_centre"] is not None:
+        head = {"centre": info["head_centre"], "radius": info["head_side"] / 2, "gain": HEAD_GAIN}
     blender("prep", {"glb": str(glb), "out": str(work / "prep"), "tex": TEX, "head": head},
             work / "blender.log", timeout=timeout)
     return work / "prep"
