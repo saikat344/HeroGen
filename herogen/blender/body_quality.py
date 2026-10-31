@@ -35,6 +35,10 @@ SCHEMA = {"name": "body_usability_v1", "schema": {
     "required": ["usable_probability", "reason"],
 }}
 PROMPT_SHA256 = "8e054e5d6ba4b8efb4316878ed01c4f9c33eb3d889b5d6edc91f0781ad1ad38c"
+# The output cap covers the answer's reasoning tokens. At 1200 some answers came back incomplete
+# (reason max_output_tokens), which stops stage 3; 4000 leaves room for reasoning plus the short answer.
+# An attempt whose output usage is missing is priced at this cap.
+VISUAL_MAX_OUTPUT_TOKENS = 4000
 
 
 def _hull_area(points: np.ndarray) -> float:
@@ -157,7 +161,8 @@ def visual_score(client, sketch: Image.Image, images: dict[str, Image.Image]) ->
     if hashlib.sha256(PROMPT.encode()).hexdigest() != PROMPT_SHA256:
         raise ClientError("body usability prompt hash changed; recalibration required")
     answer = client.compare_images(PROMPT, [contact_sheet(sketch, images)], schema=SCHEMA,
-                                   model=TEXT_MODEL, reasoning_effort="low", max_output_tokens=1200,
+                                   model=TEXT_MODEL, reasoning_effort="low",
+                                   max_output_tokens=VISUAL_MAX_OUTPUT_TOKENS,
                                    image_max_side=1280, jpeg_quality=90)
     errors = schema_errors(answer, SCHEMA["schema"])
     score = answer.get("usable_probability")

@@ -2070,8 +2070,11 @@ base URL is the address Modal prints for the `web` function; set it and deploy a
   Lambert shading, an orthographic scale shared across all views, 512px tiles, white background, no
   simplification and no per-view stretching. The scale fits the widest cardinal/30/60 degree direction.
   The strict schema returns integer `usable_probability` (0–100) and a nonempty `reason`. The call uses
-  `ModelClient.compare_images`, low reasoning effort, 1200 maximum output tokens, 1280 maximum image
-  side and JPEG quality 90. The client's cache, retry policy, attempt ledger and token prices apply.
+  `ModelClient.compare_images`, low reasoning effort, 4000 maximum output tokens (`VISUAL_MAX_OUTPUT_TOKENS`),
+  1280 maximum image side and JPEG quality 90. The cap covers the answer's reasoning tokens; it was raised
+  from 1200, at which measured answers came back incomplete (`max_output_tokens`) and stopped stage 3. An
+  incomplete answer still raises and stops; it is never resampled. The client's cache, retry policy, attempt
+  ledger and token prices apply, and a call whose output usage is missing is priced at the cap.
   Model errors, missing views, invalid responses and a changed prompt hash raise; none supplies a pass.
 
 Neither measurement alone asserts topology, rigging or export quality. Acceptance thresholds belong to
