@@ -115,10 +115,10 @@ def _components8(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def light_background_foreground(img: Image.Image, tolerance: int = 40, min_pixels: int = 16) -> np.ndarray:
-    """Reference on plain white paper: complement of border-reachable near-white pixels.
+    """Unfilled foreground on plain white paper, retaining thin lines and interior openings.
 
-    Near-white means every channel is at least 255 - tolerance. Fill enclosed white regions and remove
-    8-connected components smaller than min_pixels, without opening away one-pixel poles or straps.
+    Near-white means every channel is at least 255 - tolerance. Remove 8-connected components smaller
+    than min_pixels, without filling enclosed paper or opening away one-pixel poles or straps.
     This is for generated white-background views, not arbitrary sketches or photographs.
     """
     if not 0 <= tolerance < 255 or min_pixels < 1:
@@ -126,19 +126,24 @@ def light_background_foreground(img: Image.Image, tolerance: int = 40, min_pixel
     rgb = np.asarray(img.convert("RGB"))
     if np.any(background_colour(rgb) < 255 - tolerance):
         raise ValueError("attached foreground requires a plain near-white image background")
-    foreground = fill_holes(rgb.min(axis=2) < 255 - tolerance)
+    foreground = rgb.min(axis=2) < 255 - tolerance
     labels, areas = _components8(foreground)
     keep = areas >= min_pixels
     keep[0] = False
     return keep[labels]
 
 
-def complete_attached_foreground(img: Image.Image, sam: np.ndarray) -> np.ndarray:
+def complete_attached_foreground(
+    img: Image.Image, sam: np.ndarray, *, panel_runs: list[tuple[int, int]] | None = None,
+) -> np.ndarray:
     """Union SAM with reference components overlapping or touching it (8 neighbours, at most one pixel).
 
-    SAM remains the required seed; empty SAM stays empty. Detached clutter and border-reachable light
-    shadows are excluded. Dark shadows touching the figure cannot be distinguished from dark props by
-    this colour/connectivity rule; generated views must still have the requested plain white background.
+    SAM remains the required seed; empty SAM stays empty. Each original panel's columns must have at
+    least 80% near-white pixels outside SAM, over the full image height. A single view uses its SAM
+    column extent. This refuses inset coloured backgrounds even when the outer image border is white.
+    Detached clutter and light shadows are excluded. Dark shadows touching the figure cannot be
+    distinguished from dark props by this colour/connectivity rule; generated views must still have
+    the requested plain white background.
     No dilation or closing is applied to the output, so thin items and gaps retain their pixel geometry.
     """
     if sam.dtype != np.bool_ or sam.shape != (img.height, img.width):
@@ -146,11 +151,55 @@ def complete_attached_foreground(img: Image.Image, sam: np.ndarray) -> np.ndarra
     if not sam.any():
         return sam.copy()
     reference = light_background_foreground(img)
+    near_white = np.asarray(img.convert("RGB")).min(axis=2) >= 215
+    if panel_runs is None:
+        x0, _, x1, _ = bbox(sam)
+        panel_runs = [(x0, x1)]
+    for i, (x0, x1) in enumerate(panel_runs):
+        outside = ~sam[:, x0:x1]
+        white = int((near_white[:, x0:x1] & outside).sum())
+        total = int(outside.sum())
+        if total == 0 or 5 * white < 4 * total:
+            raise ValueError(f"attached foreground requires a near-white panel background (panel {i}: "
+                             f"{white}/{total} non-SAM pixels near-white; at least 80% required)")
     labels, _ = _components8(reference)
     keep = np.zeros(int(labels.max()) + 1, dtype=bool)
     keep[np.unique(labels[dilate(sam, 1)])] = True
     keep[0] = False
     return sam | keep[labels]
+
+
+def completed_panel_columns(
+    sam: np.ndarray, completed: np.ndarray, runs: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Expand original SAM panels by their connected additions; refuse cross-panel components.
+
+    A component containing additions may touch only one original panel's column range (including one
+    neighbouring column). This also catches components touching SAM pixels in different panels. Keep
+    disconnected SAM fragments in their original panel, rather than splitting the completed sheet again.
+    Overlapping expanded crops are refused because a column crop could include another panel's pixels.
+    """
+    labels, _ = _components8(completed)
+    added = np.zeros(int(labels.max()) + 1, dtype=bool)
+    added[np.unique(labels[completed & ~sam])] = True
+    added[0] = False
+    owner = np.full(len(added), -1, dtype=np.int32)
+    expanded = []
+    for i, (x0, x1) in enumerate(runs):
+        touching = np.unique(labels[:, max(0, x0 - 1):x1 + 1])
+        touching = touching[added[touching]]
+        if np.any(owner[touching] >= 0):
+            raise ValueError("completion connects original panels")
+        owner[touching] = i
+        seeded = np.unique(labels[:, x0:x1][sam[:, x0:x1]])
+        keep = np.zeros(len(added), dtype=bool)
+        keep[seeded] = True
+        keep[0] = False
+        cols = np.flatnonzero(keep[labels].any(axis=0))
+        expanded.append((min(x0, int(cols[0])), max(x1, int(cols[-1]) + 1)))
+    if any(left[1] >= right[0] for left, right in zip(expanded, expanded[1:])):
+        raise ValueError("completion connects original panels through overlapping crops")
+    return expanded
 
 
 def bbox(mask: np.ndarray) -> Box | None:
