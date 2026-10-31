@@ -22,8 +22,8 @@ export function inspectionStages(job, run) {
       checks: list(record.checks).filter((c) => c && typeof c === 'object').map((c) => ({
         name: c.name, value: c.value, threshold: c.threshold,
         comparison: c.cmp || c.op || null, assumed: c.cmp_assumed === true,
-        verdict: c.review === true ? 'Needs review' :
-          c.pass === true ? 'Passed' : c.pass === false ? 'Failed' : 'Not recorded',
+        verdict: c.pass === true ? 'Passed' : c.pass === false ?
+          (c.review === true ? 'Needs review' : 'Failed') : 'Not recorded',
         kind: c.gate === false ? 'Diagnostic' : 'Gate',
       })),
     };
