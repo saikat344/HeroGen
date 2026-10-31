@@ -330,8 +330,9 @@ class StageTests(unittest.TestCase):
                      "head_centre": [0, 0, 1.8], "head_side": 0.4}
         self.renders = []
         def blender(mode, args, log, **kwargs):
-            if mode == "render":
-                self.renders.append(args["texture"])
+            if mode in ("probe", "render"):
+                if mode == "render":
+                    self.renders.append(args["texture"])
                 folder = Path(args["out"])
                 folder.mkdir(parents=True, exist_ok=True)
                 mask = disc((64, 64), 32, 32, 22)
@@ -340,8 +341,10 @@ class StageTests(unittest.TestCase):
                 Image.fromarray(rgba).save(folder / (args["cams"][0]["name"] + ".png"))
             if mode == "export":
                 Path(args["out"]).write_bytes(b"refined")
-        patches = [mock.patch.object(character, "setup", return_value=self.info),
-                   mock.patch.object(character, "prep", return_value=self.run / "prep"),
+        self.blender = blender
+        self.setup_patch = mock.patch.object(character, "setup", return_value=self.info)
+        self.prep_patch = mock.patch.object(character, "prep", return_value=self.run / "prep")
+        patches = [self.setup_patch, self.prep_patch,
                    mock.patch.object(character, "HEAD_RES", (64, 64)),
                    mock.patch.object(character, "BODY_RES", (64, 64)),
                    mock.patch.object(refine, "Texture", return_value=self.tex),
@@ -356,6 +359,154 @@ class StageTests(unittest.TestCase):
     def identity(rgb, alpha, edit):
         yy, xx = np.indices(alpha.shape)
         return xx + .5, yy + .5, edit, {"scale": 1.0}
+
+    def use_character_setup(self, *, head=False, hair=False):
+        self.setup_patch.stop()
+        self.prep_patch.stop()
+        points = np.array([[-.5, -.2, 0], [.5, .2, 2], [0, -.2, 1.5], [0, .2, 1.6]])
+        for patch in (mock.patch.object(character, "blender", side_effect=self.blender),
+                      mock.patch.object(character, "blender_points", return_value=points)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        def segment(image, text):
+            self.client._call(SAM_MODEL, "segment")
+            mask = np.zeros(image.size[::-1], bool)
+            if head and text == "head":
+                mask[8:24, 24:40] = True
+            if hair and text == "hair" and self.client.inputs and image is self.client.inputs[-1][1][0]:
+                mask[25:40, 25:40] = True  # render-only hair must remain protected on body passes too
+            return [SamInstance(mask, (24, 8, 40, 24))] if mask.any() else []
+
+        self.client.segment = mock.Mock(side_effect=segment)
+
+    def test_no_head_completes_body_refinement_with_hair_protection(self):
+        self.use_character_setup(hair=True)
+        with mock.patch.object(refine, "hair_weight", wraps=refine.hair_weight) as hair_weight:
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["outputs"], ["03-refined.glb"])
+        self.assertEqual(rec["final_model"], "03-refined.glb")
+        self.assertEqual((self.run / "03-refined.glb").read_bytes(), b"refined")
+        self.assertEqual((self.run / "03-source.glb").read_bytes(), b"source")
+        head_check = next(c for c in rec["checks"] if c["name"] == "head_found")
+        self.assertIs(head_check["value"], False)
+        self.assertFalse(head_check["gate"])
+        self.assertEqual(head_check["note"], "no head on the front render; head views skipped")
+        self.assertIn("face exclusion skipped", rec["notes"])
+        for name, view in rec["views"].items():
+            if name.startswith(("head", "hair-head")):
+                self.assertFalse(view["accepted"])
+                self.assertEqual(view["tries"], 0)
+                self.assertEqual(view["attempts"], [])
+                self.assertEqual(view["reason"], "head_not_found")
+            else:
+                self.assertTrue(view["accepted"])
+        self.assertEqual(len(self.renders), len(character.BODY_ANGLES) + len(character.UPPER_ANGLES))
+        self.assertEqual(self.tex.apply.call_count, len(self.renders))
+        for call in self.tex.apply.call_args_list[:len(character.BODY_ANGLES)]:
+            weight = call.args[5]
+            self.assertEqual(weight[25:40, 25:40].max(), 0)
+            self.assertGreater(weight[40:45, 30:35].max(), 0)
+        self.assertEqual(hair_weight.call_count, len(character.UPPER_ANGLES))
+        self.assertTrue(all(call.args[-1] is None for call in hair_weight.call_args_list))
+        prep_call = next(call for call in character.blender.call_args_list if call.args[0] == "prep")
+        self.assertIsNone(prep_call.args[1]["head"])
+        info = json.loads((self.run / "blender-work/texture-refine/character.json").read_text())
+        self.assertIsNone(info["head_centre"])
+        self.assertFalse(any(name.startswith("head") for name in character.cameras_for(info)))
+
+    def test_head_without_face_keeps_all_views_and_skips_empty_face_exclusion(self):
+        self.use_character_setup(head=True)
+        with mock.patch.object(refine, "hair_weight", wraps=refine.hair_weight) as hair_weight:
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["outputs"], ["03-refined.glb"])
+        self.assertTrue(all(v["accepted"] for v in rec["views"].values()))
+        self.assertTrue(next(c["value"] for c in rec["checks"] if c["name"] == "head_found"))
+        self.assertTrue(hair_weight.called)
+        self.assertTrue(all(not call.args[-1].any() for call in hair_weight.call_args_list))
+        info = json.loads((self.run / "blender-work/texture-refine/character.json").read_text())
+        self.assertIn("head", info["boxes_px"])
+        self.assertNotIn("face", info["boxes_px"])
+        prep_call = next(call for call in character.blender.call_args_list if call.args[0] == "prep")
+        self.assertIsNotNone(prep_call.args[1]["head"])
+
+    def test_no_head_and_all_views_rejected_keeps_source(self):
+        self.use_character_setup()
+        self.client.reject = True
+        (self.run / "03-refined.glb").write_bytes(b"stale")
+        rec = stage.run_stage3f(self.run, self.client)
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["outputs"], [])
+        self.assertEqual(rec["final_model"], "03-source.glb")
+        self.assertEqual(final_model(self.run).name, "03-source.glb")
+        self.assertFalse((self.run / "03-refined.glb").exists())
+        self.assertFalse(any(v["accepted"] for v in rec["views"].values()))
+        self.assertIn("all views rejected; keeping 03-source.glb", rec["notes"])
+        self.tex.save.assert_not_called()
+
+    def test_empty_front_render_fails_before_segmentation(self):
+        self.use_character_setup()
+        def empty_probe(mode, args, *unused, **kwargs):
+            folder = Path(args["out"])
+            folder.mkdir(parents=True, exist_ok=True)
+            Image.new("RGBA", (64, 64)).save(folder / "probe0.png")
+        character.blender.side_effect = empty_probe
+        with self.assertRaisesRegex(ValueError, "front render is empty"):
+            stage.run_stage3f(self.run, self.client)
+        self.assert_error_record()
+        self.client.segment.assert_not_called()
+
+    def test_missing_and_unreadable_front_render_fail(self):
+        self.use_character_setup()
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                def broken_probe(mode, args, *unused, **kwargs):
+                    folder = Path(args["out"])
+                    folder.mkdir(parents=True, exist_ok=True)
+                    if unreadable:
+                        (folder / "probe0.png").write_bytes(b"invalid image")
+                character.blender.side_effect = broken_probe
+                with self.assertRaises(OSError):
+                    stage.run_stage3f(self.run, self.client)
+                self.assert_error_record()
+        self.client.segment.assert_not_called()
+
+    def test_unreadable_source_fails(self):
+        self.setup_patch.stop()
+        with self.assertRaises(ValueError):
+            stage.run_stage3f(self.run, self.client)
+        self.assert_error_record()
+
+    def assert_error_record(self):
+        rec = json.loads((self.run / "stage-3f.json").read_text())
+        self.assertFalse(rec["ok"])
+        self.assertEqual(rec["status"], "error")
+        self.assertFalse((self.run / "03-refined.glb").exists())
+
+    def test_probe_model_errors_propagate(self):
+        self.use_character_setup()
+        for error in (ApiError("model failed"), ReplayMiss("no entry")):
+            with self.subTest(error=type(error).__name__):
+                self.client.segment.side_effect = error
+                with self.assertRaises(type(error)):
+                    stage.run_stage3f(self.run, self.client)
+                self.assert_error_record()
+
+    def test_missing_and_unreadable_cover_fail(self):
+        cover = self.run / "01-cover.png"
+        cover.unlink()
+        with self.assertRaises(FileNotFoundError):
+            stage.run_stage3f(self.run, self.client)
+        self.assert_error_record()
+        cover.write_bytes(b"invalid image")
+        with self.assertRaises(OSError):
+            stage.run_stage3f(self.run, self.client)
+        self.assert_error_record()
 
     def test_success_records_models_cost_views_and_sequential_textures(self):
         rec = stage.run_stage3f(self.run, self.client)
@@ -444,7 +595,7 @@ class StageTests(unittest.TestCase):
         self.assertEqual(retry["cost_usd"], 0)
 
     def test_unresolved_reservation_survives_error_without_a_logged_call(self):
-        def interrupted(client, *args):
+        def interrupted(client, *args, **kwargs):
             client.before_api_attempt(IMAGE_MODEL)
             raise OSError("lost answer")
         with mock.patch.object(stage, "_view", side_effect=interrupted):

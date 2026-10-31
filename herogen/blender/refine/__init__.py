@@ -75,7 +75,7 @@ def cost_estimate(maximum=False):
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
 
 
-def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover):
+def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -131,7 +131,8 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover)
             continue
         refined = I.colour_match(render_rgb, warped, figure & fig_e)
         if hair:
-            weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy, parts["face"])
+            weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy,
+                                   parts["face"] if face_exclusion else None)
         else:
             weight = (~ndimage.binary_dilation(figure ^ fig_e, iterations=4)).astype(np.float32)
             weight *= I.hair_allowed(client, inp, edit, mapx, mapy, figure.shape, hair_only=False)
@@ -221,6 +222,13 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         cover = Image.open(run / "01-cover.png").convert("RGB")
         # All preparation is rebuilt from this invocation's source, never an earlier run's geometry or UVs.
         info = C.setup(source, work, client, timeout=timeout)
+        head_found = info["head_centre"] is not None
+        head_note = "head on the front render" if head_found else "no head on the front render; head views skipped"
+        rec.add(check("head_found", head_found, gate=False, note=head_note))
+        if not head_found:
+            rec.note(head_note)
+            rec.note("face exclusion skipped: no head on the front render")
+        save(ok=False, status="running")
         prep = C.prep(source, info, work, timeout=timeout)
         cams = C.cameras_for(info)
         tex = I.Texture(prep, info)
@@ -232,12 +240,15 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             current_record = {"accepted": False, "reason": "not attempted: API cap" if stopped else "incomplete",
                               "tries": 0, "attempts": []}
             rec.data["views"][key] = current_record
+            if not head_found and name.startswith("head"):
+                current_record.update(reason="head_not_found", note=head_note)
+                continue
             if stopped:
                 continue
             save(ok=False, status="running")
             try:
                 current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                current_record, timeout, cover)
+                                current_record, timeout, cover, face_exclusion=head_found)
             except BudgetStop as exc:
                 current_record.update(accepted=False, reason=str(exc))
                 rec.data["stop_reason"] = str(exc)
