@@ -273,7 +273,7 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
     except Exception as exc:          # the prior is optional; the carve itself does not need joints
         skeleton = None
         rec.note(f"joint estimate failed ({exc}); arm depth prior skipped")
-    for stale in ("03-source.glb", "03-joints.json"):
+    for stale in ("03-source.glb", "03-refined.glb", "03-joints.json"):
         if (run / stale).exists():
             (run / stale).unlink()
     work = work_dir(run)

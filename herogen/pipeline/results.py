@@ -26,6 +26,7 @@ HELDOUT_STAGE = ("2h", "held-out views")
 # The prompt-to-sketch record, reported first when the run started from a text prompt.
 PROMPT_STAGE = ("p", "prompt sketch")
 FACE_STAGE = ("2f", "face source")
+REFINE_STAGE = ("3f", "texture refine")
 
 # Images shown per stage beyond its record's `outputs` (stages 3-4 write folders of renders).
 EXTRA_IMAGE_DIRS = {3: ["03-renders"], 4: ["04-body/pose-renders"]}
@@ -116,6 +117,8 @@ def collect(run: RunFolder) -> dict[str, Any]:
     total_cost = 0.0
     total_seconds = 0.0
     order: list[tuple[Any, str]] = list(STAGES)
+    if run.read_stage(REFINE_STAGE[0]) is not None:
+        order.insert(next(i + 1 for i, stage in enumerate(order) if stage[0] == 3), REFINE_STAGE)
     for extra in (FACE_STAGE, HELDOUT_STAGE):
         if run.read_stage(extra[0]) is not None:
             order.insert(3, extra)

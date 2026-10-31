@@ -205,7 +205,8 @@ class ModelClient:
     record/replay cache."""
 
     def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
-                 policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None) -> None:
+                 policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None,
+                 before_api_attempt: Callable[[str], None] | None = None) -> None:
         """``policy`` and ``limiter`` default to `retry.RetryPolicy()` and the shared limiter of the key in use."""
         if mode not in ("live", "replay"):
             raise ValueError(f"mode must be 'live' or 'replay', got {mode!r}")
@@ -214,6 +215,8 @@ class ModelClient:
         self.log = log if log is not None else CallLog()
         self.policy = policy or retry.RetryPolicy()
         self.limiter = limiter
+        # Optional caller-owned budget check; cache hits never reach it, retries always do.
+        self.before_api_attempt = before_api_attempt
 
     # ---- public calls -------------------------------------------------------------------------------
 
@@ -393,11 +396,8 @@ class ModelClient:
             raise ReplayMiss(f"no cached {endpoint} response for key {key}")
         started = time.monotonic()
         resp = self._post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
-        try:
-            require_completed(endpoint, resp, required=False)
-        except ApiError:
-            self.log.add(IMAGE_MODEL, kind, key, cached=False)  # answered, so it may be billed
-            raise
+        self.log.add(IMAGE_MODEL, kind, key, cached=False)  # answered, including malformed or incomplete images
+        require_completed(endpoint, resp, required=False)
         data = resp.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
             raise ApiError(f"{endpoint}: response has no data[0]")
@@ -415,7 +415,6 @@ class ModelClient:
             "usage": resp.get("usage"),
         }
         self._save_entry(key, entry)
-        self.log.add(IMAGE_MODEL, kind, key, cached=False)
         return img
 
     def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str,
@@ -445,6 +444,8 @@ class ModelClient:
         paid_edit = model == IMAGE_MODEL  # each answered Muse call is a new, billed generation
         last = "no attempt made"
         for attempt in range(1, policy.max_attempts + 1):
+            if self.before_api_attempt is not None:
+                self.before_api_attempt(model)
             slot, slot_wait = limiter.acquire(policy.wall() + (deadline - policy.clock()))
             if slot is None:
                 raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "

@@ -1,4 +1,4 @@
-"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,4] [--mesh-source ...] [--joints ...]`,
+"""CLI: `python3 -m herogen.blender run --run <folder> [--stages 3,3f,4] [--mesh-source ...] [--joints ...]`,
 `... score --run <folder> [...]` (`herogen.blender.score`) and `... synth --run <folder>`."""
 from __future__ import annotations
 
@@ -39,9 +39,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("score", help="score bodies on the turnaround and held-out views (same options as "
                                  "python3 -m herogen.blender.score)")
-    r = sub.add_parser("run", help="run stages 3 and/or 4 on a run folder")
+    r = sub.add_parser("run", help="run stages 3, 3f and/or 4 on a run folder")
     r.add_argument("--run", required=True, type=Path)
-    r.add_argument("--stages", default="3,4")
+    r.add_argument("--stages", default="3,3f,4", help="3, 3f (texture refine), 4; 3,4 also includes 3f under best")
+    r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
+    r.add_argument("--refine-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
+    r.add_argument("--refine-cap-usd", type=float, default=0.80, help="per-run texture-refine API cap")
     r.add_argument("--height", type=float, default=HEIGHT_STUDS, help="body height in studs")
     r.add_argument("--voxels", type=int, default=None, help="voxel grid resolution along the height")
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
@@ -87,12 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         synth.write_run(a.run, fig, size=a.size, ppu=a.size * 80.0 / 512)
         print(f"synthetic masks written to {a.run}")
         return 0
-    stages = {int(x) for x in a.stages.split(",") if x.strip()}
+    stages = {x.strip() for x in a.stages.split(",") if x.strip()}
     if not stages:
         ap.error("--stages names no stage (use 3, 4 or 3,4)")
-    if not stages <= {3, 4}:
-        ap.error("this package runs stages 3 and 4 only")
-    first = min(stages)
+    if not stages <= {"3", "3f", "4"}:
+        ap.error("this package runs stages 3, 3f and 4 only")
+    if {"3", "4"} <= stages and a.profile == "best":
+        stages.add("3f")
+    first = 3 if "3" in stages else 4
     problem = _upstream_problem(a.run, first - 1)
     if problem and not a.force:
         print(f"stage {first} needs a passed stage {first - 1}: {problem} (use --force to run anyway)",
@@ -101,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     ok = True
     from .bl import BlenderError
 
-    if 3 in stages:
+    if "3" in stages:
         from herogen.pipeline.client import ModelClient
         from .body_acceptance import BodyQualityError
         from .remote.client import DEFAULT_BODY_GPU, DEFAULT_OBJECTS_GPU, RemoteClient, RemoteError
@@ -129,7 +134,19 @@ def main(argv: list[str] | None = None) -> int:
         if not rec["ok"]:
             print("stage 3 gate failed; stopping", file=sys.stderr)
             return 1
-    if 4 in stages:
+    if "3f" in stages and a.profile == "best":
+        from herogen.pipeline.client import ClientError, ModelClient
+        from .refine import run_stage3f
+        from .stage3 import error_text
+
+        try:
+            rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
+                              profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout)
+        except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
+            print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
+            return 1
+        print(json.dumps({k: rec.get(k) for k in ("stage", "ok", "status", "seconds", "cost_usd", "final_model")}))
+    if "4" in stages:
         from .stage3 import error_text
         from .stage4 import run_stage4
 

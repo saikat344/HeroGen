@@ -8,6 +8,7 @@ Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default bel
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -70,9 +71,10 @@ class Settings:
     trusted_ip_header: str = ""
     allowed_hosts: tuple[str, ...] = ()
     # Pipeline
-    default_profile: str = "roblox-ingame"
+    default_profile: str = "best"
     profiles: tuple[str, ...] = PROFILES
     stage3_args: str = "--mesh-source sam3d-objects --joints sam3d-body --remote live"
+    refine_cap_usd: float = 0.80
     stage_timeout_s: int = 3600
     blender_timeout_s: int = 3 * 3600
     code_commit: str = ""
@@ -146,6 +148,7 @@ ENV = {
     "default_profile": "HEROGEN_SERVICE_PROFILE",
     "profiles": "HEROGEN_SERVICE_PROFILES",
     "stage3_args": "HEROGEN_SERVICE_STAGE3_ARGS",
+    "refine_cap_usd": "HEROGEN_SERVICE_REFINE_CAP_USD",
     "stage_timeout_s": "HEROGEN_SERVICE_STAGE_TIMEOUT",
     "blender_timeout_s": "HEROGEN_SERVICE_BLENDER_TIMEOUT",
     "code_commit": "HEROGEN_SERVICE_COMMIT",
@@ -162,6 +165,8 @@ def _parse(name: str, raw: str, default: Any) -> Any:
             return raw.strip().lower() in ("1", "true", "yes")
         if isinstance(default, int):
             return int(raw)
+        if isinstance(default, float):
+            return float(raw)
         if isinstance(default, tuple) and default and isinstance(default[0], int):
             a, b = raw.split("/", 1)
             return (int(a), int(b))
@@ -204,6 +209,8 @@ def validate(s: Settings, require_key: bool = True) -> None:
         raise ConfigError(f"{ENV['email_from']} must look like `HeroGen <signin@your-domain>`")
     if s.default_profile not in s.profiles or any(p not in PROFILES for p in s.profiles):
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
+    if not math.isfinite(s.refine_cap_usd) or s.refine_cap_usd < 0:
+        raise ConfigError(f"{ENV['refine_cap_usd']} must be finite and nonnegative")
     for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
                  "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
                  "upload_min_side",

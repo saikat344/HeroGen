@@ -130,7 +130,7 @@ class RunIndexTest(unittest.TestCase):
 
     def test_detail_stages_and_checks(self):
         d = runindex.run_detail(self.run)
-        self.assertEqual([s["stage"] for s in d["stages"]], ["0", "1", "2", "2h", "3", "4", "5"])
+        self.assertEqual([s["stage"] for s in d["stages"]], ["0", "1", "2", "2h", "3", "3f", "4", "5"])
         by = {s["stage"]: s for s in d["stages"]}
         self.assertEqual(by["5"]["status"], "not run")
         self.assertEqual(by["0"]["label"], "synthetic sketch")

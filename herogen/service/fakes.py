@@ -174,6 +174,10 @@ class FakeRunner:
         rec["profile"] = {"name": ctx.profile}
         write_record(run, rec)
 
+    def _stage_3f(self, ctx: StageContext, run: Path) -> None:
+        write_record(run, {**_record("3f", "texture refine", []), "status": "skipped",
+                           "reason": "no SAM source mesh", "profile": ctx.profile})
+
     def _stage_6(self, ctx: StageContext, run: Path) -> None:
         out = run / "06-roblox"
         out.mkdir(exist_ok=True)

@@ -17,6 +17,7 @@ with measurements. Without a sketch, it can draw one from a short text descripti
 | 1 cover art | A clean colour rendering of the same character | Meta Muse Image (`muse-image-1.0`), SAM 3.1, Muse Spark (`muse-spark-1.3`, the input check for photos of real people) |
 | 2 turnaround | Four orthographic A-pose views in one generation, split by code, checked for agreement; then four held-out turned views (30 and 60 degrees each side) for scoring only, each accepted, sent to human review or rejected | Muse Image, SAM 3.1 |
 | 3 base mesh | Builds a hybrid from SAM 3D Objects and SAM 3D Body joints (default), with an automatic, recorded carve fallback if the hybrid cannot build; `--mesh-source carve --joints silhouette` selects the local path; records observed silhouette overlaps and checks closed edges plus multiview usability with Muse Spark | Blender 4.5 LTS (headless); optionally SAM 3D Objects and SAM 3D Body on Modal |
+| 3f texture refine | Under `best`, repaints fixed head/body renders of SAM's textured mesh, registers and gates every view, matches its colours and projects accepted detail sequentially into a 4096 atlas; protected hair passes refine the sides and back. Writes `03-refined.glb`; all-view rejection keeps `03-source.glb`. Default API cap $0.80 per run; estimated $0.365 at one sample per view | Muse Image, SAM 3.1, Blender |
 | 4 game body | Cuts the mesh at the joints into 15 rigid R15 sections, each pivoting at the centre of its cut, with shoulder covers; the neck, waist, elbow, wrist, knee and ankle cuts move off a costume ledge only where the gate poses show a gain beyond noise; at the detail a target profile asks for (default `best`: full detail, no triangle budget; `roblox-ingame`: high and low LODs within 24,000 / 6,000 triangles; `roblox-avatar`: one body within the triangle, watertight-part and texture limits of Roblox's character body specification, without its rig, attachments, facial animation or cages), bakes the turnaround colours into one atlas per LOD (1024 / 512 under `roblox-ingame`; under `best` and `roblox-avatar` the smallest size with a texel per view pixel, at most 4096 and 2048; a SAM 3D Objects mesh's own texture where no view faces the surface), and runs a pose test that measures visible joint gaps on 20 gate poses (8 more held out and reported, never used to choose) | Blender |
 | scores (after 4) | Scores every body, ours or another tool's GLB, on the turnaround views and every held-out view: silhouette IoU, colour error, SSIM, mesh sanity, and optionally a platform's limits | numpy (`herogen.blender.score`) |
 | 5 results | A static results page with every stage's images, checks, scores, time and cost | code |
@@ -31,6 +32,9 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - Python 3.11 or newer, with `numpy` and `pillow`.
 - Blender 4.5 LTS for stages 3 and 4 (set `HEROGEN_BLENDER` if it isn't at the default macOS path or on `PATH`).
+- For stage 3f: `pip install ".[refine]"` (SciPy and OpenCV, including its EXR reader). Live calls also need
+  `.[live]` and `MODEL_API_KEY`. The default `best` profile runs 3f between stages 3 and 4; model mode defaults
+  to replay, so use `--refine live` for new repaints. `--stages 3f` refines a saved run independently.
 - For live model calls in stages p, 1 and 2: a Meta Model API key in `MODEL_API_KEY` (see `.env.example`), and
   `meta-sam-parser` to decode SAM 3.1 masks (`pip install ".[live]"`).
 - For the SAM 3D sources of stage 3 (`--mesh-source sam3d-objects`, `--joints sam3d-body`): `pip install
@@ -56,7 +60,7 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```bash
 python3 -m herogen.pipeline run sketch.png --run-id my-hero --live
-python3 -m herogen.blender run --run runs/my-hero --stages 3,4 --remote live
+python3 -m herogen.blender run --run runs/my-hero --stages 3,4 --remote live --refine live
 python3 -m herogen.blender score --run runs/my-hero
 python3 -m herogen.pipeline run sketch.png --run-id my-hero --stages 5
 ```

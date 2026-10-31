@@ -17,6 +17,7 @@ tested separately. A run can also start from a text prompt: stage p draws the sk
 | 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them), `masks/parts.json` (their record) |
 | 2f face source | `herogen/pipeline` | `views/closeup-{front,left,right}.png` (head close-ups), `views/closeup-<view>-input.png` (the crops sent), `masks/closeup-<view>.png` (footprints), only for the views whose close-up passed its gates; `views/closeup.json` (the record, always, with each view's reason when it is not used) |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
+| 3f texture refine | `herogen/blender/refine` | `03-refined.glb` (SAM's source geometry and frame with a 4096 base-colour image), `stage-3f.json`; only the default `best` profile; rejected views leave SAM's colours |
 | 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust` |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
@@ -2000,7 +2001,7 @@ deploying shell). The main ones:
 | `HEROGEN_SERVICE_HELDOUT_MAX` | 2 | Held-out view runs at once, service-wide |
 | `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
 | `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
-| `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `roblox-ingame` | Profiles offered, and the default |
+| `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `best` | Profiles offered, and the default |
 | `HEROGEN_SERVICE_STAGE3_ARGS` | `--mesh-source sam3d-objects --joints sam3d-body --remote live` | Extra `herogen.blender run` options for stage 3 |
 | `HEROGEN_SERVICE_IP_HEADER` | (empty) | Header holding the client address behind a proxy |
 
@@ -2075,3 +2076,90 @@ base URL is the address Modal prints for the `web` function; set it and deploy a
 
 Neither measurement alone asserts topology, rigging or export quality. Acceptance thresholds belong to
 an explicitly calibrated policy, separate from these measurement functions.
+
+## Stage 3f: texture refinement
+
+`herogen.blender.refine.run_stage3f` follows a passing stage 3 under `best`. The default Blender CLI stages are
+`3,3f,4`; requesting `3,4` also inserts 3f under `best`. Explicit `--stages 3` builds only the mesh, and
+`--stages 3f` refines an existing saved run. No source mesh (the carve path) records a skip. The service runs
+3f as a separate, required stage in its Blender group for `best`, with its own time, cost and error record.
+Roblox profiles do not schedule it.
+
+The input is SAM 3D Objects' textured `03-source.glb` and `01-cover.png`. A flat front probe locates the head
+with SAM 3.1. The existing GLB reader applies scene transforms and converts to the imported Blender frame:
+Z up, facing -Y. Blender re-unwraps into a 4096 atlas, allocating extra area to the head while unwrapping and
+restoring all positions before baking. The original colours are baked first. Position, normal and coverage
+maps provide visibility and facing weights; uncovered atlas margins take their nearest covered colour. The
+export embeds a PNG base-colour image and preserves the source geometry and frame.
+
+The frozen named prompts `RF2R` and `RF3H` live in `refine/prompts.py`; editing a prompt requires a new name.
+Every call supplies the current mesh render first and the cover second, including hair mode. Normal passes
+run head angles 0, 40, -40, 90, -90, 180, then body angles 0, 45, -45, 90, -90, 180. Head renders are 1024
+square; body renders are 1024 by 1536. The head frame is 1.30 times the detected head's larger side; the body
+frame is 1.06 times the height. Hair passes then run head angles 90, 135, 180, 225, 270 and upper-body angles
+135, 180, 225. Negative angle names in records represent the equivalent angle modulo 360. Upper-body cameras
+cover the top 55% of the body height.
+
+Each repaint registers back with stage 2f's grey-level affine fit with gain and bias, at 512 working pixels.
+Normal passes allow up to three samples. The unchanged outline thresholds are IoU at least 0.90 and bidirectional
+outline distances at most 6 median / 16 p90 pixels per 1024 render pixels, excluding the image border. A SAM 3.1
+face occupying at least 0.005 of the figure may have at most 0.25 of its area outside the render's face mask.
+This containment check prevents a new face on a profile or back view without requiring soft and sharp face
+masks to have the same area. These recipe thresholds retain their original measured calibration; they are
+per-view acceptance checks, not an independent quality score for the final mesh.
+
+Hair passes allow up to two samples. Their gates are IoU at least 0.85, affine scale change at most 0.10, and
+agreement on at least 0.80 of the eroded interior. Palette-mapped, blurred channel differences under 0.08 agree
+fully and over 0.16 agree not at all. Writes are restricted to the eroded interior (6 pixels per 1024), with
+hard support after smoothing so weights cannot leak across that boundary. The render's face mask, grown by
+12 pixels per 1024, is protected. Inside its head mask, writes require hair in both SAM 3.1 segmentations
+(repaint hair grown by 3, render hair by 15 pixels per 1024). This keeps a bald scalp and prevents a painted ear
+or face replacing hair merely because its colour resembles the original.
+
+Accepted repaints are matched to the current SAM-derived palette by a regularised quadratic fit, dropping the
+worst 15% of residuals and refitting; a masked low-frequency correction restores the remaining tone difference.
+Projection uses the nearest surface in a 3-pixel depth window, facing squared times pixel density, and a smooth
+ramp against the best quality already written. Outline and depth-jump feathers suppress seams. Hair has a 2x
+quality bonus to replace softer earlier passes. Every later camera renders the updated texture. Texels no
+accepted camera sees retain SAM's colour. No geometry generation or geometry replacement occurs in 3f.
+
+`stage-3f.json` records the source hash, recipes, models actually called, call log, outputs, thresholds, cost
+basis and per-view camera, accepted flag, reason, tries, attempts, registration, measured gates and texel count.
+Each view's rejection is diagnostic and does not fail the run. If every view is rejected, no refined GLB is
+written, and `final_model` says `03-source.glb`. A cap stop exports the views already completed, or keeps SAM's
+source when none completed. `ApiError`, `ReplayMiss`, malformed inputs and Blender failures write an error
+record and propagate; the CLI returns nonzero. An earlier refined output is invalidated before a new pass,
+and a stage-3 rebuild removes it too. The export uses a temporary GLB and an atomic rename.
+
+Cost uses the shared `COST_BASIS`: configured per-image list-price estimates, with cached calls free. A run is
+estimated at $0.365 with one accepted sample per view; the sample-limit projection is $0.765 before transport
+retries, using the configured prices of $0.01 per Muse Image image and $0.0025 per SAM 3.1 segmentation.
+`--refine-cap-usd` defaults to $0.80; the service sets it with `HEROGEN_SERVICE_REFINE_CAP_USD`. Before every uncached HTTP attempt, including retries, the projected
+cost is checked against the cap. Unknown outcomes count toward spend. An in-flight reservation is persisted
+before sending, so a worker interruption cannot reset its budget. Repeated invocations of 3f count the prior
+run record's cumulative spend/reservation; `cost_usd` reports the current invocation, as in other stages.
+Cache hits remain usable with a zero cap, and a replay miss remains an error. Records distinguish
+`complete`, `cap_reached`, `skipped`, `running` and `error`.
+
+The shared `herogen.blender.final_model.final_model` selects `03-refined.glb`, then `03-source.glb`, then
+`04-body/high.glb` for `best`. The Lab main body's `high` slot and GLB deliverable, service GLB download,
+service detail fallback and service viewer use that selection. Stage 4 still produces the sectioned body;
+its colours and geometry path are unchanged. It consumes `blender-work/03-source-uv.npz` and
+`03-source-texture.png` as a texture fallback rather than reading `03-source.glb`. Both Roblox profiles keep
+`04-body/high.glb`, and the Roblox bundle always packages that sectioned mesh even when the display profile
+is `best`. Frozen body versions continue to describe their own sectioned GLBs.
+
+Run on a saved run (no stage-3 rebuild):
+
+```bash
+python3 -m herogen.blender run --run runs/my-hero --stages 3f --refine live \
+  --refine-cache runs/_cache-model --refine-cap-usd 0.80
+python3 -m herogen.blender run --run runs/my-hero --stages 3f --refine replay \
+  --refine-cache runs/_cache-model --refine-cap-usd 0.80
+```
+
+Install `.[refine,live]` for live use. SciPy is BSD-3-Clause and OpenCV is Apache-2.0; both permit commercial
+use. The stage reuses the repository's existing Muse Image and SAM 3.1 clients and model terms. Offline tests
+use synthetic images and mocked model clients; a Blender integration test verifies a 4096 bake, embedded image,
+frame preservation and render passes, skipping when Blender is unavailable or cannot start in the environment.
+No live quality score is inferred from these unit tests; held-out mesh scoring remains a separate measurement.
