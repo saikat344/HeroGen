@@ -189,10 +189,14 @@ gate gap 0.127 to 0.116). The worst gaps left are at joints it does not move: th
 walk_a) and the carve's right shoulder (0.156 in arms_across).
 
 The cut search requires a nonempty child and parent section and a nonempty shared rim for every joint it
-measures. An unmeasurable baseline stops stage 4 with an error naming the joints and the empty sections or
-missing rims; the stage 3 mesh and joint placement need correction before cuts can be chosen. A candidate move
+measures. An unmeasurable baseline writes a failed `stage-4.json` with `error`, an `unmeasurable_joints`
+map and a failed `measurable_joints` check, preserving the elapsed time, profile and tools. The CLI exits with
+status 1 and names the joints and empty sections or missing rims. The stage 3 mesh and joint placement need
+correction before cuts can be chosen. A candidate move
 that removes an own or neighbouring joint's measurement is rejected and recorded in the trial's
-`unmeasurable_joints` map (joint to reason), without a gap or score. Missing measurements never count as zero.
+`unmeasurable_joints` map (joint to reason), without a gap or score. Every selected bare LOD is checked again
+before pose evaluation: a boundary lost during decimation also writes a failed record with its LOD in the
+reason. Missing measurements never count as zero.
 
 **Atlases.** The sections other than the Head share one UV atlas per LOD: Blender's Smart UV Project unwraps them
 without margin, and
@@ -438,6 +442,20 @@ shoulder sits inside bulky costume pieces; each joint's source is in `joint_sour
 kept under `sources`, and joints more than 0.5 studs apart are listed in `flagged`. With `--joints silhouette`
 the file holds the silhouette finder's joints only (`"source": "silhouette"`), and stage 4 finds them again
 itself.
+
+Before cutting a hybrid body, stage 4 checks the skeleton's section boundaries and measures the arm and thigh
+radii from the reference mesh's half-depth at the Body elbows and knees. When the skeleton has a missing section
+or shared rim, or an incompatible root override, these measured radii repair the nearest-bone weights; a
+coherent, measurable skeleton keeps its existing radii. Copying incompatible silhouette radii can let a broad
+torso claim a thin arm, even when its joints sit inside the mesh. A silhouette shoulder
+override is retained only when it leaves the shoulder cut between the recorded Body shoulder and elbow. Hip
+overrides must lie below the Body waist and above the knee. Incompatible overrides use the original Body joint
+kept in `03-joints.json`; the stage-4 `joint_fit` records the radii and rejected overrides. The fit uses no pose
+scores and changes no gate. Carve skeletons retain their original radii and joints.
+
+A cut opening can border several sections, for example a lower arm meeting its upper arm and the torso.
+Every actual shared boundary is retained for gap measurements, even when another neighbour owns most of the
+opening. Openings with two contiguous neighbour runs are capped separately along a shared chord.
 
 ## Stage 4 texture: colour projection
 

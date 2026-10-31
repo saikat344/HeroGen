@@ -79,14 +79,8 @@ def affected(kinds) -> set:
     return {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None and (s in secs or p in secs)}
 
 
-def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
-                   cover: dict, dome: tuple[int, int], joints: set | None = None) -> dict:
-    """Per pose set, each joint's worst visible gap (studs) on the body cut at `offsets`, covers on (only
-    `joints`, when given)."""
-    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
-                                   cut_offsets=offsets)
-    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
-    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, str]:
+    """Missing parent/child geometry or actual shared boundaries, independent of cap style and pose."""
     expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
     if joints is not None:
         expected &= joints
@@ -100,12 +94,27 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
             missing[j] = "empty section " + ", ".join(empty)
         elif not any(r["neighbour"] == parent and len(r["points"]) for r in secs[child].rims):
             missing[j] = f"no shared rim between {child} and {parent}"
+    return missing
+
+
+def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
+                   cover: dict, dome: tuple[int, int], joints: set | None = None) -> dict:
+    """Per pose set, each joint's worst visible gap (studs) on the body cut at `offsets`, covers on (only
+    `joints`, when given)."""
+    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
+                                   cut_offsets=offsets)
+    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
+    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+    missing = unmeasurable_sections(secs, joints)
     if missing:
         raise UnmeasurableJoints(missing)
     covered, _ = covers.add_covers(secs, cover_mesh[0], cover_mesh[1], **cover)
     out = {}
     for name, poses in pose_sets.items():
         g = pose.joint_gaps(covered, poses, visible=True, joints=joints)
+        expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
+        if joints is not None:
+            expected &= joints
         out[name] = {j: max(row[j] for row in g.values()) for j in sorted(expected)}
     return out
 

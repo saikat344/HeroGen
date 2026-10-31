@@ -214,3 +214,64 @@ def apply_to_skeleton(sk, rec: dict):
     sk.evidence = dict(rec.get("evidence", {}))
     sk.notes.append(f"joints from 03-joints.json (source {rec.get('source')})")
     return sk
+
+
+def fit_skeleton(sk, rec: dict, front: View, verts: np.ndarray, faces: np.ndarray) -> dict:
+    """Fit hybrid limb radii to the mesh being cut and reject incompatible silhouette root overrides.
+
+    The silhouette finder supplies a complete skeleton for its own pose and proportions. Its radii must not
+    weight a different Body skeleton's bone distances. Measure the limb depth at its Body elbow/knee instead.
+    A shoulder override must leave the shoulder cut between the Body shoulder and elbow; a hip must stay below
+    the waist and above its knee. Invalid overrides use the original Body joint, retained in stage 3's record.
+    A coherent skeleton with every shared rim keeps its existing radii. Otherwise the measured radii repair
+    the nearest-bone weights. No pose score or acceptance threshold chooses this fit. Carve skeletons do not
+    use it.
+    """
+    from . import cuts, split
+
+    sections, _ = split.build_sections(verts, faces, sk, cap="flat")
+    missing = cuts.unmeasurable_sections(sections)
+    near, far = depth_maps(front, verts, faces)
+    model = rec.get("sources", {}).get("sam3d-body", rec["joints"])
+    replaced, radii = {}, {}
+    for side in ("Left", "Right"):
+        for joint, kind in (("Elbow", "Arm"), ("Knee", "Leg")):
+            q = sk.joints[side + joint]
+            row, col = front.uv_to_pixel(q[:1], q[2:])
+            r, c = int(row[0]), int(col[0])
+            ok = np.isfinite(near) & np.isfinite(far)
+            if not (0 <= r < ok.shape[0] and 0 <= c < ok.shape[1] and ok[r, c]):
+                rr, cc = np.nonzero(ok)
+                if not len(rr):
+                    raise cuts.UnmeasurableJoints({side + joint: "reference mesh covers no front pixel"})
+                i = int(np.argmin((rr - r) ** 2 + (cc - c) ** 2))
+                r, c = int(rr[i]), int(cc[i])
+            radius = float((far[r, c] - near[r, c]) / 2)
+            if radius <= 0:
+                raise cuts.UnmeasurableJoints({side + joint: "reference mesh has no depth at the joint"})
+            radii[side + kind] = radius
+        shoulder = side + "Shoulder"
+        elbow = sk.joints[side + "Elbow"]
+        original = np.asarray(model[shoulder], float)
+        direction = elbow - original
+        length = float(np.linalg.norm(direction))
+        direction = direction / max(length, 1e-12)
+        along = float((sk.joints[shoulder] - original) @ direction)
+        if not 0 <= along < length - split.SHOULDER_CUT_OFFSET * radii[side + "Arm"]:
+            replaced[shoulder] = sk.joints[shoulder].tolist()
+            sk.joints[shoulder] = original.copy()
+        hip = side + "Hip"
+        up = sk.joints["Neck"] - sk.joints["Waist"]
+        if ((sk.joints[hip] - sk.joints["Waist"]) @ up >= 0 or
+                (sk.joints[hip] - sk.joints[side + "Knee"]) @ up <= 0):
+            replaced[hip] = sk.joints[hip].tolist()
+            sk.joints[hip] = np.asarray(model[hip], float).copy()
+    # A coherent, measurable skeleton keeps its original proportions. Fitting only repairs invalid input;
+    # it must not move a valid hip cut simply because another estimate of the radius is available.
+    if replaced or missing:
+        sk.radii.update(radii)
+    sk.ends["HipCentre"] = (sk.joints["LeftHip"] + sk.joints["RightHip"]) / 2
+    for name in replaced:
+        sk.evidence[name] = "recorded SAM 3D Body joint; silhouette override would remove or reverse a section"
+    return {"method": fit_skeleton.__doc__.strip(), "radii": {k: sk.radii[k] for k in radii},
+            "measured_radii": radii, "replaced_roots": replaced, "unmeasurable_before": missing}

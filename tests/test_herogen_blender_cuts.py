@@ -4,6 +4,9 @@ Synthetic inputs only; no Blender is needed.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -40,6 +43,100 @@ class TestCutMeasurements(unittest.TestCase):
                                    {"gate": {"rest": {}} if poses is None else poses},
                                    (self.verts, self.faces),
                                    {"owner": "UpperTorso", "radius": 2.5, "outset": 0.0}, (1, 8), requested)
+
+    def test_mixed_opening_keeps_every_shared_boundary(self):
+        # An open tetrahedron's rim meets the parent arm and two unrelated parts. The majority neighbour
+        # controls the cap, but it cannot erase the elbow's actual cut vertices from the gap measurement.
+        v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, -1]], float)
+        f = np.array([[0, 1, 3], [1, 2, 3], [2, 0, 3]])
+        child = "LeftLowerArm"
+        sections = {n: np.zeros((0, 3), np.int64) for n in SECTIONS}
+        sections[child] = f
+        pair = {0: (split.SID[child], split.SID["LeftUpperArm"]),
+                1: (split.SID[child], split.SID["UpperTorso"]),
+                2: (split.SID[child], split.SID["LowerTorso"])}
+        rig = split.build_rig(self.sk)
+        with patch.object(split, "split_mesh", return_value=(rig, None, v, sections, pair, 0)):
+            secs, _ = split.build_sections(v, f, self.sk, cap="flat")
+        rims = {r["neighbour"]: r for r in secs[child].rims}
+        self.assertEqual(set(rims), {"LeftUpperArm", "UpperTorso", "LowerTorso"})
+        self.assertEqual(rims["LeftUpperArm"]["joint"], "LeftElbow")
+        np.testing.assert_array_equal(rims["LeftUpperArm"]["points"], v[:1])
+        self.assertEqual(len(split.boundary_loops(secs[child].faces)), 0)
+
+    def test_two_neighbour_opening_splits_and_closes_both_caps(self):
+        from herogen.blender.score import mesh_sanity
+
+        angles = np.arange(6) * np.pi / 3
+        rim = np.stack([np.cos(angles), np.sin(angles), np.zeros(6)], axis=1)
+        v = np.concatenate([rim, [[0, 0, -1]]])
+        f = np.array([[k, (k + 1) % 6, 6] for k in range(6)])
+        child, parent, other = "LeftLowerArm", "LeftUpperArm", "UpperTorso"
+        sections = {n: np.zeros((0, 3), np.int64) for n in SECTIONS}
+        sections[child] = f
+        pair = {k: (split.SID[child], split.SID[parent if k < 3 else other]) for k in range(6)}
+        rig = split.build_rig(self.sk)
+        with patch.object(split, "split_mesh", return_value=(rig, None, v, sections, pair, 0)):
+            secs, _ = split.build_sections(v, f, self.sk, cap="flat")
+        section = secs[child]
+        self.assertTrue(mesh_sanity(section.verts, section.faces, 1e-9)["watertight"])
+        self.assertEqual(len(split.boundary_loops(section.faces)), 0)
+        points = np.concatenate([r["points"] for r in section.rims if r["neighbour"] == parent])
+        np.testing.assert_array_equal(np.unique(points, axis=0), np.unique(rim[:3], axis=0))
+        self.assertEqual({r["neighbour"] for r in section.rims}, {parent, other})
+
+    def test_selected_lod_missing_rim_records_a_failure_with_nonempty_sections(self):
+        from herogen.blender import stage4
+
+        low = dict(self.secs)
+        child = low["LeftLowerArm"]
+        low["LeftLowerArm"] = replace(child, rims=[r for r in child.rims if r["neighbour"] != "LeftUpperArm"])
+        self.assertGreater(len(low["LeftLowerArm"].faces), 0)
+        self.assertGreater(len(low["LeftUpperArm"].faces), 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            def fail(*args):
+                stage4._require_measurable_lods({"high": self.secs, "low": low})
+
+            with patch.object(stage4, "_run_stage4", side_effect=fail):
+                rec = stage4.run_stage4(Path(tmp), profile="roblox-ingame")
+            self.assertFalse(rec["ok"])
+            self.assertEqual(rec["unmeasurable_joints"],
+                             {"LeftElbow": "low LOD: no shared rim between LeftLowerArm and LeftUpperArm"})
+            self.assertEqual(json.loads((Path(tmp) / "stage-4.json").read_text()), rec)
+
+    def test_unmeasurable_stage_writes_failure_and_replaces_stale_pass(self):
+        from herogen.blender import stage4
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "stage-4.json").write_text('{"ok": true}')
+            reasons = {"LeftElbow": "empty section LeftUpperArm"}
+
+            def fail(run, rec, *args):
+                rec.data["tools"] = ["blender test"]
+                raise cuts.UnmeasurableJoints(reasons)
+
+            with patch.object(stage4, "_run_stage4", side_effect=fail):
+                rec = stage4.run_stage4(run, profile="roblox-ingame")
+            self.assertFalse(rec["ok"])
+            self.assertEqual(json.loads((run / "stage-4.json").read_text()), rec)
+            self.assertEqual(rec["unmeasurable_joints"], reasons)
+            self.assertIn("UnmeasurableJoints", rec["error"])
+            self.assertIn("LeftElbow", rec["error"])
+            self.assertEqual(rec["outputs"], [])
+            self.assertEqual(rec["tools"], ["blender test"])
+            self.assertEqual(rec["cost_usd"], 0)
+            self.assertEqual(rec["profile"]["name"], "roblox-ingame")
+            self.assertFalse(rec["checks"][-1]["pass"])
+            from herogen.blender.__main__ import main
+
+            stderr = io.StringIO()
+            with patch.object(stage4, "run_stage4", return_value=rec), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                status = main(["run", "--run", str(run), "--stages", "4", "--force"])
+            self.assertEqual(status, 1)
+            self.assertIn("stage 4 stopped: UnmeasurableJoints", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_named_joint_with_no_section_has_no_measurable_gap(self):
         # Remove the upper arm's geometry, keeping the complete skeleton and the rest of the body.

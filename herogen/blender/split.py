@@ -583,9 +583,9 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         infos = []
         for loop in boundary_loops(fs):
             nbs = [_neighbour_of(g, name, pair_of) for g in loop]
-            joint_nbs = {x for x in nbs if x is not None and joint_between(name, x)}
+            neighbours = {x for x in nbs if x is not None}
             parts = None
-            if len(joint_nbs) == 2:
+            if len(neighbours) == 2:
                 parts = _split_two_neighbours(loop, nbs, pos, new_pos, base)
             if parts is None:
                 cnt = Counter(x for x in nbs if x is not None)
@@ -649,7 +649,12 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         for info in infos:
             loops.append([int(remap[g]) for g in info["loop"]])
             jn = info["joint"]
-            rims.append({"neighbour": info["neighbour"], "joint": jn, "points": pos[info["shared"]]})
+            # One opening can border the torso and an adjacent arm section (or several costume parts).
+            # Its cap owner does not own every boundary segment: keep every real shared rim for the gap test.
+            neighbours = {_neighbour_of(g, name, pair_of) for g in info["loop"]}
+            for nb in sorted(n for n in neighbours if n is not None):
+                shared = [g for g in info["loop"] if _neighbour_of(g, name, pair_of) == nb]
+                rims.append({"neighbour": nb, "joint": joint_between(name, nb), "points": pos[shared]})
             if cap == "flat" or jn is None:
                 caps.append(None)
                 continue

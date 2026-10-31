@@ -140,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps({"stage": 4, "ok": rec["ok"], "seconds": rec["seconds"], "profile": a.profile,
                           "checks": {c["name"]: c["value"] for c in rec["checks"]}}))
+        if rec.get("error"):
+            print(f"stage 4 stopped: {rec['error']}", file=sys.stderr)
         ok &= rec["ok"]
     return 0 if ok else 1
 

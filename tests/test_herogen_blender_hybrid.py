@@ -13,6 +13,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from test_herogen_body_quality import quality_client
@@ -525,6 +526,71 @@ class TestBodyJoints(HybridBase):
             self.assertEqual(set(ev), set(body_joints.JOINT_NAMES))
         with self.assertRaises(ValueError):
             body_joints.from_body(body, self.vs.views["front"], self.verts, self.faces, 5.5, "nope")
+
+    def test_hybrid_fit_rejects_reversed_roots_and_measures_mesh_radii(self):
+        from herogen.blender import PARENT, split
+
+        model = {k: list(v) for k, v in self.truth["joints"].items()}
+        used = {k: list(v) for k, v in model.items()}
+        # A costume outline can put the shoulder beyond the elbow and the hips above the waist. Its arm
+        # width can also be a thin trim line; neither belongs to the model's anatomical skeleton.
+        for side in ("Left", "Right"):
+            used[side + "Shoulder"] = list(model[side + "Wrist"])
+            used[side + "Hip"] = list(model["Neck"])
+        rec = {"source": "sam3d-body", "joints": used, "sources": {"sam3d-body": model}}
+        sk = body_joints.apply_to_skeleton(joints.estimate(self.vs, 5.5), rec)
+        sk.radii.update(LeftArm=0.006, RightArm=0.006)
+        broken, _ = split.build_sections(self.verts, self.faces, sk, rings=1, ring_points=8)
+        self.assertTrue(any(not len(broken[n].faces) for n in ("LeftUpperArm", "RightUpperArm")))
+        fit = body_joints.fit_skeleton(sk, rec, self.vs.views["front"], self.verts, self.faces)
+        self.assertEqual(set(fit["replaced_roots"]), set(body_joints.LIMB_ROOTS))
+        self.assertGreater(sk.radii["LeftArm"], 0.1)
+        self.assertGreater(sk.radii["RightArm"], 0.1)
+        secs, _ = split.build_sections(self.verts, self.faces, sk, rings=1, ring_points=8)
+        for name, parent in PARENT.items():
+            self.assertGreater(len(secs[name].faces), 0, name)
+            if parent:
+                self.assertTrue(any(r["neighbour"] == parent and len(r["points"]) for r in secs[name].rims), name)
+
+    def test_hybrid_fit_preserves_valid_roots_and_depth_translation(self):
+        model = {k: list(v) for k, v in self.truth["joints"].items()}
+        rec = {"source": "sam3d-body", "joints": model, "sources": {"sam3d-body": model}}
+        sk = body_joints.apply_to_skeleton(joints.estimate(self.vs, 5.5), rec)
+        original = sk.as_json()
+        original_radii = dict(sk.radii)
+        fit = body_joints.fit_skeleton(sk, rec, self.vs.views["front"], self.verts, self.faces)
+        self.assertEqual(fit["replaced_roots"], {})
+        self.assertEqual(sk.as_json(), original)
+        self.assertEqual(sk.radii, original_radii)
+        shift = np.array([0, 0.7, 0])
+        moved = self.verts + shift
+        sk.joints = {k: v + shift for k, v in sk.joints.items()}
+        sk.ends = {k: v + shift for k, v in sk.ends.items()}
+        moved_rec = {"joints": sk.joints, "sources": {"sam3d-body": sk.joints}}
+        moved_fit = body_joints.fit_skeleton(sk, moved_rec, self.vs.views["front"], moved, self.faces)
+        for name, radius in fit["radii"].items():
+            self.assertAlmostEqual(moved_fit["radii"][name], radius)
+
+    def test_unreadable_mesh_depth_records_a_failed_stage(self):
+        from herogen.blender import stage4
+
+        model = {k: list(v) for k, v in self.truth["joints"].items()}
+        rec = {"source": "sam3d-body", "joints": model, "sources": {"sam3d-body": model}}
+        for depth in (np.inf, 0.0):
+            with self.subTest(depth=depth), tempfile.TemporaryDirectory() as tmp:
+                sk = body_joints.apply_to_skeleton(joints.estimate(self.vs, 5.5), rec)
+                image = np.full(self.vs.views["front"].mask.shape, depth)
+
+                def fail(*args):
+                    body_joints.fit_skeleton(sk, rec, self.vs.views["front"], self.verts, self.faces)
+
+                with patch.object(body_joints, "depth_maps", return_value=(image, image)), \
+                        patch.object(stage4, "_run_stage4", side_effect=fail):
+                    result = stage4.run_stage4(Path(tmp), profile="roblox-ingame")
+                self.assertFalse(result["ok"])
+                self.assertIn("LeftElbow", result["unmeasurable_joints"])
+                self.assertIn("reference mesh", result["error"])
+                self.assertEqual(json.loads((Path(tmp) / "stage-4.json").read_text()), result)
 
     def test_skeleton_override_and_cross_check(self):
         sk = joints.estimate(self.vs, 5.5)
