@@ -843,6 +843,10 @@ class HeldoutChecksTest(unittest.TestCase):
         seen = turned_mask(figure("a"), 26)
         for face, ok in (({"offset": -0.2, "face_head_area": 0.3}, True),
                          ({"offset": -0.2, "face_head_area": heldout.FACE_HEAD_AREA_MAX + 0.01}, False),
+                         # The sliver of face an oblique back view shows (120-150 degrees: 0.01-0.15 of the head on
+                         # the tuning characters), on the same side as the front view it aliases to.
+                         ({"offset": -0.3, "face_head_area": 0.10}, False),
+                         ({"offset": -0.3, "face_head_area": heldout.FACE_HEAD_AREA_MIN}, True),
                          ({"offset": -0.2}, False),  # recorded before the area was
                          ({"offset": 0.0, "face_head_area": 0.3}, False),
                          ({"offset": 0.2, "face_head_area": 0.3}, False)):  # toward the other side

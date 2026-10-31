@@ -783,8 +783,15 @@ sideways shift (head, torso and legs; the arms are left out), separately facing 
   half, and a back view whose left and right joints are named the other way round (Sapiens does this on about
   half of back views) fits as a front view with no error (154 degrees reads as 26, 120 as 60). The 0.75 was set
   from front views (tuning split: face over head 0.07-0.73, test 0.13-0.84). On the turnaround back views of the
-  26 bench sketches with a passed stage 2, SAM 3.1 returned no face instance at all (0 of 26; a head on 23), so
-  none would pass. Only exact back views (180 degrees) were measured, not 120-154.
+  26 bench sketches with a passed stage 2, SAM 3.1 returned no face instance at all (0 of 26; a head on 23).
+  Oblique back views do show the edge of the face, on the same side of the head as the front view they alias to:
+  on bench-gt renders at 120, 135 and 150 degrees (79 lit views) SAM found a face on 40, and 20 passed the rule
+  above with faces 0.01-0.28 of the head. So the face must also be at least 0.16 of the head's area, just above the
+  largest on the tuning characters (C01-C09, 0.15); 3 of 102 tuning and 2 of 35 test front views facing the right
+  way have a smaller face and need review. Known residual risk: on the other characters 6 of the 13 passing
+  oblique back views still pass (faces 0.17-0.28 of the head, two characters), and a "face" covering most of the
+  head yet under 0.75 (never seen on a real back view) would pass too; either one gets through only when Sapiens
+  also names that back view's joints the other way round.
 - **A-pose.** Each arm's angle below horizontal, from how far the wrist hangs below the shoulder over the arm's
   length in the front view (a turn doesn't change it): the nearer arm must be found and between 35 and 72
   degrees, and so must the farther one when both its joints score at least 0.5.
