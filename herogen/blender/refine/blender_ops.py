@@ -40,6 +40,12 @@ def setup(sc, engine):
 def import_glb(path):
     bpy.ops.import_scene.gltf(filepath=path)
     objs = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+    # Refinement derives its normals from geometry; imported custom corner normals become invalid when
+    # the bake copy's UV-seam vertices are merged. Clear them before any mesh processing or joining.
+    for o in objs:
+        if o.data.has_custom_normals:
+            bpy.context.view_layer.objects.active = o
+            bpy.ops.mesh.customdata_custom_splitnormals_clear()
     if len(objs) > 1:
         bpy.ops.object.select_all(action="DESELECT")
         for o in objs:

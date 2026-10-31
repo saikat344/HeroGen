@@ -689,6 +689,49 @@ class ConsumerTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_REFINE and bl.find_blender(), "Blender and texture-refine dependencies are required")
 class BlenderRefineTests(unittest.TestCase):
+    def test_prep_maps_are_unchanged_by_added_source_normals(self):
+        import io
+        import math
+        from herogen.blender.glb import add_missing_normals, write_glb
+        from herogen.blender.refine.backend import blender
+
+        # Split every panel at its UV seams, including the two interior height rings.
+        zs = (0.0, 0.25, 0.75, 1.0)
+        verts, faces, uvs = [], [], []
+        for lo, hi in zip(zs, zs[1:]):
+            for k in range(8):
+                base = len(verts)
+                for corner, z in ((k, lo), (k + 1, lo), (k + 1, hi), (k, hi)):
+                    angle = 2 * math.pi * corner / 8
+                    verts.append((0.35 * math.cos(angle), 0.35 * math.sin(angle), z))
+                    uvs.append((corner / 8, z))
+                faces.extend(((base, base + 1, base + 2), (base, base + 2, base + 3)))
+        image = io.BytesIO()
+        Image.new("RGB", (16, 16), (180, 180, 180)).save(image, format="PNG")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = write_glb(root / "raw.glb", [("Body", np.array(verts), np.array(faces), np.array(uvs))],
+                            texture_png=image.getvalue())
+            source = root / "source.glb"
+            self.assertEqual(add_missing_normals(raw, source), 1)
+            maps = []
+            for name, glb in (("raw", raw), ("normals", source)):
+                out = root / name
+                blender("prep", {"glb": str(glb), "out": str(out), "tex": 256, "head": None},
+                        root / f"{name}.log", timeout=120)
+                maps.append(character.texel_maps(out))
+            (raw_pos, raw_nrm, raw_cov), (pos, nrm, cov) = maps
+            np.testing.assert_array_equal(cov, raw_cov)
+            self.assertGreater(int(cov.sum()), 1000)
+            np.testing.assert_allclose(pos[cov], raw_pos[cov], atol=1e-6, rtol=0)
+            angles = np.degrees(np.arccos(np.clip((nrm[cov] * raw_nrm[cov]).sum(-1), -1, 1)))
+            self.assertLess(float(angles.max()), 0.5)
+            wall = cov & (pos[..., 2] > 0.30) & (pos[..., 2] < 0.70)
+            radial = np.column_stack((pos[wall, :2] / np.linalg.norm(pos[wall, :2], axis=-1, keepdims=True),
+                                      np.zeros(int(wall.sum()))))
+            angles = np.degrees(np.arccos(np.clip((nrm[wall] * radial).sum(-1), -1, 1)))
+            self.assertLess(float(angles.max()), 1.0)
+
     def test_prep_render_export_preserves_frame_and_base_colour_image(self):
         from herogen.blender.glb import load_glb
         from herogen.blender.refine.backend import blender
