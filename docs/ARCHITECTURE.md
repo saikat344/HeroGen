@@ -450,12 +450,21 @@ coherent, measurable skeleton keeps its existing radii. Copying incompatible sil
 torso claim a thin arm, even when its joints sit inside the mesh. A silhouette shoulder
 override is retained only when it leaves the shoulder cut between the recorded Body shoulder and elbow. Hip
 overrides must lie below the Body waist and above the knee. Incompatible overrides use the original Body joint
-kept in `03-joints.json`; the stage-4 `joint_fit` records the radii and rejected overrides. The fit uses no pose
+kept in `03-joints.json`; the stage-4 `joint_fit` records each joint's old and final position and bone radius,
+the reason for retaining or replacing them, the measured radii, whether they were applied, and rejected overrides. The fit uses no pose
 scores and changes no gate. Carve skeletons retain their original radii and joints.
 
 A cut opening can border several sections, for example a lower arm meeting its upper arm and the torso.
-Every actual shared boundary is retained for gap measurements, even when another neighbour owns most of the
-opening. Openings with two contiguous neighbour runs are capped separately along a shared chord.
+Gap measurements require a connected closed ring of edges present in both sections' uncapped mesh boundaries.
+Point contacts, open chains and degenerate rings cannot measure a joint; they cause a recorded
+`measurable_joints` failure if no closed shared ring remains. Only genuine rings contribute gap samples,
+including when another neighbour owns most of the opening. This rule applies to the reference body and every
+selected LOD; per-LOD `joint_rims` records the vertex and edge counts and ring validity. Body-joint skeletons'
+openings with two contiguous neighbour runs are capped separately along a shared chord. A cap chord does not
+invent a shared measurement boundary. Silhouette skeletons retain the original chord rule, which splits only
+openings with two joint-adjacent neighbours; their section geometry and pivots are unchanged.
+Silhouette shoulder covers retain their original cap-owner samples for sizing, separately from the closed
+shared rings used to measure joints.
 
 ## Stage 4 texture: colour projection
 

@@ -86,6 +86,7 @@ class Skeleton:
     arms: dict = field(default_factory=dict)   # side -> {"mask": front-plane bool, "dir": (dx, dz)}
     front: Plane | None = None
     evidence: dict = field(default_factory=dict)  # joint -> what decided it
+    source: str = "silhouette"
 
     def as_json(self) -> dict:
         return {k: [round(float(c), 4) for c in v] for k, v in self.joints.items()}

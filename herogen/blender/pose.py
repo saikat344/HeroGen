@@ -240,6 +240,11 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
     for its rest frame and one per posed joint neighbourhood; `fast=False` runs the brute-force queries.
     `joints` limits the test to those joints (the others are left out of the result).
     """
+    from . import cuts, split
+
+    missing = cuts.unmeasurable_sections(sections, joints)
+    if missing:
+        raise cuts.UnmeasurableJoints(missing)
     query = MeshIndex if fast else _Brute
     index: dict[str, object] = {}
 
@@ -254,7 +259,7 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
         parent = PARENT[name]
         if parent is None:
             continue
-        pts = [r["points"] for r in s.rims if r["neighbour"] == parent]
+        pts = [r["points"] for r in s.rims if r["neighbour"] == parent and split.is_closed_rim(r)]
         if pts and len(sections[parent].faces) and len(s.faces) and (joints is None or PIVOT_JOINT[name] in joints):
             rims[name] = np.concatenate(pts)
     result: dict[str, dict[str, float]] = {}

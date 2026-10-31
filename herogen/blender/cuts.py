@@ -92,9 +92,21 @@ def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, st
         empty = [n for n in (child, parent) if not len(secs[n].faces)]
         if empty:
             missing[j] = "empty section " + ", ".join(empty)
-        elif not any(r["neighbour"] == parent and len(r["points"]) for r in secs[child].rims):
+        elif not any(r["neighbour"] == parent and split.is_closed_rim(r) for r in secs[child].rims):
             missing[j] = f"no shared rim between {child} and {parent}"
+            contacts = [r for r in secs[child].rims if r["neighbour"] == parent and len(r["points"])]
+            if contacts:
+                sizes = ", ".join(f"{len(r['points'])} vertices/{len(r.get('edges', []))} edges" for r in contacts)
+                missing[j] += f" (contacts are not closed rings: {sizes})"
     return missing
+
+
+def rim_topology(secs: dict) -> dict:
+    """Per joint, the sizes and structural validity of all parent/child boundary components."""
+    return {PIVOT_JOINT[child]: [{"vertices": len(r["points"]), "edges": len(r.get("edges", [])),
+                                "closed_ring": split.is_closed_rim(r)}
+                               for r in secs[child].rims if r["neighbour"] == parent]
+            for child, parent in PARENT.items() if parent is not None}
 
 
 def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,

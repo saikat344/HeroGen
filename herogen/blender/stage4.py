@@ -454,6 +454,7 @@ def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
                          "cap_triangles": sum(s.cap_triangles for s in bare_secs[lod].values()),
                          "cover_triangles": sum(c["triangles"] for c in cover_info[lod].values()),
                          "dome_rings": rings, "dome_ring_points": ring_points,
+                         "joint_rims": cuts.rim_topology(bare_secs[lod]),
                          "budget": build["budget"] if build["budget"] != "groups" else "avatar part groups"}
         if len(groups) > 1:
             lod_info[lod]["triangles_by_group"] = {g: sum(len(lod_secs[lod][n].faces) for n in secs)
@@ -653,7 +654,7 @@ def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
         s = hi[n]
         jn = PIVOT_JOINT[n]
         est = np.asarray(sk.joints[jn], float)
-        rim = [r["points"] for r in s.rims if r["neighbour"] == PARENT[n] and len(r["points"])]
+        rim = [r["points"] for r in s.rims if r["neighbour"] == PARENT[n] and split.is_closed_rim(r)]
         rim_r = float(np.linalg.norm(np.concatenate(rim) - s.pivot, axis=1).mean()) if rim else None
         inside = bool(winding_inside(s.pivot[None], s.verts, s.faces)[0]) if len(s.faces) else False
         off = float(np.linalg.norm(s.pivot - est))

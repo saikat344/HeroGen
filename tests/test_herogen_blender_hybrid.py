@@ -544,6 +544,14 @@ class TestBodyJoints(HybridBase):
         self.assertTrue(any(not len(broken[n].faces) for n in ("LeftUpperArm", "RightUpperArm")))
         fit = body_joints.fit_skeleton(sk, rec, self.vs.views["front"], self.verts, self.faces)
         self.assertEqual(set(fit["replaced_roots"]), set(body_joints.LIMB_ROOTS))
+        self.assertTrue(fit["radii_applied"])
+        for name in model:
+            row = fit["joints"][name]
+            np.testing.assert_array_equal(row["position"], sk.joints[name])
+            self.assertGreater(row["radius"], 0)
+            self.assertTrue(row["reason"])
+        self.assertIn("passes the Body elbow", fit["joints"]["LeftShoulder"]["reason"])
+        self.assertIn("above the Body waist", fit["joints"]["LeftHip"]["reason"])
         self.assertGreater(sk.radii["LeftArm"], 0.1)
         self.assertGreater(sk.radii["RightArm"], 0.1)
         secs, _ = split.build_sections(self.verts, self.faces, sk, rings=1, ring_points=8)
@@ -560,6 +568,11 @@ class TestBodyJoints(HybridBase):
         original_radii = dict(sk.radii)
         fit = body_joints.fit_skeleton(sk, rec, self.vs.views["front"], self.verts, self.faces)
         self.assertEqual(fit["replaced_roots"], {})
+        self.assertFalse(fit["radii_applied"])
+        for row in fit["joints"].values():
+            self.assertEqual(row["old_position"], row["position"])
+            self.assertEqual(row["old_radius"], row["radius"])
+            self.assertEqual(row["reason"], "joint position retained; radius retained")
         self.assertEqual(sk.as_json(), original)
         self.assertEqual(sk.radii, original_radii)
         shift = np.array([0, 0.7, 0])

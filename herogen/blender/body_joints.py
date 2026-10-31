@@ -205,6 +205,7 @@ def apply_to_skeleton(sk, rec: dict):
     if missing:
         raise KeyError(f"03-joints.json lacks {missing}")
     sk.joints = joints
+    sk.source = rec.get("source", "silhouette")
     sk.ends["HipCentre"] = (joints["LeftHip"] + joints["RightHip"]) / 2
     for side in ("Left", "Right"):
         toe = np.asarray(sk.ends[side + "Toe"], float).copy()
@@ -227,13 +228,17 @@ def fit_skeleton(sk, rec: dict, front: View, verts: np.ndarray, faces: np.ndarra
     the nearest-bone weights. No pose score or acceptance threshold chooses this fit. Carve skeletons do not
     use it.
     """
-    from . import cuts, split
+    from . import PIVOT_JOINT, cuts, split
 
+    old_positions = {k: v.tolist() for k, v in sk.joints.items()}
+    old_rig = split.build_rig(sk)
+    old_radii = {PIVOT_JOINT[n]: float(b[2]) for n, b in old_rig.bones.items()}
+    old_radii["HeadTop"] = float(sk.radii["head"])
     sections, _ = split.build_sections(verts, faces, sk, cap="flat")
     missing = cuts.unmeasurable_sections(sections)
     near, far = depth_maps(front, verts, faces)
     model = rec.get("sources", {}).get("sam3d-body", rec["joints"])
-    replaced, radii = {}, {}
+    replaced, radii, reasons = {}, {}, {}
     for side in ("Left", "Right"):
         for joint, kind in (("Elbow", "Arm"), ("Knee", "Leg")):
             q = sk.joints[side + joint]
@@ -259,12 +264,17 @@ def fit_skeleton(sk, rec: dict, front: View, verts: np.ndarray, faces: np.ndarra
         along = float((sk.joints[shoulder] - original) @ direction)
         if not 0 <= along < length - split.SHOULDER_CUT_OFFSET * radii[side + "Arm"]:
             replaced[shoulder] = sk.joints[shoulder].tolist()
+            reasons[shoulder] = ("silhouette shoulder reverses the upper arm" if along < 0 else
+                                 "silhouette shoulder cut reaches or passes the Body elbow")
             sk.joints[shoulder] = original.copy()
         hip = side + "Hip"
         up = sk.joints["Neck"] - sk.joints["Waist"]
         if ((sk.joints[hip] - sk.joints["Waist"]) @ up >= 0 or
                 (sk.joints[hip] - sk.joints[side + "Knee"]) @ up <= 0):
             replaced[hip] = sk.joints[hip].tolist()
+            reasons[hip] = ("silhouette hip is at or above the Body waist" if
+                            (sk.joints[hip] - sk.joints["Waist"]) @ up >= 0 else
+                            "silhouette hip is at or below the Body knee")
             sk.joints[hip] = np.asarray(model[hip], float).copy()
     # A coherent, measurable skeleton keeps its original proportions. Fitting only repairs invalid input;
     # it must not move a valid hip cut simply because another estimate of the radius is available.
@@ -272,6 +282,21 @@ def fit_skeleton(sk, rec: dict, front: View, verts: np.ndarray, faces: np.ndarra
         sk.radii.update(radii)
     sk.ends["HipCentre"] = (sk.joints["LeftHip"] + sk.joints["RightHip"]) / 2
     for name in replaced:
-        sk.evidence[name] = "recorded SAM 3D Body joint; silhouette override would remove or reverse a section"
+        sk.evidence[name] = "recorded SAM 3D Body joint; " + reasons[name]
+    new_rig = split.build_rig(sk)
+    new_radii = {PIVOT_JOINT[n]: float(b[2]) for n, b in new_rig.bones.items()}
+    new_radii["HeadTop"] = float(sk.radii["head"])
+    joint_fit = {}
+    for name, position in sk.joints.items():
+        why = [reasons.get(name, "joint position retained")]
+        if old_radii[name] != new_radii[name]:
+            why.append("mesh depth radius applied to repair " + (
+                "incompatible roots and unmeasurable boundaries" if replaced and missing else
+                "incompatible roots" if replaced else "unmeasurable boundaries"))
+        else:
+            why.append("radius retained")
+        joint_fit[name] = {"old_position": old_positions[name], "position": position.tolist(),
+                           "old_radius": old_radii[name], "radius": new_radii[name], "reason": "; ".join(why)}
     return {"method": fit_skeleton.__doc__.strip(), "radii": {k: sk.radii[k] for k in radii},
-            "measured_radii": radii, "replaced_roots": replaced, "unmeasurable_before": missing}
+            "measured_radii": radii, "radii_applied": bool(replaced or missing), "joints": joint_fit,
+            "replaced_roots": replaced, "unmeasurable_before": missing}
