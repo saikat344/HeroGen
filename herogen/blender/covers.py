@@ -11,6 +11,8 @@ from dataclasses import replace
 
 import numpy as np
 
+from . import split
+
 
 COVER_RADIUS = 1.8     # in shoulder cut radii (see stage4 for the measurements behind the defaults)
 COVER_OUTSET = 0.03    # studs outside the carved surface
@@ -165,7 +167,12 @@ def add_covers(sections: dict, body_v: np.ndarray, body_f: np.ndarray, owner: st
     info = {}
     for side in ("Left", "Right"):
         arm = sections[side + "UpperArm"]
-        rim = [r["points"] for r in arm.rims if r["neighbour"] == "UpperTorso" and len(r["points"])]
+        if arm.cover_rims is not None:
+            # Silhouette covers keep their original cap-owner sizing. These samples never measure a joint.
+            rim = [r["points"] for r in arm.cover_rims if r["neighbour"] == "UpperTorso" and len(r["points"])]
+        else:
+            rim = [r["points"][ids] for r in arm.rims if r["neighbour"] == "UpperTorso"
+                   and len(ids := split.rim_loop_vertices(r))]
         if not rim:
             continue
         rim_r = float(np.linalg.norm(np.concatenate(rim) - arm.pivot, axis=1).mean())

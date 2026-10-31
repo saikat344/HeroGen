@@ -59,8 +59,9 @@ REFERENCE_TRIANGLES = 20000
 class UnmeasurableJoints(ValueError):
     """A cut has no shared rim between two nonempty sections; its gap is unknown."""
 
-    def __init__(self, reasons: dict[str, str]):
+    def __init__(self, reasons: dict[str, str], boundaries: dict | None = None):
         self.reasons = reasons
+        self.boundaries = boundaries or {}
         detail = "; ".join(f"{j}: {reason}" for j, reason in sorted(reasons.items()))
         super().__init__(f"cannot measure cut gaps ({detail}); check the stage 3 mesh and joint placement")
 
@@ -79,14 +80,8 @@ def affected(kinds) -> set:
     return {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None and (s in secs or p in secs)}
 
 
-def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
-                   cover: dict, dome: tuple[int, int], joints: set | None = None) -> dict:
-    """Per pose set, each joint's worst visible gap (studs) on the body cut at `offsets`, covers on (only
-    `joints`, when given)."""
-    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
-                                   cut_offsets=offsets)
-    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
-    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, str]:
+    """Missing parent/child geometry or actual shared boundaries, independent of cap style and pose."""
     expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
     if joints is not None:
         expected &= joints
@@ -98,14 +93,71 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
         empty = [n for n in (child, parent) if not len(secs[n].faces)]
         if empty:
             missing[j] = "empty section " + ", ".join(empty)
-        elif not any(r["neighbour"] == parent and len(r["points"]) for r in secs[child].rims):
+        elif not split.rim_measurements([r for r in secs[child].rims if r["neighbour"] == parent],
+                                        secs[child].cut_radius):
             missing[j] = f"no shared rim between {child} and {parent}"
+            contacts = [r for r in secs[child].rims if r["neighbour"] == parent and len(r["points"])]
+            if contacts:
+                sizes = ", ".join(f"{len(r['points'])} vertices/{len(r.get('edges', []))} edges" for r in contacts)
+                missing[j] += f" (total shared boundary below cut radius: {sizes}; cut radius {secs[child].cut_radius:.6g})"
+    return missing
+
+
+def rim_topology(secs: dict) -> dict:
+    """Per joint, total shared-edge length and every parent/child boundary piece at one LOD."""
+    result = {}
+    for child, parent in PARENT.items():
+        if parent is None:
+            continue
+        section = secs[child]
+        rims = [r for r in section.rims if r["neighbour"] == parent]
+        pieces_by_rim = [split.rim_boundary_pieces(r) for r in rims]
+        total = sum(length for pieces in pieces_by_rim for _, _, length in pieces)
+        empty = any(not len(secs[n].faces) for n in (child, parent))
+        measurable = bool(not empty and np.isfinite(section.cut_radius) and section.cut_radius > 0
+                          and total >= section.cut_radius)
+        components = []
+        for rim, pieces in zip(rims, pieces_by_rim):
+            loops = len(split.rim_loop_vertices(rim))
+            chains = [{"length_studs": length,
+                       "length_over_radius": length / section.cut_radius if section.cut_radius > 0 else None,
+                       "measurable": measurable}
+                      for _, length in split.rim_open_chains(rim)]
+            kinds = sorted({kind for kind, _, _ in pieces}) if measurable else []
+            length = sum(length for _, _, length in pieces)
+            components.append({"vertices": len(rim["points"]), "edges": len(rim.get("edges", [])),
+                               "closed_ring": bool(loops), "loop_vertices": loops,
+                               "length_studs": length,
+                               "length_over_radius": length / section.cut_radius if section.cut_radius > 0 else None,
+                               "piece_count": len(pieces), "measurable": bool(measurable and pieces),
+                               "boundary_type": "+".join(kinds) or "none", "open_chains": chains})
+        kinds = sorted({kind for c in components for kind in c["boundary_type"].split("+") if kind != "none"})
+        result[PIVOT_JOINT[child]] = {"boundary_type": "+".join(kinds) if kinds and not empty else "none",
+                                    "cut_radius_studs": section.cut_radius, "length_studs": total,
+                                    "length_over_radius": total / section.cut_radius if section.cut_radius > 0 else None,
+                                    "piece_count": sum(len(pieces) for pieces in pieces_by_rim),
+                                    "measurable": measurable, "components": components}
+    return result
+
+
+def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
+                   cover: dict, dome: tuple[int, int], joints: set | None = None) -> dict:
+    """Per pose set, each joint's worst visible gap (studs) on the body cut at `offsets`, covers on (only
+    `joints`, when given)."""
+    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
+                                   cut_offsets=offsets)
+    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
+    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+    missing = unmeasurable_sections(secs, joints)
     if missing:
-        raise UnmeasurableJoints(missing)
+        raise UnmeasurableJoints(missing, rim_topology(secs))
     covered, _ = covers.add_covers(secs, cover_mesh[0], cover_mesh[1], **cover)
     out = {}
     for name, poses in pose_sets.items():
         g = pose.joint_gaps(covered, poses, visible=True, joints=joints)
+        expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
+        if joints is not None:
+            expected &= joints
         out[name] = {j: max(row[j] for row in g.values()) for j in sorted(expected)}
     return out
 

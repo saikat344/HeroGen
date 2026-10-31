@@ -272,16 +272,40 @@ def _rest_iou_checks(vs, shape_views: set[str], mesh_source: str, rest_silhouett
     return values, checks
 
 
+def _require_measurable_lods(lods: dict) -> None:
+    """Every selected body must retain every real joint boundary before pose gaps are measured."""
+    for lod, sections in lods.items():
+        missing = cuts.unmeasurable_sections(sections)
+        if missing:
+            raise cuts.UnmeasurableJoints({j: f"{lod} LOD: {reason}" for j, reason in missing.items()},
+                                          {lod: cuts.rim_topology(sections)})
+
+
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                profile: str = DEFAULT_PROFILE, cut_search: bool = True) -> dict:
     """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
     cut at its joint (for comparison; the record says so)."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
-    builds = LOD_BUILD[profile]
     # An earlier record must not outlive a run that stops: nothing after stage 4 may read a stale pass.
     (run / "stage-4.json").unlink(missing_ok=True)
     rec = StageRecord(run, 4, "game body")
+    rec.data["profile"] = {"name": profile, "lods": sorted(LOD_BUILD[profile]),
+                           "budgets": _budgets_record(profile)}
+    try:
+        return _run_stage4(run, rec, height, timeout, profile, cut_search)
+    except cuts.UnmeasurableJoints as exc:
+        from .stage3 import error_text
+
+        rec.add(check("measurable_joints", False, passed=False, reasons=exc.reasons))
+        rec.note(error_text(exc, run))
+        return rec.finish({"error": error_text(exc, run), "unmeasurable_joints": exc.reasons,
+                           "joint_rims": exc.boundaries})
+
+
+def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
+                profile: str, cut_search: bool) -> dict:
+    builds = LOD_BUILD[profile]
     work = work_dir(run)
     mesh_npz = work / "03-mesh.npz"
     mesh_src = mesh_npz if mesh_npz.exists() else run / "03-mesh.glb"
@@ -302,6 +326,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     if jrec is not None and jrec.get("source") == "sam3d-body":
         sk = body_joints.apply_to_skeleton(sk, jrec)
         joints_source = "sam3d-body"
+    rec.data.update(mesh_source=mesh_source, joints_source=joints_source)
     source = None
     src_uv, src_tex = work / "03-source-uv.npz", work / "03-source-texture.png"
     if mesh_source == "sam3d-objects" and src_uv.exists() and src_tex.exists():
@@ -368,11 +393,16 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     # Where to cut: a cut moved along its normal only where the gate poses show a gain beyond noise, found once on
     # the reference body and used for every LOD (see cuts). The held-out poses never choose; the record shows the
     # reference body on both pose sets with the cuts unmoved and moved.
+    ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
+    if mesh_source == "sam3d-objects" and joints_source == "sam3d-body":
+        fit = body_joints.fit_skeleton(sk, jrec, vs.views["front"], ref["verts"], ref["faces"])
+        rec.data["joint_fit"] = fit
+        for n in fit["replaced_roots"]:
+            rec.note(f"{n}: silhouette root cannot leave an ordered limb; using the recorded Body joint")
     bone_dirs = pose.bone_directions(sk)
     poses = pose.pose_library(bone_dirs)
     heldout = pose.heldout_poses(bone_dirs)
     gate_poses = {k: v for k, v in poses.items() if k not in UNGATED_POSES}
-    ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
     cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
     if cut_search:
         cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
@@ -426,10 +456,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                          "cap_triangles": sum(s.cap_triangles for s in bare_secs[lod].values()),
                          "cover_triangles": sum(c["triangles"] for c in cover_info[lod].values()),
                          "dome_rings": rings, "dome_ring_points": ring_points,
+                         "joint_rims": cuts.rim_topology(bare_secs[lod]),
                          "budget": build["budget"] if build["budget"] != "groups" else "avatar part groups"}
         if len(groups) > 1:
             lod_info[lod]["triangles_by_group"] = {g: sum(len(lod_secs[lod][n].faces) for n in secs)
                                                    for g, secs in groups.items()}
+
+    _require_measurable_lods(bare_secs)
 
     # Pose test. Gated: the gap that stays visible with the covers on (both LODs). Reported alongside: the
     # visible gap without covers, the purely geometric gap without covers, and flat caps.
@@ -623,7 +656,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         s = hi[n]
         jn = PIVOT_JOINT[n]
         est = np.asarray(sk.joints[jn], float)
-        rim = [r["points"] for r in s.rims if r["neighbour"] == PARENT[n] and len(r["points"])]
+        rim = [r["points"][ids] for r, ids in split.rim_measurements(
+            [r for r in s.rims if r["neighbour"] == PARENT[n]], s.cut_radius)]
         rim_r = float(np.linalg.norm(np.concatenate(rim) - s.pivot, axis=1).mean()) if rim else None
         inside = bool(winding_inside(s.pivot[None], s.verts, s.faces)[0]) if len(s.faces) else False
         off = float(np.linalg.norm(s.pivot - est))

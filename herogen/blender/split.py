@@ -468,9 +468,11 @@ class Section:
     verts: np.ndarray
     faces: np.ndarray
     pivot: np.ndarray
-    rims: list            # [{"neighbour", "joint", "points": [k,3]}]
+    rims: list            # [{"neighbour", "joint", "points": [k,3], "edges": [m,2]}], edges index points
     cap_triangles: int
     cap_points_outside: int = 0   # cap samples still outside the neighbour after squashing (poke-through)
+    cover_rims: list | None = None   # historical cap-owner samples for silhouette cover sizing only
+    cut_radius: float = 0.0   # child bone radius used by the joint cut; retained through cover attachment
 
 
 def _neighbour_of(g: int, name: str, pair_of: dict) -> str | None:
@@ -478,6 +480,183 @@ def _neighbour_of(g: int, name: str, pair_of: dict) -> str | None:
         return None
     a, b = pair_of[g]
     return SECTIONS[b] if SECTIONS[a] == name else SECTIONS[a]
+
+
+def boundary_edges(faces: np.ndarray) -> set[tuple[int, int]]:
+    """Undirected edges belonging to exactly one triangle, before any caps are added."""
+    edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    return set(map(tuple, unique[counts == 1].tolist()))
+
+
+def _rim_blocks(rim: dict) -> list:
+    """Biconnected shared-edge blocks; a single-edge block is a bridge."""
+    points = np.asarray(rim["points"])
+    edges = np.asarray(rim.get("edges", []), dtype=np.int64)
+    n = len(points)
+    if n < 2 or edges.ndim != 2 or edges.shape[1] != 2 or len(edges) < 1:
+        return []
+    if np.any(edges < 0) or np.any(edges >= n) or not np.isfinite(points).all():
+        return []
+    if np.any(edges[:, 0] == edges[:, 1]) or len(np.unique(np.sort(edges, axis=1), axis=0)) != len(edges):
+        return []
+    adjacent = defaultdict(list)
+    for a, b in edges.tolist():
+        adjacent[a].append(b)
+        adjacent[b].append(a)
+    discovered, low, parent = {}, {}, {}
+    blocks = []
+    # Iterative depth-first search avoids a recursion limit on densely sampled openings.
+    for root in sorted(adjacent):
+        if root in discovered:
+            continue
+        discovered[root] = low[root] = len(discovered)
+        pending, path = [(root, iter(adjacent[root]))], []
+        while pending:
+            v, neighbours = pending[-1]
+            w = next(neighbours, None)
+            if w is not None:
+                if w not in discovered:
+                    parent[w] = v
+                    path.append((v, w))
+                    discovered[w] = low[w] = len(discovered)
+                    pending.append((w, iter(adjacent[w])))
+                elif w != parent.get(v) and discovered[w] < discovered[v]:
+                    path.append((v, w))
+                    low[v] = min(low[v], discovered[w])
+                continue
+            pending.pop()
+            if v not in parent:
+                continue
+            p = parent[v]
+            low[p] = min(low[p], low[v])
+            if low[v] >= discovered[p]:
+                block = []
+                while path:
+                    edge = path.pop()
+                    block.append(edge)
+                    if edge == (p, v):
+                        break
+                blocks.append(block)
+    return blocks
+
+
+def rim_loop_vertices(rim: dict) -> np.ndarray:
+    """All vertices on nondegenerate cyclic blocks, including loops meeting at junctions."""
+    points = np.asarray(rim["points"])
+    selected = set()
+    for block in _rim_blocks(rim):
+        ids = sorted({v for edge in block for v in edge})
+        # Rank tests degeneracy, without imposing a size threshold on genuine loops.
+        if len(ids) >= 3 and np.linalg.matrix_rank(points[ids] - points[ids[0]]) >= 2:
+            selected.update(ids)
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def rim_open_chains(rim: dict) -> list[tuple[np.ndarray, float]]:
+    """Maximal open paths of shared bridges, split at branch vertices; length is mesh arc length.
+
+    Cyclic edges, including collinear cycles, are accounted for separately as cyclic blocks.
+    No chord is inferred between endpoints at a three-section junction.
+    """
+    adjacent = defaultdict(list)
+    cyclic = set()
+    for block in _rim_blocks(rim):
+        if len(block) == 1:
+            a, b = block[0]
+            adjacent[a].append(b)
+            adjacent[b].append(a)
+        else:
+            cyclic.update(v for edge in block for v in edge)
+    used, chains = set(), []
+    points = np.asarray(rim["points"])
+    for start in sorted(adjacent):
+        if len(adjacent[start]) == 2 and start not in cyclic:
+            continue
+        for next_vertex in sorted(adjacent[start]):
+            edge = tuple(sorted((start, next_vertex)))
+            if edge in used:
+                continue
+            used.add(edge)
+            path = [start, next_vertex]
+            while len(adjacent[path[-1]]) == 2 and path[-1] not in cyclic:
+                prev, current = path[-2:]
+                nxt = next(v for v in adjacent[current] if v != prev)
+                used.add(tuple(sorted((current, nxt))))
+                path.append(nxt)
+            ids = np.asarray(path, dtype=np.int64)
+            chains.append((ids, float(np.linalg.norm(np.diff(points[ids], axis=0), axis=1).sum())))
+    return chains
+
+
+def rim_boundary_pieces(rim: dict) -> list[tuple[str, np.ndarray, float]]:
+    """Shared-edge cyclic blocks and maximal open chains, with each edge counted once."""
+    points = np.asarray(rim["points"])
+    pieces = []
+    for block in _rim_blocks(rim):
+        if len(block) > 1:
+            edges = np.asarray(block, dtype=np.int64)
+            length = float(np.linalg.norm(points[edges[:, 1]] - points[edges[:, 0]], axis=1).sum())
+            pieces.append(("loops", np.unique(edges), length))
+    pieces.extend(("open_chain", ids, length) for ids, length in rim_open_chains(rim))
+    return pieces
+
+
+def rim_measurements(rims: list, radius: float) -> list[tuple[dict, np.ndarray]]:
+    """Measure all shared-edge pieces of one section pair when their total spans a cut radius.
+
+    The caller supplies only that joint's rims, at one LOD. Junctions may split a real cut into short
+    pieces, so no piece is judged separately. Isolated vertices have no shared edge and never contribute.
+    """
+    boundaries = [(rim, rim_boundary_pieces(rim)) for rim in rims]
+    total = sum(length for _, pieces in boundaries for _, _, length in pieces)
+    if not np.isfinite(radius) or radius <= 0 or total < radius:
+        return []
+    return [(rim, np.unique(np.concatenate([ids for _, ids, _ in pieces])))
+            for rim, pieces in boundaries if pieces]
+
+
+def rim_measurement_vertices(rim: dict, radius: float) -> np.ndarray:
+    """Measurement vertices when a single rim contains the joint's whole shared boundary."""
+    measurements = rim_measurements([rim], radius)
+    return measurements[0][1] if measurements else np.array([], dtype=np.int64)
+
+
+def is_closed_rim(rim: dict) -> bool:
+    """Whether a contact contains at least one closed loop with enclosed area."""
+    return bool(len(rim_loop_vertices(rim)))
+
+
+def _shared_rims(name: str, boundaries: dict, pos: np.ndarray) -> list:
+    """Rings present in both sections' uncapped boundaries, including junction vertices.
+
+    Loops and open chains retain their actual shared edges for scale-relative gap measurements.
+    Cap chords are deliberately absent: a cap cannot invent a shared boundary on the original body.
+    """
+    rims = []
+    for nb in SECTIONS:
+        if nb == name:
+            continue
+        shared = boundaries[name] & boundaries[nb]
+        adjacent = defaultdict(set)
+        for a, b in shared:
+            adjacent[a].add(b)
+            adjacent[b].add(a)
+        remaining = set(adjacent)
+        while remaining:
+            component, pending = set(), [min(remaining)]
+            while pending:
+                v = pending.pop()
+                if v not in component:
+                    component.add(v)
+                    pending.extend(adjacent[v] - component)
+            remaining -= component
+            ids = sorted(component)
+            remap = {v: i for i, v in enumerate(ids)}
+            edges = [(remap[a], remap[b]) for a, b in sorted(shared) if a in component]
+            rims.append({"neighbour": nb, "joint": joint_between(name, nb), "points": pos[ids],
+                         "edges": np.asarray(edges, dtype=np.int64)})
+    return rims
 
 
 def _split_two_neighbours(loop: list[int], nbs: list, pos: np.ndarray, new_pos: list, base: int):
@@ -583,9 +762,10 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         infos = []
         for loop in boundary_loops(fs):
             nbs = [_neighbour_of(g, name, pair_of) for g in loop]
-            joint_nbs = {x for x in nbs if x is not None and joint_between(name, x)}
+            neighbours = {x for x in nbs if x is not None and
+                          (sk.source == "sam3d-body" or joint_between(name, x))}
             parts = None
-            if len(joint_nbs) == 2:
+            if len(neighbours) == 2:
                 parts = _split_two_neighbours(loop, nbs, pos, new_pos, base)
             if parts is None:
                 cnt = Counter(x for x in nbs if x is not None)
@@ -631,25 +811,26 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
             flat_cache[name] = (v[used], remap[f])
         return flat_cache[name]
 
+    boundaries = {name: boundary_edges(fs) for name, fs in sec_faces.items()}
     out = {}
     for name in SECTIONS:
         fs = sec_faces.get(name)
         jn_pivot = PIVOT_JOINT[name]
         pivot = joint_centre[jn_pivot][0] if jn_pivot in joint_centre else np.asarray(sk.joints[jn_pivot], float)
         if fs is None or len(fs) == 0:
-            out[name] = Section(name, np.zeros((0, 3)), np.zeros((0, 3), np.int64), pivot, [], 0)
+            out[name] = Section(name, np.zeros((0, 3)), np.zeros((0, 3), np.int64), pivot, [], 0, cut_radius=float(rig.bones[name][2]))
             continue
         infos = loop_info[name]
         used = np.unique(np.concatenate([fs.ravel()] + [np.array(i["loop"]) for i in infos]))
         remap = np.full(len(pos), -1, dtype=np.int64)
         remap[used] = np.arange(len(used))
         lv, lf = pos[used], remap[fs]
-        loops, caps, rims = [], [], []
+        loops, caps = [], []
+        rims = _shared_rims(name, boundaries, pos)
         sec_centroid = pos[np.unique(fs)].mean(axis=0)
         for info in infos:
             loops.append([int(remap[g]) for g in info["loop"]])
             jn = info["joint"]
-            rims.append({"neighbour": info["neighbour"], "joint": jn, "points": pos[info["shared"]]})
             if cap == "flat" or jn is None:
                 caps.append(None)
                 continue
@@ -688,5 +869,7 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         n_before = len(lf)
         cv, cf = close_section(lv, lf, loops, caps)
         poke = int(sum(cp.get("outside", 0) for cp in caps if cp is not None))
-        out[name] = Section(name, cv, cf, pivot, rims, int(len(cf) - n_before), poke)
+        cover_rims = ([{"neighbour": i["neighbour"], "points": pos[i["shared"]]} for i in infos]
+                      if sk.source == "silhouette" else None)
+        out[name] = Section(name, cv, cf, pivot, rims, int(len(cf) - n_before), poke, cover_rims, float(rig.bones[name][2]))
     return out, rig
