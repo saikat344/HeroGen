@@ -438,7 +438,7 @@ class TestJobsApi(WebCase):
         job = r.json()
         self.assertEqual((job["state"], job["name"], job["kind"]), ("queued", "Sir Bob", "sketch"))
         self.assertEqual(self.submitted, [job["id"]], "dispatched at once")
-        self.assertEqual([s["key"] for s in job["stages"]], ["0", "1", "2", "3", "4", "6", "5", "2h"])
+        self.assertEqual([s["key"] for s in job["stages"]], ["0", "1", "2", "3", "3f", "4", "6", "5", "2h"])
         self.assertFalse(job["downloads"]["glb"]["available"])
         self.assertEqual(b.get(f"/api/jobs/{job['id']}/download/glb").status_code, 409)
         self.assertEqual(self.finish(job["id"]), "succeeded")

@@ -1,5 +1,5 @@
-"""Stage 4: joints, R15 sections, the LODs a target profile asks for (`herogen.blender.PROFILES`) and the pose
-test."""
+"""Stage 4: joints, R15 sections and profile LODs, coloured from a validated refined source or the view bake,
+with a pose test. Refined colour supplies both the shared atlas and the Head texture of every built LOD."""
 from __future__ import annotations
 
 import colorsys
@@ -71,7 +71,8 @@ ATLAS_BEST = 4096
 # at 1024 went from front colour error 11.52 and SSIM 0.712 to 10.29 and 0.758.
 UV_GUTTER_PX = 2
 # The Head has its own texture (1024 px on the high body, 512 px on low): the face no longer
-# shares the atlas with the rest of the body, and stage 2f's close-ups are baked into it. Roblox's texture
+# shares the atlas with the rest of the body. It takes refined colour when validated, otherwise the views and
+# stage 2f's close-ups. Roblox's texture
 # specification (create.roblox.com/docs/art/modeling/texture-specifications) gives 1024 x 1024 as the maximum
 # for a texture map in its UV mapping section (and 4096 x 4096 for textures in general), and the Marketplace
 # character specification (create.roblox.com/docs/art/characters/specifications) caps textures at 2048 x 2048;
@@ -303,6 +304,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         sk = body_joints.apply_to_skeleton(sk, jrec)
         joints_source = "sam3d-body"
     source = None
+    from . import refined_colour
+
+    primary, refined_info = refined_colour.load(run, work, height)
+    rec.add(check("refined_texture", "refined" if primary is not None else "views", gate=False,
+                  passed=primary is not None, **refined_info))
+    if primary is None:
+        rec.note("refined texture not used: " + refined_info["reason"])
     src_uv, src_tex = work / "03-source-uv.npz", work / "03-source-texture.png"
     if mesh_source == "sam3d-objects" and src_uv.exists() and src_tex.exists():
         import importlib.util
@@ -449,8 +457,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     body = run / "04-body"
     (body / "pose-renders").mkdir(parents=True, exist_ok=True)
     (body / "rest-renders").mkdir(parents=True, exist_ok=True)
-    # Comparison atlases are written only for a hybrid body; one left by an earlier run of another mesh source
-    # would be scored as a variant of this body.
+    # A comparison from an earlier colour source must not be scored as a variant of this body.
     for stale in body.glob("atlas-high-*.png"):
         stale.unlink()
     for lod in ("high", "low"):            # a LOD this profile does not build must not survive from a past run
@@ -505,7 +512,12 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         closeup_info["notes"].append(f"{name}: no observed colour image; not used")
     closeups = {k: v for k, v in closeups.items() if k in colour_views}
     closeup_info["used"] = sorted(closeups)
-    if closeups:
+    if primary is not None:
+        closeup_info["comparison_views_used"] = sorted(closeups)
+        closeup_info["used"] = []
+        rec.note("the Head texture takes the refined texture; stage 2f close-ups were not applied to either "
+                 "primary texture")
+    elif closeups:
         rec.note("the Head texture takes stage 2f's close-ups of the " + ", ".join(sorted(closeups)) + " view(s)")
     for n in closeup_info["notes"]:
         rec.note(f"close-ups: {n}")
@@ -515,7 +527,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         u = np.load(uv_paths[lod])
         uvs = {k.split("__")[0]: u[k] for k in u.files}
         _save_lod(lod_paths[lod], lod_secs[lod], uvs)
-        if colour_views:
+        if colour_views or primary is not None:
             size, head_size = atlas_size[lod], HEAD_TEXTURE[lod]
             rest = {n: s for n, s in lod_secs[lod].items() if n != HEAD_SECTION}
             head = {HEAD_SECTION: lod_secs[lod][HEAD_SECTION]}
@@ -527,24 +539,28 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                 """The atlas and the Head texture of one variant (close-ups only ever in the Head's)."""
                 a, st, _ = texture.bake(rest, uvs, colour_views, size, zbuf, **kw)
                 h, hst, _ = texture.bake(head, uvs, colour_views, head_size, zbuf,
-                                         closeups=closeups if tag != "no-closeup" else None, **kw)
+                                         closeups=closeups if tag != "no-closeup" and kw.get("primary") is None
+                                         else None, **kw)
                 return a, h, {**st, "head": hst}
 
-            atlas, head_tex, stats = both("", source=source)
+            atlas, head_tex, stats = both("", primary=primary) if primary is not None else both("", source=source)
             atlas_paths[lod] = body / f"atlas-{lod}.png"
             head_paths[lod] = body / f"atlas-head-{lod}.png"
             Image.fromarray(atlas).save(atlas_paths[lod])
             Image.fromarray(head_tex).save(head_paths[lod])
             tex_stats[lod] = stats
             if lod == "high":
-                # comparison textures, scored by `score` as variants (`atlas-high-<variant>.png` and its Head
-                # texture `atlas-head-high-<variant>.png`): without the close-ups (their effect); for a hybrid
+                # Comparison textures, scored by `score` as variants (`atlas-high-<variant>.png` and its Head
+                # texture `atlas-head-high-<variant>.png`): the original view bake when refined is primary;
+                # otherwise without the close-ups (their effect); for a hybrid
                 # body, no source fallback (its effect), and the side views down-weighted (they did not shape
                 # this mesh, so their colours land on oblique surfaces at the wrong depth)
                 variants = {}
-                if closeups:
+                if primary is not None:
+                    variants["views"] = {"source": source}
+                elif closeups:
                     variants["no-closeup"] = {"source": source}
-                if source is not None:
+                if primary is None and source is not None:
                     variants["no-source-fallback"] = {}
                     trust = {v: SIDE_TRUST for v in colour_views if v in ("left", "right") and v not in shape_views}
                     if trust:
@@ -669,7 +685,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         rec.add(check(f"texture_colour_error_{v}", tex_metrics[v]["mean_abs_error"], TEX_ERROR_GATE,
                       passed=tex_metrics[v]["mean_abs_error"] <= TEX_ERROR_GATE, rule="<="))
         rec.add(check(f"texture_ssim_{v}", tex_metrics[v]["ssim"], TEX_SSIM_GATE))
-    if not colour_views:
+    if not colour_views and primary is None:
         rec.note("no observed colour views: body left untextured")
     sheet = _comparison_sheet(colour_views, bres["rest_textured"], body / "textured-vs-views.png")
     poke = sum(s.cap_points_outside for s in hi.values())
@@ -734,6 +750,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                    "contract_note": "covers are merged into their owner section so each GLB keeps the 15 R15 "
                                     "parts; they are listed under sections.json \"covers\""},
         "texture": {"method": texture.__doc__.strip(), "atlas_sizes": atlas_size, "atlas_choice": atlas_choice,
+                    "colour_source": "refined" if primary is not None else "views",
+                    "source_fallback": primary is None and source is not None, "refined": refined_info,
                     "atlases": {k: str(v.relative_to(run)) for k, v in atlas_paths.items()},
                     "head_texture_sizes": {lod: HEAD_TEXTURE[lod] for lod in builds},
                     "head_textures": {k: v.relative_to(run).as_posix() for k, v in head_paths.items()},

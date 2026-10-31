@@ -1,4 +1,11 @@
-"""Colour projection from the turnaround views onto the UV-unwrapped body, and its measurement.
+"""Refined source colour or turnaround projection onto the UV-unwrapped body, and its measurement.
+
+With an explicit `primary` SourceColour, every covered texel takes that source's colour, including the Head
+and every LOD. View projections, the raw source fallback and stage 2f close-ups do not alter it. The same
+rasterisation, whole-body depth maps and outward island padding are retained. Coverage and nearest sampled
+source-surface distances are recorded. Stage 4 validates the refined source's provenance and frame first.
+
+Without a primary source the colour rules below apply unchanged.
 
 For every texel of a section's UV atlas the matching surface point is projected into the observed side views
 (front, back, left, right; a top view that stage 2 derived from the others carries no colour of its own and
@@ -284,12 +291,14 @@ def texel_samples(sections: dict, uvs: dict, size: int) -> np.ndarray:
 
 def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = None,
          source: SourceColour | None = None, fallback_facing: float = FALLBACK_FACING, trust: dict | None = None,
-         closeups: dict | None = None):
+         closeups: dict | None = None, primary: SourceColour | None = None):
     """Bake one texture of a LOD for the given sections. `uvs[name]` is [faces, 3, 2] in [0, 1]. Returns
     (texture uint8, stats, zbuf); when only some of the body's sections are baked, pass the whole body's `zbuf`
     (`depth_maps` of its `texel_samples`) so the rest still hides what it covers. `trust` scales a view's weight
     (default 1 for every view). `closeups` ({view: Closeup}) the close-ups
-    (module notes)."""
+    (module notes). `primary` supplies every covered texel and suppresses view colour and close-ups."""
+    if primary is not None:
+        closeups = None
     pos, uv, nrm = [], [], []
     for name, s in sections.items():
         if name not in uvs or len(s.faces) == 0:
@@ -306,6 +315,12 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
                                                            "notes": ["no faces to bake"]}, zbuf
     pos, uv, nrm = np.concatenate(pos), np.concatenate(uv), np.concatenate(nrm)
     tidx, p3, tri = _texels(pos, uv, size)
+    if primary is not None and not len(p3):
+        return np.zeros((size, size, 3), dtype=np.uint8), {
+            "texels_used": 0, "atlas_fill": 0.0, "colour_source": "refined", "texels_primary": 0.0,
+            "primary_nearest_distance_mean": None, "primary_nearest_distance_p95": None,
+            "primary_nearest_distance_max": None, "closeups_applied": False,
+            "notes": ["no UV texels to bake"]}, zbuf
     n3 = nrm[tri]
     texel_ppu = None
     if closeups:
@@ -319,7 +334,7 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     fallback = np.zeros((len(p3), 3))
     fb_w = np.zeros(len(p3))
     best_facing = np.zeros(len(p3))
-    for name, (view, img) in views.items():
+    for name, (view, img) in (views.items() if primary is None else ()):
         fwd = FORWARD[name]
         facing = np.clip(-(n3 @ fwd), 0, 1)
         row, col = _project(view, p3)
@@ -344,7 +359,13 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     col = np.where((wsum > 1e-6)[:, None], acc / np.maximum(wsum, 1e-12)[:, None],
                    fallback / np.maximum(fb_w, 1e-12)[:, None])
     src_stats = {}
-    if source is not None:
+    if primary is not None:
+        col, dist = primary(p3)
+        src_stats = {"colour_source": "refined", "texels_primary": 1.0,
+                     "primary_nearest_distance_mean": float(dist.mean()),
+                     "primary_nearest_distance_p95": float(np.percentile(dist, 95)),
+                     "primary_nearest_distance_max": float(dist.max()), "closeups_applied": False}
+    elif source is not None:
         alpha = np.clip(best_facing / fallback_facing, 0.0, 1.0)[:, None]
         need = alpha[:, 0] < 1.0
         src_col = np.zeros_like(col)

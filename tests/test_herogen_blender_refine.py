@@ -653,10 +653,34 @@ class StageTests(unittest.TestCase):
         self.assertEqual(weight[scalp].max(), 0)
 
     def test_other_profiles_make_no_calls(self):
-        rec = stage.run_stage3f(self.run, self.client, profile="roblox-ingame")
+        (self.run / "03-refined.glb").write_bytes(b"stale")
+        rec = stage.run_stage3f(self.run, self.client, profile="preview")
         self.assertEqual(rec["status"], "skipped")
+        self.assertIn("roblox-avatar", rec["reason"])
+        self.assertFalse((self.run / "03-refined.glb").exists())
         self.assertEqual(self.client.log.calls, [])
         self.tex.apply.assert_not_called()
+
+    def test_entry_invalidates_old_refinement_before_budget_initialisation(self):
+        for name in ("03-refined.glb", "03-refined.part.glb"):
+            (self.run / name).write_bytes(b"stale")
+        with mock.patch.object(stage, "Budget", side_effect=ValueError("budget unavailable")):
+            with self.assertRaisesRegex(ValueError, "budget unavailable"):
+                stage.run_stage3f(self.run, self.client, profile="roblox-ingame")
+        self.assertFalse((self.run / "03-refined.glb").exists())
+        self.assertFalse((self.run / "03-refined.part.glb").exists())
+
+    def test_roblox_ingame_refines_with_the_same_default_cap(self):
+        rec = stage.run_stage3f(self.run, self.client, profile="roblox-ingame")
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["budget"]["cap_usd"], .8)
+        self.tex.apply.assert_called()
+
+    def test_roblox_avatar_refines_with_the_same_default_cap(self):
+        rec = stage.run_stage3f(self.run, self.client, profile="roblox-avatar")
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["budget"]["cap_usd"], .8)
+        self.tex.apply.assert_called()
 
     def test_no_source_is_skipped(self):
         (self.run / "03-source.glb").unlink()
@@ -684,7 +708,12 @@ class ConsumerTests(unittest.TestCase):
             self.assertEqual(final_model(run).relative_to(run).as_posix(), "04-body/high.glb")
             self.assertEqual(bodies(run)[0]["high"], "04-body/high.glb")
             self.assertIn("3f", [s.key for s in plan_for("sketch", "best")])
-            self.assertNotIn("3f", [s.key for s in plan_for("sketch", "roblox-ingame")])
+            for profile in ("best", "roblox-ingame", "roblox-avatar"):
+                for kind in ("sketch", "prompt"):
+                    keys = [s.key for s in plan_for(kind, profile)]
+                    self.assertIn("3f", keys)
+                    self.assertEqual(keys[keys.index("3"):keys.index("4") + 1], ["3", "3f", "4"])
+            self.assertNotIn("3f", [s.key for s in plan_for("sketch", "preview")])
 
 
 @unittest.skipUnless(HAVE_REFINE and bl.find_blender(), "Blender and texture-refine dependencies are required")
@@ -830,7 +859,32 @@ class RunnerTests(unittest.TestCase):
                     mock.patch("herogen.blender.stage4.run_stage4", side_effect=called("4")), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["run", "--run", str(run), "--profile", "roblox-ingame"]), 0)
-            self.assertEqual([name for name, _ in order], ["3", "4"])
+            self.assertEqual([name for name, _ in order], ["3", "3f", "4"])
+
+    def test_cli_explicit_stage_selection_for_every_profile(self):
+        import contextlib
+        import io
+        from herogen.blender.__main__ import main
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            for key in (2, 3):
+                (run / f"stage-{key}.json").write_text('{"ok":true}')
+            result = {"ok": True, "checks": [], "seconds": 0}
+            for profile in ("best", "roblox-ingame", "roblox-avatar"):
+                for selection, expected in (("3,4", ["3", "3f", "4"]), ("3", ["3"]),
+                                            ("4", ["4"]), ("3f", ["3f"])):
+                    with self.subTest(profile=profile, stages=selection):
+                        order = []
+                        with mock.patch("herogen.blender.stage3.run_stage3",
+                                        side_effect=lambda *a, **k: order.append("3") or result), \
+                                mock.patch.object(stage, "run_stage3f",
+                                                  side_effect=lambda *a, **k: order.append("3f") or result), \
+                                mock.patch("herogen.blender.stage4.run_stage4",
+                                           side_effect=lambda *a, **k: order.append("4") or result), \
+                                contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(main(["run", "--run", str(run), "--profile", profile,
+                                                   "--stages", selection]), 0)
+                        self.assertEqual(order, expected)
 
     def test_cli_model_error_is_nonzero_without_traceback(self):
         import contextlib

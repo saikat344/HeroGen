@@ -17,8 +17,8 @@ tested separately. A run can also start from a text prompt: stage p draws the sk
 | 2 turnaround | `herogen/pipeline` | `02-turnaround.png` (all views in one image), `views/{front,back,left,right,top}.png`, `masks/{view}.png` (white figure on black, same size as the view), `masks/front-{face,head}.png` (front-view part masks, when SAM 3.1 finds them), `masks/parts.json` (their record) |
 | 2f face source | `herogen/pipeline` | `views/closeup-{front,left,right}.png` (head close-ups), `views/closeup-<view>-input.png` (the crops sent), `masks/closeup-<view>.png` (footprints), only for the views whose close-up passed its gates; `views/closeup.json` (the record, always, with each view's reason when it is not used) |
 | 3 base mesh | `herogen/blender` | `03-mesh.glb`, `03-joints.json`, `03-renders/{view}.png` (rendered from the same cameras, silhouette only); with SAM 3D Objects also `03-source.glb` (the model's own textured mesh) |
-| 3f texture refine | `herogen/blender/refine` | `03-refined.glb` (SAM's source geometry and frame with a 4096 base-colour image), `stage-3f.json`; only the default `best` profile; rejected views leave SAM's colours |
-| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust` |
+| 3f texture refine | `herogen/blender/refine` | `03-refined.glb` (SAM's source geometry and frame with a 4096 base-colour image), `stage-3f.json`; `best`, `roblox-ingame` and `roblox-avatar` with the same cap and gates; rejected views leave SAM's colours |
+| 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); validated refined colour is primary in both textures at every LOD; comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `views` when refined colour is primary, otherwise `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust`; comparisons are scoring-only |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
 | 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
@@ -446,9 +446,38 @@ kept under `sources`, and joints more than 0.5 studs apart are listed in `flagge
 the file holds the silhouette finder's joints only (`"source": "silhouette"`), and stage 4 finds them again
 itself.
 
-## Stage 4 texture: colour projection
+## Stage 4 texture: refined colour and view projection
 
-Stage 4 colours each LOD's UV atlas by projecting the observed side views (front, back, left, right; a derived
+Stage 4 first checks whether stage 3f's refined texture can supply the entire sectioned body
+(`herogen/blender/refined_colour.py`). `stage-3f.json` must have status `complete`, its `source_sha256` must
+match the current `03-source.glb`, and `03-refined.glb` and `blender-work/03-source-uv.npz` must exist. Both GLBs
+are read with stage 3's `sam3d_mesh.load_source`. The raw source's vertices and the NPZ's vertices share an
+exact one-to-one correspondence; an affine least-squares fit recovers stage 3's frame, including its Y shift.
+The fit must have full rank and its maximum residual must be at most `1e-6 * height` studs. The transformed
+refined surface is checked independently against the NPZ's source triangles with exact nearest-triangle
+distances: up to 4096 area-stratified faces, four barycentric samples per face, plus six vertex extrema. The
+maximum distance has the same bound. Float32 rotation/export round trips over source spans 0.2, 2 and 20
+measured at most `5.34e-8 * height`; a source displaced by `1e-4 * height` fails. These checks use faces and
+corners, so the refined export can split and reorder vertices at its new UV seams. Non-affine source
+deformations that exceed the residual bound retain the view bake.
+
+On success, `texture.bake(primary=SourceColour(...))` samples the transformed refined mesh for every covered
+texel of both the shared atlas and the Head texture, at every LOD the profile builds. Stage 2f close-ups are
+not applied to these textures. The existing UV rasterisation, whole-body depth handling and eight iterations
+of island padding remain unchanged. High LOD also writes `atlas-high-views.png` and
+`atlas-head-high-views.png`: the previous view bake, including the raw source fallback and Head close-ups.
+The other view-bake variants are omitted when refined colour is primary. Comparison atlases never enter the
+GLBs, rig, stage output lists or downloads. Stage 3 and stage 3f delete earlier refined outputs on entry;
+the source hash and completion status prevent reuse after a source replacement or an interrupted refinement.
+
+`stage-4.json` and `sections.json` record `texture.colour_source` (`refined` or `views`), `source_fallback`,
+and `refined`: both GLB/source hashes, the fit residuals and transform, exact surface-distance mean/p95/max,
+sample count, threshold, and any fallback reason. The diagnostic `refined_texture` check reports eligibility
+without failing a valid view fallback. Each primary bake records full texel coverage and nearest sampled
+colour-source distances separately from the exact frame check. Notes explicitly identify the refined Head
+texture and suppression of close-ups; comparison close-ups are listed separately.
+
+Without an eligible refined source, stage 4 colours each LOD's UV atlas by projecting the observed side views (front, back, left, right; a derived
 top view has no colour of its own) onto the body (`herogen/blender/texture.py`). Each texel's surface point is
 projected into every view; a view's weight is the cosine between the surface normal and the direction to its
 camera, to the power 4, and zero where the point is hidden in that view (a depth map splatted from the texels)
@@ -467,7 +496,7 @@ its UV mapping section, and 4096 x 4096 for textures in general. The Marketplace
 all three. The profiles' `texture_max_px` check counts the Head texture with the atlas: 1024 under `roblox-avatar`'s
 2048 cap.
 
-**Close-ups in the Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
+**Close-ups in the view-baked Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
 image is unchanged (its SHA-256) and the view is a colour view. A malformed record (wrong JSON types, a singular
 or non-finite transform, an empty crop box) is skipped with a note, never an error. Each footprint is feathered
 over 3 view pixels and cut at the crop box.
@@ -2092,11 +2121,12 @@ an explicitly calibrated policy, separate from these measurement functions.
 
 ## Stage 3f: texture refinement
 
-`herogen.blender.refine.run_stage3f` follows a passing stage 3 under `best`. The default Blender CLI stages are
-`3,3f,4`; requesting `3,4` also inserts 3f under `best`. Explicit `--stages 3` builds only the mesh, and
+`herogen.blender.refine.run_stage3f` follows a passing stage 3 under `best`, `roblox-ingame` and `roblox-avatar`.
+All three profiles use the same default $0.80 cap, view gates, retry accounting and durable service budget.
+Other profiles record a skip. The default Blender CLI stages are
+`3,3f,4`; requesting `3,4` also inserts 3f under all three profiles. Explicit `--stages 3` builds only the mesh, and
 `--stages 3f` refines an existing saved run. No source mesh (the carve path) records a skip. The service runs
-3f as a separate, required stage in its Blender group for `best`, with its own time, cost and error record.
-Roblox profiles do not schedule it.
+3f as a separate, required stage in its Blender group for all three profiles, with its own time, cost and error record.
 
 The input is SAM 3D Objects' textured `03-source.glb` and `01-cover.png`. A flat front probe locates the head
 with SAM 3.1. The existing GLB reader applies scene transforms and converts to the imported Blender frame:
@@ -2170,9 +2200,10 @@ Cache hits remain usable with a zero cap, and a replay miss remains an error. Re
 
 The shared `herogen.blender.final_model.final_model` selects `03-refined.glb`, then `03-source.glb`, then
 `04-body/high.glb` for `best`. The Lab main body's `high` slot and GLB deliverable, service GLB download,
-service detail fallback and service viewer use that selection. Stage 4 still produces the sectioned body;
-its colours and geometry path are unchanged. It consumes `blender-work/03-source-uv.npz` and
-`03-source-texture.png` as a texture fallback rather than reading `03-source.glb`. Both Roblox profiles keep
+service detail fallback and service viewer use that selection. Stage 4 still produces the sectioned body,
+with the refined texture as its primary colour when the provenance and frame checks above pass. Otherwise,
+it consumes `blender-work/03-source-uv.npz` and `03-source-texture.png` as the existing raw-texture fallback
+for the view bake. Both Roblox profiles keep
 `04-body/high.glb`, and the Roblox bundle always packages that sectioned mesh even when the display profile
 is `best`. Frozen body versions continue to describe their own sectioned GLBs.
 

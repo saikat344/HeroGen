@@ -41,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
                                  "python3 -m herogen.blender.score)")
     r = sub.add_parser("run", help="run stages 3, 3f and/or 4 on a run folder")
     r.add_argument("--run", required=True, type=Path)
-    r.add_argument("--stages", default="3,3f,4", help="3, 3f (texture refine), 4; 3,4 also includes 3f under best")
+    r.add_argument("--stages", default="3,3f,4",
+                   help="3, 3f (texture refine), 4; 3,4 also includes 3f under best and both Roblox profiles")
     r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
     r.add_argument("--refine-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
     r.add_argument("--refine-cap-usd", type=float, default=0.80, help="per-run texture-refine API cap")
@@ -95,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--stages names no stage (use 3, 4 or 3,4)")
     if not stages <= {"3", "3f", "4"}:
         ap.error("this package runs stages 3, 3f and 4 only")
-    if {"3", "4"} <= stages and a.profile == "best":
+    from .refine import REFINE_PROFILES
+
+    if {"3", "4"} <= stages and a.profile in REFINE_PROFILES:
         stages.add("3f")
     first = 3 if "3" in stages else 4
     name = "3" if "3" in stages else "3f" if "3f" in stages else "4"
@@ -135,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         if not rec["ok"]:
             print("stage 3 gate failed; stopping", file=sys.stderr)
             return 1
-    if "3f" in stages and a.profile == "best":
+    if "3f" in stages:
         from herogen.pipeline.client import ClientError, ModelClient
         from .refine import run_stage3f
         from .stage3 import error_text
