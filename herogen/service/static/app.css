@@ -69,3 +69,15 @@ pre.legal { font: inherit; background: none; padding: 0; }
 .checks td, .checks th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
 .foot { text-align: center; padding: 20px; color: var(--muted); font-size: .88rem; }
 .account summary { cursor: pointer; font-weight: 600; }
+.developer { border-top: 3px solid var(--accent); }
+.developer .row { justify-content: space-between; }
+.developer h3 { margin-top: 20px; }
+.developer-facts { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(0, 2fr); gap: 4px 16px; font-size: .88rem; }
+.developer-facts dt { color: var(--muted); }
+.developer-facts dd { margin: 0; overflow-wrap: anywhere; }
+.developer-stage { border-top: 1px solid var(--line); padding: 12px 0; }
+.developer-stage summary { cursor: pointer; font-weight: 600; }
+.developer-table { overflow-x: auto; margin: 12px 0; }
+.developer-table td { overflow-wrap: anywhere; min-width: 90px; }
+#developerMode[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 540px) { .top { flex-wrap: wrap; } .developer-facts { grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); } }

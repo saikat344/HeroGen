@@ -2129,6 +2129,16 @@ minimal summary with the same field names. `/viewer` serves the Studio page and 
 `herogen/lab/static/` holds the Studio (`index.html` and `app.js`); otherwise it serves the service's own minimal
 viewer, which reads only that API. Both open `#run=r1/<job-id>`.
 
+The signed-in service page has an optional **Developer mode**. It combines the selected job's service state,
+attempt count, build commit, duration and estimated cost with stage records from `/api/runs/r1/<job-id>`.
+Each expandable stage shows its recorded models, reconstruction sources, code stamp, model-call/replay counts,
+measurements, thresholds and verdicts. Gates and diagnostics are labelled separately; an inferred comparison
+operator is marked as assumed. Live service state and the saved stage-record status remain separate. Fields
+the API does not supply are labelled as unreported, including detailed per-stage retry histories. The full
+viewer link opens the same hero for visual inspection. Requests run only while Developer mode is enabled;
+switching or deleting the selected hero discards pending responses from the previous selection. This feature
+uses the existing authenticated APIs and does not change access rules or quality gates.
+
 ### Remote models from a worker
 
 herogen.blender's remote client starts `$HEROGEN_MODAL run <runner>.py::main --job ... --out ...`. The Blender
