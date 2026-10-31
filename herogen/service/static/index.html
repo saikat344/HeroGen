@@ -77,7 +77,8 @@
           </div>
           <div id="promptIn" hidden>
             <label for="prompt">Describe the hero</label>
-            <textarea id="prompt" name="prompt" rows="3"></textarea>
+            <textarea id="prompt" name="prompt" rows="3" aria-describedby="promptCount"></textarea>
+            <p id="promptCount" class="small msg muted" aria-live="polite" aria-atomic="true"></p>
           </div>
           <label for="name">Name <span class="muted">(optional)</span></label>
           <input id="name" name="name" type="text" maxlength="60">

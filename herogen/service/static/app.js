@@ -175,6 +175,19 @@ async function openJob(id) {
 }
 
 function initJobs() {
+  const prompt = $('#prompt');
+  const count = $('#promptCount');
+  const limit = S.session.limits.prompt_max_chars;
+  // Allow excess text so pasting a long description shows the problem without silently truncating it.
+  function updatePromptCount() {
+    const length = Array.from(prompt.value).length;
+    const over = length > limit;
+    count.textContent = `${length} / ${limit} characters${over ? ' (over limit)' : ''}`;
+    count.className = `small msg ${over ? 'err' : 'muted'}`;
+    prompt.setAttribute('aria-invalid', String(over));
+  }
+  prompt.addEventListener('input', updatePromptCount);
+  updatePromptCount();
   for (const r of document.querySelectorAll('input[name=kind]')) r.addEventListener('change', () => {
     const p = document.querySelector('input[name=kind]:checked').value === 'prompt';
     show('#promptIn', p); show('#sketchIn', !p);

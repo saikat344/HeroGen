@@ -782,6 +782,46 @@ class TestIsolation(WebCase):
 
 
 class TestPages(WebCase):
+    def test_description_count_is_wired_to_the_field(self):
+        from html.parser import HTMLParser
+
+        class Elements(HTMLParser):
+            def __init__(self, html):
+                super().__init__()
+                self.tags = []
+                self.feed(html)
+
+            def handle_starttag(self, tag, attrs):
+                self.tags.append((tag, dict(attrs)))
+
+        b = Browser(self.app)
+        tags = Elements(b.get('/').text).tags
+        self.assertTrue(any(t == 'label' and a.get('for') == 'prompt' for t, a in tags))
+        field = next(a for t, a in tags if t == 'textarea' and a.get('id') == 'prompt')
+        count = next(a for t, a in tags if a.get('id') == 'promptCount')
+        self.assertIn('promptCount', field['aria-describedby'].split())
+        self.assertEqual(count['aria-live'], 'polite')
+        self.assertEqual(count['aria-atomic'], 'true')
+        script = b.get('/assets/app.js').text
+        self.assertIn('S.session.limits.prompt_max_chars', script)
+        self.assertIn("prompt.addEventListener('input', updatePromptCount)", script)
+
+    def test_description_api_limit_follows_the_selected_version(self):
+        from unittest import mock
+        from herogen import prompts
+
+        version = prompts.selected('prompt_sketch')
+        limit = version.data['user_text']['max_chars'] - 17
+        with mock.patch.dict(version.data['user_text'], max_chars=limit), \
+                mock.patch.object(prompts, 'selected', return_value=version):
+            b = self.signin()
+            self.assertEqual(b.session()['limits']['prompt_max_chars'], limit)
+            r = b.post('/api/jobs', data={'kind': 'prompt', 'prompt': 'x' * (limit + 1)},
+                       files={'x': ('a', b'a')}, headers={'Idempotency-Key': 'key-prompt-limit'})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn(f'the limit is {limit}', r.json()['error']['message'])
+            self.assertEqual(self.submitted, [])
+
     def test_legal_pages(self):
         self.assertEqual(Browser(self.app).get("/privacy").status_code, 404)
         legal = self.tmp / "legal"
