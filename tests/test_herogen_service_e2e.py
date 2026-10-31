@@ -291,6 +291,7 @@ class TestServicePage(TempDirCase):
         t.eval("document.querySelector('#jobForm').requestSubmit()")
         t.wait("document.querySelector('#detailH').textContent === 'Saved draft'")
         self.assertEqual(t.eval("document.querySelectorAll('#jobs li').length"), 1)
+        self.assertTrue(t.eval("document.activeElement.id === 'detail'"))
 
     def test_entry_rejects_excess_prompt_before_auth_and_supports_keyboard_dialog(self):
         t = self.tab
@@ -306,6 +307,21 @@ class TestServicePage(TempDirCase):
         self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
         t.eval("document.querySelector('#closeHow').click()")
         self.assertFalse(t.eval("document.querySelector('#howDialog').open"))
+
+    def test_signout_clears_the_saved_draft(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("document.querySelector('#signinDialog').open")
+        self.signin()
+        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
+        t.eval("document.querySelector('#signOut').click()")
+        t.wait("!document.querySelector('#entry').hidden && !document.querySelector('#headerSignIn').disabled && document.querySelector('#signOut').hidden")
+        self.assertEqual(t.eval("document.querySelector('#prompt').value"), '')
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        self.assertEqual(t.eval("document.querySelector('#prompt').value"), '')
 
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""

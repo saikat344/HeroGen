@@ -79,7 +79,7 @@ pre.legal { font: inherit; background: none; padding: 0; }
 @media (max-width: 540px) { .top { flex-wrap: wrap; } .developer-facts { grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); } }
 
 /* The entry page shares the workshop's accessible controls and status colours. */
-:root { color-scheme: light; --bg:#f7f3eb; --card:#fcf9f2; --ink:#17121c; --muted:#696570; --line:#cfc5b6; --accent:#df431c; --bad:#ad2828; --ok:#337343; --warn:#946511; }
+:root { color-scheme: light; --bg:#f7f3eb; --card:#fcf9f2; --ink:#17121c; --muted:#696570; --line:#cfc5b6; --accent:#ce3916; --bad:#ad2828; --ok:#337343; --warn:#946511; }
 html { scroll-behavior:smooth; }
 body { background-color:var(--bg); background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23846c48' opacity='.055' filter='url(%23n)' d='M0 0h180v180H0z'/%3E%3C/svg%3E"); font-family:Arial,Helvetica,sans-serif; }
 .top, main, .foot { max-width:1600px; width:calc(100% - 9%); margin-inline:auto; }
@@ -100,7 +100,7 @@ h1#entryH { font:700 clamp(48px,6.1vw,100px)/.94 Georgia,'Times New Roman',serif
 .composer { padding:16px 20px 8px; border:1px solid var(--line); border-radius:5px; background:#fff8; box-shadow:0 3px 18px #67533505; }
 .composer label { font-size:15px; margin:0 0 10px; }
 #prompt { border:0; border-radius:0; padding:4px 0; background:transparent; resize:vertical; min-height:74px; max-height:260px; font-size:15px; line-height:1.6; }
-#prompt::placeholder { color:#87828d; }
+#prompt::placeholder { color:#716c77; }
 #prompt:focus { outline:0; }
 .composer:focus-within { border-color:#a98062; box-shadow:0 0 0 2px #df431c20; }
 .composer-bottom { display:flex; gap:8px; align-items:center; justify-content:space-between; }

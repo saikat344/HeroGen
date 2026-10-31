@@ -134,7 +134,7 @@ async function refreshList() {
   ul.replaceChildren(...jobs.map((j) => {
     const b = el('button', { type: 'button', cls: 'jobbtn' }, el('b', { text: j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero') }),
       el('span', { cls: `state s-${j.state}`, text: j.state }), el('small', { text: fmtTime(j.created_at) }));
-    b.addEventListener('click', () => openJob(j.id));
+    b.addEventListener('click', () => openJob(j.id, true));
     return el('li', {}, b);
   }));
   show('#noJobs', jobs.length === 0);
@@ -190,7 +190,7 @@ function polls(j) {
   return j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.side && s.state === 'running');
 }
 
-async function openJob(id) {
+async function openJob(id, reveal = false) {
   clearTimeout(S.timer);
   if (S.current !== id) developer.update(null);
   S.current = id;
@@ -198,6 +198,7 @@ async function openJob(id) {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (S.current !== id) return;
     renderJob(j);
+    if (reveal) { $('#detail').scrollIntoView({ block: 'start' }); $('#detail').focus({ preventScroll: true }); }
     if (polls(j)) S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
   } catch (e) { banner(e.message); }
 }
@@ -270,7 +271,7 @@ function initJobs() {
       msg.textContent = '';
       await refreshList();
       renderQuota((await loadSession()).usage);
-      openJob(j.id);
+      openJob(j.id, true);
     } catch (e) {
       if (e.status === 409) {
         clearPending();
@@ -301,7 +302,7 @@ function initJobs() {
     catch (e) { banner(e.message); }
   });
   $('#deleteAccount').addEventListener('click', async () => {
-    try { await api('/api/account', { method: 'DELETE', json: { confirm: $('#confirmDelete').value } }); location.replace('/'); }
+    try { await api('/api/account', { method: 'DELETE', json: { confirm: $('#confirmDelete').value } }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
     catch (e) { banner(e.message); }
   });
 }
@@ -312,23 +313,25 @@ async function signedIn() {
   renderQuota(S.session.usage);
   const jobs = await refreshList();
   const want = new URLSearchParams(location.hash.slice(1)).get('job');
-  if (want) openJob(want); else if (jobs.length) openJob(jobs[0].id);
+  if (want) openJob(want, true); else if (jobs.length) openJob(jobs[0].id);
 }
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
   show('#loading', false);
   if (location.pathname === '/signin') return initVerify();
-  show('#entry'); initSignin(); initJobs(); await restoreDraft();
+  initSignin(); initJobs();
   $('#headerSignIn').addEventListener('click', async () => {
     try { await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
     signIn();
   });
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
   $('#signOut').addEventListener('click', async () => {
-    try { await api('/api/auth/logout', { method: 'POST', json: {} }); location.replace('/'); }
+    try { await api('/api/auth/logout', { method: 'POST', json: {} }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
     catch (e) { banner(e.message); }
   });
+  await restoreDraft();
+  show('#entry'); $('#headerSignIn').disabled = false;
   if (S.session.signed_in) await signedIn();
   window.addEventListener('focus', async () => {
     if (S.session.signed_in) return;

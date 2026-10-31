@@ -2370,7 +2370,7 @@ The public entry page accepts a text idea or an image before sign-in. Suggestion
 image cards select a PNG and submit it through the existing multipart `POST /api/jobs` image contract.
 Creating a hero requires the existing authenticated session, CSRF token, quota checks and idempotency key.
 A draft, including its image Blob and any uncertain request key, is saved in browser IndexedDB before the
-email sign-in flow. Drafts expire after 24 hours when next read and are removed after a confirmed creation.
+email sign-in flow. Drafts expire after 24 hours when next read and are removed after a confirmed creation or explicit sign-out.
 If browser storage is unavailable, the page asks the user to keep the original tab open. Returning focus to
 that tab refreshes its session. Sign-in never automatically starts a generation.
 
