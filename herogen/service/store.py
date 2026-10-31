@@ -768,7 +768,8 @@ class Store:
         if job["attempts"] >= max_attempts:
             self._fail_ours(c, job, error_code, error_stage, error_message)
             return "failed"
-        self._set_state(c, job, "queued", lease_until=None, dispatched_at=None, call_id=None, error_code=error_code,
+        self._set_state(c, job, "queued", lease_until=None, dispatched_at=None, call_id=None,
+                        cost_usd=self._recorded_cost(c, job["id"]), error_code=error_code,
                         error_stage=error_stage, error_message=error_message)
         self._audit(c, "system", "job_requeued", job["id"], {"code": error_code, "stage": error_stage})
         return "queued"
@@ -791,11 +792,18 @@ class Store:
         """Fail a job for the service's reasons, refunding it when `_refund_ok` allows."""
         refunded = self._refund_ok(c, job)
         self._set_state(c, job, "failed", finished_at=self.clock(), error_code=error_code, error_stage=error_stage,
+                        cost_usd=self._recorded_cost(c, job["id"]),
                         error_message=error_message + (REFUND_NOTE if refunded else ""),
                         counts_quota=0 if refunded else job["counts_quota"], lease_until=None,
                         refunded_at=self.clock() if refunded else None)
         self._audit(c, "system", "job_failed", job["id"], {"code": error_code, "stage": error_stage,
                                                             "refunded": refunded})
+
+    def _recorded_cost(self, c: sqlite3.Connection, job_id: str) -> float:
+        """Cumulative own-stage spending plus completed side stages, including on retry or worker loss."""
+        own = c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage NOT IN "
+                        f"({','.join('?' * len(SIDE_STAGES))})", (job_id, *SIDE_STAGES)).fetchone()[0]
+        return round(own + self._side_cost(c, job_id), 6)
 
     # ---- side stages ----------------------------------------------------------------------------------------
 
