@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import threading
 from pathlib import Path
+from contextlib import closing
 from typing import ClassVar
 from unittest.mock import Mock, patch
 
@@ -55,6 +56,65 @@ class StoreCase(TempDirCase):
                     input_sha="a" * 64)
         args.update(kw)
         return self.store.job_create(**args)
+
+
+class TestRefineReservations(StoreCase):
+    def test_explicit_settlement_is_idempotent_and_stale_attempts_are_fenced(self):
+        job, _ = self.create()
+        claim = self.store.job_claim(job["id"], "first", 60, 2)
+        jid, attempt = job["id"], claim["attempt"]
+        reserve = self.store.job_refine_budget(jid, attempt, "reserve", token="one", amount=.01, cap=.01)
+        self.assertEqual(reserve["pending_attempt_usd"], .01)
+        same = self.store.job_refine_budget(jid, attempt, "reserve", token="one", amount=.01, cap=.01)
+        self.assertEqual(same["spent_usd_total"], .01)
+        settled = self.store.job_refine_budget(jid, attempt, "settle", token="one", amount=0, cap=.01)
+        self.assertEqual(settled["spent_usd_total"], 0)
+        self.assertEqual(settled["pending_attempt_usd"], 0)
+        self.store.job_refine_budget(jid, attempt, "settle", token="one", amount=0, cap=.01)
+        self.store.job_cancel(jid, self.user["id"])
+        with self.assertRaises(StoreError):
+            self.store.job_refine_budget(jid, attempt, "reserve", token="two", amount=.01, cap=.01)
+
+    def test_failed_durable_acknowledgement_prevents_http_send(self):
+        from herogen.blender.refine import Budget
+        from herogen.pipeline.client import IMAGE_MODEL, ModelClient
+        from herogen.service.refine_budget import budget_bridge, remote_budget
+        job, _ = self.create()
+        attempt = self.store.job_claim(job["id"], "first", 60, 2)["attempt"]
+        def operation(action, **kwargs):
+            return self.store.job_refine_budget(job["id"], attempt, action, **kwargs)
+        with budget_bridge(operation) as env, patch.dict(os.environ, env):
+            client = ModelClient(self.tmp / "cache", mode="live")
+            budget = Budget(client, .01, store=remote_budget)
+            client.before_api_attempt = budget.reserve
+            self.store.persist = Mock(side_effect=OSError("commit failed"))
+            with patch.dict(os.environ, {"MODEL_API_KEY": "test-placeholder"}), \
+                    patch("herogen.pipeline.client._open") as send:
+                with self.assertRaisesRegex(RuntimeError, "could not be acknowledged"):
+                    client._post("images/edits", {}, model=IMAGE_MODEL, kind="edit", key="k")
+            send.assert_not_called()
+
+    def test_lost_worker_reservations_survive_store_replacement(self):
+        job, _ = self.create()
+        claim = self.store.job_claim(job["id"], "first", 60, 2)
+        attempt = claim["attempt"]
+        saved = self.tmp / "saved.db"
+        def persist(db):
+            with closing(sqlite3.connect(saved)) as snapshot:
+                db.backup(snapshot)
+        self.store.persist = persist
+        for index in range(60):
+            result = self.store.job_refine_budget(job["id"], attempt, "reserve", token=str(index),
+                                                 amount=.01, cap=.80)
+        self.assertEqual(result["spent_usd_total"], .60)
+        self.assertTrue(saved.is_file())
+        replacement = Store(saved, clock=self.clock)
+        self.addCleanup(replacement.close)
+        for index in range(60, 80):
+            replacement.job_refine_budget(job["id"], attempt, "reserve", token=str(index), amount=.01, cap=.80)
+        result = replacement.job_refine_budget(job["id"], attempt, "reserve", token="blocked", amount=.01, cap=.80)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["spent_usd_total"], .80)
 
 
 class TestMethodSets(TempDirCase):
@@ -514,7 +574,9 @@ class TestSchema(TempDirCase):
         """A database made with the schema of an older version, holding one job."""
         from herogen.service import store as store_mod
 
-        schema = store_mod.SCHEMA.replace("claim TEXT, lease_until REAL,", "")
+        schema = store_mod.SCHEMA.replace("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);", "")
+        if version < 3:
+            schema = schema.replace("claim TEXT, lease_until REAL,", "")
         if version < 2:
             schema = schema.replace(", refunded_at REAL", "")
         path = self.tmp / f"v{version}.db"
@@ -533,7 +595,7 @@ class TestSchema(TempDirCase):
     def test_older_databases_are_upgraded_keeping_their_rows(self):
         from herogen.service import store as store_mod
 
-        for version in (1, 2):
+        for version in (1, 2, 3):
             st = Store(self.old_database(version))
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
             self.assertIsNone(st.job_get("j_x")["refunded_at"], "existing rows keep their data")

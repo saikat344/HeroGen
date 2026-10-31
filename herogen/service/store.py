@@ -26,11 +26,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
     2: ("ALTER TABLE job_stages ADD COLUMN claim TEXT", "ALTER TABLE job_stages ADD COLUMN lease_until REAL"),
+    3: ("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL)",),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -98,6 +99,7 @@ CREATE TABLE job_runs (
   job_id TEXT NOT NULL, attempt INTEGER NOT NULL, grp TEXT NOT NULL, entries INTEGER NOT NULL,
   PRIMARY KEY (job_id, attempt, grp)
 );
+CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);
 CREATE TABLE audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   subject TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT ''
@@ -180,6 +182,7 @@ class Store:
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
+        "job_refine_budget",
     })
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
@@ -691,6 +694,23 @@ class Store:
             c.execute("UPDATE jobs SET lease_until=MAX(COALESCE(lease_until, 0), ?) WHERE id=?",
                       (self.clock() + lease_s, job_id))
         return True
+
+    def job_refine_budget(self, job_id: str, attempt: int, action: str, **kwargs) -> dict:
+        """Reserve/settle per-run API spend, acknowledged only after the metadata snapshot is durable.
+
+        Reservations survive worker and store replacement, including re-entry in the same job attempt.
+        Every operation is fenced against canceled, deleted and superseded job attempts.
+        """
+        from herogen.refine_budget import update
+
+        with self._tx() as c:
+            if self._current(c, job_id, attempt) is None:
+                raise StoreError("The job attempt is no longer current.", "stale")
+            row = c.execute("SELECT state FROM refine_budgets WHERE job_id=?", (job_id,)).fetchone()
+            state = update(json.loads(row[0]) if row else None, action, **kwargs)
+            c.execute("INSERT INTO refine_budgets(job_id, state) VALUES (?,?) ON CONFLICT(job_id) "
+                      "DO UPDATE SET state=excluded.state", (job_id, json.dumps(state)))
+        return state
 
     def group_enter(self, job_id: str, attempt: int, group: str, max_entries: int) -> bool:
         """Count a start of one stage group for one attempt. False once it has started more than `max_entries`

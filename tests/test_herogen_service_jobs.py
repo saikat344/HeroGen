@@ -691,6 +691,49 @@ class TestSweep(JobCase):
 
 
 class TestCopyWorkdir(JobCase):
+    def test_refinement_cap_survives_lost_local_workdir_with_real_subprocess(self):
+        job = self.new_job()
+        self.store.db.execute("UPDATE jobs SET profile='best' WHERE id=?", (job["id"],))
+        claim = self.store.job_claim(job["id"], "worker", 60, 2)
+        job, attempt = claim["job"], claim["attempt"]
+        counts = []
+        script = '''import json, os, sys
+from pathlib import Path
+from herogen.service.refine_budget import remote_budget
+run = Path(sys.argv[1])
+remote_budget("read", cap=.8)
+sent = 0
+for index in range(int(sys.argv[2])):
+    reservation = remote_budget("reserve", token=f"{os.getpid()}-{index}", amount=.01, cap=.8)
+    if not reservation["allowed"]:
+        break
+    sent += 1
+(run / "stage-3f.json").write_text(json.dumps({"ok": True, "sent": sent}))
+'''
+        class Runner(CliRunner):
+            lost = True
+            def command(inner, spec, ctx, env, work):
+                return [sys.executable, "-c", script, str(ctx.run_dir), "60" if inner.lost else "100"], None
+            def run(inner, spec, ctx):
+                if spec.key != "3f":
+                    return Outcome("passed")
+                outcome = super().run(spec, ctx)
+                counts.append(json.loads((ctx.run_dir / "stage-3f.json").read_text())["sent"])
+                if inner.lost:
+                    raise KeyboardInterrupt()
+                return outcome
+        runner = Runner()
+        ctx = make_context(self.s, self.storage, job)
+        def execute():
+            return run_group(self.store, self.s, job, attempt, "blender", 0, runner,
+                             CopyWorkdir(ctx, self.tmp / "local", LocalVolume(), lambda: True))
+        with self.assertRaises(KeyboardInterrupt):
+            execute()
+        self.assertFalse((ctx.run_dir / "stage-3f.json").exists())
+        runner.lost = False
+        self.assertEqual(execute().status, "ok")
+        self.assertEqual(counts, [60, 20])
+
     def test_copies_in_and_out_and_fences_stale_attempts(self):
         job = self.new_job()
         claim = self.store.job_claim(job["id"], "c", 60, 2)

@@ -2112,9 +2112,10 @@ Hair passes allow up to two samples. Their gates are IoU at least 0.85, affine s
 agreement on at least 0.80 of the eroded interior. Palette-mapped, blurred channel differences under 0.08 agree
 fully and over 0.16 agree not at all. Writes are restricted to the eroded interior (6 pixels per 1024), with
 hard support after smoothing so weights cannot leak across that boundary. The render's face mask, grown by
-12 pixels per 1024, is protected. Inside its head mask, writes require hair in both SAM 3.1 segmentations
-(repaint hair grown by 3, render hair by 15 pixels per 1024). This keeps a bald scalp and prevents a painted ear
-or face replacing hair merely because its colour resembles the original.
+12 pixels per 1024, is protected. Every pass, including normal passes, preserves pixels where the registered
+repaint and render SAM 3.1 hair masks disagree. Hair may change only within their exact intersection. Hair
+passes additionally protect non-hair pixels inside the render head mask. This keeps a bald scalp and prevents
+a painted ear or face replacing hair merely because its colour resembles the original.
 
 Accepted repaints are matched to the current SAM-derived palette by a regularised quadratic fit, dropping the
 worst 15% of residuals and refitting; a masked low-frequency correction restores the remaining tone difference.
@@ -2129,15 +2130,21 @@ Each view's rejection is diagnostic and does not fail the run. If every view is 
 written, and `final_model` says `03-source.glb`. A cap stop exports the views already completed, or keeps SAM's
 source when none completed. `ApiError`, `ReplayMiss`, malformed inputs and Blender failures write an error
 record and propagate; the CLI returns nonzero. An earlier refined output is invalidated before a new pass,
-and a stage-3 rebuild removes it too. The export uses a temporary GLB and an atomic rename.
+and stage 3 removes it at entry, before validating options or loading views. The export uses a temporary GLB and an atomic rename.
 
 Cost uses the shared `COST_BASIS`: configured per-image list-price estimates, with cached calls free. A run is
-estimated at $0.365 with one accepted sample per view; the sample-limit projection is $0.765 before transport
+estimated at $0.425 with one accepted sample per view; the sample-limit projection is $0.825 before transport
 retries, using the configured prices of $0.01 per Muse Image image and $0.0025 per SAM 3.1 segmentation.
 `--refine-cap-usd` defaults to $0.80; the service sets it with `HEROGEN_SERVICE_REFINE_CAP_USD`. Before every uncached HTTP attempt, including retries, the projected
-cost is checked against the cap. Unknown outcomes count toward spend. An in-flight reservation is persisted
-before sending, so a worker interruption cannot reset its budget. Repeated invocations of 3f count the prior
-run record's cumulative spend/reservation; `cost_usd` reports the current invocation, as in other stages.
+cost is checked against the cap. Unknown outcomes count toward spend. Reservations have unique tokens and
+remain charged until explicitly settled. An answered request enters the call log before limiter release,
+settlement or ledger writes can fail. Local runs persist reservation state in the run record before sending.
+The service uses the existing metadata store: each reservation is committed to its Modal Volume snapshot
+before the worker acknowledges it over private inherited subprocess pipes. A replacement worker reads this
+store even if its predecessor never copied its local run back. Store transactions enforce the cap across
+workers and fence stale job attempts. Failed or lost acknowledgements prevent HTTP sends; their reservations
+remain conservatively charged. Older saved runs seed the store once from their cumulative spend.
+`cost_usd` reports the current invocation, as in other stages.
 Cache hits remain usable with a zero cap, and a replay miss remains an error. Records distinguish
 `complete`, `cap_reached`, `skipped`, `running` and `error`.
 

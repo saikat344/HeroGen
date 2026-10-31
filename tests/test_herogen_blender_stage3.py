@@ -46,6 +46,18 @@ class SyntheticBase(unittest.TestCase):
 
 
 class TestViewsAndCarve(SyntheticBase):
+    def test_missing_front_invalidates_previous_refinement_at_entry(self):
+        from herogen.blender.final_model import final_model
+        from herogen.blender.stage3 import run_stage3
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "03-refined.glb").write_bytes(b"stale")
+            (run / "03-source.glb").write_bytes(b"source")
+            with self.assertRaises(ValueError):
+                run_stage3(run, mesh_source="carve", joints_source="silhouette", fallback=False)
+            self.assertFalse((run / "03-refined.glb").exists())
+            self.assertNotEqual(final_model(run).name, "03-refined.glb")
+
     def test_masks_and_scale(self):
         self.assertEqual(sorted(self.vs.views), sorted(views.VIEWS))
         self.assertEqual(self.vs.missing, [])

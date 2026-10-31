@@ -214,6 +214,23 @@ class RegistrationTests(unittest.TestCase):
         np.testing.assert_array_equal(tex.T.reshape(-1, 3)[1:], 0.2)
         self.assertGreater(tex.T[0, 0].min(), .9)
 
+    def test_projection_cannot_interpolate_into_forbidden_hair_or_face_pixels(self):
+        tex = object.__new__(refine.Texture)
+        tex.P = np.array([[-.225, 0, -.125]], float)
+        tex.N = np.array([[0, -1, 0]], float)
+        tex.idx = np.array([0])
+        tex.Q = np.array([.01])
+        tex.height = 1
+        tex.T = np.full((1, 1, 3), .2)
+        cam = cameras.camera("c", [0, 0, 0], 0, 1, (4, 4))
+        weights = np.zeros((4, 4))
+        weights[:, 0] = 1
+        # The texel projects to (1.1, 2.5): inside forbidden column 1, beside allowed column 0.
+        count = tex.apply(cam, np.ones((4, 4, 3)), np.ones((4, 4)), np.zeros((4, 4)),
+                          np.ones((4, 4), bool), weights)
+        self.assertEqual(count, 0)
+        np.testing.assert_array_equal(tex.T, .2)
+
 
 class BudgetTests(unittest.TestCase):
     def test_cap_boundary_and_prior_spend(self):
@@ -226,8 +243,8 @@ class BudgetTests(unittest.TestCase):
         for cap in (-1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 stage.Budget(client, cap)
-        self.assertAlmostEqual(stage.cost_estimate(), .365)
-        self.assertAlmostEqual(stage.cost_estimate(True), .765)
+        self.assertAlmostEqual(stage.cost_estimate(), .425)
+        self.assertAlmostEqual(stage.cost_estimate(True), .825)
 
     def test_unknown_outcome_retry_is_capped_before_http(self):
         from herogen.pipeline import client as module, retry
@@ -369,14 +386,14 @@ class StageTests(unittest.TestCase):
         self.assertEqual([x[2]["attempt"] for x in self.client.inputs[:3]], [0, 1, 2])
 
     def test_cap_stops_calls_and_keeps_completed_views(self):
-        rec = stage.run_stage3f(self.run, self.client, cap_usd=.02)
+        rec = stage.run_stage3f(self.run, self.client, cap_usd=.025)
         self.assertEqual(rec["status"], "cap_reached")
-        self.assertLessEqual(rec["cost_usd"], .02)
+        self.assertLessEqual(rec["cost_usd"], .025)
         self.assertTrue(rec["views"]["head+0"]["accepted"])
         self.assertFalse(rec["views"]["head+40"]["accepted"])
         self.assertEqual(rec["outputs"], ["03-refined.glb"])
         before = len(self.client.inputs)
-        rec2 = stage.run_stage3f(self.run, self.client, cap_usd=.02)
+        rec2 = stage.run_stage3f(self.run, self.client, cap_usd=.025)
         self.assertEqual(rec2["budget"]["prior_usd"], rec["cost_usd"])
         self.assertEqual(len(self.client.inputs), before + 1)  # blocked before the simulated API call
         self.assertEqual(rec2["cost_usd"], 0)
@@ -406,6 +423,83 @@ class StageTests(unittest.TestCase):
         self.assertEqual(rec["status"], "cap_reached")
         self.assertEqual(rec["cost_usd"], 0)
         self.assertEqual(rec["budget"]["prior_usd"], .01)
+
+    def test_answered_call_survives_a_failed_ledger_write(self):
+        from herogen.pipeline import client as module
+        client = ModelClient(self.run / "live-cache", mode="live", limiter=mock.Mock())
+        client.limiter.acquire.return_value = ("slot", 0)
+        response = mock.MagicMock(status=200)
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"data": []}'
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": "test-placeholder"}), \
+                mock.patch.object(module, "_open", return_value=response), \
+                mock.patch.object(client, "_ledger", side_effect=OSError("ledger unavailable")):
+            with self.assertRaises(OSError):
+                stage.run_stage3f(self.run, client, cap_usd=.01)
+        self.assertEqual(client.log.cost_usd(), .01)
+        rec = json.loads((self.run / "stage-3f.json").read_text())
+        self.assertEqual(rec["budget"]["spent_usd_total"], .01)
+        retry = stage.run_stage3f(self.run, self.client, cap_usd=.01)
+        self.assertEqual(retry["status"], "cap_reached")
+        self.assertEqual(retry["cost_usd"], 0)
+
+    def test_unresolved_reservation_survives_error_without_a_logged_call(self):
+        def interrupted(client, *args):
+            client.before_api_attempt(IMAGE_MODEL)
+            raise OSError("lost answer")
+        with mock.patch.object(stage, "_view", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                stage.run_stage3f(self.run, self.client, cap_usd=.01)
+        rec = json.loads((self.run / "stage-3f.json").read_text())
+        self.assertEqual(rec["cost_usd"], 0)
+        self.assertEqual(rec["budget"]["spent_usd_total"], .01)
+        self.assertEqual(rec["budget"]["pending_attempt_usd"], .01)
+        retry = stage.run_stage3f(self.run, self.client, cap_usd=.01)
+        self.assertEqual(retry["status"], "cap_reached")
+        self.assertEqual(retry["budget"]["pending_attempt_usd"], .01)
+
+    def test_service_budget_is_read_even_when_the_local_record_is_lost(self):
+        from herogen.refine_budget import update
+        from herogen.service.refine_budget import budget_bridge
+        durable = {"state": None}
+        def operation(action, **kwargs):
+            durable["state"] = update(durable["state"], action, **kwargs)
+            return durable["state"]
+        with budget_bridge(operation) as env, mock.patch.dict(os.environ, env):
+            self.client.error = KeyboardInterrupt()
+            with self.assertRaises(KeyboardInterrupt):
+                stage.run_stage3f(self.run, self.client, cap_usd=.01)
+            (self.run / "stage-3f.json").unlink()
+            replacement = FakeClient(self.run / "replacement-cache")
+            rec = stage.run_stage3f(self.run, replacement, cap_usd=.01)
+        self.assertEqual(rec["status"], "cap_reached")
+        self.assertEqual(rec["budget"]["prior_usd"], .01)
+        self.assertEqual(replacement.log.cost_usd(), 0)
+
+    def test_normal_repaint_cannot_add_hair_to_a_bald_scalp(self):
+        scalp = disc((64, 64), 32, 22, 7)
+        face = disc((64, 64), 32, 36, 5)
+        seen = []
+        def segment(image, text):
+            seen.append(text)
+            mask = face if text == "face" else scalp if text == "head" else np.zeros_like(scalp)
+            if text == "hair" and image.getpixel((32, 22)) == (20, 20, 20):
+                mask = scalp
+            return [SamInstance(mask, (0, 0, 64, 64))]
+        def edit(prompt, images, **kwargs):
+            image = np.array(images[0])
+            image[scalp] = (20, 20, 20)
+            return Image.fromarray(image)
+        self.client.segment = segment
+        self.client.edit_image = edit
+        rec = {"attempts": []}
+        cam = character.cameras_for(self.info)["head+0"]
+        stage._view(self.client, self.run / "prep", self.run / "base.png", self.tex, cam, False,
+                    self.run / "view", rec, 900, Image.new("RGB", (64, 64)))
+        self.assertTrue(rec["accepted"])
+        self.assertIn("hair", seen)
+        weight = self.tex.apply.call_args.args[5]
+        self.assertEqual(weight[scalp].max(), 0)
 
     def test_other_profiles_make_no_calls(self):
         rec = stage.run_stage3f(self.run, self.client, profile="roblox-ingame")
