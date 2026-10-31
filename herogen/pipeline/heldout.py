@@ -665,9 +665,9 @@ FACE_PROFILE_MIN = 0.05  # profile face offsets below this can't serve as the re
 # +60. Sapiens swaps the names on about half of back views. The positive evidence that the view is the front is
 # a face SAM 3.1 finds as a proper part of the head (its area at most FACE_HEAD_AREA_MAX of the head's: a "face"
 # that is the whole head, say the back of it returned for both prompts, is no evidence) whose centre lies off the
-# head's toward the view's side; without that the view needs human review (`face_seen`). SAM was never asked for a
-# face on a back view in any recorded run, so how often it returns one there is not measured; the rule is set
-# from front views only. On the labelled bench views facing the right way, with a face and a head found, the
+# head's toward the view's side; without that the view needs human review (`face_seen`). The cut is set from front
+# views; on the back views (180 degrees) of the 26 bench turnarounds SAM 3.1 returned no face instance at all (a
+# head on 23), so none would pass; back views at 120-154 degrees were not measured. On the labelled bench views facing the right way, with a face and a head found, the
 # face's area over the head's was 0.07-0.58 at 30 degrees and 0.13-0.73 at 60 on the tuning split (0.14-0.84 and
 # 0.13-0.78 on the test split), and the face's centre lay toward the view's side on 136 of 137.
 FACE_HEAD_AREA_MAX = 0.75
