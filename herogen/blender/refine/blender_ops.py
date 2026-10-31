@@ -4,15 +4,13 @@ import math
 import sys
 from pathlib import Path
 
-import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector
 
 POS_LO = -2.0
 POS_EXT = 4.0   # the position pass stores (p - POS_LO) / POS_EXT, so world coordinates in [-2, 2] fit [0, 1]
-SMOOTH_ANGLE_DEG = 180.0  # exported normals stay sharp only across creases sharper than this (180: none)
-MERGE_DIST = 1e-6  # source vertices closer than this (scene units) are one vertex split at a UV seam
+SEAM_GRID = 1e-6  # vertices at the same position on this grid (scene units) are one point split at a UV seam
 
 
 def reset(engine="BLENDER_WORKBENCH"):
@@ -340,6 +338,35 @@ def probe(a):
         render_position(sc, obj, str(out / f"{cam['name']}.pos.exr"))
 
 
+def smooth_seam_normals(me):
+    """Give every face corner the area-weighted normal of all faces at its position.
+
+    The source arrives split at its UV seams, so its copies of one point carry separate vertex normals; averaging
+    over the position, not the vertex, smooths across those seams. Vertices and faces are left as they are."""
+    n = len(me.vertices)
+    co = np.empty(n * 3)
+    me.vertices.foreach_get("co", co)
+    _, group = np.unique(np.round(co.reshape(-1, 3) / SEAM_GRID).astype(np.int64), axis=0, return_inverse=True)
+    group = group.ravel()
+    pn, area = np.empty(len(me.polygons) * 3), np.empty(len(me.polygons))
+    me.polygons.foreach_get("normal", pn)
+    me.polygons.foreach_get("area", area)
+    pn = pn.reshape(-1, 3)
+    loop_vert = np.empty(len(me.loops), np.int64)
+    me.loops.foreach_get("vertex_index", loop_vert)
+    starts, totals = np.empty(len(me.polygons), np.int64), np.empty(len(me.polygons), np.int64)
+    me.polygons.foreach_get("loop_start", starts)
+    me.polygons.foreach_get("loop_total", totals)
+    loop_poly = np.repeat(np.arange(len(me.polygons)), totals)
+    acc = np.zeros((group.max() + 1 if n else 0, 3))
+    np.add.at(acc, group[loop_vert], pn[loop_poly] * area[loop_poly, None])
+    out = acc[group[loop_vert]]
+    length = np.linalg.norm(out, axis=1, keepdims=True)
+    out = np.where(length > 1e-12, out / np.maximum(length, 1e-12), pn[loop_poly])
+    me.shade_smooth()
+    me.normals_split_custom_set(out.tolist())
+
+
 def export(a):
     sc, obj = open_work(a["blend"], a["texture"])
     img = bpy.data.images["texture"]
@@ -349,15 +376,8 @@ def export(a):
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     # Without normals a viewer must light every triangle flat, and a coarse face then splits into lit and unlit
-    # facets. The source arrives split at its UV seams, so join coincident vertices first (UVs live on face
-    # corners and survive), then smooth everywhere except creases sharper than SMOOTH_ANGLE_DEG.
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=MERGE_DIST)
-    bm.to_mesh(obj.data)
-    bm.free()
-    obj.data.shade_smooth()
-    obj.data.set_sharp_from_angle(angle=math.radians(SMOOTH_ANGLE_DEG))
+    # facets. Export smooth normals without changing the topology.
+    smooth_seam_normals(obj.data)
     bpy.ops.export_scene.gltf(filepath=a["out"], export_format="GLB", export_image_format="AUTO", export_texcoords=True, export_normals=True,
                               export_materials="EXPORT", export_yup=True, use_selection=True)
 
