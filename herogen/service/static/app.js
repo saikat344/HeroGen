@@ -1,9 +1,31 @@
 // HeroGen service page: sign in with an emailed link, start a hero from a sketch or a description, follow its
 // stages, download the GLB and the Roblox bundle. Every value from the server is shown with textContent.
 import { developerMode } from '/assets/developer.js';
+import { entryPage } from '/assets/entry.js';
+import { draftStore } from '/assets/draft.js';
 
 const $ = (s) => document.querySelector(s);
 const S = { csrf: null, session: null, current: null, timer: null };
+let entry;
+function signIn() { show('#signin'); $('#signinDialog').showModal(); }
+async function keepDraft() {
+  const file = entry.file();
+  await draftStore('put', { prompt: $('#prompt').value, name: $('#name').value, profile: $('#profile').value,
+    file, pending: loadPending(), saved: Date.now() });
+}
+async function restoreDraft() {
+  try {
+    const d = await draftStore('get');
+    if (!d || Date.now() - d.saved > 24 * 3600 * 1000) { if (d) await draftStore('delete'); return; }
+    $('#prompt').value = typeof d.prompt === 'string' ? d.prompt : '';
+    $('#name').value = typeof d.name === 'string' ? d.name : '';
+    if (S.session.limits.profiles.includes(d.profile)) $('#profile').value = d.profile;
+    if (d.file instanceof Blob) entry.setFile(d.file);
+    if (d.pending && !loadPending()) savePending(d.pending);
+    $('#prompt').dispatchEvent(new Event('input'));
+    $('#jobMsg').textContent = 'Your draft is ready. Review it, then create your hero.';
+  } catch { /* A fresh form remains usable without browser storage. */ }
+}
 
 function show(id, on = true) { $(id).hidden = !on; }
 function banner(text) { const b = $('#banner'); b.textContent = text || ''; b.hidden = !text; }
@@ -193,6 +215,7 @@ function initJobs() {
     prompt.setAttribute('aria-invalid', String(over));
   }
   prompt.addEventListener('input', updatePromptCount);
+  entry = entryPage($, updatePromptCount);
   updatePromptCount();
   for (const r of document.querySelectorAll('input[name=kind]')) r.addEventListener('change', () => {
     const p = document.querySelector('input[name=kind]:checked').value === 'prompt';
@@ -221,10 +244,20 @@ function initJobs() {
     fd.append('name', $('#name').value);
     let file = null;
     if (kind === 'sketch') {
-      file = $('#sketch').files[0];
-      if (!file) { msg.textContent = 'Choose a sketch to upload.'; return; }
+      file = entry.file();
+      if (!file) { msg.textContent = 'Choose an image to upload.'; return; }
+      if (file.size > S.session.limits.upload_max_bytes) { msg.textContent = `Choose an image smaller than ${Math.round(S.session.limits.upload_max_bytes / 1024 / 1024)} MB.`; return; }
       fd.append('sketch', file, 'sketch');
-    } else fd.append('prompt', $('#prompt').value);
+    } else {
+      if (!prompt.value.trim()) { msg.textContent = 'Describe your hero or choose an image to start.'; prompt.focus(); return; }
+      if (Array.from(prompt.value).length > limit) { msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
+      fd.append('prompt', prompt.value);
+    }
+    if (!S.session.signed_in) {
+      try { await keepDraft(); msg.textContent = 'Your draft is saved. Sign in to create your hero.'; }
+      catch { msg.textContent = 'Browser storage is unavailable. Keep this tab open and return here after signing in to keep your draft.'; }
+      signIn(); return;
+    }
     $('#go').disabled = true; msg.textContent = 'Starting…';
     const hash = await formHash(kind, sel.value, $('#name').value, $('#prompt').value, file);
     const earlier = loadPending();
@@ -233,6 +266,7 @@ function initJobs() {
     try {
       const j = await api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
       clearPending();
+      await draftStore('delete').catch(() => {});
       msg.textContent = '';
       await refreshList();
       renderQuota((await loadSession()).usage);
@@ -248,6 +282,11 @@ function initJobs() {
         msg.textContent = 'The service is busy and could not confirm your hero. Make it again in a moment from this tab: if it was saved, you get that hero, not a second one.';
       } else {
         msg.textContent = e.message;
+        if (e.status === 401) {
+          S.session.signed_in = false;
+          try { await keepDraft(); } catch { msg.textContent += ' Keep this tab open to preserve your draft.'; }
+          signIn();
+        }
       }
     }
     finally { $('#go').disabled = false; }
@@ -267,21 +306,37 @@ function initJobs() {
   });
 }
 
+async function signedIn() {
+  $('#who').textContent = S.session.user.email; show('#who'); show('#signOut');
+  show('#headerSignIn', false); show('#developerMode'); show('#app');
+  renderQuota(S.session.usage);
+  const jobs = await refreshList();
+  const want = new URLSearchParams(location.hash.slice(1)).get('job');
+  if (want) openJob(want); else if (jobs.length) openJob(jobs[0].id);
+}
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
   show('#loading', false);
   if (location.pathname === '/signin') return initVerify();
-  if (!S.session.signed_in) { show('#signin'); initSignin(); return; }
-  $('#who').textContent = S.session.user.email; show('#who'); show('#signOut');
-  show('#developerMode');
-  $('#signOut').addEventListener('click', async () => { await api('/api/auth/logout', { method: 'POST', json: {} }).catch(() => {}); location.replace('/'); });
-  show('#app');
-  renderQuota(S.session.usage);
-  initJobs();
-  const jobs = await refreshList();
-  const want = new URLSearchParams(location.hash.slice(1)).get('job');
-  if (want) openJob(want); else if (jobs.length) openJob(jobs[0].id);
+  show('#entry'); initSignin(); initJobs(); await restoreDraft();
+  $('#headerSignIn').addEventListener('click', async () => {
+    try { await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
+    signIn();
+  });
+  $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
+  $('#signOut').addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { method: 'POST', json: {} }); location.replace('/'); }
+    catch (e) { banner(e.message); }
+  });
+  if (S.session.signed_in) await signedIn();
+  window.addEventListener('focus', async () => {
+    if (S.session.signed_in) return;
+    try {
+      await loadSession();
+      if (S.session.signed_in) { $('#signinDialog').close(); await signedIn(); }
+    } catch (e) { banner(e.message); }
+  });
 }
 
-boot();
+boot().catch((e) => banner(e.message));

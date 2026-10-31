@@ -2362,3 +2362,25 @@ use. The stage reuses the repository's existing Muse Image and SAM 3.1 clients a
 use synthetic images and mocked model clients; a Blender integration test verifies a 4096 bake, embedded image,
 frame preservation and render passes, skipping when Blender is unavailable or cannot start in the environment.
 No live quality score is inferred from these unit tests; held-out mesh scoring remains a separate measurement.
+
+
+### Service entry page
+
+The public entry page accepts a text idea or an image before sign-in. Suggestion buttons fill the text field;
+image cards select a PNG and submit it through the existing multipart `POST /api/jobs` image contract.
+Creating a hero requires the existing authenticated session, CSRF token, quota checks and idempotency key.
+A draft, including its image Blob and any uncertain request key, is saved in browser IndexedDB before the
+email sign-in flow. Drafts expire after 24 hours when next read and are removed after a confirmed creation.
+If browser storage is unavailable, the page asks the user to keep the original tab open. Returning focus to
+that tab refreshes its session. Sign-in never automatically starts a generation.
+
+The illustrated entry assets are an external deployment input, excluded from Git. Install the supplied PNG
+bundle under `herogen/service/static/art/`, preserving these filenames: `hero-collage.png`, `trail-keeper.png`,
+`little-inventor.png`, `cloud-sailor.png`, and `garden-guardian.png`. Verify the bundle against its `sha256.json`
+before copying. Include that directory when packaging the service. The hero collage is decorative; the four
+other files are full-body starter images. Missing card images are hidden. Text and local uploads remain
+available without the bundle. These illustrations are starter inputs, not evidence of pipeline output.
+
+The static asset handler serves PNG, JPEG and WebP with image MIME types using its existing path confinement
+and symlink rejection. The workshop, viewer, downloads, and read-only developer inspection continue to use the
+existing service endpoints.
