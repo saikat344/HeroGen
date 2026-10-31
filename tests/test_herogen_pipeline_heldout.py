@@ -481,7 +481,9 @@ class HeldoutTest(unittest.TestCase):
                                             None, profile_face_error=profile_error, body=body_of(figure("a")),
                                             keypoints=keypoints_at(figure("a"), 26))
             self.assertEqual(heldout.view_status(checks), "needs review")
-            self.assertEqual([c["name"] for c in checks if not c["pass"]], ["head_cue_measured"])
+            # A failed face call is not a missing face; a missing one (the stand-in here) also needs a face.
+            want = ["head_cue_measured"] + ([] if face.get("api_error") else ["face_seen"])
+            self.assertEqual([c["name"] for c in checks if not c["pass"]], want)
 
     def test_live_face_api_failure_needs_review_and_is_not_cached(self):
         api = FakeAPI()

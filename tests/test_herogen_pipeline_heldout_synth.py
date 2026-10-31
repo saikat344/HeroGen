@@ -673,7 +673,8 @@ class HeldoutChecksTest(unittest.TestCase):
                                             {"offset": None}, None, body=body, keypoints=kps)
             self.assertEqual(heldout.view_status(checks), "needs review")
             # Without keypoints neither the turn, the arms nor (with no face cue either) the facing is decided.
-            self.assertEqual(_failed(checks), ["turn_measured", "arm_angle_measured", "facing_cues_for"])
+            self.assertEqual(_failed(checks), ["turn_measured", "arm_angle_measured", "facing_cues_for",
+                                               "face_seen"])
             self.assertIn(why, next(c for c in checks if c["name"] == "turn_measured")["note"])
             self.assertIsNone(m["found_yaw_deg"])
         self.assertEqual(heldout.next_request(heldout.VIEW_BY_NAME["front-left-30"], 25.65, None), 25.65)
@@ -749,10 +750,24 @@ class HeldoutChecksTest(unittest.TestCase):
                                             {"offset": None}, None, body=body_of(figure("a")),
                                             keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(heldout.view_status(checks), "needs review")
-        self.assertEqual(_failed(checks), ["facing_cues_for"])
+        self.assertEqual(_failed(checks), ["facing_cues_for", "face_seen"])
         self.assertEqual(m["facing_votes"], {"keypoints": 0, "head": 0})
 
     def test_unmeasurable_cues_do_not_vote(self):
+        # A face found but too little turned to vote (no profile reference): the keypoints decide the side and
+        # the face shows it is the front.
+        t = turnaround(figure("a"))
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        seen = turned_mask(figure("a"), 26)
+        checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
+                                        {"offset": -0.01, "face_found": True, "head_found": True}, None,
+                                        body=body_of(figure("a")), keypoints=keypoints_at(figure("a"), 26))
+        self.assertEqual(m["facing_votes"], {"keypoints": 1, "head": 0})
+        self.assertTrue(m["face_seen"])
+        self.assertEqual(heldout.view_status(checks), "accepted")
+
+    def test_no_face_needs_review(self):
+        # The same view with no face found: nothing shows it is the front rather than a back view.
         t = turnaround(figure("a"))
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
         seen = turned_mask(figure("a"), 26)
@@ -760,7 +775,29 @@ class HeldoutChecksTest(unittest.TestCase):
                                         {"offset": None, "face_found": False}, None, body=body_of(figure("a")),
                                         keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(m["facing_votes"], {"keypoints": 1, "head": 0})
-        self.assertEqual(heldout.view_status(checks), "accepted")
+        self.assertFalse(m["face_seen"])
+        self.assertEqual(heldout.view_status(checks), "needs review")
+        self.assertEqual(_failed(checks), ["face_seen"])
+
+    def test_back_view_with_swapped_names_is_never_accepted_without_a_face(self):
+        # Back views (154 and 120 degrees) whose keypoints carry left and right the other way round, as Sapiens
+        # often names a back view: they fit as front views at 26 and 60 with no error, so the keypoints can't
+        # tell them apart; with no face found they go to review, never accepted.
+        f = figure("a")
+        t = turnaround(f)
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        body = body_of(f)
+        for yaw, name, mirrored in ((154, "front-left-30", 26), (-154, "front-right-30", -26),
+                                    (120, "front-left-60", 60), (-120, "front-right-60", -60)):
+            mask = turned_mask(f, yaw)
+            kps = keypoints_at(f, yaw)
+            kps["joints"] = {(heldout.KP.pair_name(n) or n): v for n, v in kps["joints"].items()}
+            checks, m = heldout.view_checks(heldout.VIEW_BY_NAME[name], mask, model, 0.1, float(mask.mean()),
+                                            {"offset": None}, None, body=body, keypoints=kps)
+            self.assertAlmostEqual(m["found_yaw_deg"], mirrored, delta=0.5, msg=yaw)
+            self.assertLess(m["keypoint_fit"]["rms"], 1e-6)
+            self.assertNotEqual(heldout.view_status(checks), "accepted", yaw)
+            self.assertIn("face_seen", _failed(checks), yaw)
 
     def test_no_figure_rejected(self):
         t = turnaround(figure("a"))

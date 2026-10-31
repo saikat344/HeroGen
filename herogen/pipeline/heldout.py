@@ -657,6 +657,13 @@ FACE_TURN_MIN = 0.30
 FACE_PROFILE_MIN = 0.05  # profile face offsets below this can't serve as the reference (front-on noise 0.008)
 # Facing passes when at least one cue says the view's way and none says the other way; no deciding cue
 # needs human review.
+# Front or back: every view must also show a face. The keypoint fit only looks at the front half (-89 to +89
+# degrees), and a back view whose left and right joints are named the other way round projects exactly like a
+# front view (u = -x cos(180 - y) + d sin(180 - y) = x cos y + d sin y; the joint model gives each pair one
+# depth), so a back view at 154 degrees with the names swapped reads +26 with no error, and one at 120 reads
+# +60. Sapiens swaps the names on about half of back views. A face SAM 3.1 finds inside the head is the
+# positive evidence that the view is the front: without one the view needs human review (`face_seen`). On the
+# labelled bench views a face was found on 78% (30 degrees) and 76% (60) of those facing the right way.
 # The view's own yaw window (`yaw_window`): inside it the view can be accepted; up to 5 degrees outside it
 # needs human review; further out it is rejected (and generated again). The found yaw is the body-keypoint fit's
 # on the view's side (the facing checks judge the side).
@@ -777,6 +784,12 @@ def view_checks(
         out.append(_review(C.check("head_cue_measured", 0.0, 1.0, op="==",
                                    note="the Model API failed on the face or head, so the head cue could not "
                                         "vote")))
+    face_seen = face.get("offset") is not None
+    if not face_seen and not face.get("api_error"):
+        out.append(_review(C.check("face_seen", 0.0, 1.0, op="==",
+                                   note="no face found inside the head: nothing shows the view is the front "
+                                        "rather than a back view (keypoints with left and right swapped fit a "
+                                        "back view as a front one)")))
     measured = {
         "found_yaw_deg": found,
         "keypoint_fit": kfit,
@@ -798,6 +811,7 @@ def view_checks(
         "profile_face_offset": profile_face,
         "face_turn": face_turn,
         "facing_votes": votes,
+        "face_seen": face_seen,
     }
     return out, _rounded(measured)
 

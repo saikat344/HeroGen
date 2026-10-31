@@ -774,7 +774,11 @@ sideways shift (head, torso and legs; the arms are left out), separately facing 
   generated runs; with the bench's usual four diagonals too, 25-26.3 and 57-65 degrees. Up to 5 degrees outside needs human review. Generations aim at the window's middle.
 - **Facing.** Two votes: the fit's side (its error facing the other way minus facing the view's way, at least
   0.003 of the figure height) and SAM 3.1's face inside the head. Facing passes when one says the view's way
-  and none the other way; no deciding vote needs review.
+  and none the other way; no deciding vote needs review. Every view must also show a face SAM 3.1 finds inside
+  the head (`face_seen`), or it needs review: the fit only searches the front half, and a back view whose
+  left and right joints are named the other way round (Sapiens does this on about half of back views) fits as a
+  front view with no error (154 degrees reads as 26, 120 as 60). On the labelled bench views a face was found on
+  78% (30 degrees) and 76% (60) of the views facing the right way.
 - **A-pose.** Each arm's angle below horizontal, from how far the wrist hangs below the shoulder over the arm's
   length in the front view (a turn doesn't change it): the nearer arm must be found and between 35 and 72
   degrees, and so must the farther one when both its joints score at least 0.5.
