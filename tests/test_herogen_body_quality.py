@@ -71,6 +71,8 @@ class VisualTests(unittest.TestCase):
         kwargs = client.compare_images.call_args.kwargs
         self.assertEqual(kwargs["schema"], q.SCHEMA)
         self.assertEqual(kwargs["model"], "muse-spark-1.3")
+        self.assertEqual(kwargs["max_output_tokens"], q.VISUAL_MAX_OUTPUT_TOKENS)
+        self.assertEqual(q.VISUAL_MAX_OUTPUT_TOKENS, 4000)
         self.assertEqual(client.compare_images.call_args.args[1][0].size, (1280, 688))
 
     def test_invalid_or_failed_answer_never_passes(self):
