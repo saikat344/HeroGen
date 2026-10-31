@@ -1789,6 +1789,8 @@ def stage2h_heldout(run: RunFolder, client: ModelClient, *, attempts: int = ATTE
         "turnaround_keypoints": ctx.turnaround_kp,
         "keypoint_model": POSE_MODEL,
         "keypoint_calls": pose.log.calls[pose_calls0:],
+        # Live calls that ran on an ephemeral app instead of the deployment, and why (`PoseClient._open`).
+        "keypoint_fallbacks": sorted({c["fallback"] for c in pose.log.calls[pose_calls0:] if c.get("fallback")}),
         "keypoint_cost_basis": SAPIENS_COST_BASIS,
         "inputs": ("the cover; a pose reference (views/front.png, or the nearer profile once the request "
                    f"reaches {PROFILE_REFERENCE_FROM_DEG:.0f} degrees) and a mannequin turn guide at the "

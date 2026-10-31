@@ -3,8 +3,9 @@
 Modes:
 - ``live``: call `herogen/pipeline/sapiens_app.py` on Modal: its deployed app when one runs the same source, else
   an ephemeral app opened on the first uncached call and kept for the client's life (the model loads once per
-  stage-2h run; `close` stops it). The result is saved to the cache. A failed or timed-out try (CALL_TIMEOUT_S) is tried again after RETRY_WAIT_S; when every
-  try fails, `PoseError`.
+  stage-2h run; `close` stops it). The result is saved to the cache. Only a missing deployment or one of other
+  source falls back to the ephemeral app, and each call records which (`route`, `fallback`). A failed or
+  timed-out try (CALL_TIMEOUT_S) is tried again after RETRY_WAIT_S; when every try fails, `PoseError`.
 - ``replay``: read the cache only. A missing entry raises `ReplayMiss`; nothing touches the network.
 
 The cache key hashes the request: the model's pins (Sapiens 2 code commit, weight revision and SHA-256), the
@@ -16,6 +17,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,6 +78,9 @@ class PoseClient:
         self._pins = app_pins()
         self._app = None
         self._pose = None
+        # Where live calls run: "deployed", or "ephemeral" with the reason the deployment wasn't used.
+        self.route: str | None = None
+        self.fallback: str | None = None
 
     def keypoints(self, image: Image.Image, box: list[float]) -> dict[str, tuple[float, float, float]]:
         """name -> (x, y, score) for the person in ``box`` [x0, y0, x1, y1] (image px, exclusive edges)."""
@@ -96,7 +101,8 @@ class PoseClient:
             tmp.write_text(json.dumps({"request": summary, "response": out}, sort_keys=True) + "\n")
             tmp.replace(path)
             self.log.calls.append({"model": POSE_MODEL, "key": key, "cached": False,
-                                   "cost_usd": round(out.get("seconds", 0.0) * PRICE_PER_SECOND, 6)})
+                                   "cost_usd": round(out.get("seconds", 0.0) * PRICE_PER_SECOND, 6),
+                                   "route": self.route, "fallback": self.fallback})
         return {n: (float(xy[0]), float(xy[1]), float(s))
                 for n, xy, s in zip(out["names"], out["keypoints"], out["scores"], strict=True)}
 
@@ -116,23 +122,30 @@ class PoseClient:
         raise PoseError(f"{POSE_MODEL} failed on every try: {' | '.join(errors)}")
 
     def _open(self) -> None:
-        """The deployed app (`modal deploy herogen/pipeline/sapiens_app.py`) when there is one, else an ephemeral
-        run of the same app. A deployment made from other source is not used: its results would not match the
-        cache key."""
+        """The deployed app (`modal deploy herogen/pipeline/sapiens_app.py`) when there is one running the same
+        source, else an ephemeral run of the same app (a deployment of other source would not match the cache
+        key). Only a missing deployment (Modal's NotFoundError) or a different source falls back, and the fallback
+        is recorded on every call it makes (`route`, `fallback`) and warned on stderr; any other error is raised
+        (the caller tries again, then records a `PoseError`)."""
         import modal
 
         from herogen.pipeline import sapiens_app
 
         try:
             pose = modal.Cls.from_name(sapiens_app.APP_NAME, sapiens_app.CLASS_NAME)()
-            if pose.app_sha256.remote() == self._pins["app_sha256"]:
-                self._pose = pose
+            deployed = pose.app_sha256.remote()
+        except modal.exception.NotFoundError as e:
+            reason = f"no deployment of {sapiens_app.APP_NAME}: {type(e).__name__}: {e}"[:300]
+        else:
+            if deployed == self._pins["app_sha256"]:
+                self._pose, self.route, self.fallback = pose, "deployed", None
                 return
-        except Exception:  # noqa: BLE001  (not deployed, or deployed without the method: run it ephemerally)
-            pass
+            reason = (f"the deployed {sapiens_app.APP_NAME} runs other source ({deployed}, this one "
+                      f"{self._pins['app_sha256']})")
+        print(f"warning: {POSE_MODEL}: {reason}; running it as an ephemeral app", file=sys.stderr)
         self._app = sapiens_app.app.run()
         self._app.__enter__()
-        self._pose = sapiens_app.Pose()
+        self._pose, self.route, self.fallback = sapiens_app.Pose(), "ephemeral", reason
 
     def close(self) -> None:
         """Stop the live app, if one is open."""

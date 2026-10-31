@@ -751,8 +751,10 @@ Each view is checked against the turnaround with Sapiens 2 body keypoints (Meta'
 SHA-256). Stage 2h measures the turnaround's front view and profiles once and every generation once, each on the
 person box of its SAM 3.1 figure mask, through a record/replay cache in the Model API's cache folder
 (`herogen/pipeline/sapiens.py`: the deployed app `herogen-sapiens-pose` when it runs the same source, else an
-ephemeral run of it; a failed or timed-out call is tried three times, and a failure is recorded on the view,
-which then needs review, never raised). The record keeps the turnaround's keypoints
+ephemeral run of it, which only a missing deployment or a deployment of other source causes: the reason is
+warned on stderr and recorded on each call (`route`, `fallback`) and in `details.keypoint_fallbacks`; any other
+Modal error counts as a failed try. A failed or timed-out call is tried three times, and a failure is recorded
+on the view, which then needs review, never raised). The record keeps the turnaround's keypoints
 (`details.turnaround_keypoints`), each generation's body joints and fits, and the keypoint calls and their
 estimated cost.
 
