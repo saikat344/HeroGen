@@ -510,7 +510,7 @@ def is_closed_rim(rim: dict) -> bool:
             seen.add(v)
             pending.extend(adjacent[v] - seen)
     # Collinear or coincident vertices do not enclose an opening. Rank is a degeneracy check, not a size gate.
-    return len(seen) == n and np.linalg.matrix_rank(points - points[0]) >= 2
+    return bool(len(seen) == n and np.linalg.matrix_rank(points - points[0]) >= 2)
 
 
 def _shared_rims(name: str, boundaries: dict, pos: np.ndarray, loops: dict) -> list:

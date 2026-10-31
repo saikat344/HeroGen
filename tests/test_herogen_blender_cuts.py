@@ -101,6 +101,13 @@ class TestCutMeasurements(unittest.TestCase):
             with self.subTest(points=points, edges=edges):
                 self.assertFalse(split.is_closed_rim({"points": points, "edges": edges}))
 
+    def test_rim_topology_records_are_json_serializable(self):
+        record = cuts.rim_topology(self.secs)
+        self.assertEqual(json.loads(json.dumps(record)), record)
+        self.assertIs(record["LeftElbow"][0]["closed_ring"], True)
+        self.assertEqual(record["LeftElbow"][0]["vertices"], 43)
+        self.assertEqual(record["LeftElbow"][0]["edges"], 43)
+
     def test_touching_rings_and_dangling_contacts_do_not_erase_real_rims(self):
         child, parent = "LeftLowerArm", "LeftUpperArm"
         points = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0], [-1, 0, 0], [0, -1, 0], [0, 0, 1]])
