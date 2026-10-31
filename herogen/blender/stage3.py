@@ -216,6 +216,7 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     Quality rejection is a completed build and never triggers another constructor. Spend from a failed
     attempt remains in the same record. ``fallback=False`` preserves the original build error.
     """
+    (run / "03-refined.glb").unlink(missing_ok=True)
     if mesh_source not in MESH_SOURCES or joints_source not in JOINT_SOURCES:
         raise ValueError(f"mesh_source in {MESH_SOURCES}, joints_source in {JOINT_SOURCES}")
     (run / "stage-3.json").unlink(missing_ok=True)

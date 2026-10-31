@@ -217,6 +217,9 @@ class ModelClient:
         self.limiter = limiter
         # Optional caller-owned budget check; cache hits never reach it, retries always do.
         self.before_api_attempt = before_api_attempt
+        # Called with the billable estimate once an attempt has an explicit outcome. Unresolved attempts
+        # never call this hook, so their caller-owned reservations remain charged.
+        self.after_api_attempt: Callable[[float], None] | None = None
 
     # ---- public calls -------------------------------------------------------------------------------
 
@@ -296,9 +299,7 @@ class ModelClient:
         }
         started = time.monotonic()
         # A failed call raises `ApiError` and is never cached: a failure is not a result to replay.
-        resp = self._post("responses", body, model=SAM_MODEL, kind="segment", key=key)
-        # The call is billed now, so log it and keep the raw response before decoding can fail.
-        self.log.add(SAM_MODEL, "segment", key, cached=False)
+        resp = self._answered_post("responses", body, model=SAM_MODEL, kind="segment", key=key)
         # An incomplete or failed response can carry no output, which would read as "nothing found".
         require_completed("responses", resp, required=True)
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2),
@@ -361,11 +362,10 @@ class ModelClient:
         }
         started = time.monotonic()
         # An attempt that may be billed is priced from the usage it reported, if any (else at the output cap).
-        resp = self._post("responses", body, model=model, kind="compare", key=key,
+        resp = self._answered_post("responses", body, model=model, kind="compare", key=key,
                           usage_cost_usd=lambda usage: answer_cost_usd(model, usage, max_output_tokens))
         # Answered, so it may be billed: priced from its usage, with any count it did not report at its bound.
         cost = answer_cost_usd(model, resp.get("usage"), max_output_tokens)
-        self.log.add(model, "compare", key, cached=False, cost_usd=cost)
         # An incomplete answer (out of output tokens, say) is a failure, not a result: raised and never cached.
         require_completed("responses", resp, required=True)
         entry = {"request": summary, "seconds": round(time.monotonic() - started, 2), "status": resp.get("status"),
@@ -395,8 +395,7 @@ class ModelClient:
         if self.mode == "replay":
             raise ReplayMiss(f"no cached {endpoint} response for key {key}")
         started = time.monotonic()
-        resp = self._post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
-        self.log.add(IMAGE_MODEL, kind, key, cached=False)  # answered, including malformed or incomplete images
+        resp = self._answered_post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
         require_completed(endpoint, resp, required=False)
         data = resp.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
@@ -416,6 +415,17 @@ class ModelClient:
         }
         self._save_entry(key, entry)
         return img
+
+    def _answered_post(self, endpoint, body, *, model, kind, key, **kwargs):
+        """Keep injected transports accountable too; the real transport counts before its bookkeeping."""
+        start = len(self.log.calls)
+        resp = self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
+        if not any(c["key"] == key and not c["cached"] and c.get("outcome") != "unknown"
+                   for c in self.log.calls[start:]):
+            usage_cost = kwargs.get("usage_cost_usd")
+            self.log.add(model, kind, key, cached=False,
+                         cost_usd=usage_cost(resp.get("usage")) if usage_cost else None)
+        return resp
 
     def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str,
               usage_cost_usd: Callable[[Any], float] | None = None) -> dict[str, Any]:
@@ -457,6 +467,7 @@ class ModelClient:
             parsed: Any = None
             error_code = None
             network_class = "network error"
+            log_start = len(self.log.calls)
             try:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
@@ -500,6 +511,10 @@ class ModelClient:
                     outcome = "unknown"
                     unknown_outcome()
                 last = _scrub(f"{type(reason).__name__}: {reason}")[:300]
+            # Count an answer before the limiter, reservation settlement or ledger can fail.
+            if outcome == "ok":
+                self.log.add(model, kind, key, cached=False,
+                             cost_usd=usage_cost_usd(parsed.get("usage")) if usage_cost_usd else None)
             seconds = policy.clock() - started
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
                 or attempt == policy.max_attempts
@@ -509,6 +524,8 @@ class ModelClient:
             # Others on the key are held off only for a wait this call really starts (the limiter caps it again).
             limiter.release(slot, ok=outcome == "ok", rate_limited=status == 429,
                             hold_s=0.0 if final or gives_up else wait)
+            if self.after_api_attempt is not None:
+                self.after_api_attempt(self.log.cost_usd(log_start))
             self._ledger({"model": model, "endpoint": endpoint, "key": key, "attempt": attempt, "status": status,
                           "outcome": outcome, "seconds": round(seconds, 3), "slot_wait_s": round(slot_wait, 3),
                           "wait_s": None if final or gives_up else round(wait, 3), "wait_reason": why or None,

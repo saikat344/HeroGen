@@ -44,11 +44,8 @@ HAIR_GATE = {"iou_min": 0.85, "scale_max_change": 0.10, "agree_min": 0.80}
 HAIR_ATTEMPTS = 2
 HAIR_BONUS = 2.0       # hair views take texels from earlier, softer passes of the same camera
 FACE_KEEP_PX = 12      # hair views never write the render's SAM 3.1 face mask grown by this (per 1024)
-# Inside the render's SAM 3.1 `head` mask a hair view writes only where SAM 3.1 sees `hair` both on the sharp repaint
-# and (grown by HAIR_GROW_PX) on the render: on s003 (bald) RF3H painted blond hair over the scalp, which SAM 3.1
-# rightly calls hair on the repaint and which the colour agreement cannot see. On renders that already carry rf2r's
-# strands, 70-100% of the repaint's hair lies inside the grown render hair (s001, s004, s015 head views).
-HAIR_GROW_PX = 15
+# Every pass preserves pixels where the render and repaint disagree about hair. Hair-mode writes inside
+# the render head additionally require hair in both masks; colour agreement alone cannot protect a bald scalp.
 
 
 def grey(a):
@@ -154,19 +151,19 @@ def part_gate(parts_r, parts_e, fig):
     return ok, rec, disagree
 
 
-def hair_allowed(client, inp, edit, mapx, mapy, shape):
-    """Hair mode: False inside the render's head mask except where both the repaint and the render show hair."""
+def hair_allowed(client, inp, edit, mapx, mapy, shape, *, hair_only=True):
+    """Every pass preserves hair disagreements; hair passes also protect non-hair head pixels."""
     head = np.zeros(shape, bool)
-    for inst in client.segment(inp, "head"):
-        head |= inst.mask
+    if hair_only:
+        for inst in client.segment(inp, "head"):
+            head |= inst.mask
     render_hair = np.zeros(shape, bool)
     for inst in client.segment(inp, "hair"):
         render_hair |= inst.mask
     hair = part_masks_text(client, edit, "hair", mapx, mapy)
-    scale = max(shape) / 1024
-    hair = ndimage.binary_dilation(hair, iterations=max(1, round(3 * scale)))
-    hair &= ndimage.binary_dilation(render_hair, iterations=max(1, round(HAIR_GROW_PX * scale)))
-    return ~(head & ~hair)
+    both = hair & render_hair
+    allowed = ~(hair ^ render_hair)
+    return allowed & ~(head & ~both) if hair_only else allowed
 
 
 def part_masks_text(client, image, text, mapx, mapy):
@@ -307,7 +304,7 @@ class Texture:
         k = px_per_unit(cam)
         eps = 3.0 / k + 0.001 * self.height
         front = ndimage.minimum_filter(np.where(valid_img, depth_img, np.inf), size=VIS_WINDOW)
-        vis = inside & valid_img[yi, xi] & (d <= front[yi, xi] + eps)
+        vis = inside & valid_img[yi, xi] & (d <= front[yi, xi] + eps) & (weight_mask[yi, xi] > 0)
         _, _, fwd = axes(cam)
         cos = np.clip(-(self.N @ fwd), 0, 1)
         q = cos ** 2 * k * bonus

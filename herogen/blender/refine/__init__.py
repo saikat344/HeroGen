@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import uuid
 from pathlib import Path
 
 from PIL import Image
@@ -12,6 +13,7 @@ from PIL import Image
 from herogen.blender.record import StageRecord, check
 from herogen.blender.stage3 import error_text
 from herogen.pipeline.client import COST_BASIS, IMAGE_MODEL, SAM_MODEL, PRICE_PER_IMAGE_USD, ModelClient
+from herogen.refine_budget import BudgetStop, update as update_budget
 
 STAGE = "3f"
 DEFAULT_CAP_USD = 0.80
@@ -22,21 +24,41 @@ HAIR_ORDER = ("head+90", "head+135", "head+180", "head-135", "head-90",
               "upper+135", "upper+180", "upper-135")
 
 
-class BudgetStop(RuntimeError):
-    """The next API attempt's projected list-price cost would exceed this run's cap."""
-
-
 class Budget:
-    def __init__(self, client, cap, prior=0.0):
+    def __init__(self, client, cap, prior=0.0, *, state=None, store=None):
         if not math.isfinite(cap) or cap < 0:
             raise ValueError("texture-refine API cap must be finite and nonnegative")
         if not math.isfinite(prior) or prior < 0:
             raise ValueError("texture-refine prior spend must be finite and nonnegative")
         self.client, self.cap, self.prior = client, cap, prior
         self.start = len(client.log.calls)
+        self.store = store
+        self.state = state if state and "attempts" in state else None
+        self.active = None
+        self._update("read")
+
+    def _update(self, action, **kwargs):
+        if self.store is None:
+            self.state = update_budget(self.state, action, cap=self.cap, prior=self.prior, **kwargs)
+        else:
+            self.state = self.store(action, cap=self.cap, prior=self.prior, **kwargs)
+        return self.state
 
     def spent(self):
-        return round(self.prior + self.client.log.cost_usd(self.start), 6)
+        return max(self.state["spent_usd_total"], round(self.prior + self.client.log.cost_usd(self.start), 6))
+
+    def reserve(self, model):
+        self.before_attempt(model)
+        token = uuid.uuid4().hex
+        if not self._update("reserve", token=token, amount=PRICE_PER_IMAGE_USD[model])["allowed"]:
+            raise BudgetStop(f"API cap: next attempt exceeds ${self.cap:.4f}")
+        self.active = token
+
+    def settle(self, cost):
+        if self.active is None:
+            raise ValueError("no active refinement reservation")
+        self._update("settle", token=self.active, amount=cost)
+        self.active = None
 
     def before_attempt(self, model):
         price = PRICE_PER_IMAGE_USD[model]
@@ -49,7 +71,7 @@ def cost_estimate(maximum=False):
     """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
     normal, hair = (3, 2) if maximum else (1, 1)
     images = len(REFINE_ORDER) * normal + len(HAIR_ORDER) * hair
-    segments = 2 + len(REFINE_ORDER) * (1 + normal) + len(HAIR_ORDER) * (1 + hair + 3)
+    segments = 2 + len(REFINE_ORDER) * (1 + normal + 2) + len(HAIR_ORDER) * (1 + hair + 3)
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
 
 
@@ -112,6 +134,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover)
             weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy, parts["face"])
         else:
             weight = (~ndimage.binary_dilation(figure ^ fig_e, iterations=4)).astype(np.float32)
+            weight *= I.hair_allowed(client, inp, edit, mapx, mapy, figure.shape, hair_only=False)
         feather = I.feather_map(alpha, depth, valid, px_per_unit(cam), tex.height)
         record["texels"] = tex.apply(cam, refined, feather, depth, valid, weight, I.HAIR_BONUS if hair else 1.0)
         for name, arr in (("refined", refined), ("weight", weight)):
@@ -122,7 +145,8 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover)
     return current
 
 
-def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0):
+def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
+                budget_store=None):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -132,10 +156,16 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     rec = StageRecord(run, STAGE, "texture refine")
     record_path = run / "stage-3f.json"
     prior = 0.0
+    old_budget = None
     if record_path.exists():
         old = json.loads(record_path.read_text())
         prior = float((old.get("budget") or {}).get("spent_usd_total", old.get("cost_usd") or 0.0))
-    budget = Budget(client, cap_usd, prior)
+        old_budget = old.get("budget")
+    if budget_store is None and os.environ.get("HEROGEN_REFINE_BUDGET_REQUEST_FD"):
+        from herogen.service.refine_budget import remote_budget
+        budget_store = remote_budget
+    budget = Budget(client, cap_usd, prior, state=old_budget, store=budget_store)
+    prior = budget.state["spent_usd_total"]
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(), estimate_max_samples_usd=cost_estimate(True),
                     recipes=["RF2R", "RF3H"], texture_size=4096, final_model="03-source.glb",
@@ -146,25 +176,30 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     output = run / "03-refined.glb"
     pending = run / "03-refined.part.glb"
     previous_guard = client.before_api_attempt
+    previous_settle = client.after_api_attempt
 
     def guard(model):
         budget.before_attempt(model)
         if previous_guard is not None:
             previous_guard(model)
-        # Reserve the in-flight attempt durably. If the worker dies, its next invocation counts this
-        # unresolved attempt toward the same run's cap; an ordinary finish replaces it with logged cost.
-        price = PRICE_PER_IMAGE_USD[model]
-        save(ok=False, status="running", budget={"cap_usd": cap_usd, "prior_usd": prior,
-                                                "spent_usd_total": round(budget.spent() + price, 6),
-                                                "pending_attempt_usd": price})
+        budget.reserve(model)
+        save(ok=False, status="running")
+
+    def settle(cost):
+        budget.settle(cost)
+        save(ok=False, status="running")
+        if previous_settle is not None:
+            previous_settle(cost)
 
     def save(**extra):
         rec.data.update(cost_usd=client.log.cost_usd(start), models=client.log.models(start),
-                        calls=client.log.calls[start:], budget={"cap_usd": cap_usd, "prior_usd": prior,
+                        calls=client.log.calls[start:], budget={**budget.state, "cap_usd": cap_usd,
+                                                              "prior_usd": prior,
                                                               "spent_usd_total": budget.spent()})
         return rec.finish(extra)
 
     client.before_api_attempt = guard
+    client.after_api_attempt = settle
     current_record = None
     try:
         save(ok=False, status="running")
@@ -232,4 +267,5 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         raise
     finally:
         client.before_api_attempt = previous_guard
+        client.after_api_attempt = previous_settle
         pending.unlink(missing_ok=True)

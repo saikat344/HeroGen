@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -114,6 +115,7 @@ class StageContext:
     blender_timeout_s: float = 3 * 3600.0
     env: dict[str, str] = field(default_factory=dict)
     refine_cap_usd: float = 0.80
+    refine_budget: Callable | None = None
 
     @property
     def runs_root(self) -> Path:
@@ -352,8 +354,10 @@ class CliRunner:
         extra = dict(ctx.env)
         if (spec.group in ("model", "heldout") or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
-        with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
-            env = base_env({"HOME": home, **extra})
+        from herogen.service.refine_budget import budget_bridge
+        bridge = budget_bridge(ctx.refine_budget) if spec.key == "3f" and ctx.refine_budget else nullcontext({})
+        with bridge as budget_env, tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
+            env = base_env({"HOME": home, **extra, **budget_env})
             argv, stdin = self.command(spec, ctx, env, Path(home))
             for stale in (spec.record, *spec.extra):
                 p = ctx.run_dir / stale
@@ -365,7 +369,8 @@ class CliRunner:
             try:
                 proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
                                       timeout=timeout, env=env,
-                                      cwd=home)
+                                      cwd=home, **({"pass_fds": tuple(map(int, budget_env.values()))}
+                                                   if budget_env else {}))
                 out, err, code = proc.stdout, proc.stderr, proc.returncode
             except subprocess.TimeoutExpired as e:
                 timed_out = True

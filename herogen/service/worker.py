@@ -312,6 +312,8 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
         return GroupResult("error", mine[0][1].key, "restarts", "A worker was restarted too many times.", False)
     prior = {r["stage"]: r for r in store.job_stages(jid)}
     ctx = workdir.open()
+    ctx.refine_budget = lambda action, **kwargs: store.job_refine_budget(jid, attempt, action, **{
+        **kwargs, "cap": settings.refine_cap_usd})
     try:
         for index, spec in mine:
             if not store.job_current(jid, attempt):
