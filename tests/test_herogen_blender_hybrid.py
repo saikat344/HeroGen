@@ -828,7 +828,9 @@ class TestStage4HybridBlender(HybridBase):
         self.assertEqual(chk["sections_non_empty"]["value"], 15)
         self.assertTrue(chk["rest_iou_with_covers_front"]["gate"])
         for v in ("back", "left", "right"):
-            self.assertTrue(chk[f"rest_iou_with_covers_{v}"]["gate"], v)      # observed: gated
+            self.assertTrue(chk[f"rest_iou_with_covers_{v}"]["gate"], v)
+            self.assertEqual(chk[f"rest_iou_with_covers_{v}"]["reference"], "stage3_mesh")
+            self.assertFalse(chk[f"rest_iou_with_covers_turnaround_{v}"]["gate"], v)
             self.assertTrue(chk[f"texture_colour_error_{v}"]["gate"], v)      # colour seen: still gated
         self.assertTrue(chk["triangles_high"]["gate"])
         self.assertLessEqual(chk["triangles_high"]["value"], 24000)
@@ -850,7 +852,8 @@ class TestStage4HybridBlender(HybridBase):
         self.assertEqual(set(scores), {"hybrid", "hybrid-no-source-fallback", "hybrid-side-trust"})
         hyb = scores["hybrid"]
         for v in ("front", "back", "left", "right"):
-            self.assertAlmostEqual(hyb["views"][v]["iou"], chk[f"rest_iou_with_covers_{v}"]["value"], delta=0.003)
+            iou_check = f"rest_iou_with_covers_{v}" if v == "front" else f"rest_iou_with_covers_turnaround_{v}"
+            self.assertAlmostEqual(hyb["views"][v]["iou"], chk[iou_check]["value"], delta=0.003)
             self.assertAlmostEqual(hyb["views"][v]["colour_error"], chk[f"texture_colour_error_{v}"]["value"],
                                    delta=1.0)
             self.assertAlmostEqual(hyb["views"][v]["ssim"], chk[f"texture_ssim_{v}"]["value"], delta=0.03)

@@ -154,8 +154,9 @@ def load_mesh(path):
 
 
 def task_silhouettes(t):
+    reset_scene()
+    verts, faces = load_any_mesh(t["mesh"])
     scene = reset_scene()
-    verts, faces = load_mesh(t["mesh"])
     obj = make_object("BaseMesh", verts, faces, color=(0.7, 0.7, 0.72))
     out = {"glb": None, "renders": {}}
     if t.get("glb"):

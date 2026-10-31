@@ -149,6 +149,17 @@ LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot`.
 }
 ```
 
+**Rest silhouette gate.** `rest_iou_with_covers_<view>` requires IoU >= 0.90 after sectioning and adding
+covers, on every non-derived view. A view in stage 3's `shape_views` still uses the turnaround mask
+(`reference: "turnaround"`); all observed carve views therefore keep their previous checks. Other observed
+views use the stage 3 mesh's own silhouette (`reference: "stage3_mesh"`). Stage 4 renders the mesh it receives
+(after registration, before decimation or cutting), using stage 3's Blender silhouette renderer and the exact
+same `View.camera()` definitions as the sectioned rest body. The reference renders live under
+`04-body/rest-renders/stage3-mesh/`; cached `03-renders` are not reused. Turnaround IoU on these views remains
+in `rest_iou_with_covers_turnaround_<view>` with `gate: false` and the shape-not-built-from-this-view note.
+Derived visual-hull views keep their ungated turnaround comparison. `rest_iou_with_covers` in the body records
+holds the IoUs against each view's selected reference. Pivots, joint gaps and texture gates are separate.
+
 **Cuts and pivots.** Each cut is a plane through a joint (`herogen/blender/split.py`); the pivot is the area
 centroid of the child's largest opening there (largest by area), so it depends only on the cut's shape, not on
 how densely the mesh is sampled along it (the mean of the opening's vertices, used before, moved the
@@ -287,7 +298,7 @@ carve check let through.
 the views the shape was built from, and `pose_views`, the views the hybrid's pitch was registered on.
 Stage 3 records every observed and derived silhouette IoU against the historical 0.90 threshold with
 `gate: false`. Views not used for shape construction retain their provenance notes. Stage 4 separately
-still gates observed rest IoU and observed colour fidelity; stage-3 acceptance alone does not certify
+still gates rest shape preservation and observed colour fidelity; stage-3 acceptance alone does not certify
 that a game body will pass stage 4.
 
 **The hybrid's pitch is registered on the side views.** The front silhouette barely reacts to a tilt about X, so a
@@ -358,7 +369,9 @@ tails/packs can bias its pitch before the later depth translation. Translation c
 turnarounds rendered from exact model masks the reconstructed side views stay 0.51-0.73 whatever the pitch,
 the figure too thin front to back. The remesh can drop thin parts and front detail (one source: front 0.952
 after conform, 0.794 after remeshing), so the front can move with small changes of pitch.
-Stage 4 can still be run on such a mesh with `--force`; its rest IoU gates fail the same way. A failed hybrid build (including either unavailable SAM 3D source or Blender export failure) retries once
+Stage 4 can still be run on such a mesh with `--force`; its front rest IoU gate still compares with the
+turnaround, while other observed views check preservation of the received mesh. A failed hybrid build
+(including either unavailable SAM 3D source or Blender export failure) retries once
 with `carve` and `silhouette`. `fallback` records the constructor transition and reason,
 `mesh_source_requested` and `joints_source_requested` preserve the request, and the notes and CLI say so.
 Both attempts share cost accounting. A completed quality rejection never triggers this retry; `--no-fallback` stops the stage instead, with a one-line error.
