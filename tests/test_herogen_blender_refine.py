@@ -730,6 +730,18 @@ bpy.ops.export_scene.gltf(filepath=str(Path(__file__).with_name("source.glb")), 
                 np.testing.assert_allclose(np.unique(before.meshes[0].verts[:, axis]),
                                            np.unique(after.meshes[0].verts[:, axis]), atol=1e-6)
             self.assertIn((4096, 4096), after.image_sizes)
+            # Smooth normals across the source's split vertices: every copy of a corner carries one normal, the
+            # cube's diagonal, so a viewer never lights the faces flat.
+            from herogen.blender import glb as G
+            doc, binary = G._chunks((root / "refined.glb").read_bytes())
+            attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+            self.assertIn("NORMAL", attrs)
+            pos = G._accessor(doc, binary, attrs["POSITION"]).round(5)
+            nrm = G._accessor(doc, binary, attrs["NORMAL"])
+            for p in np.unique(pos, axis=0):
+                at = nrm[(pos == p).all(axis=1)]
+                np.testing.assert_allclose(at, np.repeat(at[:1], len(at), axis=0), atol=1e-3)
+                self.assertGreater(np.abs(at[0]).min(), 0.3)
             cam = cameras.camera("front", [0.2, -0.3, .7], 0, 2, (128, 128))
             blender("render", {"blend": str(root / "prep/work.blend"), "texture": str(root / "prep/base.png"),
                                "cams": [cam], "out": str(root / "render"), "pos": True}, log)

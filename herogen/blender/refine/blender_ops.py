@@ -4,12 +4,15 @@ import math
 import sys
 from pathlib import Path
 
+import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector
 
 POS_LO = -2.0
 POS_EXT = 4.0   # the position pass stores (p - POS_LO) / POS_EXT, so world coordinates in [-2, 2] fit [0, 1]
+SMOOTH_ANGLE_DEG = 180.0  # exported normals stay sharp only across creases sharper than this (180: none)
+MERGE_DIST = 1e-6  # source vertices closer than this (scene units) are one vertex split at a UV seam
 
 
 def reset(engine="BLENDER_WORKBENCH"):
@@ -345,7 +348,17 @@ def export(a):
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
-    bpy.ops.export_scene.gltf(filepath=a["out"], export_format="GLB", export_image_format="AUTO", export_texcoords=True, export_normals=False,
+    # Without normals a viewer must light every triangle flat, and a coarse face then splits into lit and unlit
+    # facets. The source arrives split at its UV seams, so join coincident vertices first (UVs live on face
+    # corners and survive), then smooth everywhere except creases sharper than SMOOTH_ANGLE_DEG.
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=MERGE_DIST)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.shade_smooth()
+    obj.data.set_sharp_from_angle(angle=math.radians(SMOOTH_ANGLE_DEG))
+    bpy.ops.export_scene.gltf(filepath=a["out"], export_format="GLB", export_image_format="AUTO", export_texcoords=True, export_normals=True,
                               export_materials="EXPORT", export_yup=True, use_selection=True)
 
 
