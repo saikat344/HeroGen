@@ -323,6 +323,48 @@ class TestServicePage(TempDirCase):
         t.wait("!document.querySelector('#entry').hidden")
         self.assertEqual(t.eval("document.querySelector('#prompt').value"), '')
 
+    def test_uncertain_request_restores_current_input_and_retires_conflicted_key(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        t.eval("document.querySelector('#prompt').value='Original idea'; document.querySelector('#jobForm').requestSubmit()")
+        t.wait("document.querySelector('#signinDialog').open")
+        self.signin()
+        t.eval("""(() => {
+            const original=window.fetch;
+            window.fetch=(url, options) => url === '/api/jobs' && options?.method === 'POST'
+                ? Promise.resolve(new Response(JSON.stringify({error:{message:'Busy'}}), {status:503}))
+                : original(url,options);
+            document.querySelector('#prompt').value='Revised emerald knight';
+            document.querySelector('#jobForm').requestSubmit();
+        })()""")
+        t.wait("/busy/.test(document.querySelector('#jobMsg').textContent)")
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        self.assertEqual(t.eval("document.querySelector('#prompt').value"), 'Revised emerald knight')
+        self.assertTrue(t.eval("/not confirmed/.test(document.querySelector('#jobMsg').textContent)"))
+        t.eval("""(() => {
+            const original=window.fetch;
+            window.fetch=(url, options) => url === '/api/jobs' && options?.method === 'POST'
+                ? Promise.resolve(new Response(JSON.stringify({error:{message:'Conflict'}}), {status:409}))
+                : original(url,options);
+            document.querySelector('#jobForm').requestSubmit();
+        })()""")
+        t.wait("/Check Your heroes/.test(document.querySelector('#jobMsg').textContent)")
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        self.assertIsNone(t.eval("sessionStorage.getItem('hg-pending-job')"))
+        self.assertEqual(t.eval("document.querySelector('#prompt').value"), 'Revised emerald knight')
+
+    def test_signin_page_header_can_request_another_link(self):
+        t = self.tab
+        t.goto(self.url + '/signin')
+        t.wait("/incomplete/.test(document.querySelector('#verifyWho').textContent)")
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("document.querySelector('#signinDialog').open")
+        t.eval("document.querySelector('#closeSignin').click(); document.querySelector('#howButton').click()")
+        self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
+
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""
         self.tab.eval("""(() => {
