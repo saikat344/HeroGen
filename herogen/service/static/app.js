@@ -8,22 +8,29 @@ const $ = (s) => document.querySelector(s);
 const S = { csrf: null, session: null, current: null, timer: null };
 let entry;
 function signIn() { show('#signin'); $('#signinDialog').showModal(); }
-async function keepDraft() {
-  const file = entry.file();
-  await draftStore('put', { prompt: $('#prompt').value, name: $('#name').value, profile: $('#profile').value,
-    file, pending: loadPending(), saved: Date.now() });
+async function keepDraft(values = null) {
+  const fields = values || { prompt: $('#prompt').value, name: $('#name').value,
+    profile: $('#profile').value, file: entry.file() };
+  const pending = loadPending();
+  if (!fields.prompt.trim() && !fields.name.trim() && !fields.file && !pending) return draftStore('delete');
+  await draftStore('put', { ...fields, pending, saved: Date.now() });
 }
 async function restoreDraft() {
   try {
     const d = await draftStore('get');
     if (!d || Date.now() - d.saved > 24 * 3600 * 1000) { if (d) await draftStore('delete'); return; }
+    const pending = loadPending();
+    // A failed storage write must never restore an older input under a newer request key.
+    if (pending && (!d.pending || d.pending.key !== pending.key || d.pending.hash !== pending.hash || d.pending.revision !== pending.revision)) return;
     $('#prompt').value = typeof d.prompt === 'string' ? d.prompt : '';
     $('#name').value = typeof d.name === 'string' ? d.name : '';
     if (S.session.limits.profiles.includes(d.profile)) $('#profile').value = d.profile;
     if (d.file instanceof Blob) entry.setFile(d.file);
     if (d.pending && !loadPending()) savePending(d.pending);
     $('#prompt').dispatchEvent(new Event('input'));
-    $('#jobMsg').textContent = 'Your draft is ready. Review it, then create your hero.';
+    $('#jobMsg').textContent = loadPending()
+      ? 'An earlier hero was not confirmed. Retry this saved input to recover it without starting a second hero.'
+      : 'Your draft is ready. Review it, then create your hero.';
   } catch { /* A fresh form remains usable without browser storage. */ }
 }
 
@@ -254,16 +261,18 @@ function initJobs() {
       if (Array.from(prompt.value).length > limit) { msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
       fd.append('prompt', prompt.value);
     }
+    const values = { prompt: prompt.value, name: $('#name').value, profile: sel.value, file };
     if (!S.session.signed_in) {
-      try { await keepDraft(); msg.textContent = 'Your draft is saved. Sign in to create your hero.'; }
+      try { await keepDraft(values); msg.textContent = 'Your draft is saved. Sign in to create your hero.'; }
       catch { msg.textContent = 'Browser storage is unavailable. Keep this tab open and return here after signing in to keep your draft.'; }
       signIn(); return;
     }
     $('#go').disabled = true; msg.textContent = 'Starting…';
-    const hash = await formHash(kind, sel.value, $('#name').value, $('#prompt').value, file);
+    const hash = await formHash(kind, values.profile, values.name, values.prompt, file);
     const earlier = loadPending();
     const key = earlier ? earlier.key : idemKey();
-    savePending({ key, hash: earlier ? earlier.hash : hash });
+    savePending({ key, hash: earlier ? earlier.hash : hash, revision: idemKey() });
+    await keepDraft(values).catch(() => banner('Your retry draft could not be saved. Keep this tab open until your hero is confirmed.'));
     try {
       const j = await api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
       clearPending();
@@ -275,6 +284,7 @@ function initJobs() {
     } catch (e) {
       if (e.status === 409) {
         clearPending();
+        await keepDraft(values).catch(() => draftStore('delete').catch(() => {}));
         msg.textContent = earlier && earlier.hash !== hash
           ? 'Your earlier, unconfirmed hero from this tab was saved, so this different one was not started: check Your heroes, then make it again.'
           : `${e.message} Check Your heroes.`;
@@ -285,7 +295,7 @@ function initJobs() {
         msg.textContent = e.message;
         if (e.status === 401) {
           S.session.signed_in = false;
-          try { await keepDraft(); } catch { msg.textContent += ' Keep this tab open to preserve your draft.'; }
+          try { await keepDraft(values); } catch { msg.textContent += ' Keep this tab open to preserve your draft.'; }
           signIn();
         }
       }
@@ -318,11 +328,9 @@ async function signedIn() {
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
-  show('#loading', false);
-  if (location.pathname === '/signin') return initVerify();
   initSignin(); initJobs();
   $('#headerSignIn').addEventListener('click', async () => {
-    try { await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
+    try { if (location.pathname !== '/signin') await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
     signIn();
   });
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
@@ -330,8 +338,10 @@ async function boot() {
     try { await api('/api/auth/logout', { method: 'POST', json: {} }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
     catch (e) { banner(e.message); }
   });
+  $('#headerSignIn').disabled = false;
+  if (location.pathname === '/signin') { show('#loading', false); return initVerify(); }
   await restoreDraft();
-  show('#entry'); $('#headerSignIn').disabled = false;
+  show('#loading', false); show('#entry');
   if (S.session.signed_in) await signedIn();
   window.addEventListener('focus', async () => {
     if (S.session.signed_in) return;

@@ -81,7 +81,7 @@ pre.legal { font: inherit; background: none; padding: 0; }
 /* The entry page shares the workshop's accessible controls and status colours. */
 :root { color-scheme: light; --bg:#f7f3eb; --card:#fcf9f2; --ink:#17121c; --muted:#696570; --line:#cfc5b6; --accent:#ce3916; --bad:#ad2828; --ok:#337343; --warn:#946511; }
 html { scroll-behavior:smooth; }
-body { background-color:var(--bg); background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23846c48' opacity='.055' filter='url(%23n)' d='M0 0h180v180H0z'/%3E%3C/svg%3E"); font-family:Arial,Helvetica,sans-serif; }
+.entry-page { background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23846c48' opacity='.055' filter='url(%23n)' d='M0 0h180v180H0z'/%3E%3C/svg%3E"); font-family:Arial,Helvetica,sans-serif; background-color:var(--bg); }
 .top, main, .foot { max-width:1600px; width:calc(100% - 9%); margin-inline:auto; }
 .top { padding:12px 0; min-height:72px; border-color:#8b827b; background:transparent; gap:20px; }
 .brand { display:flex; align-items:center; gap:16px; font:700 32px Georgia,serif; letter-spacing:-1.3px; white-space:nowrap; }
@@ -172,3 +172,5 @@ body { overflow-x:clip; }
 @media(max-width:760px) { h1#entryH { font-size:clamp(43px,9vw,68px); } }
 .template img { object-position:50% 0%; }
 @media(min-width:761px) { .hero-art img { height:100%; top:-1%; } }
+
+main.doc { padding:20px 16px 40px; }

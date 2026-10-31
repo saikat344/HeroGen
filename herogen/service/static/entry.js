@@ -15,12 +15,12 @@ export function entryPage($, onChange) {
     if (preview) URL.revokeObjectURL(preview);
     preview = file ? URL.createObjectURL(file) : null;
     if (preview) $('#uploadPreview').src = preview; else $('#uploadPreview').removeAttribute('src');
-    $('#uploadName').textContent = file ? file.name : '';
+    $('#uploadName').textContent = file ? (file.name || 'Your character image') : '';
     $('#sketchIn').hidden = !file;
     $('#promptIn').hidden = !!file;
     $('#promptCount').hidden = !!file;
     document.querySelector(`input[name=kind][value=${file ? 'sketch' : 'prompt'}]`).checked = true;
-    if (!file) $('#sketch').value = '';
+    $('#sketch').value = '';
     for (const b of document.querySelectorAll('[data-idea]')) b.setAttribute('aria-pressed', 'false');
     onChange();
   }
