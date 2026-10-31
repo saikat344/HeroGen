@@ -347,23 +347,34 @@ SHEET_SIZE = "2560x1024"  # aspect only (Muse Image fixes the resolution); room 
 
 
 def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, fig_method: str) -> dict[str, Any]:
-    """Find the four figures' column extents in the SAM mask and cut them out (`panel0`..`panel3`, left to
-    right), each with its SAM mask.
+    """Find the four figures and cut them out (`panel0`..`panel3`, left to right), with completed SAM masks.
 
-    Only the SAM mask is used: when its columns don't give four figures the sheet has no views (and fails
-    `figures_found`). ``thr_mask`` (background threshold) is only the reference for `sam_coverage` per view,
-    which a gated check compares with C.SAM_COVERAGE_MIN, so a figure SAM missed fails the gate instead of
-    being measured on another mask.
+    Complete attached foreground before finding crop bounds, so held props are not clipped from the
+    stored images. SAM must still find four figures: missing figures never acquire a seed. ``thr_mask``
+    is the coverage reference; coverage uses the original SAM pixels, before completion, so a figure SAM
+    missed still fails C.SAM_COVERAGE_MIN.
     """
     names = [f"panel{i}" for i in range(len(SIDE_VIEWS))]
-    runs = imaging.split_columns(fig_mask, expected=len(names)) if fig_mask.any() else []
+    sam = fig_mask
+    runs = imaging.split_columns(sam, expected=len(names)) if sam.any() else []
     out: dict[str, Any] = {"runs": runs, "split_source": fig_method, "views": {}, "sam_coverage": {}}
     if len(runs) != len(names):
         return out
+    completion = {"method": "attached_foreground"}
+    try:
+        done = imaging.complete_attached_foreground(sheet, sam)
+    except ValueError as e:  # not a plain white sheet: keep SAM's mask and say why
+        done, completion = None, {"method": "none", "reason": str(e)}
+    done_runs = imaging.split_columns(done, expected=len(names)) if done is not None else []
+    if done is not None and len(done_runs) != len(names):  # a prop bridged two figures
+        done, completion = None, {"method": "none", "reason": "completion merged figures"}
+    if done is not None:
+        fig_mask, runs = done, done_runs
+    out["runs"] = runs
     combined = np.zeros_like(fig_mask)
     for (x0, x1), name in zip(runs, names, strict=True):
         combined[:, x0:x1] = fig_mask[:, x0:x1]
-        out["sam_coverage"][name] = round(sam_coverage(fig_mask[:, x0:x1], thr_mask[:, x0:x1]), 4)
+        out["sam_coverage"][name] = round(sam_coverage(sam[:, x0:x1], thr_mask[:, x0:x1]), 4)
     # Side views share the sheet's row range, so their feet stay on one baseline after the crop.
     boxes = [imaging.bbox(combined[:, x0:x1]) for x0, x1 in runs]
     y0 = min(b[1] for b in boxes if b)
@@ -373,6 +384,7 @@ def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, 
             "image": sheet.crop((x0, y0, x1, y1)),
             "mask": combined[y0:y1, x0:x1],
             "mask_method": fig_method,
+            "mask_completion": {**completion, "added_pixels": int((fig_mask[:, x0:x1] & ~sam[:, x0:x1]).sum())},
             "sheet_box": [x0, y0, x1, y1],
         }
     return out
@@ -449,9 +461,15 @@ def orient_sides(sq: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], d
 
 def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
     """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width).
-    Its mask is SAM 3.1's; when SAM finds nothing in it, ``mask`` is None and the drawn view is not used."""
+    Complete attached foreground on its SAM seed; when SAM finds nothing, ``mask`` is None and the drawn
+    view is not used."""
     img = client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
-    mask, method, _ = sam_figure_mask(client, img)
+    sam, method, _ = sam_figure_mask(client, img)
+    completion = {"method": "attached_foreground"}
+    try:
+        mask = imaging.complete_attached_foreground(img, sam)
+    except ValueError as e:  # not a plain white image: keep SAM's mask and say why
+        mask, completion = sam, {"method": "none", "reason": str(e)}
     tb = imaging.bbox(mask)
     fb = imaging.bbox(sq["front"]["mask"])
     if tb is None or fb is None:
@@ -467,7 +485,8 @@ def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], 
     tile.paste(crop.resize(new, Image.LANCZOS), (0, 0), scaled_mask)
     square = imaging.paste_centred(tile, size, bg, new[0] / 2, new[1] / 2)
     smask = imaging.from_mask_image(imaging.paste_centred(scaled_mask, size, 0, new[0] / 2, new[1] / 2))
-    return {"raw": img, "image": square, "mask": smask, "mask_method": method, "scale": round(scale, 4)}
+    return {"raw": img, "image": square, "mask": smask, "mask_method": method, "scale": round(scale, 4),
+            "mask_completion": {**completion, "added_pixels": int((mask & ~sam).sum())}}
 
 
 def hull_top_view(sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
@@ -667,7 +686,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     st.notes += orient_notes + top_notes
     if top is not None:
         st.save_image("02-top-drawn.png", top_raw)
-        sq["top"] = {"image": top["image"], "mask": top["mask"], "mask_method": top["mask_method"]}
+        sq["top"] = {k: top[k] for k in ("image", "mask", "mask_method", "mask_completion") if k in top}
     if not sq:
         st.notes.append("Could not split the sheet into four figures.")
         return st.finish()
@@ -689,6 +708,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         "views": list(ALL_VIEWS),
         "mask_method": {n: method_kind(sq[n]["mask_method"]) for n in ALL_VIEWS},
         "mask_method_detail": {n: sq[n]["mask_method"] for n in ALL_VIEWS},
+        "mask_completion": {n: sq[n]["mask_completion"] for n in ALL_VIEWS if "mask_completion" in sq[n]},
         "top_method": st.details["top_method"],
     }
     run.write_json("views/meta.json", meta)
@@ -703,6 +723,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         "image_size": size,
         "mask_method": meta["mask_method"],
         "mask_method_detail": meta["mask_method_detail"],
+        "mask_completion": meta["mask_completion"],
         "bbox_sizes_px": C.bbox_sizes({n: v["mask"] for n, v in sq.items()}),
     })
     return st.finish()
