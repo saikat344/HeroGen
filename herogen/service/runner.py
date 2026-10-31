@@ -382,20 +382,30 @@ class CliRunner:
         if spec.key == "p":
             # Stage p's records and model errors can contain the description. Use their status for decisions,
             # never their text as a message or log detail, including output from a killed subprocess.
-            if rec and rec.get("ok") is True and not timed_out:
+            if (code == 0 and rec and rec.get("ok") is True and "status" not in rec and "error" not in rec
+                    and not timed_out):
                 return Outcome("passed", seconds, cost)
-            if not timed_out and (code in (2, 3, 4) or (rec and rec.get("status") == "input_rejected")):
+            gate = (code == 6 and rec and rec.get("ok") is False and rec.get("status") == "gate_failed"
+                    and "error" not in rec and isinstance(rec.get("checks"), list)
+                    and all(isinstance(check, dict) for check in rec["checks"]) and failed_checks(rec))
+            # prompt_sketch writes input rejection via fail(status="input_rejected") and policy errors
+            # via fail() (status="error"). Only the adapter's structured exception code identifies policy.
+            refusal = (code in (3, 4) and rec and rec.get("ok") is False
+                       and rec.get("status") == {3: "input_rejected", 4: "error"}[code]
+                       and isinstance(rec.get("error"), str) and bool(rec["error"]))
+            if not timed_out and (gate or refusal):
                 status = {3: "input_rejected", 4: "content_policy"}.get(code)
                 safe = {"status": status or (rec or {}).get("status")}
                 # Gate checks come from the record; input and policy refusals need no model-supplied text.
-                if code == 2 and rec:
+                if gate:
                     safe["checks"] = rec.get("checks")
                 return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected")
             if not timed_out and code == 5:
                 return Outcome("failed", seconds, cost, "The image model service did not answer properly.",
                                "model_unavailable", True)
             code_s, message, transient = describe_error(spec, "", timed_out)
-            return Outcome("failed", seconds, cost, message, code_s, transient)
+            detail = f"stage p failed: exit_code={code}; timed_out={timed_out}; record_present={rec is not None}"
+            return Outcome("failed", seconds, cost, message, code_s, transient, detail=detail)
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
         if rec is not None and rec.get("ok") is False and rec.get("error") and not timed_out:

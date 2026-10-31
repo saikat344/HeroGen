@@ -237,9 +237,11 @@ class PromptJobTest(JobCase):
                 self.assertEqual(self.go(job), "failed")
         self.assertNotIn(self.description, "\n".join(logs.output))
         out = CliRunner.outcome(spec, ctx, 1, 1, self.description, self.description, False)
-        self.assertEqual((out.state, out.detail), ("failed", ""))
+        self.assertEqual(out.state, "failed")
+        self.assertIn("exit_code=1", out.detail)
         out = CliRunner.outcome(spec, ctx, 1, -1, self.description, self.description, True)
-        self.assertEqual((out.state, out.code, out.detail), ("failed", "timeout", ""))
+        self.assertEqual((out.state, out.code), ("failed", "timeout"))
+        self.assertIn("timed_out=True", out.detail)
 
     def test_structured_outcomes_ignore_description_and_output_markers(self):
         from herogen.pipeline.stages import GateFailed, InputRejected
@@ -258,7 +260,7 @@ class PromptJobTest(JobCase):
                 ("policy", 4, ("rejected", "rejected", False)),
                 ("transient", 5, ("failed", "model_unavailable", True)),
                 ("permanent", 1, ("failed", "stage_error", False)),
-                ("gate", 2, ("rejected", "rejected", False))):
+                ("gate", 6, ("rejected", "rejected", False))):
             reference = None
             for description in descriptions:
                 with self.subTest(case=case, description=description):
@@ -268,7 +270,12 @@ class PromptJobTest(JobCase):
                         rec = {"ok": case == "pass", "status": "input_rejected" if case == "input" else
                                ("passed" if case == "pass" else "error"), "error": text,
                                "details": {"user_text": text}, "name": "prompt_sketch",
-                               "checks": [], "seconds": 0, "cost_usd": 0}
+                               "stage": "p", "checks": [], "seconds": 0, "cost_usd": 0}
+                        if case in ("pass", "gate"):
+                            rec.pop("status")
+                            rec.pop("error")
+                        if case == "gate":
+                            rec["checks"] = [{"name": "character_instances", "pass": False}]
                         _write_json(run, "stage-p.json", rec)
                         if case == "pass":
                             return rec
@@ -302,12 +309,13 @@ class PromptJobTest(JobCase):
         spec = next(s for s in PLAN if s.key == "p")
         job = self.prompt_job()
         ctx = make_context(self.s, self.storage, job)
-        for code, state in ((1, "failed"), (2, "rejected"), (3, "rejected"), (4, "rejected"), (5, "failed")):
+        for code in (1, 2, 3, 4, 5, 6):
             with self.subTest(code=code):
                 outcome = CliRunner.outcome(spec, ctx, 1, code, self.description, self.description, False)
-                self.assertEqual(outcome.state, state)
+                self.assertEqual(outcome.state, "failed")
                 self.assertEqual(outcome.transient, code == 5)
-                self.assertEqual(outcome.detail, "")
+                if code != 5:
+                    self.assertIn(f"exit_code={code}", outcome.detail)
                 self.assertNotIn(self.description, outcome.message)
                 timeout = CliRunner.outcome(spec, ctx, 1, code, self.description, self.description, True)
                 self.assertEqual((timeout.state, timeout.code, timeout.transient), ("failed", "timeout", True))
