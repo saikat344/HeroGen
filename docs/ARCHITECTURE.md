@@ -475,6 +475,40 @@ Close-ups go only into the Head texture, and weights and visibility are unchange
 `texture.closeups` in `sections.json` records the views used and why others were not. Each Head bake's
 `texture.bake.<lod>.head.closeups` records the texel density and the texels with close-up detail.
 
+**Measured effect.** The stage-4 bench used the ground-truth characters' hybrid stage-3 bodies (SAM 3D Objects with
+SAM 3D Body joints), built before the pitch fix that is now on main. That fix does not change the comparison
+between arms.
+
+Three arms were built on the same bodies, each through stage 4 with profile `best`:
+- the shared atlas without a Head texture (main);
+- the Head texture without close-ups (the `no-closeup` variant);
+- the Head texture with stage 2f's close-up detail, with live Muse Image close-ups made by stage 2f.
+
+Method:
+- The shared-atlas arm was re-baked on the same sections, checked against its own full stage 4 on one character
+  (face colour error within 0.003, SSIM 1.000).
+- Each arm is rendered flat at the four held-out cameras (yaw ±25° and ±65°) and compared with the true render
+  inside the frozen face regions, in a 768 px face window.
+- Figures are paired per character, with 95% bootstrap intervals.
+
+Results on the held-out characters (C11, C12, C14-C18, n = 8), Head texture with close-ups vs the shared atlas:
+
+| metric | change | views better |
+|---|---|---|
+| LPIPS | 0.1351 → 0.1293 (-0.0058 [-0.0089, -0.0025]) | 26 of 32 |
+| DINOv2 cosine | 0.816 → 0.834 (+0.018 [+0.007, +0.030]) | 26 of 32 |
+| face colour error | 48.80 → 48.77, not significant ([-0.44, +0.23]) | |
+| SSIM | -0.0075, not significant ([-0.019, +0.003]) | |
+| colour error in the face window outside the face | +0.28 [+0.05, +0.52], out of 63.5 | |
+
+- The Head texture alone gives most of the LPIPS and DINOv2 gain: LPIPS -0.0031, DINOv2 +0.020.
+- The close-up detail adds a further LPIPS -0.0027 [-0.0045, -0.0010] (26 of 32 views better). It also adds the
+  +0.27 colour error just outside the face.
+- On the tuning characters (C01, C02, C06, C08, C09, n = 5), face colour error changed by -0.22 [-0.36, -0.04] of
+  38.4 and LPIPS by -0.0017 [-0.0028, -0.0006].
+- On these hybrid bodies the face colour error (about 38-49 of 255) is set by the geometry, so the texture changes
+  move it little.
+
 ## Stage 2f: face source (head close-ups)
 
 A turnaround view gives the face a few dozen pixels. Stage 2f (`herogen/pipeline/facesource.py`) runs after stage 2
