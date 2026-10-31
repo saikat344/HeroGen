@@ -213,6 +213,28 @@ def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
     return out
 
 
+def _rest_iou_checks(vs, shape_views: set[str], mesh_source: str, rest_silhouettes: dict,
+                     stage3_silhouettes: dict) -> tuple[dict, list[dict]]:
+    """Check shape preservation; retain turnaround agreement as a diagnostic for unseen shape views."""
+    values, checks = {}, []
+    method = vs.meta.get("mask_method") or {}
+    for v, path in rest_silhouettes.items():
+        rendered = load_mask(Path(path))
+        turnaround_iou = round(iou(rendered, vs.views[v].mask), 4)
+        derived = "visual_hull" in str(method.get(v, ""))
+        unseen = v not in shape_views and not derived
+        if unseen:
+            checks.append(check(f"rest_iou_with_covers_turnaround_{v}", turnaround_iou, IOU_GATE, gate=False,
+                                reference="turnaround",
+                                note=f"shape not built from this view (mesh source {mesh_source})"))
+            values[v] = round(iou(rendered, load_mask(Path(stage3_silhouettes[v]))), 4)
+        else:
+            values[v] = turnaround_iou
+        checks.append(check(f"rest_iou_with_covers_{v}", values[v], IOU_GATE, gate=not derived,
+                            reference="stage3_mesh" if unseen else "turnaround"))
+    return values, checks
+
+
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                profile: str = DEFAULT_PROFILE, cut_search: bool = True) -> dict:
     """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
@@ -459,10 +481,20 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
 
     # Blender: textured GLBs, rest renders from the contract cameras, pose renders.
     rest_cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
+    # Render the mesh received by stage 4, before decimation/cutting, with the very same cameras.
+    # Re-render rather than trusting 03-renders, which may predate registration or use another height.
+    reference_cams = [c for c in rest_cams if c["view"] not in shape_views
+                      and "visual_hull" not in str(method.get(c["view"], ""))]
+    reference_tasks = []
+    if reference_cams:
+        reference_dir = body / "rest-renders" / "stage3-mesh"
+        reference_dir.mkdir(exist_ok=True)
+        reference_tasks.append({"task": "silhouettes", "mesh": str(mesh_src.resolve()),
+                                "cameras": reference_cams, "out_dir": str(reference_dir.resolve())})
     pivots = {n: s.pivot for n, s in lod_secs["high"].items()}
     pose_jobs = [{"name": name, "matrices": {n: m.tolist() for n, m in pose.world_matrices(loc, pivots).items()}}
                  for name, loc in poses.items()]
-    res = bl.run_job({"tasks": [{
+    res = bl.run_job({"tasks": reference_tasks + [{
         "task": "body", "lods": {k: str(v.resolve()) for k, v in lod_paths.items()},
         "glb": {lod: str((body / f"{lod}.glb").resolve()) for lod in builds},
         "atlas": {k: str(v.resolve()) for k, v in atlas_paths.items()},
@@ -470,7 +502,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         "pose_dir": str((body / "pose-renders").resolve()), "pose_lod": "high",
         "rest_cameras": rest_cams, "rest_dir": str((body / "rest-renders").resolve())}]},
         work, "stage4-body", timeout=timeout)
-    bres = res["results"][0]
+    bres = res["results"][-1]
+    stage3_silhouettes = res["results"][0]["renders"] if reference_tasks else {}
 
     # Checks.
     hi, lo = lod_secs["high"], lod_secs.get("low")
@@ -541,14 +574,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         val = max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
         rec.add(check(f"max_joint_gap_high_{name}", round(val, 4), GAP_GATE, passed=val <= GAP_GATE, gate=False,
                       rule="<=", note="comparison only"))
-    # The rest silhouette with covers must still match the masks (observed views gated like stage 3).
-    rest_iou = {}
-    for v, path in bres["rest_silhouettes"].items():
-        rest_iou[v] = round(iou(load_mask(Path(path)), vs.views[v].mask), 4)
-        derived = "visual_hull" in str(method.get(v, ""))
-        unseen = v not in shape_views and not derived
-        rec.add(check(f"rest_iou_with_covers_{v}", rest_iou[v], IOU_GATE, gate=not derived,
-                      **({"note": f"shape not built from this view (mesh source {mesh_source})"} if unseen else {})))
+    rest_iou, rest_checks = _rest_iou_checks(vs, shape_views, mesh_source, bres["rest_silhouettes"],
+                                           stage3_silhouettes)
+    for c in rest_checks:
+        rec.add(c)
     # Texture: the textured rest body rendered flat from each observed colour view against that view.
     tex_metrics = {}
     for v, path in bres["rest_textured"].items():

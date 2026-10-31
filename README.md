@@ -78,7 +78,8 @@ Stage 3 keeps silhouette overlaps as diagnostics and gates usability with a fixe
 on the sketch, four cardinal renders and two unseen angles. It needs `MODEL_API_KEY`; the question uses
 the repository's retry, cache and cost accounting. `--quality replay` requires its exact cached answer.
 Model failures stop loudly with a failed record and cost, and never trigger a carve retry. Stage 4 still
-has separate observed rest-IoU and texture gates, so passing stage 3 does not guarantee a finished game body.
+gates rest IoU at 0.90 against the turnaround on shape views and the received stage-3 mesh on other observed
+views, plus separate texture checks, so passing stage 3 does not guarantee a finished game body.
 
 Stages p, 1 and 2 replay model calls from the cache unless `--live` is set. In stage 3, `--remote`
 controls only SAM 3D calls: they replay from `runs/_cache-remote/` unless `--remote live` is set.

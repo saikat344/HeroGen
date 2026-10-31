@@ -240,6 +240,8 @@ class TestEndToEndBlender(SyntheticBase):
             self.assertTrue(checks[f"texture_colour_error_{v}"]["pass"], checks[f"texture_colour_error_{v}"])
             self.assertTrue(checks[f"texture_ssim_{v}"]["pass"], checks[f"texture_ssim_{v}"])
             self.assertTrue(checks[f"rest_iou_with_covers_{v}"]["pass"])
+            self.assertEqual(checks[f"rest_iou_with_covers_{v}"]["reference"], "turnaround")
+            self.assertNotIn(f"rest_iou_with_covers_turnaround_{v}", checks)
         self.assertEqual(body["texture"]["atlas_sizes"], {"high": 1024, "low": 512})
         self.assertEqual(len(body["covers"]["pieces_high"]), 2)
         # the cuts were placed once, on the reference body, and the record says where and why
