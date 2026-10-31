@@ -78,6 +78,18 @@ class JobCase(TempDirCase):
 
 
 class TestJobFlow(JobCase):
+    def test_restarted_group_keeps_the_cost_of_both_executions(self):
+        job = self.new_job("prompt")
+
+        def execute(j, attempt, group, resume):
+            if group == "model":
+                self.assertEqual(self.execute(j, attempt, group, resume).status, "ok")
+            return self.execute(j, attempt, group, resume)
+
+        self.assertEqual(run_job(self.store, self.s, self.storage, job["id"], "restart", execute), "succeeded")
+        self.assertAlmostEqual(self.store.job_get(job["id"])["cost_usd"], 2 * 0.0475, places=6)
+        self.assertAlmostEqual(sum(r["cost_usd"] for r in self.stages(job).values()), 2 * 0.0475, places=6)
+
     def test_success_records_every_stage(self):
         job = self.new_job()
         self.assertEqual(self.go(job), "succeeded")
@@ -146,6 +158,8 @@ class TestJobFlow(JobCase):
         self.assertEqual(self.runner.calls, ["3", "4", "6", "5"], "stages 0-2 kept from attempt 1")
         self.assertEqual(self.stages(job)["1"]["message"], "kept from an earlier attempt")
         self.assertEqual(self.store.job_get(job["id"])["attempts"], 2)
+        self.assertAlmostEqual(self.store.job_get(job["id"])["cost_usd"], 0.0375, places=6,
+                               msg="the earlier attempt's completed model stages still count")
 
     def test_retries_stop_at_the_attempt_limit(self):
         self.runner.fail = {"1": "transient"}

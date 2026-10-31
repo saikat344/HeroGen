@@ -310,6 +310,7 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
         if not store.job_current(jid, attempt):
             return GroupResult("stale", mine[0][1].key)
         return GroupResult("error", mine[0][1].key, "restarts", "A worker was restarted too many times.", False)
+    prior = {r["stage"]: r for r in store.job_stages(jid)}
     ctx = workdir.open()
     try:
         for index, spec in mine:
@@ -331,7 +332,8 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             compute = round(out.seconds * compute_price_per_s, 6)
             workdir.sync()
             store.job_stage_set(jid, attempt, spec.key, out.state, seconds=out.seconds,
-                                cost_usd=round(out.cost_usd + compute, 6), message=out.message)
+                                cost_usd=round((prior.get(spec.key, {}).get("cost_usd") or 0.0)
+                                               + out.cost_usd + compute, 6), message=out.message)
             event("stage_finished", job=jid, attempt=attempt, stage=spec.key, state=out.state, code=out.code,
                   seconds=out.seconds, cost_usd=out.cost_usd, compute_usd=compute)
             if out.detail and out.state in ("failed", "rejected"):
@@ -434,6 +436,8 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                              error_message="The uploaded sketch was not saved.")
             return "failed"
         seconds = cost = compute = 0.0
+        # Outcomes count new work. Stored stage rows also include earlier attempts and restarted groups.
+        own_stages = {s.key for s in plan_for(job["kind"]) if s.group in GROUPS}
         for group in GROUPS:
             try:
                 res = execute(job, attempt, group, resume)
@@ -444,12 +448,15 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
             seconds += res.seconds
             cost += res.cost_usd
             compute += res.compute_usd
+            recorded = sum(r["cost_usd"] or 0.0 for r in store.job_stages(job_id) if r["stage"] in own_stages)
+            carried = max(0.0, recorded - cost - compute)
             if group == "model" and res.status == "ok" and heldout is not None:
                 try:
                     heldout(job)
                 except Exception:
                     log.exception("could not start the held-out views of %s", job_id)
             detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
+                      "previous_work_usd": round(carried, 6),
                       "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
                                "list price"}
             if res.status == "stale":
@@ -458,7 +465,7 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
             if res.status == "rejected":
                 store.job_finish(job_id, attempt, "rejected", error_code="rejected", error_stage=res.stage,
                                  error_message=res.message, seconds=round(time.monotonic() - t0, 2),
-                                 cost_usd=round(cost + compute, 6), cost_detail=detail,
+                                 cost_usd=round(carried + cost + compute, 6), cost_detail=detail,
                                  bytes_=_bytes(storage, job, volume))
                 event("job_finished", job=job_id, attempt=attempt, state="rejected", stage=res.stage)
                 return "rejected"
@@ -469,7 +476,7 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 else:
                     store.job_finish(job_id, attempt, "failed", error_code=res.code, error_stage=res.stage,
                                      error_message=res.message,
-                                     seconds=round(time.monotonic() - t0, 2), cost_usd=round(cost + compute, 6),
+                                     seconds=round(time.monotonic() - t0, 2), cost_usd=round(carried + cost + compute, 6),
                                      cost_detail=detail, refund=True, bytes_=_bytes(storage, job, volume))
                     state = "failed"
                 event("job_finished" if state != "queued" else "job_requeued", job=job_id, attempt=attempt,
@@ -478,10 +485,10 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                     redispatch(job_id)
                 return state
         took = round(time.monotonic() - t0, 2)
-        store.job_finish(job_id, attempt, "succeeded", seconds=took, cost_usd=round(cost + compute, 6),
+        store.job_finish(job_id, attempt, "succeeded", seconds=took, cost_usd=round(carried + cost + compute, 6),
                          cost_detail=detail, bytes_=_bytes(storage, job, volume))
         event("job_finished", job=job_id, attempt=attempt, state="succeeded", seconds=took,
-              cost_usd=round(cost + compute, 6))
+              cost_usd=round(carried + cost + compute, 6))
         return "succeeded"
 
 
