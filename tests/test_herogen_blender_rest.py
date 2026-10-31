@@ -1,15 +1,87 @@
 """Rest shape preservation against a received mesh, using synthetic geometry and local Blender only."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from herogen.blender import bl, split, views
 from herogen.blender.stage3 import IOU_GATE, iou
-from herogen.blender.stage4 import _rest_iou_checks, _save_lod
+from herogen.blender.stage4 import _rest_iou_checks, _save_lod, _shape_views, run_stage4
+
+
+class TestShapeViews(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="herogen-shape-views-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.run = Path(self.temp.name)
+        self.vs = SimpleNamespace(views=dict.fromkeys(("front", "left", "top")),
+                                  meta={"mask_method": {"top": "visual_hull"}})
+        (self.run / "03-mesh.glb").touch()
+
+    def write_stage3(self, data):
+        (self.run / "stage-3.json").write_text(json.dumps(data))
+
+    def assert_stops(self, message):
+        # A failed retry must replace an earlier pass before any Blender job can run.
+        (self.run / "stage-4.json").write_text('{"ok": true}')
+        with patch("herogen.blender.stage4.load_views", return_value=self.vs), \
+                patch("herogen.blender.stage4.bl.run_job") as job:
+            with self.assertRaisesRegex(ValueError, message):
+                run_stage4(self.run)
+        job.assert_not_called()
+        rec = json.loads((self.run / "stage-4.json").read_text())
+        self.assertFalse(rec["ok"])
+        c = rec["checks"][0]
+        self.assertEqual(c["name"], "shape_views")
+        self.assertFalse(c["pass"])
+        self.assertTrue(c["gate"])
+        self.assertRegex(c["note"], message)
+
+    def test_invalid_shape_views_stop_with_failed_record(self):
+        for source in ("carve", "sam3d-objects"):
+            for value in ("front", ["bogus"], [], None, 42, ["front", 42]):
+                with self.subTest(source=source, shape_views=value):
+                    self.write_stage3({"mesh_source": source, "shape_views": value})
+                    self.assert_stops("shape_views must be a non-empty list of known view names")
+
+    def test_hybrid_requires_front(self):
+        self.write_stage3({"mesh_source": "sam3d-objects", "shape_views": ["left"]})
+        self.assert_stops('sam3d-objects must include "front"')
+
+    def test_missing_shape_views_uses_source_default_and_notes_check(self):
+        for source, expected in (("carve", ["front", "left"]), ("sam3d-objects", ["front"])):
+            with self.subTest(source=source):
+                self.write_stage3({"mesh_source": source})
+                actual_source, names, c = _shape_views(self.run, self.vs)
+                self.assertEqual(actual_source, source)
+                self.assertEqual(names, set(expected))
+                self.assertEqual(c["value"], expected)
+                self.assertTrue(c["pass"])
+                self.assertIn(f"using the {source} default: " + ", ".join(expected), c["note"])
+
+    def test_explicit_known_views_are_preserved(self):
+        self.write_stage3({"mesh_source": "sam3d-objects", "shape_views": ["front", "back"]})
+        _, names, c = _shape_views(self.run, self.vs)
+        self.assertEqual(names, {"front", "back"})
+        self.assertNotIn("note", c)
+
+    def test_missing_stage3_record_stops(self):
+        self.assert_stops("needs stage-3.json")
+
+    def test_unreadable_record_and_unknown_source_stop(self):
+        for text, message in (("{", "cannot read stage-3.json as JSON"),
+                              ('[]', "mesh_source must be"),
+                              ('{}', "mesh_source must be"),
+                              ('{"mesh_source": "bogus"}', "mesh_source must be")):
+            with self.subTest(text=text):
+                (self.run / "stage-3.json").write_text(text)
+                self.assert_stops(message)
 
 
 def box(z0, z1, depth=0.5):
