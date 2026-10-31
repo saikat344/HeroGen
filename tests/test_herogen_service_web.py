@@ -195,6 +195,22 @@ class TestHeaders(WebCase):
                   "/static/..%2fserver.py", "/static/.hidden", "/static/app.js/"):
             self.assertEqual(b.get(p).status_code, 404, p)
 
+    def test_raster_assets_have_image_mime_and_remain_confined(self):
+        from unittest.mock import patch
+        from herogen.service import web
+        assets = self.tmp / 'assets'
+        assets.mkdir()
+        (assets / 'sample.png').write_bytes(png(400, 600))
+        (assets / 'outside.png').symlink_to(self.tmp / 'not-public.png')
+        (self.tmp / 'not-public.png').write_bytes(b'private')
+        with patch.object(web, 'STATIC_DIR', assets):
+            b = Browser(self.app)
+            r = b.get('/assets/sample.png')
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.headers['content-type'], 'image/png')
+            self.assertEqual(b.get('/assets/outside.png').status_code, 404)
+            self.assertEqual(b.get('/assets/%2e%2e/not-public.png').status_code, 404)
+
     def test_the_viewer_is_the_studio_when_it_is_deployed(self):
         from herogen.service import labapi
 

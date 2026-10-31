@@ -233,7 +233,9 @@ class TestServicePage(TempDirCase):
         t = self.tab
         self.store.allow_add(email)
         t.goto(self.url + "/")
-        t.wait("!document.querySelector('#signin').hidden")
+        t.wait("!document.querySelector('#entry').hidden")
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("document.querySelector('#signinDialog').open")
         t.eval(f"document.querySelector('#email').value = {json.dumps(email)}; "
                "document.querySelector('#signinForm').requestSubmit()")
         t.wait("/link/i.test(document.querySelector('#signinMsg').textContent)")
@@ -257,10 +259,53 @@ class TestServicePage(TempDirCase):
             const dt = new DataTransfer();
             dt.items.add(new File([bytes], 'sketch.png', {{ type: 'image/png' }}));
             document.querySelector('#sketch').files = dt.files;
+            document.querySelector('#sketch').dispatchEvent(new Event('change'));
             document.querySelector('#name').value = {json.dumps(name)};
             document.querySelector('#jobForm').requestSubmit();
         }})()""")
         self.tab.wait(f"document.querySelector('#detailH').textContent === {json.dumps(name)}")
+
+    def test_public_entry_preserves_image_draft_through_signin(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        self.assertTrue(t.eval("document.querySelector('#app').hidden"))
+        t.eval("document.querySelector('[data-idea=forest]').click()")
+        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
+        data = base64.b64encode(png(400, 600)).decode()
+        t.eval(f"""(() => {{
+            const bytes = Uint8Array.from(atob('{data}'), c => c.charCodeAt(0));
+            const dt = new DataTransfer();
+            dt.items.add(new File([bytes], 'draft.png', {{type:'image/png'}}));
+            document.querySelector('#sketch').files = dt.files;
+            document.querySelector('#sketch').dispatchEvent(new Event('change'));
+            document.querySelector('#name').value = 'Saved draft';
+            document.querySelector('#jobForm').requestSubmit();
+        }})()""")
+        t.wait("document.querySelector('#signinDialog').open")
+        self.assertTrue(t.eval("/saved/.test(document.querySelector('#jobMsg').textContent)"))
+        self.signin()
+        t.wait("document.querySelector('#uploadName').textContent === 'draft.png'")
+        self.assertEqual(t.eval("document.querySelector('#name').value"), 'Saved draft')
+        self.assertTrue(t.eval("document.querySelector('#promptIn').hidden"))
+        t.eval("document.querySelector('#jobForm').requestSubmit()")
+        t.wait("document.querySelector('#detailH').textContent === 'Saved draft'")
+        self.assertEqual(t.eval("document.querySelectorAll('#jobs li').length"), 1)
+
+    def test_entry_rejects_excess_prompt_before_auth_and_supports_keyboard_dialog(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#entry').hidden")
+        t.eval("document.querySelector('#prompt').value = 'x'.repeat(301); document.querySelector('#prompt').dispatchEvent(new Event('input')); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("/within 300/.test(document.querySelector('#jobMsg').textContent)")
+        self.assertFalse(t.eval("document.querySelector('#signinDialog').open"))
+        self.assertEqual(t.eval("document.querySelector('#prompt').getAttribute('aria-invalid')"), 'true')
+        t.eval("document.querySelector('[data-idea=moon]').click()")
+        self.assertEqual(t.eval("document.querySelector('#prompt').getAttribute('aria-invalid')"), 'false')
+        t.eval("document.querySelector('#howButton').click()")
+        self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
+        t.eval("document.querySelector('#closeHow').click()")
+        self.assertFalse(t.eval("document.querySelector('#howDialog').open"))
 
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""

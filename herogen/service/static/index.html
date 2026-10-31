@@ -24,8 +24,10 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/">HeroGen <span class="beta">beta</span></a>
+  <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
   <div class="spacer"></div>
+  <nav aria-label="Main"><button type="button" class="link" id="howButton">How it works</button><a href="#gallery">Gallery</a><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
+  <button type="button" id="headerSignIn">Sign in</button>
   <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
@@ -34,7 +36,7 @@
 <main>
   <p id="loading" class="muted">Loading…</p>
 
-  <section id="signin" class="card narrow" hidden aria-labelledby="signinH">
+  <dialog id="signinDialog"><button type="button" class="dialog-close" id="closeSignin" aria-label="Close sign in">×</button><section id="signin" class="card narrow" hidden aria-labelledby="signinH">
     <h1 id="signinH">Sign in</h1>
     <p class="muted">HeroGen is invite-only during the beta. We email you a link; there is no password.</p>
     <form id="signinForm" novalidate>
@@ -46,6 +48,8 @@
     </form>
     <p id="signinMsg" class="msg" role="status"></p>
   </section>
+
+  </dialog>
 
   <section id="verify" class="card narrow" hidden aria-labelledby="verifyH">
     <h1 id="verifyH">Finish signing in</h1>
@@ -60,35 +64,38 @@
     <p id="verifyMsg" class="msg" role="status"></p>
   </section>
 
-  <section id="app" hidden>
-    <div class="grid">
-      <section class="card" aria-labelledby="newH">
-        <h2 id="newH">New hero</h2>
-        <p id="quota" class="muted"></p>
+  <section id="entry" aria-labelledby="entryH" hidden>
+    <div class="hero-layout">
+      <div class="hero-copy">
+        <p class="eyebrow">For the characters you imagine <span></span></p>
+        <h1 id="entryH">Every hero starts<br>with an idea.</h1>
+        <p class="intro">Describe a character, explore a starting point, or bring your own image.</p>
         <form id="jobForm" novalidate>
-          <fieldset class="seg">
-            <legend class="sr">Start from</legend>
-            <label><input type="radio" name="kind" value="sketch" checked> Upload a sketch</label>
-            <label><input type="radio" name="kind" value="prompt"> Describe it</label>
-          </fieldset>
-          <div id="sketchIn">
-            <label for="sketch">Sketch (PNG, JPEG or WebP)</label>
-            <input id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp">
-            <p class="muted small">One character, full body from head to feet, standing and facing forward, arms a little away from the body, on plain paper.</p>
+          <fieldset hidden><legend>Start from</legend><label><input type="radio" name="kind" value="prompt" checked>Describe it</label><label><input type="radio" name="kind" value="sketch">Upload an image</label></fieldset>
+          <div class="composer">
+            <label for="prompt">Your hero idea</label>
+            <div id="promptIn"><textarea id="prompt" name="prompt" rows="3" aria-describedby="promptCount" placeholder="A forest courier with an orange coat and a teal scarf…"></textarea></div>
+            <div id="sketchIn" hidden><img id="uploadPreview" alt="Your selected character"><div><b id="uploadName"></b><button type="button" class="link" id="removeUpload">Remove image</button></div></div>
+            <div class="composer-bottom"><span class="input-hint">▧ <span>Start with a sketch or coloured artwork</span></span><button type="submit" class="primary" id="go">Create my hero <span aria-hidden="true">→</span></button></div>
           </div>
-          <div id="promptIn" hidden>
-            <label for="prompt">Describe the hero</label>
-            <textarea id="prompt" name="prompt" rows="3" aria-describedby="promptCount"></textarea>
-            <p id="promptCount" class="small msg muted" aria-live="polite" aria-atomic="true"></p>
-          </div>
-          <label for="name">Name <span class="muted">(optional)</span></label>
-          <input id="name" name="name" type="text" maxlength="60">
-          <label for="profile">Target</label>
-          <select id="profile" name="profile"></select>
-          <button type="submit" class="primary" id="go">Make my hero</button>
+          <p id="promptCount" class="small msg muted" aria-live="polite" aria-atomic="true"></p>
+          <p class="spark-label">Need a spark?</p>
+          <div class="suggestions" aria-label="Character ideas"><button type="button" data-idea="forest"><span aria-hidden="true">🍃</span> Forest courier</button><button type="button" data-idea="clockwork"><span aria-hidden="true">⚙</span> Clockwork gardener</button><button type="button" data-idea="moon"><span aria-hidden="true">☾</span> Moonlit mage</button></div>
+          <label class="upload-button" for="sketch"><span class="upload-icon" aria-hidden="true">↥</span><span>Or upload your own image<small>Sketch, illustration, or photo · PNG, JPEG, WebP</small></span></label>
+          <input class="sr" id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp">
+          <details class="creation-options"><summary>Name &amp; export target</summary><div class="options-grid"><div><label for="name">Hero name (optional)</label><input id="name" name="name" type="text" maxlength="60"></div><div><label for="profile">Target</label><select id="profile" name="profile"></select></div></div></details>
+          <p id="jobMsg" class="msg" role="status"></p><p id="quota" class="muted small"></p>
         </form>
-        <p id="jobMsg" class="msg" role="status"></p>
-      </section>
+      </div>
+      <div class="hero-art"><img src="/assets/art/hero-collage.png" alt="Character design sheets: an adventurous courier, a clockwork gardener, and a moonlit mage" id="heroArtwork" fetchpriority="high"></div>
+    </div>
+    <section class="gallery" id="gallery" aria-labelledby="galleryH" hidden><div class="row"><h2 id="galleryH">Start from a character</h2><div class="spacer"></div><span class="small muted">Choose an image to make it yours</span></div><div id="templates" class="template-grid"></div><p id="templateMsg" class="small msg" role="status"></p></section>
+  </section>
+  <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>
+
+  <section id="app" hidden>
+    <div class="workspace-heading row"><h2>Your workshop</h2><div class="spacer"></div><a href="#entry">＋ New hero</a></div>
+    <div class="grid">
       <section class="card" aria-labelledby="listH">
         <h2 id="listH">Your heroes</h2>
         <ul id="jobs" class="jobs"></ul>
@@ -127,6 +134,6 @@
     </details>
   </section>
 </main>
-<footer class="foot"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
+<footer class="foot"><span>Your idea. Your character. Your game.</span><span class="footer-rule"></span><span>Built with Meta AI <span aria-hidden="true">∞</span></span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></footer>
 </body>
 </html>

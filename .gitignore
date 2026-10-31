@@ -50,3 +50,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# External illustration bundle
+/herogen/service/static/art/

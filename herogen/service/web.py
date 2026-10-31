@@ -64,7 +64,8 @@ THREE_VERSION = "0.160.0"
 CDN_PREFIX = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/"
 ASSET_TYPES = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                ".svg": "image/svg+xml", ".json": "application/json", ".txt": "text/plain; charset=utf-8",
-               ".ttf": "font/ttf", ".woff2": "font/woff2"}
+               ".ttf": "font/ttf", ".woff2": "font/woff2",
+               ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 FILE_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox"
 JSON_LIMIT = 16 * 1024
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
