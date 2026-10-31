@@ -107,7 +107,7 @@ class TestJobFlow(JobCase):
         job = self.new_job("prompt")
         self.assertEqual(self.go(job), "succeeded")
         self.assertEqual(self.runner.calls[0], "p")
-        self.assertTrue(self.storage.input_path(self.user["id"], job["id"]).is_file())
+        self.assertTrue((self.storage.run_dir(self.user["id"], job["id"]) / "p-full-body.png").is_file())
 
     def test_rejection_shows_the_reason_and_stops(self):
         self.runner.fail = {"2": "reject"}
@@ -887,6 +887,24 @@ class TestStageCommands(TempDirCase):
             (run / f"stage-{k}.json").write_text(json.dumps({"ok": True}))
         (run / "stage-3.json").write_text(json.dumps({"ok": True}))
         self.assertEqual(resume_index(run, plan), 2, "only a leading run of passed stages counts")
+
+    def test_prompt_resume_checks_the_legacy_stage_p_to_input_boundary(self):
+        run = self.tmp / "prompt-run"
+        run.mkdir()
+        plan = plan_for("prompt")
+        legacy = {"stage": "p", "name": "sketch_from_description", "ok": True}
+        write_record(run, legacy)
+        self.assertEqual(resume_index(run, plan), 0, "a legacy image cannot feed the new stage 0")
+        (run / "p-full-body.png").write_bytes(png(300, 300))
+        self.assertEqual(resume_index(run, plan), 0, "the version reference is required too")
+        write_record(run, {**legacy, "name": "prompt_sketch", "details": {
+            "prompt_version": {"name": "hero-sketch-v0", "sha256": "a" * 64}}})
+        self.assertEqual(resume_index(run, plan), 1, "a valid earlier pipeline version remains reusable")
+        (run / "p-full-body.png").unlink()
+        self.assertEqual(resume_index(run, plan), 0, "a missing canonical image is regenerated")
+        write_record(run, legacy)
+        write_record(run, {"stage": 0, "ok": True})
+        self.assertEqual(resume_index(run, plan), 2, "a completed legacy conversion is not rebuilt")
 
     def test_group_result_round_trips(self):
         g = GroupResult("error", "3", "timeout", "slow", True, 1.0, 0.1, 0.01)

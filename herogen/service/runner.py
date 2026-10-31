@@ -159,6 +159,18 @@ def resume_index(run_dir: Path, plan: list[StageSpec]) -> int:
     for spec in plan:
         if not record_ok(run_dir, spec):
             break
+        if spec.key == "p" and not record_ok(run_dir, next(s for s in PLAN if s.key == "0")):
+            from herogen.pipeline.prompt_sketch import SKETCH
+
+            # Older service records cannot feed the pipeline's stage 0. Keep completed conversions, but
+            # regenerate at this boundary if the canonical image or its version reference is missing.
+            rec = read_record(run_dir, spec.record) or {}
+            details = rec.get("details")
+            version = details.get("prompt_version") if isinstance(details, dict) else None
+            if (not (run_dir / SKETCH).is_file() or not isinstance(version, dict)
+                    or not isinstance(version.get("name"), str) or not version["name"]
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(version.get("sha256", "")))):
+                break
         n += 1
     return n
 
@@ -181,6 +193,11 @@ def failed_checks(rec: dict[str, Any]) -> list[dict[str, Any]]:
 
 def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
     """A sentence or two for the user: what the stage found wrong, then the measured checks that failed."""
+    if spec.key == "p" and rec.get("status") == "input_rejected":
+        return ("The description could not be used. Describe one character in words within the description's "
+                "length limit, then try again.")
+    if spec.key == "p" and "content_policy_violation" in str(rec.get("error", "")):
+        return "The image model refused this description under its content policy. Try rewording the description."
     checks = failed_checks(rec)
     reason = next((text for stage, prefix, text in REASONS
                    if stage == spec.key and any(str(c.get("name", "")).startswith(prefix) for c in checks)
@@ -194,7 +211,7 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
         shown.append(f"{c.get('name')} measured {_fmt(c.get('value'))}, needs {op} {_fmt(c.get('threshold'))}")
     more = f" and {len(checks) - 4} more" if len(checks) > 4 else ""
     measured = f" Checks that failed: {'; '.join(shown)}{more}." if shown else ""
-    tip = f" {TIPS}" if spec.key in ("0", "1", "2", "p") else ""
+    tip = " Try rewording the description." if spec.key == "p" else (f" {TIPS}" if spec.key in ("0", "1", "2") else "")
     return f"The {spec.label} stage rejected this hero. {reason}{measured}{tip}"
 
 
@@ -246,12 +263,14 @@ def _slug(name: str) -> str:
 
 def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """The environment every stage subprocess gets: no secrets, only what Python and Blender need."""
-    keep = ("PATH", "LANG", "LC_ALL", "TZ", "HEROGEN_BLENDER", "HEROGEN_MODAL", "SYSTEMROOT", "TMPDIR")
+    keep = ("PATH", "LANG", "LC_ALL", "TZ", "HEROGEN_BLENDER", "HEROGEN_MODAL", "SYSTEMROOT", "TMPDIR",
+            "HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = root
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("LANG", "C.UTF-8")
     env.update(extra or {})
     return env
@@ -282,9 +301,10 @@ class CliRunner:
         pipe = [py, "-m", "herogen.pipeline", "run"]
         common = ["--run-id", ctx.job_id, "--runs", str(ctx.runs_root), "--cache", str(ctx.cache_dir)]
         if spec.key == "p":
-            return ([py, "-m", "herogen.service.sketchgen", "--run", str(ctx.run_dir), "--out", str(ctx.input_path),
-                     "--cache", str(ctx.cache_dir)], ctx.prompt)
+            return [py, "-m", "herogen.service.pipestage", "p", *common], ctx.prompt
         if spec.key == "0":
+            if ctx.kind == "prompt":
+                return pipe + common + ["--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
             src = ctx.input_path
             if ctx.name:
                 named = work / "input" / f"{_slug(ctx.name)}.png"
@@ -338,7 +358,8 @@ class CliRunner:
             t0 = time.monotonic()
             timed_out = False
             try:
-                proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=env,
+                proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                                      timeout=timeout, env=env,
                                       cwd=home)
                 out, err, code = proc.stdout, proc.stderr, proc.returncode
             except subprocess.TimeoutExpired as e:
@@ -358,6 +379,18 @@ class CliRunner:
         for r in [rec] + [read_record(ctx.run_dir, x) for x in spec.extra]:
             c = r.get("cost_usd") if r else None
             cost += float(c) if isinstance(c, (int, float)) and math.isfinite(c) else 0.0
+        if spec.key == "p":
+            # Stage p's records and model errors can contain the description. Use their status for decisions,
+            # never their text as a message or log detail, including output from a killed subprocess.
+            if rec and rec.get("ok") is True and not timed_out:
+                return Outcome("passed", seconds, cost)
+            error = str(rec.get("error", "")) if rec else ""
+            if rec and not timed_out and (rec.get("status") == "input_rejected" or
+                                         "content_policy_violation" in error or
+                                         (rec.get("ok") is False and not error)):
+                return Outcome("rejected", seconds, cost, describe_rejection(spec, rec), "rejected")
+            code_s, message, transient = describe_error(spec, error + "\n" + tail, timed_out)
+            return Outcome("failed", seconds, cost, message, code_s, transient)
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
         if rec is not None and rec.get("ok") is False and rec.get("error") and not timed_out:

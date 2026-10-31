@@ -1,6 +1,6 @@
 """Where a user's files live on the data volume, and the only way the web layer reaches them.
 
-    <data>/users/<user-id>/inputs/<job-id>.png    the cleaned upload (or the sketch drawn from a prompt)
+    <data>/users/<user-id>/inputs/<job-id>.png    the cleaned upload (prompt sketches live in the run folder)
     <data>/users/<user-id>/runs/<job-id>/         the job's run folder (docs/ARCHITECTURE.md, "Run folder")
     <data>/users/<user-id>/cache/                 the model client's record/replay cache for this user
     <data>/users/<user-id>/cache-remote/          the remote-model cache for this user

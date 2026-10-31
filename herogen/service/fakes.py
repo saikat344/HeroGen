@@ -114,14 +114,23 @@ class FakeRunner:
         return CliRunner.outcome(spec, ctx, 0.01, 0, "", "", False)
 
     def _stage_p(self, ctx: StageContext, run: Path) -> None:
-        ctx.input_path.parent.mkdir(parents=True, exist_ok=True)
-        _figure(512, (60, 60, 60)).save(ctx.input_path, format="PNG")
-        write_record(run, _record("p", "sketch_from_prompt", [], cost=0.01, details={"description": ctx.prompt}))
+        from herogen import prompts
+        from herogen.pipeline.prompt_sketch import DESIGN, SKETCH
+
+        for rel in (DESIGN, SKETCH):
+            _figure(512, (60, 60, 60)).save(run / rel, format="PNG")
+        write_record(run, _record("p", "prompt_sketch", [DESIGN, SKETCH], cost=0.01,
+                                  details={"user_text": ctx.prompt,
+                                           "prompt_version": prompts.selected("prompt_sketch").ref()}))
 
     def _stage_0(self, ctx: StageContext, run: Path) -> None:
         from PIL import Image
 
-        Image.open(ctx.input_path).convert("RGB").save(run / "00-sketch.png", format="PNG")
+        from herogen.pipeline.prompt_sketch import SKETCH
+
+        src = run / SKETCH if ctx.kind == "prompt" else ctx.input_path
+        with Image.open(src) as image:
+            image.convert("RGB").save(run / "00-sketch.png", format="PNG")
         write_record(run, _record(0, "input", ["00-sketch.png"], details={
             "source_name": f"{ctx.name or ctx.job_id}.png", "label": ctx.kind}))
 

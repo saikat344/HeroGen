@@ -763,6 +763,23 @@ class TestIsolation(WebCase):
         self.assertNotIn(str(self.tmp), json.dumps(d), "no server paths")
         self.assertNotIn(str(self.tmp), json.dumps(ws))
 
+    def test_named_prompt_keeps_its_workspace_title_and_downloads(self):
+        alice = self.signin()
+        result = alice.post("/api/jobs", data={"kind": "prompt", "prompt": "a knight in violet armour",
+                                               "name": "Violet Knight"}, files={"x": ("a", b"a")},
+                            headers={"Idempotency-Key": "key-prompt-name"})
+        self.assertEqual(result.status_code, 201)
+        job = result.json()
+        self.assertEqual(self.finish(job["id"]), "succeeded")
+        view = alice.get(f"/api/jobs/{job['id']}").json()
+        self.assertEqual(view["name"], "Violet Knight")
+        self.assertEqual(alice.get(view["images"]["sketch"]).status_code, 200)
+        self.assertEqual(alice.get(f"/runs/r1/{job['id']}/p-full-body.png").status_code, 200)
+        self.assertTrue(view["downloads"]["glb"]["available"])
+        self.assertTrue(view["downloads"]["roblox"]["available"])
+        workspace = alice.get("/api/workspace").json()
+        self.assertEqual(workspace["characters"][0]["title"], "Violet Knight")
+
 
 class TestPages(WebCase):
     def test_legal_pages(self):

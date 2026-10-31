@@ -1,4 +1,8 @@
-"""Stage 2 (turnaround) alone: `python3 -m herogen.service.pipestage 2 --run-id <id> --runs <root> --cache <cache>`.
+"""Per-stage adapter: `python3 -m herogen.service.pipestage p|2 --run-id <id> --runs <root> --cache <cache>`.
+
+Stage p reads the description as UTF-8 on stdin and calls the pipeline's stagep_prompt, which owns the prompt
+versions, checks, images and stage-p.json. No description or model error text is printed: API errors may echo
+the description. The runner reads the record to classify errors and count costs.
 
 The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service runs 2h beside the
 rest of the job instead (see `worker.run_heldout`), so it starts stage 2 through the same public functions the
@@ -15,25 +19,35 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m herogen.service.pipestage")
-    ap.add_argument("stage", choices=("2",))
+    ap.add_argument("stage", choices=("p", "2"))
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
     a = ap.parse_args(argv)
     from herogen.pipeline.client import ModelClient
     from herogen.pipeline.runfolder import RunFolder, runs_root
-    from herogen.pipeline.stages import GateFailed, stage2_turnaround
+    from herogen.pipeline.prompt_sketch import stagep_prompt
+    from herogen.pipeline.stages import GateFailed, InputRejected, stage2_turnaround
 
     run = RunFolder(runs_root(a.runs), a.run_id)
     try:
-        rec = stage2_turnaround(run, ModelClient(a.cache, mode="live"))
+        client = ModelClient(a.cache, mode="live")
+        if a.stage == "p":
+            rec = stagep_prompt(run, client, sys.stdin.read())
+        else:
+            rec = stage2_turnaround(run, client)
     except GateFailed as e:
-        print(f"stage 2: {e}; stopping", file=sys.stderr)
+        print(f"stage {a.stage}: gate failed; stopping" if a.stage == "p" else f"stage 2: {e}; stopping",
+              file=sys.stderr)
         return 2
+    except InputRejected:
+        print(f"stage {a.stage}: input rejected; stopping", file=sys.stderr)
+        return 3
     except Exception as e:  # noqa: BLE001  (one line for the runner; the record holds the rest)
-        print(f"stage 2: error: {type(e).__name__}: {e}; stopping", file=sys.stderr)
+        print("stage p: error; stopping" if a.stage == "p" else f"stage 2: error: {type(e).__name__}: {e}; stopping",
+              file=sys.stderr)
         return 1
-    print(f"stage 2 {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
+    print(f"stage {a.stage} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
     return 0
 
 
