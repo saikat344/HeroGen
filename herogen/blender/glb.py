@@ -70,6 +70,8 @@ class Glb:
     notes: list[str]
     materials: list[Material] = field(default_factory=list)
     images: list[bytes | None] = field(default_factory=list, repr=False)   # encoded bytes per glTF image
+    image_sizes_by_index: dict[int, tuple[int, int]] = field(default_factory=dict)
+    other_texture_images: set[int] = field(default_factory=set)   # images also used outside base colour
 
     @property
     def triangles(self) -> int:
@@ -251,10 +253,42 @@ def _materials(doc: dict, notes: list[str]) -> list[Material]:
     return out
 
 
-def _images(doc: dict, binary: bytes, notes: list[str]) -> tuple[list[bytes | None], list[tuple[int, int]]]:
+def _other_texture_images(doc: dict) -> set[int]:
+    """Images used by material textures other than the replaceable PBR base-colour slot, including extensions."""
+    textures = doc.get("textures", [])
+    images = set()
+
+    def sources(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "source" and isinstance(child, int):
+                    images.add(child)
+                else:
+                    sources(child)
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.endswith("Texture") and isinstance(child, dict):
+                    index = child.get("index", -1)
+                    if isinstance(index, int) and 0 <= index < len(textures):
+                        sources(textures[index])
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for material in doc.get("materials", []):
+        other = {**material, "pbrMetallicRoughness": {
+            k: v for k, v in material.get("pbrMetallicRoughness", {}).items() if k != "baseColorTexture"}}
+        visit(other)
+    return images
+
+
+def _images(doc: dict, binary: bytes, notes: list[str]) -> tuple[list[bytes | None], dict[int, tuple[int, int]]]:
     from PIL import Image
 
-    raws, sizes = [], []
+    raws, sizes = [], {}
     for i, img in enumerate(doc.get("images", [])):
         if "bufferView" not in img:
             notes.append(f"image {i} is not embedded; its size is unknown")
@@ -263,7 +297,7 @@ def _images(doc: dict, binary: bytes, notes: list[str]) -> tuple[list[bytes | No
         raw, _ = _view_bytes(doc, binary, img["bufferView"])
         try:
             with Image.open(io.BytesIO(raw)) as im:
-                sizes.append(im.size)
+                sizes[i] = im.size
             raws.append(bytes(raw))
         except Exception:  # noqa: BLE001  (an unreadable texture is reported, not fatal)
             notes.append(f"image {i} could not be decoded")
@@ -334,7 +368,7 @@ def load_glb(path: Path | str) -> Glb:
         for c in reversed(node.get("children", [])):
             stack.append((c, world))
     raws, sizes = _images(doc, binary, notes)
-    return Glb(meshes, sizes, notes, materials, raws)
+    return Glb(meshes, list(sizes.values()), notes, materials, raws, sizes, _other_texture_images(doc))
 
 
 def write_glb(path: Path | str, meshes: list[tuple], texture_png: bytes | None = None,

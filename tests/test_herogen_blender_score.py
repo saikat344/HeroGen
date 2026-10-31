@@ -9,6 +9,7 @@ import io
 import json
 import math
 import shutil
+import struct
 import tempfile
 import types
 import unittest
@@ -584,6 +585,106 @@ class Colour(Tmp):
     def test_srgb_round_trip(self):
         c = np.linspace(0, 1, 11)
         np.testing.assert_allclose(S._to_srgb(S._to_linear(c)), c, atol=1e-9)
+
+
+class TextureLimits(Tmp):
+    @staticmethod
+    def image(size):
+        buf = io.BytesIO()
+        Image.new("RGB", size).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def body(self, images, materials):
+        verts, faces = box(*BODY)
+        path = G.write_glb(self.tmp / "textures.glb", [("Head", verts, faces, np.zeros((len(verts), 2)))])
+        doc, binary = G._chunks(path.read_bytes())
+        doc["images"] = []
+        for raw in images:
+            binary += b"\0" * (-len(binary) % 4)
+            doc["images"].append({"bufferView": len(doc["bufferViews"]), "mimeType": "image/png"})
+            doc["bufferViews"].append({"buffer": 0, "byteOffset": len(binary), "byteLength": len(raw)})
+            binary += raw
+        doc["buffers"][0]["byteLength"] = len(binary)
+        doc["textures"] = [{"source": i} for i in range(len(images))]
+        doc["materials"] = materials
+        doc["meshes"][0]["primitives"][0]["material"] = 0
+        encoded = json.dumps(doc).encode()
+        encoded += b" " * (-len(encoded) % 4)
+        binary += b"\0" * (-len(binary) % 4)
+        path.write_bytes(struct.pack("<III", G.GLB_MAGIC, 2, 28 + len(encoded) + len(binary))
+                         + struct.pack("<II", len(encoded), G.CHUNK_JSON) + encoded
+                         + struct.pack("<II", len(binary), G.CHUNK_BIN) + binary)
+        return path
+
+    def score(self, body, **overrides):
+        return S.score_body(self.tmp, "textures", body, views=[], profile="roblox-avatar", **overrides)
+
+    def assert_texture_limit(self, entry, size):
+        self.assertEqual(entry["atlas"], size)
+        check = next(c for c in entry["profile"]["checks"] if c["name"] == "texture_max_px")
+        self.assertEqual(check["value"], size)
+        self.assertEqual(check["pass"], None if size is None else size <= 2048)
+        if size is not None and size > 2048:
+            self.assertFalse(entry["profile"]["pass"])
+
+    def test_normal_map_only_still_fails_the_platform_limit(self):
+        body = self.body([self.image((4096, 4096))], [{"normalTexture": {"index": 0}}])
+        self.assert_texture_limit(self.score(body), 4096)
+
+    def test_head_override_keeps_a_large_normal_map_in_the_limit(self):
+        body = self.body([self.image((16, 16)), self.image((4096, 2))], [{
+            "name": S.HEAD_MATERIAL, "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}},
+            "normalTexture": {"index": 1}}])
+        head = self.tmp / "head.png"
+        Image.new("RGB", (32, 16)).save(head)
+        self.assert_texture_limit(self.score(body, head_atlas=head), 4096)
+
+    def test_override_keeps_an_image_shared_with_another_texture_slot(self):
+        for slot in ("normalTexture", "occlusionTexture", "metallicRoughnessTexture", "emissiveTexture",
+                     "clearcoatTexture"):
+            with self.subTest(slot=slot):
+                material = {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}
+                if slot == "metallicRoughnessTexture":
+                    material["pbrMetallicRoughness"][slot] = {"index": 0}
+                elif slot == "clearcoatTexture":
+                    material["extensions"] = {"KHR_materials_clearcoat": {slot: {"index": 0}}}
+                else:
+                    material[slot] = {"index": 0}
+                body = self.body([self.image((4096, 2))], [material])
+                atlas = self.tmp / "atlas.png"
+                Image.new("RGB", (8, 8)).save(atlas)
+                self.assert_texture_limit(self.score(body, atlas=atlas), 4096)
+
+    def test_override_keeps_an_image_shared_with_the_unreplaced_head(self):
+        body = self.body([self.image((4096, 2))], [
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}},
+            {"name": S.HEAD_MATERIAL, "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}])
+        atlas = self.tmp / "atlas.png"
+        Image.new("RGB", (8, 8)).save(atlas)
+        self.assert_texture_limit(self.score(body, atlas=atlas), 4096)
+
+    def test_largest_replacement_counts_and_replaced_images_do_not(self):
+        body = self.body([self.image((4096, 2)), self.image((8192, 2))], [
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}},
+            {"name": S.HEAD_MATERIAL, "pbrMetallicRoughness": {"baseColorTexture": {"index": 1}}}])
+        atlas, head = self.tmp / "atlas.png", self.tmp / "head.png"
+        for atlas_size, head_size in (((64, 8), (16, 128)), ((8, 256), (32, 16))):
+            with self.subTest(atlas_size=atlas_size, head_size=head_size):
+                Image.new("RGB", atlas_size).save(atlas)
+                Image.new("RGB", head_size).save(head)
+                self.assert_texture_limit(self.score(body, atlas=atlas, head_atlas=head),
+                                          max(*atlas_size, *head_size))
+
+    def test_undecodable_images_preserve_the_remaining_image_indices(self):
+        body = self.body([b"unreadable", self.image((4096, 2))], [
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}])
+        atlas = self.tmp / "atlas.png"
+        Image.new("RGB", (8, 8)).save(atlas)
+        self.assert_texture_limit(self.score(body, atlas=atlas), 4096)
+
+    def test_no_decodable_image_keeps_the_limit_unmeasured(self):
+        body = self.body([b"unreadable"], [{"normalTexture": {"index": 0}}])
+        self.assert_texture_limit(self.score(body), None)
 
 
 class Sanity(unittest.TestCase):
