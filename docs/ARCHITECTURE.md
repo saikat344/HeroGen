@@ -791,7 +791,11 @@ sideways shift (head, torso and legs; the arms are left out), separately facing 
   way have a smaller face and need review. Known residual risk: on the other characters 6 of the 13 passing
   oblique back views still pass (faces 0.17-0.28 of the head, two characters), and a "face" covering most of the
   head yet under 0.75 (never seen on a real back view) would pass too; either one gets through only when Sapiens
-  also names that back view's joints the other way round.
+  also names that back view's joints the other way round. Measured end to end on the 40 oblique back views SAM
+  found a face on (Sapiens 2 on the deployed app, judged by every stage-2h check as the front view each aliases
+  to): none was accepted. Sapiens swapped the names on 8 (150 degrees, read as 20-36), and every one of those had
+  too small a face and went to review; on the 6 whose face passes, Sapiens named the joints correctly, the fit ran
+  to the profile and the view was rejected.
 - **A-pose.** Each arm's angle below horizontal, from how far the wrist hangs below the shoulder over the arm's
   length in the front view (a turn doesn't change it): the nearer arm must be found and between 35 and 72
   degrees, and so must the farther one when both its joints score at least 0.5.
