@@ -556,8 +556,8 @@ def rim_loop_vertices(rim: dict) -> np.ndarray:
 def rim_open_chains(rim: dict) -> list[tuple[np.ndarray, float]]:
     """Maximal open paths of shared bridges, split at branch vertices; length is mesh arc length.
 
-    Cyclic edges are excluded even when collinear: opening a degenerate cycle into paths would turn it
-    into a measurement. No chord is inferred between endpoints at a three-section junction.
+    Cyclic edges, including collinear cycles, are accounted for separately as cyclic blocks.
+    No chord is inferred between endpoints at a three-section junction.
     """
     adjacent = defaultdict(list)
     cyclic = set()
@@ -589,14 +589,37 @@ def rim_open_chains(rim: dict) -> list[tuple[np.ndarray, float]]:
     return chains
 
 
+def rim_boundary_pieces(rim: dict) -> list[tuple[str, np.ndarray, float]]:
+    """Shared-edge cyclic blocks and maximal open chains, with each edge counted once."""
+    points = np.asarray(rim["points"])
+    pieces = []
+    for block in _rim_blocks(rim):
+        if len(block) > 1:
+            edges = np.asarray(block, dtype=np.int64)
+            length = float(np.linalg.norm(points[edges[:, 1]] - points[edges[:, 0]], axis=1).sum())
+            pieces.append(("loops", np.unique(edges), length))
+    pieces.extend(("open_chain", ids, length) for ids, length in rim_open_chains(rim))
+    return pieces
+
+
+def rim_measurements(rims: list, radius: float) -> list[tuple[dict, np.ndarray]]:
+    """Measure all shared-edge pieces of one section pair when their total spans a cut radius.
+
+    The caller supplies only that joint's rims, at one LOD. Junctions may split a real cut into short
+    pieces, so no piece is judged separately. Isolated vertices have no shared edge and never contribute.
+    """
+    boundaries = [(rim, rim_boundary_pieces(rim)) for rim in rims]
+    total = sum(length for _, pieces in boundaries for _, _, length in pieces)
+    if not np.isfinite(radius) or radius <= 0 or total < radius:
+        return []
+    return [(rim, np.unique(np.concatenate([ids for _, ids, _ in pieces])))
+            for rim, pieces in boundaries if pieces]
+
+
 def rim_measurement_vertices(rim: dict, radius: float) -> np.ndarray:
-    """Sample every genuine loop and every open chain at least one cut radius long."""
-    selected = set(rim_loop_vertices(rim).tolist())
-    if np.isfinite(radius) and radius > 0:
-        for ids, length in rim_open_chains(rim):
-            if length >= radius:
-                selected.update(ids.tolist())
-    return np.asarray(sorted(selected), dtype=np.int64)
+    """Measurement vertices when a single rim contains the joint's whole shared boundary."""
+    measurements = rim_measurements([rim], radius)
+    return measurements[0][1] if measurements else np.array([], dtype=np.int64)
 
 
 def is_closed_rim(rim: dict) -> bool:

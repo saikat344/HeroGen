@@ -93,39 +93,50 @@ def unmeasurable_sections(secs: dict, joints: set | None = None) -> dict[str, st
         empty = [n for n in (child, parent) if not len(secs[n].faces)]
         if empty:
             missing[j] = "empty section " + ", ".join(empty)
-        elif not any(r["neighbour"] == parent and len(split.rim_measurement_vertices(r, secs[child].cut_radius)) for r in secs[child].rims):
+        elif not split.rim_measurements([r for r in secs[child].rims if r["neighbour"] == parent],
+                                        secs[child].cut_radius):
             missing[j] = f"no shared rim between {child} and {parent}"
             contacts = [r for r in secs[child].rims if r["neighbour"] == parent and len(r["points"])]
             if contacts:
                 sizes = ", ".join(f"{len(r['points'])} vertices/{len(r.get('edges', []))} edges" for r in contacts)
-                missing[j] += f" (no qualifying loop or chain: {sizes}; cut radius {secs[child].cut_radius:.6g})"
+                missing[j] += f" (total shared boundary below cut radius: {sizes}; cut radius {secs[child].cut_radius:.6g})"
     return missing
 
 
 def rim_topology(secs: dict) -> dict:
-    """Per joint, the sizes and structural validity of all parent/child boundary components."""
+    """Per joint, total shared-edge length and every parent/child boundary piece at one LOD."""
     result = {}
     for child, parent in PARENT.items():
         if parent is None:
             continue
         section = secs[child]
+        rims = [r for r in section.rims if r["neighbour"] == parent]
+        pieces_by_rim = [split.rim_boundary_pieces(r) for r in rims]
+        total = sum(length for pieces in pieces_by_rim for _, _, length in pieces)
+        empty = any(not len(secs[n].faces) for n in (child, parent))
+        measurable = bool(not empty and np.isfinite(section.cut_radius) and section.cut_radius > 0
+                          and total >= section.cut_radius)
         components = []
-        for rim in section.rims:
-            if rim["neighbour"] != parent:
-                continue
+        for rim, pieces in zip(rims, pieces_by_rim):
             loops = len(split.rim_loop_vertices(rim))
             chains = [{"length_studs": length,
                        "length_over_radius": length / section.cut_radius if section.cut_radius > 0 else None,
-                       "measurable": bool(section.cut_radius > 0 and length >= section.cut_radius)}
+                       "measurable": measurable}
                       for _, length in split.rim_open_chains(rim)]
-            kinds = (["loops"] if loops else []) + (["open_chain"] if any(c["measurable"] for c in chains) else [])
+            kinds = sorted({kind for kind, _, _ in pieces}) if measurable else []
+            length = sum(length for _, _, length in pieces)
             components.append({"vertices": len(rim["points"]), "edges": len(rim.get("edges", [])),
                                "closed_ring": bool(loops), "loop_vertices": loops,
+                               "length_studs": length,
+                               "length_over_radius": length / section.cut_radius if section.cut_radius > 0 else None,
+                               "piece_count": len(pieces), "measurable": bool(measurable and pieces),
                                "boundary_type": "+".join(kinds) or "none", "open_chains": chains})
         kinds = sorted({kind for c in components for kind in c["boundary_type"].split("+") if kind != "none"})
-        empty = any(not len(secs[n].faces) for n in (child, parent))
         result[PIVOT_JOINT[child]] = {"boundary_type": "+".join(kinds) if kinds and not empty else "none",
-                                    "cut_radius_studs": section.cut_radius, "components": components}
+                                    "cut_radius_studs": section.cut_radius, "length_studs": total,
+                                    "length_over_radius": total / section.cut_radius if section.cut_radius > 0 else None,
+                                    "piece_count": sum(len(pieces) for pieces in pieces_by_rim),
+                                    "measurable": measurable, "components": components}
     return result
 
 

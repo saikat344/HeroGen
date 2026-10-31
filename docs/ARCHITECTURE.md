@@ -456,24 +456,57 @@ scores and changes no gate. Carve skeletons retain their original radii and join
 
 A cut opening can border several sections, for example a lower arm meeting its upper arm and the torso.
 Gap measurements use edges present in both sections' uncapped mesh boundaries. A joint is measurable
-when it has a nondegenerate closed loop or an open chain whose arc length is at least the joint's cut radius
-(the child bone radius already used by stage 4). This is one structural, scale-relative bound; a single edge
-can qualify if long enough. Single vertices and shorter chains cannot measure a joint.
-Biconnected blocks preserve every nondegenerate loop, including multiple loops and junctions. The remaining
-bridge edges form maximal open chains, split at branch vertices; lengths are not pooled across branches or
-components. Collinear cycles do not become open chains. Every qualifying loop and chain contributes gap
-samples, and the maximum over those samples is measured. No closing chord is inferred.
-If no qualifying boundary remains, stage 4 writes a failed `measurable_joints` record and leaves the gap unknown.
+when the total arc length of all its shared-edge loops and chains is at least the joint's cut radius
+(the child bone radius already used by stage 4). Lengths are summed for the whole section pair at one LOD,
+including pieces split by branches and junctions. Once that total qualifies, every piece contributes gap
+samples, even short chains beside a loop. A sub-radius total remains unmeasurable, including a small closed
+loop. Only isolated vertices with no shared edge are excluded from a qualifying boundary.
+Biconnected cyclic blocks and maximal bridge chains account for each shared edge once; no closing chord is
+inferred. Collinear cyclic blocks retain their shared edges without being reinterpreted as open chains.
+If the total cannot qualify, stage 4 writes a failed `measurable_joints` record and leaves the gap unknown.
 The same rule applies to the reference body, cut candidates and every selected LOD. Per-LOD `joint_rims`
 records each joint's `boundary_type` (`loops`, `open_chain`, `loops+open_chain`, or `none`), `cut_radius_studs`,
-and component vertex/edge counts, loop validity and every open chain's `length_studs`, `length_over_radius`
-and `measurable` flag. Failed stage records also carry `joint_rims` for the failing reference body or LOD.
+whole-boundary `length_studs`, `length_over_radius`, `piece_count` and `measurable` flag. Components also record
+vertex/edge counts, loop validity, lengths, piece counts and every open chain's length and joint-wide
+measurability. Failed stage records also carry `joint_rims` for the failing reference body or LOD.
 Body-joint skeletons'
 openings with two contiguous neighbour runs are capped separately along a shared chord. A cap chord does not
 invent a shared measurement boundary. Silhouette skeletons retain the original chord rule, which splits only
 openings with two joint-adjacent neighbours; their section geometry and pivots are unchanged.
 Silhouette shoulder covers retain their original cap-owner samples for sizing, separately from the qualifying
 shared boundaries used to measure joints.
+
+Compared with e3d2b4c, carve section vertices, faces, pivots, cap counts and shoulder-cover geometry
+are unchanged. Gap sampling now uses the whole shared-edge boundary rather than cap-owner samples;
+missing or sub-radius boundaries fail explicitly instead of supplying an unknown measurement to pose
+scoring. This applies to cut-search candidates and every LOD, and can change candidate selection and
+reported pivot rim radii. Rest checks also validate stage-3 shape provenance; views unused for shape
+construction compare against the received stage-3 mesh, with turnaround agreement reported separately.
+Derived visual-hull views remain diagnostic. No gap or IoU threshold changes.
+
+The synthetic carve regression covers eight bodies (default, arm angles 10/30/70 degrees, head scale 1.2,
+leg spreads 0.1/0.2, and clothed), with both flat and dome caps. Thirteen of its sixteen full pose maps
+match e3d2b4c. For the 10-degree arms, both cap styles now include four real shared-edge endpoints at the
+arm junction that the old 114-sample Waist measurement omitted. All 118 shared-edge vertices contribute;
+the Waist gaps for `twist_turn`, `torso_side_bend` and `reach_up_L` are 0.3559, 0.3034 and 0.1078 studs,
+superseding the dome measurements 0.3417, 0.2697 and 0.1045. The two frozen Waist maxima are therefore 0.3559.
+The same arm fixtures include shoulder endpoints absent from cap-owner samples; the clothed dome fixture
+includes hip endpoints. All other body/cap pose maps remain identical. Reproduce the measurements and
+unchanged-geometry assertions with
+`python3 -m unittest discover -s tests -p test_herogen_blender_cuts.py -v`.
+
+All changed pose measurements relative to e3d2b4c are listed below (studs, old → whole boundary).
+
+| Body / cap | Joint | Pose measurements |
+| --- | --- | --- |
+| 10-degree arms / flat | Waist | `reach_up_L` 0.1061 → 0.1078; `torso_side_bend` 0.2937 → 0.3034; `twist_turn` 0.3417 → 0.3559 |
+| 10-degree arms / flat | LeftShoulder | `crouch_deep` 0.4585 → 0.4589; `walk_a` 0.2963 → 0.2973; `walk_long_L` 0.3931 → 0.3941 |
+| 10-degree arms / flat | RightShoulder | `arms_across` 0.4186 → 0.4209; `arms_forward` 0.5221 → 0.5248; `arms_up` 0.7213 → 0.7231; `crouch` 0.3727 → 0.3779; `crouch_deep` 0.448 → 0.4559; `twist_turn` 0.333 → 0.3416; `walk_a` 0.2841 → 0.2901; `walk_b` 0.287 → 0.2932; `walk_long_L` 0.3429 → 0.3464; `walk_short_R` 0.1795 → 0.1833 |
+| 10-degree arms / dome | Waist | `crouch_deep` 0.0423 → 0.0566; `crouch_side_torso` 0.095 → 0.1068; `lean_back_nod` 0.0556 → 0.0607; `reach_up_L` 0.1045 → 0.1078; `torso_side_bend` 0.2697 → 0.3034; `twist_turn` 0.3417 → 0.3559 |
+| 10-degree arms / dome | LeftShoulder | `arms_up` 0.5737 → 0.5752 |
+| 10-degree arms / dome | RightShoulder | `arms_up` 0.5595 → 0.5606; `twist_turn` 0.1824 → 0.1999; `walk_a` 0.1014 → 0.1075; `walk_b` 0.1752 → 0.1924 |
+| Clothed / dome | LeftHip | `crouch` 0.066 → 0.0719; `crouch_deep` 0.0662 → 0.0706; `crouch_shallow` 0.0516 → 0.0524; `crouch_side_torso` 0.0659 → 0.0721; `lunge_L` 0.0659 → 0.0721; `sit` 0.0661 → 0.0721 |
+| Clothed / dome | RightHip | `crouch` 0.0641 → 0.0651; `crouch_deep` 0.0664 → 0.0665; `kick_R` 0.0668 → 0.067 |
 
 ## Stage 4 texture: colour projection
 

@@ -656,8 +656,8 @@ def _run_stage4(run: Path, rec: StageRecord, height: float, timeout: float,
         s = hi[n]
         jn = PIVOT_JOINT[n]
         est = np.asarray(sk.joints[jn], float)
-        rim = [r["points"][ids] for r in s.rims if r["neighbour"] == PARENT[n]
-               and len(ids := split.rim_measurement_vertices(r, s.cut_radius))]
+        rim = [r["points"][ids] for r, ids in split.rim_measurements(
+            [r for r in s.rims if r["neighbour"] == PARENT[n]], s.cut_radius)]
         rim_r = float(np.linalg.norm(np.concatenate(rim) - s.pivot, axis=1).mean()) if rim else None
         inside = bool(winding_inside(s.pivot[None], s.verts, s.faces)[0]) if len(s.faces) else False
         off = float(np.linalg.norm(s.pivot - est))

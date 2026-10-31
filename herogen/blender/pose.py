@@ -259,8 +259,8 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
         parent = PARENT[name]
         if parent is None:
             continue
-        pts = [r["points"][ids] for r in s.rims if r["neighbour"] == parent
-               and len(ids := split.rim_measurement_vertices(r, s.cut_radius))]
+        pts = [r["points"][ids] for r, ids in split.rim_measurements(
+            [r for r in s.rims if r["neighbour"] == parent], s.cut_radius)]
         if pts and len(sections[parent].faces) and len(s.faces) and (joints is None or PIVOT_JOINT[name] in joints):
             rims[name] = np.concatenate(pts)
     result: dict[str, dict[str, float]] = {}

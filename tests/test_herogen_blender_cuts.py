@@ -93,7 +93,7 @@ class TestCutMeasurements(unittest.TestCase):
         triangle = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0]])
         ring = np.array([[0, 1], [1, 2], [2, 0]])
         self.assertTrue(split.is_closed_rim({"points": triangle, "edges": ring}))
-        # No tuned size threshold: a small genuine opening is still measurable.
+        # Closure has no size threshold; gap measurability uses the whole joint boundary length.
         self.assertTrue(split.is_closed_rim({"points": triangle * 1e-9, "edges": ring}))
         for points, edges in ((triangle[:1], []), (triangle[:2], [[0, 1]]),
                               (triangle, ring[:2]), (triangle, [[0, 1], [1, 0], [2, 2]]),
@@ -125,7 +125,7 @@ class TestCutMeasurements(unittest.TestCase):
                 samples = np.concatenate([r["points"][split.rim_loop_vertices(r)] for r in rims])
                 np.testing.assert_array_equal(np.unique(samples, axis=0), np.unique(points[expected], axis=0))
 
-    def test_joint_gap_uses_every_loop_but_no_dangling_branch(self):
+    def test_joint_gap_uses_every_loop_but_no_isolated_vertex(self):
         from herogen.blender import pose
 
         child = self.secs["LeftLowerArm"]
@@ -135,14 +135,14 @@ class TestCutMeasurements(unittest.TestCase):
         first = dict(original, points=points[:3], edges=ring)
         second = dict(original, points=points[3:], edges=ring)
         multiple = dict(original, points=points, edges=np.concatenate([ring, ring + 3]))
-        # A very distant contact would dominate the gap if it leaked into the samples.
+        # A very distant isolated contact would dominate the gap if it leaked into the samples.
         branch = dict(multiple, points=np.concatenate([points, [[100., 100, 100]]]),
-                      edges=np.concatenate([multiple["edges"], [[0, 6]]]))
+                      edges=multiple["edges"])
         poses = pose.pose_library(pose.bone_directions(self.sk))
 
         def measure(rim):
             secs = dict(self.secs)
-            secs[child.name] = replace(child, rims=[rim], cut_radius=1000.0)
+            secs[child.name] = replace(child, rims=[rim], cut_radius=0.01)
             return pose.joint_gaps(secs, poses, joints={"LeftElbow"})
 
         a, b = measure(first), measure(second)
@@ -167,20 +167,52 @@ class TestCutMeasurements(unittest.TestCase):
             np.testing.assert_array_equal(split.rim_measurement_vertices({"points": points, "edges": edges}, 1),
                                           expected)
 
-    def test_chains_are_not_pooled_across_components_or_branches(self):
+    def test_boundary_length_pools_loops_chains_components_and_branches(self):
         points = np.array([[0., 0, 0], [0.75, 0, 0], [0, 0.75, 0], [0, 0, 0.75]])
         for edges in ([[0, 1], [0, 2], [0, 3]], [[0, 1], [2, 3]]):
             rim = {"points": points, "edges": edges}
-            radius = 2.0 if len(edges) == 2 else 1.0
-            np.testing.assert_array_equal(split.rim_measurement_vertices(rim, radius), [])
-        # Two short bridges incident on a loop junction cannot be pooled through that junction.
+            # Each chain is shorter than 1.5; both totals lie between 1.5 and 3.
+            np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 1.5), np.arange(4))
+            np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 3.), [])
+        # Short bridges and a collinear cycle are still real shared edges of the same joint.
         rim = {"points": np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0],
                                     [-0.75, 0, 0], [0, -0.75, 0]]),
                "edges": [[0, 1], [1, 2], [2, 0], [0, 3], [0, 4]]}
-        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 1.0), [0, 1, 2])
-        # A collinear cycle must not be reinterpreted as several long open chains.
+        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 1.0), np.arange(5))
         rim = {"points": points * [1, 0, 0], "edges": [[0, 1], [1, 2], [2, 0]]}
-        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 0.1), [])
+        np.testing.assert_array_equal(split.rim_measurement_vertices(rim, 0.1), [0, 1, 2])
+
+    def test_joint_total_includes_short_components_but_never_other_joints_or_lods(self):
+        from herogen.blender import pose, stage4
+
+        child = self.secs["LeftLowerArm"]
+        original = next(r for r in child.rims if r["neighbour"] == "LeftUpperArm")
+        # Neither disconnected chain qualifies alone; together they reach exactly one radius.
+        rims = [dict(original, points=np.array([[0., 0, z], [0.5, 0, z]]), edges=[[0, 1]])
+                for z in (0., 1.)]
+        secs = dict(self.secs)
+        secs[child.name] = replace(child, rims=rims, cut_radius=1.)
+        self.assertTrue(all(not len(split.rim_measurement_vertices(r, 1.)) for r in rims))
+        self.assertEqual(len(split.rim_measurements(rims, 1.)), 2)
+        self.assertEqual(cuts.unmeasurable_sections(secs, {"LeftElbow"}), {})
+        pose.joint_gaps(secs, {"rest": {}}, joints={"LeftElbow"})
+        record = cuts.rim_topology(secs)["LeftElbow"]
+        self.assertEqual((record["length_studs"], record["length_over_radius"], record["piece_count"]),
+                         (1., 1., 2))
+        self.assertEqual(record["boundary_type"], "open_chain")
+        self.assertTrue(all(c["measurable"] for c in record["components"]))
+        for radius, contacts in ((1.01, rims), (1., [rims[0], dict(rims[1], neighbour="UpperTorso")])):
+            low = dict(secs)
+            low[child.name] = replace(child, rims=contacts, cut_radius=radius)
+            self.assertIn("LeftElbow", cuts.unmeasurable_sections(low))
+            with self.assertRaises(cuts.UnmeasurableJoints):
+                stage4._require_measurable_lods({"high": secs, "low": low})
+        # A loop also needs one radius in total; an isolated contact adds no length or samples.
+        triangle = dict(original, points=np.array([[0., 0, 0], [0.1, 0, 0], [0, 0.1, 0]]),
+                        edges=[[0, 1], [1, 2], [2, 0]])
+        self.assertEqual(split.rim_measurements([triangle], 1.), [])
+        contact = dict(original, points=np.array([[100., 100, 100]]), edges=[])
+        self.assertEqual(len(split.rim_measurements(rims + [contact], 1.)), 2)
 
     def test_gap_uses_every_qualifying_chain_and_loop(self):
         from herogen.blender import pose
@@ -421,8 +453,9 @@ class TestCarveGeometry(unittest.TestCase):
         from herogen.blender import pose
 
         # Frozen full pose maps on synthetic bodies, with unchanged section geometry. Thirteen cases
-        # match e3d2b4c exactly. arm10 flat/dome exclude sub-radius waist chains and include shared
-        # shoulder endpoints missing from cap-owner samples; clothed dome includes hip endpoints.
+        # match e3d2b4c exactly. arm10 flat/dome include shared shoulder endpoints missing from
+        # cap-owner samples; clothed dome includes hip endpoints. Waist includes four shared-edge
+        # endpoints omitted at the arm junction.
         names = ['Neck', 'Waist', 'LeftShoulder', 'LeftElbow', 'LeftWrist', 'RightShoulder', 'RightElbow']
         names += ['RightWrist', 'LeftHip', 'LeftKnee', 'LeftAnkle', 'RightHip', 'RightKnee', 'RightAnkle']
         fixtures = [
@@ -435,12 +468,12 @@ class TestCarveGeometry(unittest.TestCase):
                  "2a2b87a43409412a27cbd19b1a3e9d7d0eb75a8f377e0be7b23f85c19d476f44"),
             )),
             ({'arm_angle_deg': 10}, (
-                ((0.0824, 0.184, 0.7183, 0.1868, 0.1251, 0.7231, 0.2145,
+                ((0.0824, 0.3559, 0.7183, 0.1868, 0.1251, 0.7231, 0.2145,
                   0.1233, 0.2365, 0.2254, 0.1832, 0.2373, 0.2255, 0.1865),
-                 "f733ea19ad7357025295a0b17edf87ef92e8970fe45f3089d21dccfcfc3e03b6"),
-                ((0.0415, 0.1752, 0.7084, 0.1868, 0.0244, 0.5606, 0.2145,
+                 "72979dcb2c5020ea1a8034946866cd55d347fc3d3308a0fb657e8c7feac59d69"),
+                ((0.0415, 0.3559, 0.7084, 0.1868, 0.0244, 0.5606, 0.2145,
                   0.033, 0.0724, 0.0605, 0.1507, 0.0691, 0.0608, 0.1689),
-                 "aed7643c4c8cb8d6f795eebc2df9b14c525de69ecd74936817d4a45d22c06ddd"),
+                 "f6802765fbbef76b8e70c3c314d53e6ea21f3c98a84b3fc17c7ed289664d68e0"),
             )),
             ({'arm_angle_deg': 30}, (
                 ((0.0826, 0.1936, 0.3066, 0.1647, 0.123, 0.3159, 0.1735,
@@ -510,6 +543,24 @@ class TestCarveGeometry(unittest.TestCase):
                             with self.assertRaises(cuts.UnmeasurableJoints):
                                 pose.joint_gaps(secs, poses)
                         gaps = pose.joint_gaps(secs, poses, joints=set(frozen))
+                        if variant == {"arm_angle_deg": 10} and cap == "dome":
+                            # The arm junction splits the cut-plane Waist boundary into a loop and
+                            # two sub-radius chains. The old 114 samples omitted four real shared-edge
+                            # endpoints at the arm junction; all 118 vertices must contribute.
+                            waist = cuts.rim_topology(secs)["Waist"]
+                            self.assertEqual(waist["boundary_type"], "loops+open_chain")
+                            self.assertEqual(waist["piece_count"], 3)
+                            self.assertGreaterEqual(waist["length_over_radius"], 1)
+                            self.assertTrue(all(c["length_over_radius"] < 1 for c in waist["components"]
+                                                if c["boundary_type"] == "open_chain"))
+                            measured = split.rim_measurements(
+                                [r for r in secs["UpperTorso"].rims if r["neighbour"] == "LowerTorso"],
+                                secs["UpperTorso"].cut_radius)
+                            self.assertEqual(sum(len(ids) for _, ids in measured), 118)
+                            self.assertEqual({p: gaps[p]["Waist"] for p in
+                                              ("twist_turn", "torso_side_bend", "reach_up_L")},
+                                             {"twist_turn": 0.3559, "torso_side_bend": 0.3034,
+                                              "reach_up_L": 0.1078})
                         self.assertEqual({j: max(r[j] for r in gaps.values()) for j in frozen}, frozen)
                         self.assertEqual(hashlib.sha256(json.dumps(gaps, sort_keys=True,
                                                                    separators=(",", ":")).encode()).hexdigest(),
