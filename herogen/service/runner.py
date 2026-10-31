@@ -153,7 +153,10 @@ def roblox_available() -> bool:
 
 
 def plan_for(kind: str, profile: str = "best") -> list[StageSpec]:
-    return [s for s in PLAN if (kind == "prompt" or not s.prompt_only) and (s.key != "3f" or profile == "best")]
+    from herogen.blender.refine import REFINE_PROFILES
+
+    return [s for s in PLAN if (kind == "prompt" or not s.prompt_only)
+            and (s.key != "3f" or profile in REFINE_PROFILES)]
 
 
 def read_record(run_dir: Path, name: str) -> dict[str, Any] | None:

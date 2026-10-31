@@ -99,9 +99,9 @@ class TestJobFlow(JobCase):
         self.assertAlmostEqual(j["cost_usd"], 0.0375, places=6, msg="the job's own stages; 2h runs beside it")
         self.assertIn("basis", json.loads(j["cost_detail"]))
         st = self.stages(job)
-        self.assertEqual(set(st), {"0", "1", "2", "3", "4", "6", "5"})
+        self.assertEqual(set(st), {"0", "1", "2", "3", "3f", "4", "6", "5"})
         self.assertTrue(all(r["state"] == "passed" for r in st.values()))
-        self.assertEqual(self.runner.calls, ["0", "1", "2", "3", "4", "6", "5"])
+        self.assertEqual(self.runner.calls, ["0", "1", "2", "3", "3f", "4", "6", "5"])
 
     def test_prompt_job_draws_its_sketch_first(self):
         job = self.new_job("prompt")
@@ -155,7 +155,7 @@ class TestJobFlow(JobCase):
         self.runner.fail = {}
         self.runner.calls.clear()
         self.assertEqual(self.go(job, call="call-2"), "succeeded")
-        self.assertEqual(self.runner.calls, ["3", "4", "6", "5"], "stages 0-2 kept from attempt 1")
+        self.assertEqual(self.runner.calls, ["3", "3f", "4", "6", "5"], "stages 0-2 kept from attempt 1")
         self.assertEqual(self.stages(job)["1"]["message"], "kept from an earlier attempt")
         self.assertEqual(self.store.job_get(job["id"])["attempts"], 2)
         self.assertAlmostEqual(self.store.job_get(job["id"])["cost_usd"], 0.0375, places=6,
@@ -852,12 +852,12 @@ class TestStageCommands(TempDirCase):
         runner = CliRunner(python="py", model_api_key="synthetic-key")
         runner._flags["herogen.blender"] = "--quality-cache"
         specs = {s.key: s for s in PLAN}
-        for key in ("1", "3", "4", "6"):
+        for key in ("1", "3", "3f", "4", "6"):
             with mock.patch.object(runner, "available", return_value=None), \
                     mock.patch("herogen.service.runner.subprocess.run",
                                return_value=subprocess.CompletedProcess([], 1, "", "")) as execute:
                 runner.run(specs[key], self.ctx())
-            self.assertEqual("MODEL_API_KEY" in execute.call_args.kwargs["env"], key in ("1", "3"))
+            self.assertEqual("MODEL_API_KEY" in execute.call_args.kwargs["env"], key in ("1", "3", "3f"))
 
     def test_stage_env_holds_no_secrets(self):
         from herogen.service.runner import base_env

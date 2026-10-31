@@ -7,10 +7,12 @@ cleanly without it. Nothing generated here is written inside the repository.
 from __future__ import annotations
 
 import json
+import importlib.util
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_herogen_body_quality import quality_client
 
@@ -213,6 +215,102 @@ class TestSections(SyntheticBase):
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class TestEndToEndBlender(SyntheticBase):
+    @unittest.skipUnless(importlib.util.find_spec("scipy") is not None, "scipy is required for refined colour")
+    def test_refined_colours_reach_exported_head_and_torso_in_both_lods(self):
+        import hashlib
+        import io
+        from herogen.blender import glb, sam3d_mesh, texture
+        from herogen.blender.stage4 import run_stage4
+        from PIL import Image
+
+        run = self.tmp / "refined"
+        synth.write_run(run, synth.humanoid(), size=384, ppu=60.0)
+        verts, faces, _ = carve.build_mesh(views.load_views(run, 5.5), 5.5, 96)
+        work = run / "blender-work"
+        work.mkdir()
+        np.savez(work / "03-mesh.npz", verts=verts, faces=faces)
+        glb.write_glb(run / "03-mesh.glb", [("body", verts, faces)])
+        (run / "stage-3.json").write_text(json.dumps({"ok": True, "mesh_source": "sam3d-objects",
+                                                       "shape_views": ["front"]}))
+        R = sam3d_mesh.rotation(71, 13, -8)
+        centre = np.array([.1, -.2, 2.7])
+        raw_verts = (verts - centre) @ R.T / 5.5
+        stream = io.BytesIO()
+        Image.new("RGB", (16, 16), "green").save(stream, format="PNG")
+        glb.write_glb(run / "03-source.glb", [("raw", raw_verts, faces, np.full((len(verts), 2), .5))],
+                      texture_png=stream.getvalue())
+        raw = sam3d_mesh.load_source(run / "03-source.glb")
+        np.savez(work / "03-source-uv.npz", verts=raw.verts @ R * 5.5 + centre,
+                 faces=raw.faces, corner_uv=raw.corner_uv)
+        Image.new("RGB", (16, 16), "green").save(work / "03-source-texture.png")
+        # A real 4096 image; every triangle has its own corners and its own region's constant UV.
+        image = Image.new("RGB", (4096, 4096), (220, 30, 30))
+        image.paste((30, 30, 220), (2048, 0, 4096, 4096))
+        stream = io.BytesIO()
+        image.save(stream, format="PNG")
+        uv = np.where((verts[faces].mean(axis=1)[:, 2] > 4.4)[:, None, None], [.25, .5], [.75, .5])
+        uv = np.broadcast_to(uv, (len(faces), 3, 2)).reshape(-1, 2).copy()
+        glb.write_glb(run / "03-refined.glb", [("refined", raw_verts[faces].reshape(-1, 3),
+                                                np.arange(len(faces) * 3).reshape(-1, 3), uv)],
+                      texture_png=stream.getvalue())
+        source_sha = hashlib.sha256((run / "03-source.glb").read_bytes()).hexdigest()
+        (run / "stage-3f.json").write_text(json.dumps({"status": "complete", "source_sha256": source_sha}))
+        detail = np.zeros((64, 64, 3))
+        detail[..., 1] = (np.indices((64, 64)).sum(axis=0) % 2) * 255
+        closeup = texture.Closeup("front", detail, np.array([[.25, 0, 184], [0, .25, 40]]),
+                                  np.ones((384, 384)))
+        with mock.patch.object(texture, "load_closeups", return_value=(
+                {"front": closeup}, {"used": ["front"], "notes": []})):
+            r4 = run_stage4(run, timeout=600, profile="roblox-ingame")
+        recorded = json.loads((run / "stage-4.json").read_text())
+        info = recorded["body"]["texture"]
+        self.assertEqual(info["colour_source"], "refined")
+        self.assertFalse(info["source_fallback"])
+        self.assertEqual(info["refined"]["stage3f_source_sha256"], source_sha)
+        self.assertEqual(info["refined"]["refined_glb_sha256"],
+                         hashlib.sha256((run / "03-refined.glb").read_bytes()).hexdigest())
+        self.assertLess(info["refined"]["frame_fit"]["max"], info["refined"]["threshold_studs"])
+        self.assertLess(info["refined"]["surface_distance"]["max"], info["refined"]["threshold_studs"])
+        self.assertIn("Head texture takes the refined texture", recorded["notes"])
+        self.assertIn("close-ups were not applied", recorded["notes"])
+        self.assertEqual(info["closeups"]["used"], [])
+        self.assertEqual(info["closeups"]["comparison_views_used"], ["front"])
+        self.assertNotIn("closeups", info["bake"]["high"]["head"])
+        self.assertEqual(info["bake"]["high_views"]["head"]["closeups"]["views"], ["front"])
+        check = next(c for c in r4["checks"] if c["name"] == "refined_texture")
+        self.assertTrue(check["pass"])
+        for lod in ("high", "low"):
+            body = glb.load_glb(run / "04-body" / f"{lod}.glb")
+            self.assertEqual(len(body.images), 2)
+            for section, expected in (("Head", [220, 30, 30]), ("UpperTorso", [30, 30, 220])):
+                mesh = next(m for m in body.meshes if m.name == section)
+                tri = mesh.verts[mesh.faces].mean(axis=1)
+                # Surface points away from the neck boundary and from synthetic caps.
+                keep = (tri[:, 2] > 4.7) if section == "Head" else ((tri[:, 2] > 3.1) & (tri[:, 2] < 3.8))
+                self.assertTrue(keep.any(), (lod, section))
+                face = np.flatnonzero(keep)
+                uv = mesh.uv[mesh.faces[face]].mean(axis=1)
+                material = body.materials[int(mesh.face_material[face[0]])]
+                im = body.image(material.image)[..., :3]
+                colours = texture._bilinear(im, uv[:, 1] * len(im) - .5, uv[:, 0] * im.shape[1] - .5)
+                np.testing.assert_allclose(np.median(colours, axis=0), expected, atol=2,
+                                           err_msg=f"{lod} {section}")
+                stats = info["bake"][lod]["head"] if section == "Head" else info["bake"][lod]
+                self.assertEqual(stats["texels_primary"], 1)
+                self.assertFalse(stats["closeups_applied"])
+        for name in ("atlas-high-views.png", "atlas-head-high-views.png"):
+            self.assertTrue((run / "04-body" / name).is_file())
+            self.assertFalse(any(name in path for path in r4["outputs"]))
+        self.assertFalse((run / "04-body" / "atlas-high-no-source-fallback.png").exists())
+        self.assertFalse((run / "04-body" / "atlas-high-side-trust.png").exists())
+        self.assertEqual(json.loads((run / "04-body" / "sections.json").read_text())["texture"], info)
+
+        from herogen.roblox.export import run_export
+        r6 = run_export(run / "04-body", run / "06-roblox")
+        self.assertTrue(r6["ok"], r6)
+        self.assertFalse(any("views.png" in path for path in r6["outputs"]))
+        self.assertNotIn("views.png", (run / "06-roblox" / "HeroGen-R15.rbxmx").read_text())
+
     def test_stages_3_and_4(self):
         from herogen.blender.stage3 import run_stage3
         from herogen.blender.stage4 import run_stage4

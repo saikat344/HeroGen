@@ -17,6 +17,7 @@ from herogen.refine_budget import BudgetStop, update as update_budget
 
 STAGE = "3f"
 DEFAULT_CAP_USD = 0.80
+REFINE_PROFILES = frozenset(("best", "roblox-ingame", "roblox-avatar"))
 REFINE_ORDER = ("head+0", "head+40", "head-40", "head+90", "head-90", "head+180",
                 "body+0", "body+45", "body-45", "body+90", "body-90", "body+180")
 # Negative angles -90/-135 are 270/225 degrees, with the same orientation and projection.
@@ -154,6 +155,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     cost_usd itself counts this invocation's calls, matching the other stages' convention.
     """
     run = Path(run).resolve()
+    output = run / "03-refined.glb"
+    pending = run / "03-refined.part.glb"
+    output.unlink(missing_ok=True)
+    pending.unlink(missing_ok=True)
     rec = StageRecord(run, STAGE, "texture refine")
     record_path = run / "stage-3f.json"
     prior = 0.0
@@ -174,8 +179,6 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
     start = len(client.log.calls)
-    output = run / "03-refined.glb"
-    pending = run / "03-refined.part.glb"
     previous_guard = client.before_api_attempt
     previous_settle = client.after_api_attempt
 
@@ -204,10 +207,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     current_record = None
     try:
         save(ok=False, status="running")
-        if profile != "best":
-            return save(status="skipped", reason="profile is not best")
-        output.unlink(missing_ok=True)
-        pending.unlink(missing_ok=True)
+        if profile not in REFINE_PROFILES:
+            return save(status="skipped", reason="profile is not best, roblox-ingame or roblox-avatar")
         if not (run / "03-source.glb").is_file():
             return save(status="skipped", reason="no SAM source mesh", final_model="04-body/high.glb")
         stage3 = json.loads((run / "stage-3.json").read_text())
