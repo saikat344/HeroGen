@@ -10,6 +10,8 @@ import json
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 from test_herogen_body_quality import quality_client
@@ -89,6 +91,75 @@ class TestViewsAndCarve(SyntheticBase):
         self.assertEqual(sorted(vs.missing), ["back", "top"])
         verts, faces, _ = carve.build_mesh(vs, 5.5, 64)
         self.assertEqual(_open_edges(faces), 0)
+
+
+class TestStage3SourceNormals(SyntheticBase):
+    @staticmethod
+    def geometry():
+        return (np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float),
+                np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]))
+
+    def run_source(self, source, run, rec):
+        from herogen.blender import body_acceptance, stage3
+
+        # Mock the model source and render job: this integration check launches neither models nor Blender.
+        verts, faces = self.geometry()
+        result = SimpleNamespace(path=lambda name: source)
+
+        def render(job, work, name, **kwargs):
+            for camera in job["tasks"][0]["cameras"]:
+                view = camera["view"]
+                shutil.copyfile(run / "masks" / f"{view}.png", run / "03-renders" / f"{view}.png")
+            return {"blender": "test"}
+
+        with patch.object(stage3, "_objects_mesh", return_value=(verts, faces, {}, result)), \
+                patch.object(stage3.bl, "run_job", side_effect=render), \
+                patch.object(body_acceptance, "assess"):
+            return stage3._run_stage3(run, mesh_source="sam3d-objects", joints_source="silhouette",
+                                     fallback=False, remote=object(), rec=rec)
+
+    def test_source_normals_are_written_and_recorded_without_changing_gates(self):
+        from herogen.blender import glb
+        from herogen.blender.record import StageRecord
+
+        run = self.tmp / "smooth-source"
+        shutil.copytree(self.rundir, run)
+        verts, faces = self.geometry()
+        source = glb.write_glb(self.tmp / "cached-source.glb", [("Body", verts, faces)])
+        rec = StageRecord(run, 3, "base mesh")
+        result = self.run_source(source, run, rec)
+        self.assertIn("03-source.glb: added seam-aware smooth normals (1e-6 grid; primitives: 1)", result["notes"])
+        self.assertIn("03-source.glb", result["outputs"])
+        self.assertEqual(result, json.loads((run / "stage-3.json").read_text()))
+        before, after = glb.load_glb(source), glb.load_glb(run / "03-source.glb")
+        np.testing.assert_array_equal(before.merged()[0], after.merged()[0])
+        np.testing.assert_array_equal(before.merged()[1], after.merged()[1])
+        doc, binary = glb._chunks((run / "03-source.glb").read_bytes())
+        normal = doc["meshes"][0]["primitives"][0]["attributes"]["NORMAL"]
+        np.testing.assert_allclose(np.linalg.norm(glb._accessor(doc, binary, normal), axis=1), 1, atol=1e-7)
+        checks = result["checks"]
+        self.assertEqual({c["name"] for c in checks}, {f"silhouette_iou_{v}" for v in views.VIEWS}
+                         | {"front_view_present", "triangles", "open_edges", "non_manifold_edges"})
+        self.assertTrue(all(not c["gate"] for c in checks if c["name"].startswith("silhouette_iou_")))
+        glb.add_missing_normals(source, source)
+        authored = source.read_bytes()
+        result = self.run_source(source, run, StageRecord(run, 3, "base mesh"))
+        self.assertNotIn("added seam-aware", result["notes"])
+        self.assertEqual((run / "03-source.glb").read_bytes(), authored)
+
+    def test_invalid_source_normals_rewrite_fails_without_partial_output(self):
+        from herogen.blender.glb import GlbError
+        from herogen.blender.record import StageRecord
+
+        run = self.tmp / "invalid-source"
+        shutil.copytree(self.rundir, run)
+        source = self.tmp / "bad-source.glb"
+        source.write_bytes(b"not a GLB")
+        with self.assertRaises(GlbError):
+            self.run_source(source, run, StageRecord(run, 3, "base mesh"))
+        self.assertFalse((run / "03-source.glb").exists())
+        self.assertFalse((run / "03-source.glb.part").exists())
+        self.assertFalse((run / "stage-3.json").exists())
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
