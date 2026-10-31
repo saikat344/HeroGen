@@ -2,13 +2,16 @@
 
 Stage p reads the description as UTF-8 on stdin and calls the pipeline's stagep_prompt, which owns the prompt
 versions, checks, images and stage-p.json. No description or model error text is printed: API errors may echo
-the description. The runner reads the record for costs and gates, and exit codes for errors: 3 input rejected,
-4 content policy, 5 transient model error, 1 permanent error. Exception messages never decide these codes.
+the description. Stage p exit codes: 0 passed, 1 permanent error, 2 argparse usage error, 3 input rejected,
+4 content policy, 5 transient model error, 6 gate failed. Gate failures add status "gate_failed" to the pipeline
+record; input rejection has status "input_rejected" and an error, policy refusal status "error" and an error.
+The runner requires matching records for rejections. Exception messages never decide these codes.
 
 The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service runs 2h beside the
 rest of the job instead (see `worker.run_heldout`), so it starts stage 2 through the same public functions the
 CLI's `run_pipeline` uses (`RunFolder`, `ModelClient` in live mode with the given cache, `stage2_turnaround`),
-which write the same files and the same `stage-2.json`. Exit status: 0 passed, 2 the gate failed, 1 an error.
+which write the same files and the same `stage-2.json`. Stage 2 exit codes: 0 passed, 1 error, 2 gate failed
+or argparse usage error, 3 input rejected. For either stage, argparse help exits 0 without running the pipeline.
 """
 
 from __future__ import annotations
@@ -53,9 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rec = stage2_turnaround(run, client)
     except GateFailed as e:
+        if a.stage == "p":
+            run.write_stage({**e.record, "status": "gate_failed"})
         print(f"stage {a.stage}: gate failed; stopping" if a.stage == "p" else f"stage 2: {e}; stopping",
               file=sys.stderr)
-        return 2
+        return 6 if a.stage == "p" else 2
     except InputRejected:
         print(f"stage {a.stage}: input rejected; stopping", file=sys.stderr)
         return 3
