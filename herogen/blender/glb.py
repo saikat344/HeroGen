@@ -1,4 +1,4 @@
-"""Read triangle meshes from binary glTF (`.glb`) with numpy only, so scoring runs without Blender.
+"""Read and write binary glTF (`.glb`) with numpy only, so scoring runs without Blender.
 
 The one GLB reader of herogen/blender: our own bodies, SAM 3D Objects' source mesh and other tools' outputs are
 read the same way. Node transforms are applied, and positions are converted from glTF axes (+Y up, front along
@@ -133,14 +133,30 @@ def _chunks(data: bytes) -> tuple[dict, bytes]:
         raise GlbError("not a binary glTF file (bad magic); export as .glb")
     if version != 2:
         raise GlbError(f"glTF version {version} is not supported (2 only)")
-    doc, binary, off = None, b"", 12
-    while off + 8 <= min(length, len(data)):
+    if length != len(data):
+        raise GlbError("GLB length does not match its header")
+    doc, binary, off, kinds = None, b"", 12, set()
+    while off < length:
+        if off + 8 > length:
+            raise GlbError("truncated GLB chunk header")
         size, kind = struct.unpack_from("<II", data, off)
+        if size % 4 or off + 8 + size > length:
+            raise GlbError("invalid GLB chunk length")
         body = data[off + 8 : off + 8 + size]
+        if off == 12 and kind != CHUNK_JSON:
+            raise GlbError("GLB must start with its JSON chunk")
+        if kind in (CHUNK_JSON, CHUNK_BIN) and kind in kinds:
+            raise GlbError("duplicate GLB JSON or binary chunk")
         if kind == CHUNK_JSON:
-            doc = json.loads(body.decode("utf-8"))
-        elif kind == CHUNK_BIN and not binary:
+            try:
+                doc = json.loads(body.decode("utf-8"))
+            except (ValueError, UnicodeError) as exc:
+                raise GlbError("invalid GLB JSON chunk") from exc
+            if not isinstance(doc, dict):
+                raise GlbError("GLB JSON must be an object")
+        elif kind == CHUNK_BIN:
             binary = body
+        kinds.add(kind)
         off += 8 + size
     if doc is None:
         raise GlbError("GLB has no JSON chunk")
@@ -369,6 +385,129 @@ def load_glb(path: Path | str) -> Glb:
             stack.append((c, world))
     raws, sizes = _images(doc, binary, notes)
     return Glb(meshes, list(sizes.values()), notes, materials, raws, sizes, _other_texture_images(doc))
+
+
+def add_missing_normals(source: Path | str, destination: Path | str) -> int:
+    """Copy a GLB, adding area-weighted smooth NORMALs only to triangle primitives lacking them.
+
+    Within each mesh, vertices at the same rounded 1e-6 position share the sum of incident face area normals,
+    including across UV seams and primitives. Computation uses local glTF coordinates, leaving node transforms
+    intact. A zero sum uses the first nondegenerate incident face normal, or +Z for isolated/zero-area vertices.
+    Existing NORMALs, JSON values and binary bytes are preserved; new accessors and aligned data are appended.
+    If nothing needs normals the copy is byte-identical. Returns the number of primitives given normals.
+    Malformed accessors, sparse/external buffers and compressed meshes raise GlbError before writing anything.
+    """
+    data = Path(source).read_bytes()
+    try:
+        doc, binary = _chunks(data)
+        # Validate all data, including unused accessors and attributes on primitives with authored normals.
+        def compressed(value):
+            if isinstance(value, dict):
+                return bool(_UNSUPPORTED.intersection(value.get("extensions", {}))) or any(
+                    compressed(v) for v in value.values())
+            if isinstance(value, list):
+                return any(compressed(v) for v in value)
+            return False
+
+        if _UNSUPPORTED.intersection(doc.get("extensionsRequired", []) + doc.get("extensionsUsed", [])) or compressed(doc):
+            raise GlbError("compressed meshes are not supported; export an uncompressed GLB")
+        buffers = doc.get("buffers", [])
+        if len(buffers) != 1 or buffers[0].get("uri") or not 0 <= buffers[0]["byteLength"] <= len(binary):
+            raise GlbError("buffers outside the GLB's own binary chunk are not supported or truncated")
+        for view in doc.get("bufferViews", []):
+            start, size = view.get("byteOffset", 0), view["byteLength"]
+            if view.get("buffer", 0) != 0 or start < 0 or size < 0 or start + size > buffers[0]["byteLength"]:
+                raise GlbError("buffer view runs past the GLB's own buffer")
+        accessors = doc.get("accessors", [])
+        for i, acc in enumerate(accessors):
+            view = acc.get("bufferView", -1)
+            if not 0 <= view < len(doc.get("bufferViews", [])) or acc.get("byteOffset", 0) < 0 or acc["count"] < 0:
+                raise GlbError(f"invalid accessor {i}")
+            stride = doc["bufferViews"][view].get("byteStride")
+            if stride is not None and (stride < np.dtype(_COMPONENTS[acc["componentType"]][0]).itemsize
+                                       * _WIDTH[acc["type"]] or stride % 4):
+                raise GlbError(f"invalid accessor {i} stride")
+            _accessor(doc, binary, i)
+        pending = []
+        for mesh in doc.get("meshes", []):
+            parts = []
+            for prim in mesh.get("primitives", []):
+                attrs = prim["attributes"]
+                for index in [*attrs.values(), *([prim["indices"]] if "indices" in prim else [])]:
+                    if not 0 <= index < len(accessors):
+                        raise GlbError("primitive accessor out of range")
+                if prim.get("mode", TRIANGLES) != TRIANGLES:
+                    continue
+                if accessors[attrs["POSITION"]]["type"] != "VEC3":
+                    raise GlbError("POSITION accessor must be VEC3")
+                if "indices" in prim:
+                    idx = accessors[prim["indices"]]
+                    if idx["type"] != "SCALAR" or idx["componentType"] not in (5121, 5123, 5125) or idx.get("normalized"):
+                        raise GlbError("triangle indices must be unsigned integer scalars")
+                pos, faces = _primitive(doc, binary, prim)
+                if not np.isfinite(pos).all() or (np.abs(pos) > 9e12).any():
+                    raise GlbError("POSITION cannot be represented on the normal smoothing grid")
+                if any(accessors[index]["count"] != len(pos) for index in attrs.values()):
+                    raise GlbError("vertex attribute counts differ from POSITION")
+                parts.append((prim, pos, faces))
+            if not any("NORMAL" not in prim["attributes"] for prim, _, _ in parts):
+                continue
+            positions = np.concatenate([pos for _, pos, _ in parts])
+            _, group = np.unique(np.round(positions / 1e-6).astype(np.int64), axis=0, return_inverse=True)
+            group = group.ravel()
+            sums = np.zeros((int(group.max()) + 1 if len(group) else 0, 3))
+            fallback = np.tile([0.0, 0.0, 1.0], (len(sums), 1))
+            assigned = np.zeros(len(sums), dtype=bool)
+            base = 0
+            for _, pos, faces in parts:
+                tri = pos[faces]
+                area = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]) * 0.5
+                corners = group[faces + base].ravel()
+                weighted = np.repeat(area, 3, axis=0)
+                np.add.at(sums, corners, weighted)
+                lengths = np.linalg.norm(weighted, axis=1)
+                valid = lengths > 0
+                groups, first = np.unique(corners[valid], return_index=True)
+                first, groups = first[~assigned[groups]], groups[~assigned[groups]]
+                fallback[groups] = weighted[valid][first] / lengths[valid][first, None]
+                assigned[groups] = True
+                base += len(pos)
+            lengths = np.linalg.norm(sums, axis=1)
+            normals = fallback.copy()
+            valid = lengths > 1e-12
+            normals[valid] = sums[valid] / lengths[valid, None]
+            base = 0
+            for prim, pos, _ in parts:
+                if "NORMAL" not in prim["attributes"]:
+                    pending.append((prim, normals[group[base:base + len(pos)]].astype("<f4")))
+                base += len(pos)
+        out_bin = bytearray(binary)
+        for prim, normals in pending:
+            out_bin.extend(b"\0" * (-len(out_bin) % 4))
+            doc["bufferViews"].append({"buffer": 0, "byteOffset": len(out_bin), "byteLength": normals.nbytes,
+                                       "target": 34962})
+            out_bin.extend(normals.tobytes())
+            prim["attributes"]["NORMAL"] = len(accessors)
+            accessors.append({"bufferView": len(doc["bufferViews"]) - 1, "componentType": 5126,
+                              "count": len(normals), "type": "VEC3"})
+        if pending:
+            buffers[0]["byteLength"] = len(out_bin)
+            js = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+            js += b" " * (-len(js) % 4)
+            chunks, off = [], 12
+            while off < len(data):
+                size, kind = struct.unpack_from("<II", data, off)
+                body = js if kind == CHUNK_JSON else bytes(out_bin) if kind == CHUNK_BIN else data[off + 8:off + 8 + size]
+                chunks.append(struct.pack("<II", len(body), kind) + body)
+                off += 8 + size
+            payload = b"".join(chunks)
+            data = struct.pack("<III", GLB_MAGIC, 2, 12 + len(payload)) + payload
+    except GlbError:
+        raise
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError, struct.error) as exc:
+        raise GlbError(f"invalid GLB mesh data ({type(exc).__name__})") from exc
+    Path(destination).write_bytes(data)
+    return len(pending)
 
 
 def write_glb(path: Path | str, meshes: list[tuple], texture_png: bytes | None = None,

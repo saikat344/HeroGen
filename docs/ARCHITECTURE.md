@@ -295,7 +295,13 @@ carve check let through.
 - `carve`: the visual hull of the observed masks, surfaced and smoothed. Its shape is built from every
   observed view.
 - `sam3d-objects` (default, with `sam3d-body` joints): SAM 3D Objects reconstructs a textured mesh from `views/front.png` and `masks/front.png` only;
-  it is kept as `03-source.glb`, put in the contract frame and remeshed into one closed manifold surface
+  it is kept as `03-source.glb`. Triangle primitives without `NORMAL` receive area-weighted smooth normals
+  in NumPy, shared across vertices at the same position on a rounded 1e-6 grid within each mesh (including UV
+  seams and primitive boundaries). Existing normals, topology, UVs, materials, images, transforms and extensions
+  are preserved; the stage record notes how many primitives received normals. Zero normal sums use an incident
+  nondegenerate face normal, or +Z for isolated/zero-area vertices. This keeps the display/download fallback
+  smooth when stage 3f refuses or is skipped. Separately, the source is put in the contract frame and remeshed
+  into one closed manifold surface
   (`herogen/blender/sam3d_mesh.py`). The front view decides the facing, a small yaw / roll and perspective fit
   and an outline conform onto the front mask; the pitch, a tilt the front view cannot see, is registered on the
   observed left and right masks before conform and remeshing. Depth is registered after remeshing. Its shape

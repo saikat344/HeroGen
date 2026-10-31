@@ -321,9 +321,14 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
 
     _replace(mesh_npz, save_mesh)
     if objects_res is not None and used_source == "sam3d-objects":
-        import shutil
+        from .glb import add_missing_normals
 
-        _replace(run / "03-source.glb", lambda tmp: shutil.copyfile(objects_res.path("mesh.glb"), tmp))
+        def save_source(tmp: Path) -> None:
+            added = add_missing_normals(objects_res.path("mesh.glb"), tmp)
+            if added:
+                rec.note(f"03-source.glb: added seam-aware smooth normals (1e-6 grid; primitives: {added})")
+
+        _replace(run / "03-source.glb", save_source)
     joints_used = "silhouette"
     if joints_source == "sam3d-body":
         try:
