@@ -539,8 +539,8 @@ def toe_offset_h(mask: np.ndarray) -> float:
 
 
 def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> dict[str, Any]:
-    """SAM 3.1 `face` and `head` on the raw image; the offset of the face inside the head, or None when
-    either is not found on the figure (a full helmet, say).
+    """SAM 3.1 `face` and `head` on the raw image; the offset of the face inside the head and the face's area over
+    the head's (``face_head_area``), or None when either is not found on the figure (a full helmet, say).
 
     Only a Model API failure (`ApiError`, after the client's retries; never cached, so a replay of the run has
     no entry for it and stops) is recorded, with ``api_error`` set, and `view_checks` then sends the view to
@@ -559,6 +559,7 @@ def measure_face(client: ModelClient, raw: Image.Image, figure: np.ndarray) -> d
     out["face_found"], out["head_found"] = face is not None, head is not None
     if face is not None and head is not None and (face.mask & head.mask).sum() >= 0.5 * face.mask.sum():
         out["offset"] = face_offset(face.mask, head.mask)
+        out["face_head_area"] = round(float(face.mask.sum()) / max(1, int(head.mask.sum())), 4)
         out["face_box"], out["head_box"] = list(face.box), list(head.box)
     elif face is not None and head is not None:
         out["error"] = "face not inside head"
@@ -661,9 +662,15 @@ FACE_PROFILE_MIN = 0.05  # profile face offsets below this can't serve as the re
 # degrees), and a back view whose left and right joints are named the other way round projects exactly like a
 # front view (u = -x cos(180 - y) + d sin(180 - y) = x cos y + d sin y; the joint model gives each pair one
 # depth), so a back view at 154 degrees with the names swapped reads +26 with no error, and one at 120 reads
-# +60. Sapiens swaps the names on about half of back views. A face SAM 3.1 finds inside the head is the
-# positive evidence that the view is the front: without one the view needs human review (`face_seen`). On the
-# labelled bench views a face was found on 78% (30 degrees) and 76% (60) of those facing the right way.
+# +60. Sapiens swaps the names on about half of back views. The positive evidence that the view is the front is
+# a face SAM 3.1 finds as a proper part of the head (its area at most FACE_HEAD_AREA_MAX of the head's: a "face"
+# that is the whole head, say the back of it returned for both prompts, is no evidence) whose centre lies off the
+# head's toward the view's side; without that the view needs human review (`face_seen`). SAM was never asked for a
+# face on a back view in any recorded run, so how often it returns one there is not measured; the rule is set
+# from front views only. On the labelled bench views facing the right way, with a face and a head found, the
+# face's area over the head's was 0.07-0.58 at 30 degrees and 0.13-0.73 at 60 on the tuning split (0.14-0.84 and
+# 0.13-0.78 on the test split), and the face's centre lay toward the view's side on 136 of 137.
+FACE_HEAD_AREA_MAX = 0.75
 # The view's own yaw window (`yaw_window`): inside it the view can be accepted; up to 5 degrees outside it
 # needs human review; further out it is rejected (and generated again). The found yaw is the body-keypoint fit's
 # on the view's side (the facing checks judge the side).
@@ -784,12 +791,22 @@ def view_checks(
         out.append(_review(C.check("head_cue_measured", 0.0, 1.0, op="==",
                                    note="the Model API failed on the face or head, so the head cue could not "
                                         "vote")))
-    face_seen = face.get("offset") is not None
+    off, area = face.get("offset"), face.get("face_head_area")
+    if off is None:
+        weak = "no face found inside the head"
+    elif area is None or area > FACE_HEAD_AREA_MAX:
+        weak = (f"the face is {'not measured against' if area is None else f'{area:.2f} of'} the head's area, "
+                f"not a part of it (at most {FACE_HEAD_AREA_MAX})")
+    elif view.facing * off <= 0:
+        weak = "the face's centre is not toward the view's side of the head"
+    else:
+        weak = None
+    face_seen = weak is None
     if not face_seen and not face.get("api_error"):
         out.append(_review(C.check("face_seen", 0.0, 1.0, op="==",
-                                   note="no face found inside the head: nothing shows the view is the front "
-                                        "rather than a back view (keypoints with left and right swapped fit a "
-                                        "back view as a front one)")))
+                                   note=f"{weak}: nothing shows the view is the front rather than a back view "
+                                        "(keypoints with left and right swapped fit a back view as a front "
+                                        "one)")))
     measured = {
         "found_yaw_deg": found,
         "keypoint_fit": kfit,

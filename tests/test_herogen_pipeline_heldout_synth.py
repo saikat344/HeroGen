@@ -391,6 +391,12 @@ POSES = {"A-pose": ("a", {}), "arms 35": ("lowered", dict(arm_deg=35.0)), "arms 
 YAWS = (20, 30, 45, 60, 70)  # the pose and facing table
 
 
+def face_area_at(fig: synth.Figure, yaw: float) -> float:
+    """The face's area over the head's at ``yaw`` (what `heldout.measure_face` records as face_head_area)."""
+    face, head = face_parts(fig)
+    return float(turned_mask(fig, yaw, only=face).sum()) / float(turned_mask(fig, yaw, only=head).sum())
+
+
 def face_offset_at(fig: synth.Figure, yaw: float) -> float:
     face, head = face_parts(fig)
     return heldout.face_offset(turned_mask(fig, yaw, only=face), turned_mask(fig, yaw, only=head))
@@ -410,7 +416,8 @@ def evaluate(view_name: str, pose: str, yaw: float, figure_kw: dict, pose_kw: di
     model = heldout.turnaround_model(t["front"], t["left"], t["right"])
     profile_toe = float(np.mean([abs(heldout.toe_offset_h(t[v])) for v in ("left", "right")]))
     profile_face = float(np.mean([abs(face_offset_at(t_fig, y)) for y in (90, -90)]))
-    face = {"offset": face_offset_at(fig, yaw), "face_found": True, "head_found": True}
+    face = {"offset": face_offset_at(fig, yaw), "face_head_area": face_area_at(fig, yaw), "face_found": True,
+            "head_found": True}
     checks, measured = heldout.view_checks(view, seen, model, profile_toe, float(seen.mean()), face,
                                            profile_face, body=body_of(t_fig), keypoints=keypoints_at(fig, yaw),
                                            build_azimuths=build_azimuths)
@@ -761,7 +768,8 @@ class HeldoutChecksTest(unittest.TestCase):
         model = heldout.turnaround_model(t["front"], t["left"], t["right"])
         seen = turned_mask(figure("a"), 26)
         checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2,
-                                        {"offset": -0.01, "face_found": True, "head_found": True}, None,
+                                        {"offset": -0.01, "face_head_area": 0.3, "face_found": True,
+                                         "head_found": True}, None,
                                         body=body_of(figure("a")), keypoints=keypoints_at(figure("a"), 26))
         self.assertEqual(m["facing_votes"], {"keypoints": 1, "head": 0})
         self.assertTrue(m["face_seen"])
@@ -799,6 +807,49 @@ class HeldoutChecksTest(unittest.TestCase):
             self.assertLess(m["keypoint_fit"]["rms"], 1e-6)
             self.assertNotEqual(heldout.view_status(checks), "accepted", yaw)
             self.assertIn("face_seen", _failed(checks), yaw)
+
+    def test_back_of_head_returned_as_face_and_head_is_no_front_evidence(self):
+        # SAM answers "face" and "head" with the same mask (the back of the head): the offset is 0 and the face
+        # is the whole head, so the swapped-name back views still go to review, never accepted.
+        from herogen.pipeline.client import SamInstance  # noqa: PLC0415
+
+        f = figure("a")
+        t = turnaround(f)
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        body = body_of(f)
+        _, head_parts = face_parts(f)
+        for yaw, name in ((154, "front-left-30"), (-154, "front-right-30"), (120, "front-left-60"),
+                          (-120, "front-right-60")):
+            mask = turned_mask(f, yaw)
+            head = turned_mask(f, yaw, only=[p for p in head_parts if p is not f.parts[f.face_idx[0]]])
+
+            class SameMask:
+                def segment(self, _img, _text):
+                    return [SamInstance(mask=head, box=imaging.bbox(head), confidence=0.9)]
+
+            face = heldout.measure_face(SameMask(), None, mask)
+            self.assertEqual((face["offset"], face["face_head_area"]), (0.0, 1.0))
+            kps = keypoints_at(f, yaw)
+            kps["joints"] = {(heldout.KP.pair_name(n) or n): v for n, v in kps["joints"].items()}
+            checks, m = heldout.view_checks(heldout.VIEW_BY_NAME[name], mask, model, 0.1, float(mask.mean()),
+                                            face, 0.3, body=body, keypoints=kps)
+            self.assertFalse(m["face_seen"], yaw)
+            self.assertEqual(heldout.view_status(checks), "needs review", yaw)
+            self.assertIn("face_seen", _failed(checks), yaw)
+
+    def test_face_evidence_must_be_a_part_of_the_head_toward_the_view(self):
+        t = turnaround(figure("a"))
+        model = heldout.turnaround_model(t["front"], t["left"], t["right"])
+        seen = turned_mask(figure("a"), 26)
+        for face, ok in (({"offset": -0.2, "face_head_area": 0.3}, True),
+                         ({"offset": -0.2, "face_head_area": heldout.FACE_HEAD_AREA_MAX + 0.01}, False),
+                         ({"offset": -0.2}, False),  # recorded before the area was
+                         ({"offset": 0.0, "face_head_area": 0.3}, False),
+                         ({"offset": 0.2, "face_head_area": 0.3}, False)):  # toward the other side
+            checks, m = heldout.view_checks(heldout.VIEW_BY_NAME["front-left-30"], seen, model, 0.0, 0.2, face,
+                                            None, body=body_of(figure("a")), keypoints=keypoints_at(figure("a"), 26))
+            self.assertEqual(m["face_seen"], ok, face)
+            self.assertEqual("face_seen" in _failed(checks), not ok, face)
 
     def test_no_figure_rejected(self):
         t = turnaround(figure("a"))
