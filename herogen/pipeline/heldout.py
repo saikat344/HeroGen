@@ -665,10 +665,20 @@ FACE_PROFILE_MIN = 0.05  # profile face offsets below this can't serve as the re
 # +60. Sapiens swaps the names on about half of back views. The positive evidence that the view is the front is
 # a face SAM 3.1 finds as a proper part of the head (its area at most FACE_HEAD_AREA_MAX of the head's: a "face"
 # that is the whole head, say the back of it returned for both prompts, is no evidence) whose centre lies off the
-# head's toward the view's side; without that the view needs human review (`face_seen`). The cut is set from front
-# views; on the back views (180 degrees) of the 26 bench turnarounds SAM 3.1 returned no face instance at all (a
-# head on 23), so none would pass; back views at 120-154 degrees were not measured. On the labelled bench views facing the right way, with a face and a head found, the
-# face's area over the head's was 0.07-0.58 at 30 degrees and 0.13-0.73 at 60 on the tuning split (0.14-0.84 and
+# head's toward the view's side; without that the view needs human review (`face_seen`). The upper cut is set from
+# front views; on the back views (180 degrees) of the 26 bench turnarounds SAM 3.1 returned no face instance at all
+# (a head on 23). Oblique back views are different: an oblique back view shows the edge of the face on the same
+# side of the head as the front view it can be mistaken for, so the direction can't tell them apart. On bench-gt
+# renders at 120, 135 and 150 degrees (79 views, lit) SAM found a face on 40, and 20 of them passed the rule with
+# the upper cut alone, with faces 0.01-0.28 of the head's area (tuning characters C01-C09: 0.01-0.15). So the face
+# must also be at least FACE_HEAD_AREA_MIN of the head's area, just above the tuning characters' largest: on the
+# other characters 6 of their 13 passing oblique back views still pass (faces 0.17-0.28: two characters, C14 and
+# C19), a residual risk wherever Sapiens also names the joints of an oblique back view the other way round. Of the
+# labelled front views facing the right way, 3 of 102 on the tuning split and 2 of 35 on the test split have a
+# smaller face and now need review.
+FACE_HEAD_AREA_MIN = 0.16
+# On the labelled bench views facing the right way, with a face and a head found, the face's area over the head's
+# was 0.07-0.58 at 30 degrees and 0.13-0.73 at 60 on the tuning split (0.14-0.84 and
 # 0.13-0.78 on the test split), and the face's centre lay toward the view's side on 136 of 137.
 FACE_HEAD_AREA_MAX = 0.75
 # The view's own yaw window (`yaw_window`): inside it the view can be accepted; up to 5 degrees outside it
@@ -797,6 +807,9 @@ def view_checks(
     elif area is None or area > FACE_HEAD_AREA_MAX:
         weak = (f"the face is {'not measured against' if area is None else f'{area:.2f} of'} the head's area, "
                 f"not a part of it (at most {FACE_HEAD_AREA_MAX})")
+    elif area < FACE_HEAD_AREA_MIN:
+        weak = (f"the face is only {area:.2f} of the head's area (at least {FACE_HEAD_AREA_MIN}): an oblique back "
+                "view shows that little of the face's edge")
     elif view.facing * off <= 0:
         weak = "the face's centre is not toward the view's side of the head"
     else:
