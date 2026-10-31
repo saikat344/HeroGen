@@ -98,8 +98,20 @@ def _minimal_entry(run: Path, run_id: str) -> dict[str, Any]:
             "has_body": (run / "04-body" / "high.glb").is_file(), "readable": True}
 
 
-def workspace(runs_root: Path, job_ids: list[str]) -> dict[str, Any]:
+def workspace(runs_root: Path, job_ids: list[str], *, job_names: dict[str, str] | None = None) -> dict[str, Any]:
     """The `/api/workspace` answer for one user's runs (newest job first in `job_ids`)."""
+    data = _workspace(runs_root, job_ids)
+    # Generated sketches have a fixed pipeline file name. Use the service's saved display name, choosing
+    # the newest named job when several runs belong to one character, without changing pipeline metadata.
+    for character in data["characters"]:
+        members = {rid.split("/", 1)[-1] for rid in character["runs"]}
+        name = next(((job_names or {}).get(jid) for jid in job_ids if jid in members and (job_names or {}).get(jid)), None)
+        if name:
+            character["title"] = name
+    return data
+
+
+def _workspace(runs_root: Path, job_ids: list[str]) -> dict[str, Any]:
     allowed = set(job_ids)
     kind = backend()
     if kind == "workspace":

@@ -223,7 +223,9 @@ def validate(s: Settings, require_key: bool = True) -> None:
 
 
 def env_for_deploy(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The non-secret HEROGEN_SERVICE_* variables of `env`, to bake into the Modal image at deploy time."""
+    """Non-secret service settings and pipeline prompt selectors to bake into the Modal image at deploy time."""
     env = os.environ if env is None else env
     secret_vars = {ENV[f] for f in SECRET_FIELDS}
-    return {k: v for k, v in env.items() if k.startswith("HEROGEN_SERVICE_") and k not in secret_vars}
+    selectors = {"HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION"}
+    return {k: v for k, v in env.items() if (k.startswith("HEROGEN_SERVICE_") or k in selectors)
+            and k not in secret_vars}

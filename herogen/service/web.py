@@ -663,7 +663,8 @@ class App:
         def build() -> dict[str, Any]:
             self.svc.storage.volume.refresh()
             with self.svc.storage.volume.reading():
-                return labapi.workspace(self.svc.storage.runs_root(u["id"]), [j["id"] for j in jobs])
+                return labapi.workspace(self.svc.storage.runs_root(u["id"]), [j["id"] for j in jobs],
+                                        job_names={j["id"]: j["name"] for j in jobs})
 
         return JSONResponse(await self.call(build))
 

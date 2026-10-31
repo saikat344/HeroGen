@@ -158,6 +158,13 @@ class TestModalApp(TempDirCase):
                                                                         if name == "env" and a]
         self.assertFalse(any("s" * 40 in json.dumps(e) or "e" * 40 in json.dumps(e) for e in envs))
 
+    def test_pipeline_prompt_selectors_are_baked_into_the_worker_image(self):
+        selectors = {"HEROGEN_PROMPT_SKETCH_VERSION": "hero-sketch-v1",
+                     "HEROGEN_SAME_CHARACTER_VERSION": "same-character-v1"}
+        mod, _ = self.load({**PROD, **selectors})
+        for name, value in selectors.items():
+            self.assertEqual(mod.IMAGE_ENV[name], value)
+
     def test_deploy_refuses_dev_mode(self):
         for env in ({}, {**PROD, "HEROGEN_SERVICE_MODE": "dev"}):
             with self.assertRaises(RuntimeError) as cm:

@@ -1678,9 +1678,27 @@ run`), each in a subprocess with a timeout and an environment that holds only wh
 `MODEL_API_KEY` reaches the model stages, stage 3 and the held-out views only, and no stage sees the session key or the
 email key. Options that
 only some versions of a stage CLI have (`--profile`, `--remote-cache`) are passed only when that CLI's `--help`
-lists them. A job that starts from a description first runs stage `p` (`sketchgen.py`): one `muse-image-1.0`
-generation from a fixed pencil-sketch prompt around the description, recorded as `stage-p.json`; the pipeline then
-starts at stage 0 from that sketch.
+lists them. A job that starts from a description runs the pipeline's stage `p` through `service/pipestage.py`,
+which reads UTF-8 stdin so the description never appears in process arguments. The pipeline selects the frozen
+prompt versions, draws a design and a full-body edit, and checks the figure and identity (see "Stage p"). It
+writes `stage-p.json`, `p-design.png` and the passing `p-full-body.png` in the run folder. Stage 0 runs without a
+sketch path, taking that image and recording its stage-p origin as the pipeline CLI does; `00-sketch.png` still
+serves the job page and thumbnails. Model calls use the per-user cache, and the stage-p record's cost joins the
+job's cost; replayed calls cost zero. Invalid descriptions, content-policy refusals and failed gates reject the
+job with a rewording message; model/network errors follow the normal error and retry path. Stage-p output and
+error text are never copied into worker logs or user messages because they can echo the description.
+Stage rows keep cumulative spending across attempts, and the finished job includes earlier attempts' spending
+even when a retry resumes past completed stages or replays calls for zero new cost. Its cost detail reports that
+carried amount as `previous_work_usd`, including spending from restarted groups in the same attempt. Queued and
+failed retries also retain their recorded spending. Studio character titles use saved job names when present, so a generated
+sketch's fixed file name does not replace the hero's name.
+
+`HEROGEN_PROMPT_SKETCH_VERSION` and `HEROGEN_SAME_CHARACTER_VERSION` select the pipeline's frozen versions;
+both non-secret selectors are baked into deployed images and passed to stage subprocesses.
+Retries of older description jobs keep completed stage-0 conversions. When only the old service's stage p
+passed, the pipeline stage p runs first: its full-body image and version reference are required by the new stage
+0. This migration makes new pipeline calls rather than treating the old unchecked image as a passing sketch;
+the earlier spending remains counted.
 
 | Group | Stages | Worker | Secret |
 | --- | --- | --- | --- |
