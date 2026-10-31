@@ -953,6 +953,20 @@ def _save_png(path: Path, img: np.ndarray) -> None:
     Image.fromarray(np.clip(np.round(img), 0, 255).astype(np.uint8)).save(path)
 
 
+def texture_max_px(glb: Glb, atlas: np.ndarray | None = None, head: np.ndarray | None = None) -> int | None:
+    """Largest replacement or retained GLB image; an override replaces only its base-colour uses."""
+    replaced, retained = set(), set(glb.other_texture_images)
+    for material in glb.materials:
+        if material.image is None:
+            continue
+        override = head if material.name == HEAD_MATERIAL else atlas
+        (replaced if override is not None else retained).add(material.image)
+    removed = replaced - retained
+    sizes = [max(size) for index, size in glb.image_sizes_by_index.items() if index not in removed]
+    sizes.extend(max(img.shape[:2]) for img in (atlas, head) if img is not None)
+    return max(sizes, default=None)
+
+
 def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = None,
                seen_shape: set[str] | None = None, budget: int | None = None, profile: str | None = None,
                views: list[ScoreView] | None = None, atlas: Path | None = None, variant_of: str | None = None,
@@ -1063,8 +1077,7 @@ def score_body(run: Path, name: str, glb_path: Path, *, seen: set[str] | None = 
         _save_png(out_dir / f"{view.name}-diff.png", diff_image(geo["sil"], view.mask))
     sanity = cached["sanity"]
     lods = meta.get("lods") or {}
-    atlas_px = (max((max(img.shape[:2]) for img in colour.textures.values()), default=None)
-                if colour is not None else None)
+    atlas_px = texture_max_px(glb, atlas_img, head_img)
     low = Path(glb_path).with_name("low.glb") if Path(glb_path).name == "high.glb" else None
     triangles_low = (lods.get("low") or {}).get("triangles")
     if triangles_low is None and low is not None and low.is_file():
