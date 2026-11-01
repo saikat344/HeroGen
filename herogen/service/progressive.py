@@ -8,10 +8,15 @@ from datetime import datetime
 from functools import lru_cache
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from herogen.service.bundle import _inside, complete_glb
 from herogen.service.storage import SAFE_SEGMENT
+
+
+# View identifiers include signed angles, for example head+0 and body-90.
+_VIEW = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}")
 
 
 def read_progress(run: Path) -> dict:
@@ -34,14 +39,28 @@ def read_progress(run: Path) -> dict:
                 return empty
             for key in ("accepted", "rejected", "pending"):
                 views = version.get(key)
-                if not isinstance(views, list) or any(not isinstance(v, str) or not SAFE_SEGMENT.fullmatch(v)
+                if not isinstance(views, list) or any(not isinstance(v, str) or not _VIEW.fullmatch(v)
                                                       or ".." in v for v in views):
                     return empty
             datetime.fromisoformat(version["time"].replace("Z", "+00:00"))
             previous = n
+        metadata = {}
+        if "profile" in data:
+            profile = data["profile"]
+            if not isinstance(profile, str) or not SAFE_SEGMENT.fullmatch(profile) or ".." in profile:
+                return empty
+            metadata["profile"] = profile
+        if "final_n" in data:
+            final = data["final_n"]
+            if final is not None and (type(final) is not int or not data["done"] or final != previous or final < 1):
+                return empty
+            if data["done"] and previous and final is None:
+                return empty
+            metadata["final_n"] = final
         return {"versions": [{k: v[k] for k in ("n", "glb", "accepted", "rejected", "pending", "time")}
                              for v in data["versions"] if (glb := _inside(run, v["glb"])) is not None
-                             and complete_glb(glb)], "done": data["done"]}
+                             and complete_glb(glb)],
+                "done": data["done"], **metadata}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return empty
 
