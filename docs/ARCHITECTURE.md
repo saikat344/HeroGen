@@ -2263,11 +2263,29 @@ uses the existing authenticated APIs and does not change access rules or quality
 ### Remote models from a worker
 
 herogen.blender's remote client starts `$HEROGEN_MODAL run <runner>.py::main --job ... --out ...`. The Blender
-worker image points `HEROGEN_MODAL` at `modal_bridge.py`, which takes the same arguments, calls the runner's `infer`
+worker image points `HEROGEN_MODAL` at `modal_bridge.py`, which takes the same arguments, calls the runner's persistent `Model.infer`
 in its deployed app (the runner's `APP` constant) and writes the files the runner's own `main` writes, so the
 client's cache, cost estimate and error handling are unchanged. Stage 3 requests the live hybrid by default through
 `HEROGEN_SERVICE_STAGE3_ARGS` (`--mesh-source sam3d-objects --joints sam3d-body --remote live`). The Blender
 worker image installs SciPy 1.18.1 (BSD-3-Clause), required by hybrid orientation and outline conform.
+
+The GPU runners initialize their pinned models in `Model.load`, a Modal container entry hook. Each
+container handles one request at a time and retains the loaded Objects pipeline or Body estimator/FOV model
+between calls. `HEROGEN_OBJECTS_MIN_CONTAINERS` and `HEROGEN_BODY_MIN_CONTAINERS` default to one;
+the matching `MAX_CONTAINERS` settings also default to one. The idle scale-down window is 300 seconds,
+and platform retries are disabled. Deploy both updated runners before the updated bridge. The bridge
+checks the deployed runner source hash and configured GPU against the requested runner before inference;
+a mismatch fails loudly. `HEROGEN_OBJECTS_APP` and `HEROGEN_BODY_APP` can name isolated deployments.
+For local calls, `HEROGEN_REMOTE_DEPLOYED=1` selects the same bridge; ordinary `modal run` calls remain
+ephemeral and pay startup again. Stop finite benchmark deployments explicitly after draining their inputs.
+Warm capacity avoids startup only after the entry hook has completed; deployment and recovery still take time.
+
+Stage 3 starts Body inference from the selected front image and mask box beside Objects by default.
+Fitting/remeshing remains unchanged, and Body-to-mesh joint conversion, record updates and acceptance
+remain ordered after that fitting. `run_stage3(..., parallel_models=False)` retains serial scheduling.
+An early Objects error drains and accounts any Body result before the existing fallback/stop policy runs.
+Remote cache keys still include the full runner source hash: changing lifecycle code invalidates older
+remote entries, even though the inference parameters and model pins are unchanged.
 
 ### Retention
 

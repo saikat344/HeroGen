@@ -2,7 +2,8 @@
 
 Modes:
 - ``live``: run the Modal app (`modal run <runner>.py::main`, an ephemeral app that stops when the call
-  returns) in a subprocess with a timeout, then store its outputs in the cache.
+  returns) in a subprocess with a timeout, then store its outputs in the cache. With
+  ``HEROGEN_REMOTE_DEPLOYED=1``, call the matching deployed persistent Model through the service bridge instead.
 - ``replay``: read the cache only. A missing entry raises ``ReplayMiss``; nothing touches the network.
 
 The cache key hashes the request: the runner (its name and the SHA-256 of its source file, `runner_sha`), the model
@@ -27,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -261,6 +263,8 @@ class RemoteClient:
             out.mkdir()
             cmd = [modal, "run", str(HERE / f"{runner}.py") + "::main", "--job", str(tmp / "job.json"),
                    "--out", str(out)]
+            if os.environ.get("HEROGEN_REMOTE_DEPLOYED") == "1":
+                cmd = [sys.executable, "-m", "herogen.service.modal_bridge", *cmd[1:]]
             t0 = time.monotonic()
             price = PRICE_PER_SECOND.get(gpu)
             # Hosted deployments can have a longer function timeout than the local CLI wait.

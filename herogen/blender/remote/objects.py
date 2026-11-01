@@ -45,6 +45,8 @@ Where the self-written changes apply: the image clones the repository at `REPO_S
 own `patching/hydra` step at build time; the rasteriser and splat-render substitutions below are assigned in the
 container process before the pipeline is instantiated. No file of the repository is copied into HeroGen.
 """
+from functools import lru_cache
+
 import json
 import os
 import pathlib
@@ -102,7 +104,7 @@ image = (
                   "pip freeze > /opt/freeze.txt", absent_check)
 )
 
-app = modal.App(APP)
+app = modal.App(os.environ.get("HEROGEN_OBJECTS_APP", APP))
 
 
 @app.function(image=modal.Image.debian_slim().pip_install("huggingface_hub[cli]<1.0"), volumes={CKPT_DIR: vol},
@@ -246,22 +248,15 @@ class VramSampler:
             time.sleep(0.5)
 
 
-@app.function(image=image, gpu=GPU, volumes={CKPT_DIR: vol}, timeout=TIMEOUT,
-              secrets=[modal.Secret.from_name("huggingface")])
-def infer(jobs: list, seed: int = 42):
-    import io
+@lru_cache(maxsize=1)
+def _model_state():
+    """Load once per warm container; the seed and all inference/export parameters stay per request."""
     import subprocess
     import sys
 
-    import numpy as np
-    from PIL import Image
-
     os.environ.setdefault("HF_HOME", f"{CKPT_DIR}/hf-home")       # MoGe cache
     os.environ.setdefault("TORCH_HOME", f"{CKPT_DIR}/torch-home")  # torch.hub cache (DINOv2)
-    log = {"gpu": subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
-                                  "--format=csv,noheader"], capture_output=True, text=True).stdout.strip(),
-           "repo_sha": REPO_SHA, "weights": WEIGHTS, "seed": seed, "runs": {}}
-    sampler = VramSampler()
+    log = {}
     t0 = time.time()
     ck = pathlib.Path(CKPT_DIR) / "hf-download" / "checkpoints"
     have = checkpoint_revision(pathlib.Path(CKPT_DIR) / "hf-download")
@@ -306,44 +301,90 @@ def infer(jobs: list, seed: int = 42):
     pipe = instantiate(config)
     log["load_seconds"] = round(time.time() - t0, 1)
 
-    files = {}
-    for job in jobs:
-        name = job["name"]
-        img = np.asarray(Image.open(io.BytesIO(job["image"])).convert("RGB"))
-        mask = np.asarray(Image.open(io.BytesIO(job["mask"])).convert("L")) > 127
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
-        t = time.time()
-        rgba = nb.Inference.merge_mask_to_rgba(None, img, mask)
-        out = pipe.run(rgba, None, seed, stage1_only=False, with_mesh_postprocess=True, with_texture_baking=True,
-                       with_layout_postprocess=False, use_vertex_color=False)
-        torch.cuda.synchronize()
-        rec = {"seconds": round(time.time() - t, 1),
-               "torch_max_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20),
-               "torch_max_reserved_mib": round(torch.cuda.max_memory_reserved() / 2**20)}
-        glb = out.get("glb")
-        d = {}
-        if glb is not None:
-            d["mesh.glb"] = glb.export(file_type="glb")
-            rec["glb_vertices"] = int(len(glb.vertices))
-            rec["glb_faces"] = int(len(glb.faces))
-            try:
-                rec["texture_size"] = list(glb.visual.material.baseColorTexture.size)
-            except Exception as e:  # noqa: BLE001
-                rec["texture_size"] = f"n/a ({type(e).__name__})"
-        pose = {}
-        for k in ("rotation", "translation", "scale"):
-            v = out.get(k)
-            if isinstance(v, torch.Tensor):
-                pose[k] = v.detach().float().cpu().numpy().round(6).tolist()
-        rec["pose"] = pose
-        files[name] = d
-        log["runs"][name] = rec
-    sampler.stop = True
+    return pipe, nb, log
+
+
+def infer(jobs: list, seed: int = 42):
+    import io
+    import subprocess
+    import sys
+
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    t0 = time.time()
+    was_warm = _model_state.cache_info().currsize > 0
+    pipe, nb, state = _model_state()
+    log = {**state, "gpu": subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                                          "--format=csv,noheader"], capture_output=True, text=True).stdout.strip(),
+           "repo_sha": REPO_SHA, "weights": WEIGHTS, "seed": seed, "runs": {}}
+    log["load_seconds"] = 0.0 if was_warm else state["load_seconds"]
+    sampler = VramSampler()
+
+    try:
+        files = {}
+        for job in jobs:
+            name = job["name"]
+            img = np.asarray(Image.open(io.BytesIO(job["image"])).convert("RGB"))
+            mask = np.asarray(Image.open(io.BytesIO(job["mask"])).convert("L")) > 127
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            t = time.time()
+            rgba = nb.Inference.merge_mask_to_rgba(None, img, mask)
+            out = pipe.run(rgba, None, seed, stage1_only=False, with_mesh_postprocess=True, with_texture_baking=True,
+                           with_layout_postprocess=False, use_vertex_color=False)
+            torch.cuda.synchronize()
+            rec = {"seconds": round(time.time() - t, 1),
+                   "torch_max_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20),
+                   "torch_max_reserved_mib": round(torch.cuda.max_memory_reserved() / 2**20)}
+            glb = out.get("glb")
+            d = {}
+            if glb is not None:
+                d["mesh.glb"] = glb.export(file_type="glb")
+                rec["glb_vertices"] = int(len(glb.vertices))
+                rec["glb_faces"] = int(len(glb.faces))
+                try:
+                    rec["texture_size"] = list(glb.visual.material.baseColorTexture.size)
+                except Exception as e:  # noqa: BLE001
+                    rec["texture_size"] = f"n/a ({type(e).__name__})"
+            pose = {}
+            for k in ("rotation", "translation", "scale"):
+                v = out.get(k)
+                if isinstance(v, torch.Tensor):
+                    pose[k] = v.detach().float().cpu().numpy().round(6).tolist()
+            rec["pose"] = pose
+            files[name] = d
+            log["runs"][name] = rec
+    finally:
+        sampler.stop = True
     log["absent_modules_imported"] = sorted(m for m in ABSENT if m in sys.modules)
     log["vram_peak_mib_nvidia_smi"] = sampler.peak
     log["total_seconds"] = round(time.time() - t0, 1)
     return log, files
+
+
+@app.cls(image=image, gpu=GPU, volumes={CKPT_DIR: vol}, timeout=TIMEOUT,
+              min_containers=int(os.environ.get("HEROGEN_OBJECTS_MIN_CONTAINERS", "1")),
+              max_containers=int(os.environ.get("HEROGEN_OBJECTS_MAX_CONTAINERS", "1")),
+              scaledown_window=300, retries=0,
+              secrets=[modal.Secret.from_name("huggingface")])
+class Model:
+    """One initialized model per container; independent requests use separate containers."""
+
+    @modal.enter()
+    def load(self):
+        _model_state()
+
+    @modal.method()
+    def identity(self):
+        import hashlib
+
+        return {"gpu": GPU, "runner_sha": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()[:16]}
+
+    @modal.method()
+    def infer(self, jobs: list, seed: int = 42):
+        return infer(jobs, seed)
 
 
 @app.local_entrypoint()
@@ -352,7 +393,7 @@ def main(job: str, out: str):
     jobs = [{"name": j["name"], "image": pathlib.Path(j["image"]).read_bytes(),
              "mask": pathlib.Path(j["mask"]).read_bytes()} for j in spec["jobs"]]
     t = time.time()
-    log, files = infer.remote(jobs, seed=int(spec.get("seed", 42)))
+    log, files = Model().infer.remote(jobs, seed=int(spec.get("seed", 42)))
     log["wall_seconds"] = round(time.time() - t, 1)
     log["gpu_type"] = GPU
     o = pathlib.Path(out)

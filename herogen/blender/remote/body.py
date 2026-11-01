@@ -29,6 +29,8 @@ except those its inference never imports (`chump`, `appnope`, the PyPI `ffmpeg` 
 ffmpeg; the build fails if any of `ABSENT` can be imported. The weights are downloaded at the revisions in
 `WEIGHTS` (the model and MoGe's), which every run log records.
 """
+from functools import lru_cache
+
 import io
 import json
 import os
@@ -96,11 +98,14 @@ image = (
           "PYOPENGL_PLATFORM": "osmesa", "PYTHONPATH": "/repo"})
 )
 
-app = modal.App("herogen-sam3d-body")
+APP = "herogen-sam3d-body"
+app = modal.App(os.environ.get("HEROGEN_BODY_APP", APP))
 vol = modal.Volume.from_name(os.environ.get("HEROGEN_BODY_VOLUME", "herogen-sam3d-body-ckpt"),
                              create_if_missing=True)
 
-_fn_kwargs = dict(image=image, timeout=TIMEOUT, volumes={"/cache": vol}, secrets=[modal.Secret.from_name("huggingface")])
+_fn_kwargs = dict(image=image, timeout=TIMEOUT, retries=0, scaledown_window=300,
+                  min_containers=int(os.environ.get("HEROGEN_BODY_MIN_CONTAINERS", "1")),
+                  max_containers=int(os.environ.get("HEROGEN_BODY_MAX_CONTAINERS", "1")), volumes={"/cache": vol}, secrets=[modal.Secret.from_name("huggingface")])
 if CPU_MODE:
     _fn_kwargs.update(cpu=8.0, memory=32768)
 else:
@@ -138,48 +143,21 @@ def _patch_repo_for_cpu():
     open(f, "w").write(src.replace("model.infer(input_image)", "model.infer(input_image, use_fp16=False)"))
 
 
-@app.function(**_fn_kwargs)
-def infer(jobs: list, detector: str | None = None):
-    import resource
-    import subprocess
+@lru_cache(maxsize=2)
+def _model_state(detector):
+    """Pinned model, FOV estimator and optional detector retained in this warm container."""
     import sys
-    import threading
-
-    import torch
 
     _pin_dinov3()
+    import torch
+
     cpu = not torch.cuda.is_available()
     if cpu:
         _patch_repo_for_cpu()
         torch.set_num_threads(8)
     dev = torch.device("cpu" if cpu else "cuda")
-    import cv2
-    import numpy as np
-
     sys.path.insert(0, "/repo")
     os.chdir("/repo")
-    t_all = time.time()
-    peak = {"mib": 0, "name": None}
-    stop = threading.Event()
-
-    def poll():
-        while not stop.is_set():
-            try:
-                o = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,name", "--format=csv,noheader,nounits"],
-                                   capture_output=True, text=True, timeout=5).stdout
-                peak["mib"] = max(peak["mib"], int(o.split(",")[0]))
-                peak["name"] = o.split(",")[1].strip()
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(0.5)
-
-    if detector is not None and detector not in DETECTORS:
-        raise ValueError(f"detector must be None or one of {DETECTORS}, got {detector!r}")
-    missing = [j["name"] for j in jobs if j.get("bbox") is None]
-    if missing:
-        raise ValueError(f"every job needs a person box: {missing}")
-    if not cpu:
-        threading.Thread(target=poll, daemon=True).start()
     from huggingface_hub import hf_hub_download, snapshot_download
 
     repo_id = "facebook/sam-3d-body-dinov3"
@@ -205,60 +183,102 @@ def infer(jobs: list, detector: str | None = None):
     vol.commit()
     est = SAM3DBodyEstimator(sam_3d_body_model=model, model_cfg=cfg, human_detector=det, human_segmentor=None,
                              fov_estimator=fov)
-    results, files = {}, {}
-    for job in jobs:
-        name = job["name"]
-        img_bgr = cv2.imdecode(np.frombuffer(job["png"], np.uint8), cv2.IMREAD_COLOR)
-        tmp = f"/tmp/{name}.png"
-        cv2.imwrite(tmp, img_bgr)
-        if not cpu:
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.synchronize()
-        t0 = time.time()
-        caller_box = np.asarray([job["bbox"]], dtype=np.float32)
-        box_source = job.get("box_source") or "caller"
-        if det is None:
-            outs = est.process_one_image(tmp, bboxes=caller_box)
-        else:
-            outs = est.process_one_image(tmp, bbox_thr=0.5)
-            if outs:
-                box_source = f"detector ({detector})"
-            else:                                       # the detector found nobody: the caller's box
+    return est, det, dev, cpu, mhr_names, repo_id, t_load
+
+
+def infer(jobs: list, detector: str | None = None):
+    import resource
+    import subprocess
+    import sys
+    import threading
+
+    import torch
+
+    import cv2
+    import numpy as np
+
+    t_all = time.time()
+    peak = {"mib": 0, "name": None}
+    stop = threading.Event()
+
+    def poll():
+        while not stop.is_set():
+            try:
+                o = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,name", "--format=csv,noheader,nounits"],
+                                   capture_output=True, text=True, timeout=5).stdout
+                peak["mib"] = max(peak["mib"], int(o.split(",")[0]))
+                peak["name"] = o.split(",")[1].strip()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.5)
+
+    if detector is not None and detector not in DETECTORS:
+        raise ValueError(f"detector must be None or one of {DETECTORS}, got {detector!r}")
+    missing = [j["name"] for j in jobs if j.get("bbox") is None]
+    if missing:
+        raise ValueError(f"every job needs a person box: {missing}")
+    was_warm = _model_state.cache_info().hits
+    est, det, dev, cpu, mhr_names, repo_id, t_load = _model_state(detector)
+    if _model_state.cache_info().hits > was_warm:
+        t_load = 0.0
+    if not cpu:
+        threading.Thread(target=poll, daemon=True).start()
+    try:
+        results, files = {}, {}
+        for job in jobs:
+            name = job["name"]
+            img_bgr = cv2.imdecode(np.frombuffer(job["png"], np.uint8), cv2.IMREAD_COLOR)
+            tmp = f"/tmp/{name}.png"
+            cv2.imwrite(tmp, img_bgr)
+            if not cpu:
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.synchronize()
+            t0 = time.time()
+            caller_box = np.asarray([job["bbox"]], dtype=np.float32)
+            box_source = job.get("box_source") or "caller"
+            if det is None:
                 outs = est.process_one_image(tmp, bboxes=caller_box)
-        if not cpu:
-            torch.cuda.synchronize()
-        res = {"seconds": round(time.time() - t0, 2), "n_people": len(outs), "device": str(dev), "box": box_source,
-               "torch_max_allocated_mib": None if cpu else round(torch.cuda.max_memory_allocated() / 2**20),
-               "torch_max_reserved_mib": None if cpu else round(torch.cuda.max_memory_reserved() / 2**20)}
-        results[name] = res
-        files[name] = {}
-        if not outs:
-            continue
-        areas = [(o["bbox"][2] - o["bbox"][0]) * (o["bbox"][3] - o["bbox"][1]) for o in outs]
-        o = outs[int(np.argmax(areas))]
-        cam_t = np.asarray(o["pred_cam_t"], float)
-        verts = np.asarray(o["pred_vertices"], float) + cam_t
-        kp3 = np.asarray(o["pred_keypoints_3d"], float) + cam_t
-        kp2 = np.asarray(o["pred_keypoints_2d"], float)
-        f = float(np.asarray(o["focal_length"]).reshape(-1)[0])
-        # principal point from the keypoints (uv = f * xy / z + c), then the mesh projected into the image
-        c = np.median(kp2 - f * kp3[:, :2] / kp3[:, 2:3], axis=0)
-        proj = f * verts[:, :2] / verts[:, 2:3] + c
-        joints = {
-            "frame": "camera (OpenCV): x right, y down, z forward; metres; pred_cam_t added",
-            "image_size": [int(img_bgr.shape[1]), int(img_bgr.shape[0])],
-            "focal_length": f, "principal_point": c.tolist(), "pred_cam_t": cam_t.tolist(),
-            "bbox": np.asarray(o["bbox"], float).tolist(), "box_source": box_source,
-            "mhr70": {n: {"xyz": kp3[i].tolist(), "uv": kp2[i].tolist()} for i, n in enumerate(mhr_names)},
-            "mhr_skeleton_joint_coords": (np.asarray(o["pred_joint_coords"], float) + cam_t).tolist(),
-            "mesh_top_uv": proj[int(np.argmin(proj[:, 1]))].tolist(),
-            "mesh_bottom_uv": proj[int(np.argmax(proj[:, 1]))].tolist(),
-        }
-        files[name]["joints.json"] = json.dumps(joints, indent=1).encode()
-        buf = io.BytesIO()
-        np.savez_compressed(buf, vertices=verts.astype(np.float32), faces=np.asarray(est.faces, np.int32))
-        files[name]["body.npz"] = buf.getvalue()
-    stop.set()
+            else:
+                outs = est.process_one_image(tmp, bbox_thr=0.5)
+                if outs:
+                    box_source = f"detector ({detector})"
+                else:                                       # the detector found nobody: the caller's box
+                    outs = est.process_one_image(tmp, bboxes=caller_box)
+            if not cpu:
+                torch.cuda.synchronize()
+            res = {"seconds": round(time.time() - t0, 2), "n_people": len(outs), "device": str(dev), "box": box_source,
+                   "torch_max_allocated_mib": None if cpu else round(torch.cuda.max_memory_allocated() / 2**20),
+                   "torch_max_reserved_mib": None if cpu else round(torch.cuda.max_memory_reserved() / 2**20)}
+            results[name] = res
+            files[name] = {}
+            if not outs:
+                continue
+            areas = [(o["bbox"][2] - o["bbox"][0]) * (o["bbox"][3] - o["bbox"][1]) for o in outs]
+            o = outs[int(np.argmax(areas))]
+            cam_t = np.asarray(o["pred_cam_t"], float)
+            verts = np.asarray(o["pred_vertices"], float) + cam_t
+            kp3 = np.asarray(o["pred_keypoints_3d"], float) + cam_t
+            kp2 = np.asarray(o["pred_keypoints_2d"], float)
+            f = float(np.asarray(o["focal_length"]).reshape(-1)[0])
+            # principal point from the keypoints (uv = f * xy / z + c), then the mesh projected into the image
+            c = np.median(kp2 - f * kp3[:, :2] / kp3[:, 2:3], axis=0)
+            proj = f * verts[:, :2] / verts[:, 2:3] + c
+            joints = {
+                "frame": "camera (OpenCV): x right, y down, z forward; metres; pred_cam_t added",
+                "image_size": [int(img_bgr.shape[1]), int(img_bgr.shape[0])],
+                "focal_length": f, "principal_point": c.tolist(), "pred_cam_t": cam_t.tolist(),
+                "bbox": np.asarray(o["bbox"], float).tolist(), "box_source": box_source,
+                "mhr70": {n: {"xyz": kp3[i].tolist(), "uv": kp2[i].tolist()} for i, n in enumerate(mhr_names)},
+                "mhr_skeleton_joint_coords": (np.asarray(o["pred_joint_coords"], float) + cam_t).tolist(),
+                "mesh_top_uv": proj[int(np.argmin(proj[:, 1]))].tolist(),
+                "mesh_bottom_uv": proj[int(np.argmax(proj[:, 1]))].tolist(),
+            }
+            files[name]["joints.json"] = json.dumps(joints, indent=1).encode()
+            buf = io.BytesIO()
+            np.savez_compressed(buf, vertices=verts.astype(np.float32), faces=np.asarray(est.faces, np.int32))
+            files[name]["body.npz"] = buf.getvalue()
+    finally:
+        stop.set()
     meta = {"device": str(dev), "gpu_name": peak["name"], "vram_peak_mib_nvidia_smi": peak["mib"],
             "max_rss_mib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
             "load_seconds": round(t_load, 1), "total_seconds": round(time.time() - t_all, 1),
@@ -269,13 +289,32 @@ def infer(jobs: list, detector: str | None = None):
     return meta, files
 
 
+@app.cls(**_fn_kwargs)
+class Model:
+    """One initialized model per container; independent requests use separate containers."""
+
+    @modal.enter()
+    def load(self):
+        _model_state(None)
+
+    @modal.method()
+    def identity(self):
+        import hashlib
+
+        return {"gpu": GPU, "runner_sha": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()[:16]}
+
+    @modal.method()
+    def infer(self, jobs: list, detector: str | None = None):
+        return infer(jobs, detector)
+
+
 @app.local_entrypoint()
 def main(job: str, out: str):
     spec = json.loads(pathlib.Path(job).read_text())
     payload = [{"name": j["name"], "png": pathlib.Path(j["image"]).read_bytes(), "bbox": j["bbox"],
                 "box_source": j.get("box_source")} for j in spec["jobs"]]
     t = time.time()
-    meta, files = infer.remote(payload, spec.get("detector"))
+    meta, files = Model().infer.remote(payload, spec.get("detector"))
     meta["wall_seconds"] = round(time.time() - t, 1)
     meta["gpu_type"] = GPU
     o = pathlib.Path(out)

@@ -3,9 +3,9 @@
 herogen.blender's remote client runs SAM 3D Objects and SAM 3D Body by starting
 `<modal> run <runner>.py::main --job <job.json> --out <dir>` (an ephemeral app per call), where `<modal>` is
 `$HEROGEN_MODAL`. A Modal worker has no Modal CLI login, so the Blender worker image points `HEROGEN_MODAL` at
-this bridge instead. It takes the same arguments, calls the runner's `infer` function in the runner's deployed
+this bridge instead. It takes the same arguments, calls the persistent `Model.infer` method in the runner's deployed
 app (`modal deploy herogen/blender/remote/objects.py`, `.../body.py`; the app name is the runner's `APP`
-constant) and writes the same files the runner's own `main` writes: `<out>/<name>/<file>`, `<out>/<name>/run.json`
+constant, overridden by `HEROGEN_OBJECTS_APP` / `HEROGEN_BODY_APP`) and writes the same files the runner's own `main` writes: `<out>/<name>/<file>`, `<out>/<name>/run.json`
 and `<out>/run.json`. The client's cache, cost estimate and error handling are unchanged.
 
 `python3 -m herogen.service.modal_bridge run <runner.py>::main --job <job.json> --out <dir>`
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import sys
@@ -79,7 +80,7 @@ def main(argv: list[str] | None = None, lookup=None) -> int:
     if entry != "main" or runner not in GPU_ENV or not path.is_file():
         print(f"modal_bridge: unsupported target {target!r}", file=sys.stderr)
         return 2
-    app_name = runner_constants(path).get("APP")
+    app_name = os.environ.get(f"HEROGEN_{runner.upper()}_APP", runner_constants(path).get("APP"))
     if not isinstance(app_name, str):
         print("modal_bridge: the runner has no APP constant", file=sys.stderr)
         return 2
@@ -87,7 +88,13 @@ def main(argv: list[str] | None = None, lookup=None) -> int:
         import modal
 
         def lookup(app: str, fn: str):
-            return modal.Function.from_name(app, fn)
+            model = modal.Cls.from_name(app, "Model")()
+            identity = model.identity.remote()
+            expected_gpu = os.environ.get(GPU_ENV[runner], "A100-40GB" if runner == "objects" else "A10G")
+            expected_sha = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            if identity != {"gpu": expected_gpu, "runner_sha": expected_sha}:
+                raise BridgeError("deployed model GPU or runner source differs; deploy the matching runner")
+            return getattr(model, fn)
 
     spec = json.loads(a.job.read_text())
     args, kwargs = payload(runner, spec)
