@@ -564,8 +564,8 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
         if job and job.get('budget_required') and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled', 'stopped'):
             stages = store.job_stages(job_id)
             if job['state'] == 'stopped' or heldout is None or not any(s['stage'] == '2' and s['state'] == 'passed' for s in stages):
-                store.admission_side_done(job_id)
-            store.admission_main_done(job_id)
+                store.admission_side_done(job_id, continued_after=job['continued_after'])
+            store.admission_main_done(job_id, continued_after=job['continued_after'])
 
 
 def _bytes(storage: Storage, job: dict[str, Any], volume) -> int:
