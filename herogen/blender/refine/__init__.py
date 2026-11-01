@@ -76,7 +76,7 @@ def cost_estimate(maximum=False):
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
 
 
-def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True):
+def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -106,7 +106,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         edit = edit.convert("RGB")
         edit.save(folder / f"edit-{attempt}.png")
         mapx, mapy, warped, reg = I.register(render_rgb, alpha, np.asarray(edit, dtype=np.float32) / 255)
-        fig_e = I.figure_mask(warped)
+        fig_e = I.figure_mask(warped, render_figure=figure)
         overlap = float((figure & fig_e).sum() / max(1, (figure | fig_e).sum()))
         med, p90 = (v * 1024 / max(alpha.shape) for v in I.chamfer(figure, fig_e))
         measures = {"iou": overlap, "median_px": med, "p90_px": p90}
@@ -117,7 +117,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
                       and abs(reg["scale"] - 1) <= I.HAIR_GATE["scale_max_change"])
             reason = "hair outline, scale or colour agreement"
         else:
-            passed = overlap >= I.GATE["iou_min"] and med <= I.GATE["median_px"] and p90 <= I.GATE["p90_px"]
+            passed, measures = I.outline_gate(figure, fig_e, closeup=(body_cam is not None and I.is_closeup(cam, body_cam)))
             reason = "outline moved"
         trial.update(registration=reg, checks=measures)
         if passed:
@@ -215,7 +215,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if stage3.get("ok") is not True:
             raise ValueError("texture refine needs a passed stage-3.json")
         from . import character as C, imaging as I
-        rec.data["thresholds"] = {"outline": I.GATE, "hair": I.HAIR_GATE, "face_outside_max": I.PART_EXTRA_MAX}
+        rec.data["thresholds"] = {"outline": I.GATE, "closeup_outline": I.CLOSEUP_GATE, "hair": I.HAIR_GATE, "face_outside_max": I.PART_EXTRA_MAX}
         source = run / "03-source.glb"
         rec.data["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
         work = run / "blender-work" / "texture-refine"
@@ -249,7 +249,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             save(ok=False, status="running")
             try:
                 current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                current_record, timeout, cover, face_exclusion=head_found)
+                                current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"])
             except BudgetStop as exc:
                 current_record.update(accepted=False, reason=str(exc))
                 rec.data["stop_reason"] = str(exc)
