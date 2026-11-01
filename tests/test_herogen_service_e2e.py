@@ -291,8 +291,12 @@ class TestServicePage(ServiceBrowserCase):
         self.assertEqual(t.eval("document.querySelector('#name').value"), 'Saved draft')
         self.assertTrue(t.eval("document.querySelector('#promptIn').hidden"))
         t.eval("document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#detailH').textContent === 'Saved draft'")
+        # The library list refreshes after the detail view opens, so under load it can still be empty here.
+        # Wait for it to render, then require exactly one entry: the draft must not create a second hero.
+        t.wait("document.querySelector('#detailH')?.textContent === 'Saved draft' "
+               "&& document.querySelectorAll('#jobs li').length > 0")
         self.assertEqual(t.eval("document.querySelectorAll('#jobs li').length"), 1)
+        self.assertEqual(len(t.eval("fetch('/api/jobs').then(r => r.json()).then(b => b.jobs)")), 1)
         self.assertTrue(t.eval("document.activeElement.id === 'detail'"))
 
     def test_entry_rejects_excess_prompt_and_focuses_how_section(self):
