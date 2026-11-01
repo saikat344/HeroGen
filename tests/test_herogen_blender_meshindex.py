@@ -30,6 +30,19 @@ def box(lo, hi):
 
 
 class TestClosest(unittest.TestCase):
+    def test_tight_and_incomplete_bounds_preserve_exact_answers(self):
+        verts, faces = box((0, 0, 0), (1, 1, 1))
+        index = MeshIndex(verts, faces, cell=.2)
+        points = np.random.default_rng(4).uniform(-1, 2, (80, 3))
+        expected = index.closest(points)
+        for bound in (expected[2], np.zeros(len(points)), np.full(len(points), 100.)):
+            actual = index.closest(points, bound)
+            for a, b in zip(actual, expected):
+                np.testing.assert_allclose(a, b, atol=1e-12)
+        for bound in ([-1.] * len(points), [np.inf] * len(points), [1.]):
+            with self.assertRaisesRegex(ValueError, "upper bounds"):
+                index.closest(points, bound)
+
     def test_projection_edges_vertices_and_ties_have_expected_barycentrics(self):
         v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float)
         idx = MeshIndex(v, np.array([[0, 1, 2], [0, 1, 2], [0, 0, 0]]))

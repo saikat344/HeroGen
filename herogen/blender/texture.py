@@ -2,8 +2,9 @@
 
 With an explicit `primary` SourceColour, every covered texel takes that source's colour, including the Head
 and every LOD. View projections, the raw source fallback and stage 2f close-ups do not alter it. The same
-rasterisation, whole-body depth maps and outward island padding are retained. Coverage and nearest sampled
-source-surface distances are recorded. Stage 4 validates the refined source's provenance and frame first.
+rasterisation, whole-body depth maps and outward island padding are retained. Refined lookup uses the exact
+closest triangle's barycentric corner UVs; coverage and exact source-surface distances are recorded.
+Stage 4 validates the refined source's provenance and frame first. The view fallback retains dense samples.
 
 Without a primary source the colour rules below apply unchanged.
 
@@ -168,10 +169,18 @@ def _closeup_colour(cu: Closeup, view, row: np.ndarray, col: np.ndarray, colour:
 
 
 class SourceColour:
-    """Colour of the source mesh's own texture at the nearest point of its surface (dense surface samples)."""
+    """Source colour at a closest surface point; exact triangle UVs for refined transfers.
+
+    The view bake retains its dense-sample fallback. Exact lookup interpolates corner UVs on the closest
+    triangle, avoiding spatial quantisation of a high-resolution painting. Queries are bounded in memory.
+    """
 
     def __init__(self, verts: np.ndarray, faces: np.ndarray, corner_uv: np.ndarray, texture: np.ndarray,
-                 samples_per_edge: int = 4):
+                 samples_per_edge: int = 4, *, exact: bool = False):
+        self.verts, self.faces, self.corner_uv = verts, faces, corner_uv
+        self.texture = texture
+        self.index = None
+        self.sampling = "closest-triangle barycentric UV" if exact else "nearest dense surface sample"
         from scipy.spatial import cKDTree
 
         n = samples_per_edge
@@ -182,10 +191,26 @@ class SourceColour:
         self.tree = cKDTree(pts)
         self.uv = uv
         self.texture = texture
+        if exact:
+            from .meshindex import MeshIndex
+
+            self.index = MeshIndex(verts, faces)
 
     def __call__(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        dist, idx = self.tree.query(p, workers=-1)
-        uv = self.uv[idx]
+        if self.index is None:
+            dist, idx = self.tree.query(p, workers=-1)
+            uv = self.uv[idx]
+        else:
+            uv, dist = np.empty((len(p), 2)), np.empty(len(p))
+            # Samples supply only an upper distance bound. Triangle search still proves the nearest point;
+            # UVs never come from the samples. Tight boxes avoid searching 27 full cells for every texel.
+            bound = self.tree.query(p, workers=-1)[0]
+            for start in range(0, len(p), 256):
+                stop = start + 256
+                tri, bary, dist[start:stop] = self.index.closest(p[start:stop], bound[start:stop])
+                if (tri < 0).any():
+                    raise ValueError("source colour needs a non-degenerate surface")
+                uv[start:stop] = np.einsum("ni,nij->nj", bary, self.corner_uv[tri])
         t = self.texture
         return _bilinear(t, uv[:, 1] * t.shape[0] - 0.5, uv[:, 0] * t.shape[1] - 0.5), dist
 
@@ -362,6 +387,7 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     if primary is not None:
         col, dist = primary(p3)
         src_stats = {"colour_source": "refined", "texels_primary": 1.0,
+                     "sampling": primary.sampling,
                      "primary_nearest_distance_mean": float(dist.mean()),
                      "primary_nearest_distance_p95": float(np.percentile(dist, 95)),
                      "primary_nearest_distance_max": float(dist.max()), "closeups_applied": False}

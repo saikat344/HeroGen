@@ -23,6 +23,22 @@ def png(colour):
 
 @unittest.skipUnless(importlib.util.find_spec("scipy") is not None, "scipy is required for source colour")
 class RefinedSourceTests(unittest.TestCase):
+    def test_exact_uv_preserves_fine_stripes_between_dense_samples(self):
+        verts = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0]])
+        faces = np.array([[0, 1, 2]])
+        corner = verts[faces, :2]
+        image = np.broadcast_to(((np.arange(256) // 2 % 2) * 255)[None, :, None], (256, 256, 3)).astype(float)
+        x = (np.arange(16, 112) + .5) / 256
+        points = np.column_stack((x, np.full(len(x), .2), np.full(len(x), .01)))
+        expected = image[0, np.arange(16, 112)]
+        exact = texture.SourceColour(verts, faces, corner, image, exact=True)
+        sampled = texture.SourceColour(verts, faces, corner, image)
+        colour, distance = exact(points)
+        np.testing.assert_allclose(colour, expected, atol=1e-9)
+        np.testing.assert_allclose(distance, .01, atol=1e-12)
+        self.assertGreater(np.abs(sampled(points)[0] - expected).mean(), 100)
+        self.assertEqual(exact(np.empty((0, 3)))[0].shape, (0, 3))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
