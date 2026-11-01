@@ -4,14 +4,14 @@ import { readFile } from 'node:fs/promises';
 import { SourceTextModule, SyntheticModule } from 'node:vm';
 
 async function setup() {
-  const loads=[], scenes=[], renderers=[];
-  class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(){} copy(){} setScalar(){} }
+  const loads=[], scenes=[], renderers=[], cameras=[], controls=[];
+  class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(x,y,z){Object.assign(this,{x,y,z});} copy(v){Object.assign(this,v);} setScalar(){} }
   class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);} remove(n){this.models=this.models.filter(v=>v!==n);} }
   class Renderer { constructor(){this.disposed=false;this.renders=0;this.lastModels=[];renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(scene){this.renders++;this.lastModels=[...scene.models];} }
-  class Camera { constructor(){this.position=new Vector3();} updateProjectionMatrix(){} }
+  class Camera { constructor(){this.position=new Vector3();cameras.push(this);} updateProjectionMatrix(){} }
   class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} }
   class Light { constructor(){this.position=new Vector3();this.scale=new Vector3();this.geometry={dispose(){}};this.material={color:{set(){}},dispose(){}};} }
-  class Controls { constructor(){this.target=new Vector3();} update(){} dispose(){} }
+  class Controls { constructor(){this.target=new Vector3();controls.push(this);} update(){} dispose(){} }
   class Loader { load(url,done,progress,fail){loads.push({url,done,fail});} }
   const three={WebGLRenderer:Renderer,Scene,HemisphereLight:Light,DirectionalLight:Light,GridHelper:Light,
     PerspectiveCamera:Camera,Vector3,Box3,MeshStandardMaterial:class { constructor(options){Object.assign(this,options);} dispose(){this.disposed=true;} }};
@@ -23,7 +23,7 @@ async function setup() {
   await module.link((id)=>stub(id==='three'?three:id.includes('OrbitControls')?{OrbitControls:Controls}:{GLTFLoader:Loader}));
   await module.evaluate();
   const model=()=>({disposed:0,traverse(fn){fn({geometry:{dispose:()=>this.disposed++}});}});
-  return {api:module.namespace,loads,scenes,renderers,model,canvas:{clientWidth:800,clientHeight:500}};
+  return {api:module.namespace,loads,scenes,renderers,cameras,controls,model,canvas:{clientWidth:800,clientHeight:500}};
 }
 test('a late model response never replaces the selected hero',async()=>{
   const s=await setup(),old=s.model(),current=s.model();
@@ -81,4 +81,31 @@ test('failed model switch immediately flushes the cleared scene and recovers on 
   s.loads[2].done({scene:second}); await retrySecond;
   assert.equal(s.renderers[0].lastModels.includes(second),true);
   assert.equal(typeof s.renderers[0].loop,'function');
+});
+test('refinement updates preserve camera position, orbit target and zoom',async()=>{
+  const s=await setup(),v=s.api.createPreview();
+  const first=v.show(s.canvas,'source.glb');s.loads[0].done({scene:s.model()});await first;
+  s.cameras[0].position.set(4,5,6);s.cameras[0].zoom=1.7;s.controls[0].target.set(1,2,3);
+  const next=v.show(s.canvas,'version-1.glb',{preserveCamera:true});s.loads[1].done({scene:s.model()});await next;
+  assert.deepEqual({...s.cameras[0].position},{x:4,y:5,z:6});assert.equal(s.cameras[0].zoom,1.7);
+  assert.deepEqual({...s.controls[0].target},{x:1,y:2,z:3});
+  const other=v.show(s.canvas,'another-hero.glb');s.loads[2].done({scene:s.model()});await other;
+  assert.notDeepEqual({...s.cameras[0].position},{x:4,y:5,z:6});
+});
+test('interaction during a refinement download keeps the displayed model until Update',async()=>{
+  const s=await setup(),v=s.api.createPreview(),first=s.model(),next=s.model();let untouched=true;
+  const load=v.show(s.canvas,'source.glb');s.loads[0].done({scene:first});await load;
+  const update=v.show(s.canvas,'version-1.glb',{preserveCamera:true,canReplace:()=>untouched});
+  assert.equal(first.disposed,0);assert.equal(s.scenes[0].models.includes(first),true);
+  untouched=false;s.loads[1].done({scene:next});assert.equal(await update,false);
+  assert.equal(first.disposed,0);assert.equal(next.disposed,1);assert.equal(s.scenes[0].models.includes(first),true);
+  const explicit=v.show(s.canvas,'version-1.glb',{preserveCamera:true});s.loads[2].done({scene:s.model()});
+  assert.equal(await explicit,true);assert.equal(first.disposed,1);
+});
+test('an unsuccessful refinement keeps the existing model visible',async()=>{
+  const s=await setup(),v=s.api.createPreview(),first=s.model();
+  const load=v.show(s.canvas,'source.glb');s.loads[0].done({scene:first});await load;
+  const update=v.show(s.canvas,'version-1.glb',{preserveCamera:true});s.loads[1].fail(new Error('offline'));
+  await assert.rejects(update,/offline/);assert.equal(first.disposed,0);
+  assert.equal(s.scenes[0].models.includes(first),true);assert.equal(typeof s.renderers[0].loop,'function');
 });

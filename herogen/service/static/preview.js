@@ -52,7 +52,7 @@ export function createPreview() {
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => m.dispose()); state.renderer.dispose();
     document.removeEventListener('hg:theme', theme); state = null;
   }
-  async function show(canvas, url) {
+  async function show(canvas, url, {preserveCamera = false, canReplace = () => true} = {}) {
     if (state && state.canvas !== canvas) dispose();
     const token = ++request;
     if (!state) {
@@ -76,31 +76,46 @@ export function createPreview() {
       document.addEventListener('hg:theme', theme); theme();
     }
     paused = false; loop();
-    if (state.url === url && state.model) return;
-    restore();
-    if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; }
-    state.grid.visible = false; state.url = null; render();
-    await new Promise((resolve, reject) => new GLTFLoader().load(url, gltf => {
-      if (token !== request || !state) { release(gltf.scene); resolve(); return; }
+    if (state.url === url && state.model) return true;
+    const keepModel = preserveCamera && Boolean(state.model);
+    if (!keepModel) {
+      restore();
+      if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; }
+      state.grid.visible = false; state.url = null; render();
+    }
+    return new Promise((resolve, reject) => new GLTFLoader().load(url, gltf => {
+      if (token !== request || !state || keepModel && !canReplace()) { release(gltf.scene); resolve(false); return; }
+      restore();
+      if (state.model) { state.scene.remove(state.model); release(state.model); }
       state.model = gltf.scene; state.url = url; state.grid.visible = true; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
       const radius = Math.max(size.x, size.y, size.z, 0.01);
       const d = radius * Math.max(2.2, 1.5 / state.camera.aspect);
       state.camera.near = radius / 1000; state.camera.far = radius * 100;
-      state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10;
       state.camera.updateProjectionMatrix();
-      state.camera.position.set(centre.x + d * 0.45, centre.y + d * 0.15, centre.z + d);
-      state.controls.target.copy(centre); state.grid.position.y = box.min.y;
-      state.grid.scale.setScalar(radius / 2); shading(mode); resolve();
+      if (!preserveCamera) {
+        state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10;
+        state.camera.position.set(centre.x + d * 0.45, centre.y + d * 0.15, centre.z + d);
+        state.controls.target.copy(centre);
+      }
+      state.grid.position.y = box.min.y;
+      state.grid.scale.setScalar(radius / 2); shading(mode); resolve(true);
     }, undefined, error => {
-      if (token === request && state) { state.renderer.setAnimationLoop(null); render(); reject(error); } else resolve();
+      if (token === request && state) {
+        if (!keepModel) state.renderer.setAnimationLoop(null);
+        render(); reject(error);
+      } else resolve(false);
     }));
   }
   function snapshot() { render(); return state?.canvas.toDataURL('image/png'); }
-  return {show, pause, resume, dispose, shading, snapshot};
+  function view() {
+    return state ? {position: state.camera.position.toArray(), target: state.controls.target.toArray(), zoom: state.camera.zoom} : null;
+  }
+  return {show, pause, resume, dispose, shading, snapshot, view};
 }
 const preview = createPreview();
-export const show = (canvas, url) => preview.show(canvas, url);
+export const show = (canvas, url, options) => preview.show(canvas, url, options);
 export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
+export const view = () => preview.view();
