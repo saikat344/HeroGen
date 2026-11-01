@@ -13,6 +13,7 @@ import numpy as np
 from . import HEIGHT_STUDS, VIEWS, bl, carve, joints
 from .record import StageRecord, check
 from .views import load_mask, load_views
+from herogen.pipeline.fast import enabled, informational
 
 # Historical observed-view threshold retained only for silhouette diagnostics.
 IOU_GATE = 0.90
@@ -256,17 +257,25 @@ def _prefetch_body(run, vs, remote, rec, detector, *, enabled):
 def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
                mesh_source: str = "sam3d-objects", joints_source: str = "sam3d-body", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
-               body_detector: str | None = None, quality_client=None, parallel_models: bool = True) -> dict:
+               body_detector: str | None = None, quality_client=None, parallel_models: bool = True, fast: bool = False) -> dict:
     """Build the hybrid by default; a failed hybrid build retries the local carve once, with a reason.
 
     Quality rejection is a completed build and never triggers another constructor. Spend from a failed
     attempt remains in the same record. ``fallback=False`` preserves the original build error.
     """
+    fast = enabled(fast)
+    if fast:
+        fallback = False
+        remote = _remote(run, remote)
+        previous_remote_fast = getattr(remote, "fast", False)
+    remote_start = len(remote.log.calls) if fast else 0
     (run / "03-refined.glb").unlink(missing_ok=True)
     if mesh_source not in MESH_SOURCES or joints_source not in JOINT_SOURCES:
         raise ValueError(f"mesh_source in {MESH_SOURCES}, joints_source in {JOINT_SOURCES}")
     (run / "stage-3.json").unlink(missing_ok=True)
     rec = StageRecord(run, 3, "base mesh")
+    if fast:
+        rec.data["fast_lane"] = True
     rec.data.update(mesh_source_requested=mesh_source, joints_source_requested=joints_source, fallback=None)
     kwargs = dict(height=height, nz=nz, timeout=timeout, remote=remote, y_method=y_method,
                   limb_roots=limb_roots, body_detector=body_detector, rec=rec, quality_client=quality_client,
@@ -274,6 +283,8 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     from .remote.client import RemoteError
 
     try:
+        if fast:
+            remote.fast = True
         return _run_stage3(run, mesh_source=mesh_source, joints_source=joints_source,
                            fallback=fallback and mesh_source == "carve", **kwargs)
     except (RemoteError, bl.BlenderError, ModuleNotFoundError, ValueError, OSError) as exc:
@@ -289,6 +300,19 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
         rec.data["fallback"] = {"from": "sam3d-objects", "to": "carve", "reason": reason}
         rec.data["checks"] = []
         return _run_stage3(run, mesh_source="carve", joints_source="silhouette", fallback=False, **kwargs)
+    finally:
+        if fast:
+            try:
+                import sys
+                calls = remote.log.calls[remote_start:]
+                rec.data["calls"] = calls
+                rec.data["cost_usd"] = round(sum(c.get("cost_usd") or 0.0 for c in calls), 6)
+                rec.data["models"] = list(dict.fromkeys(c["model"] for c in calls))
+                informational(rec.data["checks"])
+                exc = sys.exception()
+                rec.finish({"ok": False, "status": "error", "error": error_text(exc, run)} if exc else None)
+            finally:
+                remote.fast = previous_remote_fast
 
 
 def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
@@ -452,7 +476,10 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
                             "method": method}
         from .body_acceptance import assess
 
-        if all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
+        if rec.data.get("fast_lane"):
+            informational(rec.data["checks"])
+            rec.note("Fast lane: visual acceptance judges skipped; structural checks informational")
+        elif all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
             assess(run, verts, faces, rec, client=quality_client)
         else:
             rec.note("visual acceptance skipped because the mesh failed structural checks")

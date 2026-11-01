@@ -201,6 +201,8 @@ class RemoteClient:
         """SAM 3D Objects: `mesh.glb` (textured source mesh) and `run.json`. `gpu` defaults to the client's
         `objects_gpu`."""
         gpu = gpu or self.objects_gpu
+        if self.fast:
+            self.purpose = "3D shape"
         summary = objects_summary(image, mask, seed)
         return self._call("objects", summary, {"jobs": [{"name": "job", "image": str(Path(image).resolve()),
                                                          "mask": str(Path(mask).resolve())}], "seed": seed},
@@ -216,6 +218,8 @@ class RemoteClient:
         key. `gpu="none"` runs on CPU (default: the client's `body_gpu`); a CPU run keys separately, the GPU type
         does not enter the key."""
         gpu = gpu or self.body_gpu
+        if self.fast:
+            self.purpose = "body joints"
         summary = body_summary(image, bbox, box_source, detector)
         if gpu.lower() == "none":
             summary["device"] = "cpu"           # CPU numerics differ from the GPU's: never replay one for the other
@@ -283,7 +287,7 @@ class RemoteClient:
             except subprocess.TimeoutExpired as exc:
                 if self.fast:
                     self.log.add(summary["runner"], key, False,
-                                 None if price is None else round((time.monotonic() - t0) * price, 4))
+                                 None if price is None else round(max(function_timeout, time.monotonic() - t0) * price, 4))
                 raise RemoteError(f"{runner} timed out after {self.timeout:.0f} s") from exc
             except OSError as exc:              # modal found but not runnable (permissions, broken install)
                 raise RemoteError(f"{runner}: could not start modal ({type(exc).__name__}: {exc.strerror or exc})"

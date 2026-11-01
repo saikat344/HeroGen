@@ -271,21 +271,30 @@ def _stagep(
     st.details.update({"user_text": character, "design_prompt": text})
     designs: dict[int, Image.Image] = {}
     chosen = None
-    for k, (d_sample, f_sample) in enumerate(ATTEMPT_PLAN):
+    for k, (d_sample, f_sample) in enumerate(ATTEMPT_PLAN[:1] if st.fast else ATTEMPT_PLAN):
         t0 = time.monotonic()
         rec: dict[str, Any] = {"attempt": k, "design_sample": d_sample, "full_body_sample": f_sample}
         st.details["attempts"].append(rec)
         step = "design"
         try:
             if d_sample not in designs:
+                if st.fast:
+                    client.purpose = "sketch design"
                 designs[d_sample] = client.generate_image(
                     text, size=version.step("design")["params"]["size"], attempt=d_sample)
             design = designs[d_sample]
             st.save_image(f"{ATTEMPTS_DIR}/{k}-design.png", design)
             step = "full-body edit"
+            if st.fast:
+                client.purpose = "full-body sketch"
             full = client.edit_image(full_text, [design], size=version.step("full_body")["params"]["size"],
                                      attempt=f_sample)
             st.save_image(f"{ATTEMPTS_DIR}/{k}-full-body.png", full)
+            if st.fast:
+                rec.update(checks=[], figure={"skipped": "fast lane"}, identity={"skipped": "fast lane"},
+                           **{"pass": True}, seconds=round(time.monotonic() - t0, 2))
+                chosen = (k, design, full)
+                break
             step = "figure checks (SAM 3.1)"
             checks, fig, mask = figure_checks(client, full)
             rec["figure"] = fig
@@ -332,7 +341,7 @@ def _stagep(
     st.save_image(SKETCH, full)
     if k:
         st.notes.append(f"Passed on attempt {k} (counting from 0) after {k} failed attempt{'s' if k > 1 else ''}.")
-    changes = st.details["attempts"][k]["identity"]["prop_changes"]
+    changes = st.details["attempts"][k]["identity"].get("prop_changes", {})
     listed = [f"{kind.replace('_', ' ')}: {', '.join(v)}" for kind, v in changes.items() if v]
     if listed:
         st.notes.append("Identity check reported prop changes (not a gate): " + "; ".join(listed) + ".")

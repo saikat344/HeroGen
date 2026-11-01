@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from herogen.pipeline import inputs
+from herogen.pipeline.fast import enabled
 from herogen import prompts
 from herogen.pipeline.client import ApiError, ClientError, ModelClient
 from herogen.pipeline.facesource import stage2f_face_source
@@ -112,6 +113,7 @@ def run_pipeline(
     note: str = "",
     stop_after: int | None = None,
     turnaround_concurrency: int = 1,
+    fast: bool = False,
 ) -> int:
     """Run the stages in order. With ``prompt``, stage p draws the sketch and stage 0 copies its full-body image;
     stage 0 without a sketch path also takes the run's stage p image when stage p passed earlier."""
@@ -129,6 +131,9 @@ def run_pipeline(
         stages = [PROMPT, *stages]
     if PROMPT in stages and prompt is None:
         raise ValueError("stage p needs a prompt (--prompt)")
+    fast = enabled(fast)
+    if fast:
+        stages = [s for s in stages if s not in (HELDOUT, FACE_SOURCE)]
     version = prompts.selected("prompt_sketch", prompt_version) if PROMPT in stages else None
     root = runs_root(runs)
     if parent is not None:
@@ -141,9 +146,9 @@ def run_pipeline(
         run = RunFolder(root, run_id)
     if stop_after is not None:
         stages = [s for s in stages if _order(s) <= stop_after]
-    client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode)
+    client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode, **({"fast": True} if fast else {}))
     pipeline = [s for s in stages if s != 5]
-    if 2 in pipeline and stop_after is None:  # the held-out views and the face source follow a passing stage 2
+    if 2 in pipeline and stop_after is None and not fast:  # the held-out views and the face source follow a passing stage 2
         pipeline += [s for s in (HELDOUT, FACE_SOURCE) if s not in pipeline]
     pipeline.sort(key=_order)
     status = 0
@@ -155,9 +160,9 @@ def run_pipeline(
             elif n == 0:
                 if sketch is None:
                     sketch, label, origin = _prompt_sketch(run, label)
-                    rec = stage0_input(run, sketch, label=label, origin=origin)
+                    rec = stage0_input(run, sketch, label=label, origin=origin, **({"fast": True} if fast else {}))
                 else:
-                    rec = stage0_input(run, sketch, label=label)
+                    rec = stage0_input(run, sketch, label=label, **({"fast": True} if fast else {}))
             elif n == 1:
                 rec = stage1_cover(run, client)
             elif n == 2:
@@ -230,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--from-stage", type=int, choices=(1, 2))
     r.add_argument("--note", default="", help="character appearance changes, at most 300 characters")
     r.add_argument("--stop-after", type=int, choices=(1, 2), help="stop before later stages and side work")
+    r.add_argument("--fast", action="store_true", help="speed/demo: one sample, no judges or quality retries")
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
@@ -270,7 +276,17 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--live", action="store_true")
     s.add_argument("--runs", default=None)
     s.add_argument("--cache", default=None)
+    report_parser = sub.add_parser("report", help="print every call and write fast-report.json")
+    report_parser.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
+    if a.cmd == "report":
+        from herogen.pipeline.report import report
+        try:
+            report(a.run_dir)
+        except (ValueError, OSError) as exc:
+            print(f"report: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if a.cmd == "run":
         try:
             stages = parse_stages(a.stages)
@@ -284,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
                 a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
                 runs=a.runs, cache=a.cache, label=a.label, views=views, prompt=a.prompt,
                 prompt_version=a.prompt_version, parent=a.parent, from_stage=a.from_stage, note=a.note,
-                stop_after=a.stop_after, turnaround_concurrency=a.turnaround_concurrency,
+                stop_after=a.stop_after, turnaround_concurrency=a.turnaround_concurrency, fast=a.fast,
             )
         except (ValueError, prompts.RegistryError) as e:
             ap.error(str(e))

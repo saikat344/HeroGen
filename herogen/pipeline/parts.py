@@ -50,6 +50,8 @@ def front_part_masks(client: ModelClient, image: Image.Image, figure: np.ndarray
         try:
             insts = client.segment(image, text)
         except ApiError as e:
+            if getattr(client, "fast", False):
+                raise
             rec.update({"api_error": True, "error": f"{type(e).__name__}: {e}"[:300]})
             info[part] = rec
             continue

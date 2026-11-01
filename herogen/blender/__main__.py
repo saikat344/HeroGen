@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import DEFAULT_PROFILE, HEIGHT_STUDS, PROFILES
+from herogen.pipeline.fast import enabled
 
 
 def _upstream_problem(run: Path, stage: int) -> str | None:
@@ -40,9 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("score", help="score bodies on the turnaround and held-out views (same options as "
                                  "python3 -m herogen.blender.score)")
     r = sub.add_parser("run", help="run stages 3, 3f and/or 4 on a run folder")
+    r.add_argument("--fast", action="store_true", help="fast product lane with necessary checks and frozen-atlas texture refinement")
     r.add_argument("--run", required=True, type=Path)
-    r.add_argument("--stages", default="3,3f,4",
-                   help="3, 3f (texture refine), 4; 3,4 also includes 3f under best and both Roblox profiles")
+    r.add_argument("--stages", default=None,
+                   help="3, 3f (texture refine), 4; fast also supports 6,5 and defaults to 3,3f,4,6,5; "
+                        "3,4 also includes 3f under best and both Roblox profiles")
     r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
     r.add_argument("--refine-profile", choices=("best", "fast"), default=None,
                    help="texture repaint schedule (default best; fast uses frozen-atlas waves)")
@@ -59,7 +62,6 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
     r.add_argument("--cut-workers", type=int, choices=range(1, 13), default=3,
                    help="concurrent stage 4 cut candidates (default: 3; deterministic for any count)")
-    r.add_argument("--fast", action="store_true", help="stage 4: report unmeasurable seams and keep their cuts unmoved")
     r.add_argument("--force", action="store_true", help="run even if the previous stage did not pass")
     r.add_argument("--profile", choices=tuple(PROFILES), default=DEFAULT_PROFILE,
                    help="stage 4 target: best (default; no triangle budget, full detail, no low LOD), "
@@ -102,15 +104,25 @@ def main(argv: list[str] | None = None) -> int:
         synth.write_run(a.run, fig, size=a.size, ppu=a.size * 80.0 / 512)
         print(f"synthetic masks written to {a.run}")
         return 0
-    stages = {x.strip() for x in a.stages.split(",") if x.strip()}
+    fast = enabled(a.fast)
+    spec = a.stages if a.stages is not None else ("3,3f,4,6,5" if fast else "3,3f,4")
+    stages = {x.strip() for x in spec.split(",") if x.strip()}
     if not stages:
         ap.error("--stages names no stage (use 3, 4 or 3,4)")
-    if not stages <= {"3", "3f", "4"}:
+    if not stages <= ({"3", "3f", "4", "6", "5"} if fast else {"3", "3f", "4"}):
         ap.error("this package runs stages 3, 3f and 4 only")
     from .refine import REFINE_PROFILES
 
     if {"3", "4"} <= stages and a.profile in REFINE_PROFILES:
         stages.add("3f")
+    if fast:
+        from .fast import run as run_fast
+        try:
+            return run_fast(a, stages)
+        except (OSError, ValueError) as exc:
+            from .stage3 import error_text
+            print(f"fast run stopped: {error_text(exc, a.run)}", file=sys.stderr)
+            return 1
     first = 3 if "3" in stages else 4
     name = "3" if "3" in stages else "3f" if "3f" in stages else "4"
     problem = _upstream_problem(a.run, first - 1)
