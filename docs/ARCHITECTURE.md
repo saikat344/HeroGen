@@ -549,7 +549,7 @@ Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast use
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
 Fast renders five cameras from one frozen atlas: `head+0`, `body+0`, `body+90`, `body-90`, `body+180`.
-Each pass launches three attempts concurrently (two for hair), using the existing registration, outline,
+Each pass launches at most two attempts concurrently, including hair, using the existing registration, outline,
 face containment and hair exclusion logic with unchanged thresholds. The lowest-index passing attempt
 wins after all lower indices have failed; scores never choose between passing attempts. Higher attempts
 are cancelled before further calls where possible; active requests drain and retain their caches.

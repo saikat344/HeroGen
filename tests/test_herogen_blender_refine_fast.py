@@ -18,8 +18,8 @@ from tests.test_herogen_blender_refine import FakeClient, HAVE_REFINE
 
 class ConcurrentBudgetTests(unittest.TestCase):
     def test_estimate_reserves_all_parallel_requests(self):
-        self.assertEqual(stage.cost_estimate(refine_profile='fast'), .35)
-        self.assertEqual(stage.cost_estimate(True, refine_profile='fast'), .35)
+        self.assertEqual(stage.cost_estimate(refine_profile='fast'), .25)
+        self.assertEqual(stage.cost_estimate(True, refine_profile='fast'), .25)
 
     def test_atomic_limit_and_thread_local_settlement(self):
         client = ModelClient('unused')
@@ -126,23 +126,26 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(rec['thresholds']['outline'], fixture.refine.GATE)
         self.assertGreaterEqual(len(rec['calls']), 31)  # concurrent attempts can finish before cancellation
 
-    def test_third_head_attempt_is_preserved(self):
+    def test_every_fast_pass_stops_after_two_failed_attempts(self):
         original = FakeClient.edit_image
         def edit(child, prompt, images, **kw):
-            if 'head+0' in child.cache_dir.parts and kw['attempt'] < 2:
+            if kw['attempt'] < 2:
                 child._call(IMAGE_MODEL, 'edit')
                 return Image.new('RGB', images[0].size, (115, 115, 115))
             return original(child, prompt, images, **kw)
         with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
              mock.patch.object(FakeClient, 'edit_image', edit):
             rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
-        self.assertTrue(rec['views']['head+0']['accepted'])
-        self.assertEqual(rec['views']['head+0']['tries'], 3)
+        self.assertEqual(len(rec['views']), 6)
+        for view in rec['views'].values():
+            self.assertFalse(view['accepted'])
+            self.assertEqual(view['tries'], 2)
+            self.assertEqual([trial['try'] for trial in view['attempts']], [1, 2])
 
 
     def test_parallel_attempts_choose_lowest_passing_index(self):
         original = FakeClient.edit_image
-        barrier = threading.Barrier(3)
+        barrier = threading.Barrier(2)
         seen = []
         def edit(child, prompt, images, **kw):
             if 'head+0' in child.cache_dir.parts:
@@ -155,7 +158,7 @@ class FastStageTests(unittest.TestCase):
         with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
              mock.patch.object(FakeClient, 'edit_image', edit):
             rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
-        self.assertCountEqual(seen, [0, 1, 2])
+        self.assertCountEqual(seen, [0, 1])
         self.assertEqual(rec['views']['head+0']['selected_attempt'], 1)
         self.assertEqual(rec['views']['head+0']['attempts'][0]['reason'], 'outline moved')
 
