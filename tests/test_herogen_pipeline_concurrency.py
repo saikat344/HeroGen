@@ -42,6 +42,11 @@ class ConcurrentClient(ModelClient):
 
 
 class TurnaroundConcurrencyTest(unittest.TestCase):
+    def requests(self, client, cover, attempts, concurrency):
+        step = stages.prompt_registry.selected("turnaround").step("sheet")
+        return stages._TurnaroundRequests(client, cover, attempts, concurrency,
+                                          prompt=step["prompt"], size=step["params"]["size"])
+
     def test_bounded_overlap_and_ordered_logs(self):
         with tempfile.TemporaryDirectory() as root:
             client = ConcurrentClient(root)
@@ -49,7 +54,7 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
             mask = np.ones((32, 32), bool)
             with patch.object(stages, "sam_figure_mask", return_value=(mask, "sam-3.1", 1)), \
                     patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
-                    stages._TurnaroundRequests(client, cover, 4, 2) as requests:
+                    self.requests(client, cover, 4, 2) as requests:
                 for i in range(4):
                     sheet, _ = requests.sheet(i)
                     self.assertEqual(sheet.getpixel((0, 0))[0], i)
@@ -74,7 +79,7 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
 
             with patch.object(stages, "sam_figure_mask", side_effect=figure), \
                     patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
-                    stages._TurnaroundRequests(client, Image.new("RGB", (32, 32)), 4, 2) as requests:
+                    self.requests(client, Image.new("RGB", (32, 32)), 4, 2) as requests:
                 for i in range(4):
                     requests.sheet(i)
                     requests.top()
@@ -108,7 +113,7 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
                     patch("herogen.pipeline.client.decode_sam_output", return_value=[
                         SamInstance(mask, (0, 0, 32, 32), 1.0)]), \
                     patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
-                    stages._TurnaroundRequests(client, Image.new("RGB", (32, 32)), 4, 4) as requests:
+                    self.requests(client, Image.new("RGB", (32, 32)), 4, 4) as requests:
                 for i in range(4):
                     requests.sheet(i)
                 requests.top()
@@ -126,10 +131,102 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
                 with patch.object(stages, "sam_figure_mask", return_value=(mask, "sam-3.1", 1)), \
                         patch.object(stages.imaging, "complete_attached_foreground", return_value=mask):
                     with self.assertRaisesRegex(error, "candidate failed"):
-                        with stages._TurnaroundRequests(client, Image.new("RGB", (32, 32)), 4, 2) as requests:
+                        with self.requests(client, Image.new("RGB", (32, 32)), 4, 2) as requests:
                             requests.sheet(0)  # Even an early accepted sheet must drain unused samples.
                 self.assertEqual(client.state["active"], 0)
                 self.assertEqual(len(client.log.calls), 5)
+
+    def test_stage2_preserves_original_errors_from_every_concurrent_call(self):
+        errors = (
+            ApiError("temporary", http_status=503, transient=True),
+            ApiError("refused", http_status=400, error_code="content_policy_violation"),
+            ApiError("HTTP 503 content_policy_violation", http_status=400),
+            ReplayMiss("missing result"),
+        )
+        for source in ("sheet", "top", "sheet-mask", "top-mask", "unused-sheet"):
+            for error in errors:
+                with self.subTest(source=source, error=error), tempfile.TemporaryDirectory() as root:
+                    fields = vars(error).copy()
+                    run = RunFolder(Path(root), "r")
+                    Image.new("RGB", (32, 32)).save(run.file("01-cover.png"))
+                    run.write_json("redo.json", {"from_stage": 2, "note": "green coat"})
+                    prompt, version = stages.turnaround_prompt(run)
+                    test = self
+
+                    class FailingClient(ConcurrentClient):
+                        def edit_image(self, sent_prompt, images, *, size="1024x1024", attempt=0):
+                            image = super().edit_image(sent_prompt, images, size=size, attempt=attempt)
+                            top = sent_prompt == stages.TOP_PROMPT
+                            if not top:
+                                test.assertEqual(sent_prompt, prompt)
+                                test.assertEqual(size, version.step("sheet")["params"]["size"])
+                            if (source == "sheet" and not top and attempt == 0 or
+                                    source == "top" and top or
+                                    source == "unused-sheet" and not top and attempt == 1):
+                                raise error
+                            return image
+
+                    client = FailingClient(root)
+                    mask = np.ones((32, 32), bool)
+
+                    def figure(branch, image):
+                        top = image.getpixel((0, 0))[1] == 128
+                        if source == "top-mask" and top or source == "sheet-mask" and not top:
+                            raise error
+                        return mask, "sam-3.1", 1
+
+                    with patch.object(stages, "sam_figure_mask", side_effect=figure), \
+                            patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
+                            patch.object(stages, "split_sheet", return_value={
+                                "views": {}, "runs": [], "sam_coverage": {}, "split_source": "sam"}):
+                        with self.assertRaises(type(error)) as raised:
+                            stages.stage2_turnaround(run, client, attempts=2, concurrency=2)
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(vars(raised.exception), fields)
+                    self.assertEqual(client.state["peak"], 2)
+                    self.assertEqual(client.state["active"], 0)
+                    self.assertEqual(len(client.state["finished"]), 3)
+                    self.assertEqual(len(client.log.calls), 3)
+                    self.assertEqual(run.read_stage(2)["status"], "error")
+                    self.assertFalse(run.exists("02-turnaround.png"))
+
+    def test_stage2_raises_first_failure_in_serial_order_after_draining_all_calls(self):
+        for first_source in ("sheet", "top"):
+            with self.subTest(first_source=first_source), tempfile.TemporaryDirectory() as root:
+                first = ApiError("first failed", http_status=503, transient=True)
+                later = ReplayMiss("later failed")
+                last_sheet = threading.Event()
+
+                class FailingClient(ConcurrentClient):
+                    def edit_image(self, prompt, images, *, size="1024x1024", attempt=0):
+                        image = super().edit_image(prompt, images, size=size, attempt=attempt)
+                        top = prompt == stages.TOP_PROMPT
+                        if not top and attempt > 0:
+                            if attempt == 3:
+                                last_sheet.set()
+                            raise later
+                        if top == (first_source == "top"):
+                            if not last_sheet.wait(timeout=5):
+                                raise AssertionError("later calls did not finish before the first failure")
+                            raise first
+                        if top:
+                            raise later
+                        return image
+
+                run = RunFolder(Path(root), "r")
+                Image.new("RGB", (32, 32)).save(run.file("01-cover.png"))
+                client = FailingClient(root)
+                mask = np.ones((32, 32), bool)
+                with patch.object(stages, "sam_figure_mask", return_value=(mask, "sam-3.1", 1)), \
+                        patch.object(stages, "split_sheet", return_value={
+                            "views": {}, "runs": [], "sam_coverage": {}, "split_source": "sam"}):
+                    with self.assertRaises(ApiError) as raised:
+                        stages.stage2_turnaround(run, client, attempts=4, concurrency=4)
+                self.assertIs(raised.exception, first)
+                self.assertEqual(client.state["active"], 0)
+                self.assertEqual(len(client.state["finished"]), 5)
+                self.assertEqual(len(client.log.calls), 5)
+                self.assertEqual(run.read_stage(2)["status"], "error")
 
     def test_cli_defaults_to_four_and_can_request_serial_scheduling(self):
         from herogen.pipeline import __main__ as cli

@@ -11,7 +11,7 @@ from herogen.pipeline import client as client_mod
 from herogen.pipeline.client import ApiError, ModelClient, ReplayMiss
 from herogen.pipeline.redo import fork_run
 from herogen.pipeline.runfolder import RunFolder
-from herogen.pipeline.stages import stage0_input, stage1_cover
+from herogen.pipeline.stages import TOP_PROMPT, stage0_input, stage1_cover
 from herogen.service import pipestage
 from herogen.service.runner import PLAN, CliRunner
 from herogen.service.store import new_id
@@ -26,6 +26,7 @@ class RedoModelErrorsTest(JobCase):
         super().setUp()
         self.api = FakeAPI()
         self.error = None
+        self.fail_top = False
         self.note = "private crimson cloak HTTP 503 content_policy_violation"
         self.output = []
         self.addCleanup(mock.patch.stopall)
@@ -56,7 +57,8 @@ class RedoModelErrorsTest(JobCase):
         self.store.job_finish(self.parent["id"], claim["attempt"], "succeeded")
 
     def post(self, client, endpoint, body):
-        if endpoint == "images/edits" and self.note in body["prompt"] and self.error is not None:
+        if (endpoint == "images/edits" and self.error is not None and
+                (self.note in body["prompt"] or self.fail_top and body["prompt"] == TOP_PROMPT)):
             raise self.error
         return self.api.post(client, endpoint, body)
 
@@ -92,6 +94,7 @@ class RedoModelErrorsTest(JobCase):
 
     def test_redo_policy_refusals_are_private_rejections_without_refunds(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
+        self.fail_top = True  # No concurrent call returns a paid answer in this case.
         for stage in (1, 2):
             with self.subTest(stage=stage):
                 child, saved = self.run_failure(stage, "rejected", "rejected")
@@ -103,6 +106,16 @@ class RedoModelErrorsTest(JobCase):
                     self.assertEqual(saved["cost_usd"], 0, "a refusal before any paid answer still keeps quota")
                 record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(stage)
                 self.assertEqual(record["status"], "error")
+
+    def test_redo_policy_refusal_counts_completed_concurrent_top_calls(self):
+        self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
+        child, saved = self.run_failure(2, "rejected", "rejected")
+        self.assertEqual(saved["counts_quota"], 1)
+        self.assertIsNone(saved["refunded_at"])
+        self.assertAlmostEqual(saved["cost_usd"], .0125)  # Independent top edit and its SAM mask.
+        record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(2)
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["cost_usd"], saved["cost_usd"])
 
     def test_redo_transient_errors_retry_from_structured_fields(self):
         self.error = ApiError(self.note, http_status=503, transient=True)
