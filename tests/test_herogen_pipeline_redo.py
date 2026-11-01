@@ -243,6 +243,13 @@ class RedoCase(unittest.TestCase):
 
 
 class NoteTextTest(unittest.TestCase):
+    def test_optional_empty_notes_use_the_shared_cleaner(self):
+        for note in (" \t\n ", "«\u200b\u202e»"):
+            self.assertEqual(clean_note(note, allow_empty=True), "")
+        for note in (None, "a" * 301, "123!!!"):
+            with self.subTest(note=note), self.assertRaises(ValueError):
+                clean_note(note, allow_empty=True)
+
     def test_control_characters_delimiters_and_whitespace(self):
         self.assertEqual(clean_note("  ｇｒｅｅｎ\ncoat »\x00« \u202egear\u202c "), "green coat gear")
         self.assertEqual(clean_note(""), "")
