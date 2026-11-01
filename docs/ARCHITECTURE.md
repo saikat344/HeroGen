@@ -76,7 +76,7 @@ CSRF middleware:
 
 The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
 fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
-Version columns are migration 6 (schema version 7), following the existing admission migrations unchanged.
+Version columns are migration 7 (schema version 8), following the existing admission migrations unchanged.
 In public mode, and for every guest or previously budgeted job, redo and continuation use the same atomic
 budget admission as a new hero. A stopped version releases capacity only after its compute is confirmed
 finished, retaining its monetary allocation. Continuation reserves another full job bound for its fresh retry
