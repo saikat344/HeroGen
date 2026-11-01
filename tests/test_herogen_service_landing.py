@@ -163,10 +163,14 @@ class TestLandingModels(ServiceBrowserCase):
         t.goto(self.url + '/signin')
         t.wait("/incomplete/.test(document.querySelector('#verifyWho').textContent)")
         t.eval('document.querySelector(\'nav a[href="/#gallery"]\').click()')
+        # This click leaves /signin by a real navigation to /#gallery, so a poll can run in the
+        # freshly committed document before index.html parsing reaches #verify, #landingStatus or
+        # #modelPicker. The optional chaining treats not-yet-parsed as not-ready instead of throwing;
+        # when the wait passes, every condition below still holds at the same instant.
         t.wait(
-            "location.pathname === '/' && document.querySelector('#verify').hidden "
-            "&& document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' "
-            "&& document.querySelector('#modelPicker').children.length === 2"
+            "location.pathname === '/' && document.querySelector('#verify')?.hidden "
+            "&& document.querySelector('#landingStatus')?.textContent === 'Drag to rotate · Scroll to zoom' "
+            "&& document.querySelector('#modelPicker')?.children.length === 2"
         )
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
