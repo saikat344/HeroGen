@@ -369,14 +369,23 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
     def test_caller_owned_budget_callbacks_keep_serial_scheduling(self):
         run = RunFolder(self.root, "budget")
         Image.new("RGB", (64, 96), "white").save(run.file("01-cover.png"))
+
+        class Callback:
+            def __bool__(self):
+                return False
+
+            def __call__(self, *args):
+                pass
+
         for callback_name in ("before_api_attempt", "after_api_attempt"):
-            client = RecordingClient(self.root / callback_name, errors={3: ApiError("unused")})
-            setattr(client, callback_name, lambda *args: None)
-            with patch.object(stages, "_TurnaroundRequests", side_effect=AssertionError("speculation")):
-                record = stages.stage2_turnaround(run, client, concurrency=4)
-            self.assertTrue(record["ok"])
-            self.assertEqual([a for a, _, _ in client.sent], [0, None])
-            self.assertFalse(any(c.get("speculative") for c in record["calls"]))
+            for callback in (lambda *args: None, Callback()):
+                client = RecordingClient(self.root / callback_name, errors={3: ApiError("unused")})
+                setattr(client, callback_name, callback)
+                with patch.object(stages, "_TurnaroundRequests", side_effect=AssertionError("speculation")):
+                    record = stages.stage2_turnaround(run, client, concurrency=4)
+                self.assertTrue(record["ok"])
+                self.assertEqual([a for a, _, _ in client.sent], [0, None])
+                self.assertFalse(any(c.get("speculative") for c in record["calls"]))
 
     def test_invalid_limits_are_rejected_before_work(self):
         run = RunFolder(self.root, "invalid")
