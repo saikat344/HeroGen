@@ -20,6 +20,8 @@ cells (each triangle in every cell its bounding box overlaps), so each query onl
   rounding) may go either way in both, and its distance to the surface is then about zero.
 - `ray_hits(origins, dirs)`: whether each ray hits a triangle at t > `t_min`; the cells along each ray are walked
   (3D DDA) and only their triangles are tested, with `carve.ray_hits`'s Moller-Trumbore arithmetic.
+- `closest(points)`: nearest triangle ids, barycentric coordinates and distances, using the same expanding
+  search as `distance`. Shared edges and equal-distance triangles choose the lowest face index.
 
 Numpy only, so stage 4 needs nothing beyond numpy and Blender.
 """
@@ -175,6 +177,86 @@ class MeshIndex:
         return out
 
     # ---- inside -------------------------------------------------------------------------------------------
+
+    def _pair_closest(self, p: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Distance and barycentric coordinates of the closest point for each point/triangle pair."""
+        tri = self.tri[t]
+        a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+        n = self.normal[t]
+        nn = (n * n).sum(axis=1)
+        # Projection barycentrics via oriented areas avoid cancellation in the Gram determinant.
+        v = np.einsum("ij,ij->i", np.cross(p - a, c - a), n) / nn
+        w = np.einsum("ij,ij->i", np.cross(b - a, p - a), n) / nn
+        bary = np.column_stack((1 - v - w, v, w))
+        q = np.einsum("ni,nij->nj", bary, tri)
+        best = np.where((bary >= 0).all(axis=1), np.linalg.norm(p - q, axis=1), np.inf)
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            edge = tri[:, j] - tri[:, i]
+            u = np.clip(np.einsum("ij,ij->i", p - tri[:, i], edge) / (edge * edge).sum(axis=1), 0, 1)
+            d = np.linalg.norm(p - (tri[:, i] + u[:, None] * edge), axis=1)
+            better = d < best
+            best[better] = d[better]
+            bary[better] = 0
+            bary[better, i] = 1 - u[better]
+            bary[better, j] = u[better]
+        return best, bary
+
+    def closest(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Exact nearest triangle ids, barycentric coordinates and unsigned distances.
+
+        Ties choose the lowest face index. Empty/degenerate surfaces return -1, NaN barycentrics and infinity.
+        The expanding grid search has the same completeness bound as distance(); large boxes use bounded
+        brute-force batches. Callers may interpolate any corresponding triangle attributes with the barycentrics.
+        """
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if not np.isfinite(points).all():
+            raise ValueError("closest points must be finite")
+        ids = np.full(len(points), -1, dtype=np.int64)
+        bary = np.full((len(points), 3), np.nan)
+        distances = np.full(len(points), np.inf)
+        if not self.n or not self.ok.any() or not len(points):
+            return ids, bary, distances
+        valid = np.flatnonzero(self.ok)
+
+        def reduce_pairs(p, qq, tt):
+            d, _ = self._pair_closest(p[qq], tt)
+            best = np.full(len(p), np.inf)
+            np.minimum.at(best, qq, d)
+            chosen = np.full(len(p), self.n, dtype=np.int64)
+            tied = d == best[qq]
+            np.minimum.at(chosen, qq[tied], tt[tied])
+            return best, chosen
+
+        todo, r = np.arange(len(points)), self.h
+        while len(todo):
+            p = points[todo]
+            i0, i1 = self._index(p - r, (0, 1, 2)), self._index(p + r, (0, 1, 2))
+            size = i1 - i0 + 1
+            count = np.prod(size, axis=1)
+            brute = count > BRUTE_BOX_CELLS
+            for k in np.flatnonzero(brute):
+                for start in range(0, len(valid), 65536):
+                    tt = valid[start:start + 65536]
+                    d, chosen = reduce_pairs(p[k:k + 1], np.zeros(len(tt), dtype=int), tt)
+                    at = todo[k]
+                    if d[0] < distances[at] or (d[0] == distances[at] and chosen[0] < ids[at]):
+                        distances[at], ids[at] = d[0], chosen[0]
+            keep = ~brute
+            q = np.repeat(np.flatnonzero(keep), count[keep])
+            k = np.arange(len(q)) - np.repeat(np.cumsum(count[keep]) - count[keep], count[keep])
+            coords = np.empty((len(q), 3), dtype=np.int64)
+            for ax in (2, 1, 0):
+                coords[:, ax] = i0[q, ax] + k % size[q, ax]
+                k //= size[q, ax]
+            qq, tt = self._gather(self.cells3, q, self._flat(coords, (0, 1, 2)))
+            good = self.ok[tt]
+            best, chosen = reduce_pairs(p, qq[good], tt[good])
+            done = keep & ((best <= r) | (count >= np.prod(self.dims)))
+            distances[todo[done]], ids[todo[done]] = best[done], chosen[done]
+            todo = todo[keep & ~done]
+            r *= 2
+        _, bary[:] = self._pair_closest(points, ids)
+        return ids, bary, distances
 
     def winding(self, points: np.ndarray) -> np.ndarray:
         """Signed crossings of the +X ray from each point (the winding number of a closed mesh)."""

@@ -29,6 +29,48 @@ def box(lo, hi):
     return v, f
 
 
+class TestClosest(unittest.TestCase):
+    def test_projection_edges_vertices_and_ties_have_expected_barycentrics(self):
+        v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float)
+        idx = MeshIndex(v, np.array([[0, 1, 2], [0, 1, 2], [0, 0, 0]]))
+        p = np.array([[.2, .3, 2], [.5, -.2, 0], [2, 2, 0], [-1, -1, 0]])
+        ids, bary, distances = idx.closest(p)
+        np.testing.assert_array_equal(ids, 0)
+        np.testing.assert_allclose(bary, [[.5, .2, .3], [.5, .5, 0], [0, .5, .5], [1, 0, 0]], atol=1e-15)
+        np.testing.assert_allclose(distances, [2, .2, np.sqrt(4.5), np.sqrt(2)])
+
+    def test_grid_and_brute_search_match_independent_triangle_distances(self):
+        from unittest import mock
+        rng = np.random.default_rng(718)
+        verts = rng.uniform(-1, 1, (90, 3))
+        faces = np.arange(90).reshape(-1, 3)
+        points = np.r_[rng.uniform(-2, 2, (200, 3)), [[100, -200, 300]]]
+        for scale in (.1, 1, 10):
+            for limit in (4096, 0):
+                with self.subTest(scale=scale, limit=limit), \
+                        mock.patch("herogen.blender.meshindex.BRUTE_BOX_CELLS", limit):
+                    idx = MeshIndex(verts * scale, faces, cell=.1 * scale)
+                    ids, bary, distances = idx.closest(points * scale)
+                    nearest = np.einsum("ni,nij->nj", bary, idx.tri[ids])
+                    np.testing.assert_allclose(distances, point_mesh_distance(points * scale, verts * scale, faces),
+                                               rtol=1e-12, atol=1e-12)
+                    np.testing.assert_allclose(np.linalg.norm(points * scale - nearest, axis=1), distances,
+                                               rtol=1e-12, atol=1e-12)
+                    np.testing.assert_allclose(bary.sum(axis=1), 1, atol=1e-15)
+                    self.assertGreaterEqual(bary.min(), 0)
+
+    def test_empty_degenerate_and_nonfinite_queries(self):
+        for faces in (np.empty((0, 3), int), np.array([[0, 0, 0]])):
+            idx = MeshIndex(np.zeros((1, 3)), faces)
+            ids, bary, distances = idx.closest([[1, 2, 3]])
+            np.testing.assert_array_equal(ids, [-1])
+            self.assertTrue(np.isnan(bary).all())
+            self.assertTrue(np.isinf(distances).all())
+            self.assertEqual(idx.closest(np.empty((0, 3)))[1].shape, (0, 3))
+            with self.assertRaisesRegex(ValueError, "finite"):
+                idx.closest([[np.nan, 0, 0]])
+
+
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

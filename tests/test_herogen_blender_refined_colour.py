@@ -36,7 +36,10 @@ class RefinedSourceTests(unittest.TestCase):
         glb.write_glb(self.source_path, [("raw", self.verts, self.faces, self.uv)], texture_png=png("green"))
         raw = sam3d_mesh.load_source(self.source_path)
         self.linear = sam3d_mesh.rotation(37, -13, 7).T * 5.5
-        self.target = raw.verts @ self.linear + [.13, -.27, .4]
+        target = sam3d_mesh.perspective_to_ortho(raw.verts @ self.linear, 2, .5, 5.5)
+        target[:, 0] += .15 * np.sin(target[:, 2])
+        target[:, 1] += .12 * target[:, 2] ** 2
+        self.target = target + [.13, -.27, .4]
         self.target_faces = raw.faces
         self.save_npz()
         self.write_refined()
@@ -76,8 +79,12 @@ class RefinedSourceTests(unittest.TestCase):
         self.assertEqual(info["stage3f_source_sha256"], self.sha)
         self.assertEqual(info["current_source_sha256"], self.sha)
         self.assertEqual(info["refined_glb_sha256"], hashlib.sha256((self.run / "03-refined.glb").read_bytes()).hexdigest())
-        self.assertLess(info["frame_fit"]["max"], info["threshold_studs"])
-        self.assertLess(info["surface_distance"]["max"], info["threshold_studs"])
+        check = info["source_correspondence"]
+        self.assertNotIn("frame_fit", info)
+        self.assertEqual(check["method"], "piecewise-linear source correspondence")
+        self.assertLess(check["geometry_distance_raw"]["max"], check["threshold_raw"])
+        self.assertLess(check["placement_distance_studs"]["max"], 1e-10)
+        self.assertLess(check["placed_mesh_distance_studs"]["max"], 1e-10)
         colour, _ = primary(self.target[:1])
         np.testing.assert_allclose(colour, [[255, 0, 0]])
         json.dumps(info, allow_nan=False)
@@ -106,17 +113,71 @@ class RefinedSourceTests(unittest.TestCase):
                 self.assertRejected(reason)
                 path.write_bytes(content)
 
-    def test_wrong_correspondence_fails_the_frame_fit(self):
-        changed = self.target.copy()
-        changed[0, 0] += .01
-        self.save_npz(changed)
-        info = self.assertRejected("frame-fit residual")
-        self.assertGreater(info["frame_fit"]["max"], info["threshold_studs"])
+    def test_affine_fit_cannot_represent_the_nonaffine_fixture(self):
+        raw = sam3d_mesh.load_source(self.source_path).verts
+        design = np.c_[raw, np.ones(len(raw))]
+        affine, _, _, _ = np.linalg.lstsq(design, self.target, rcond=None)
+        error = np.linalg.norm(design @ affine - self.target, axis=1)
+        self.assertGreater(error.max(), 100 * 5.5e-6)
+        self.assertIsNotNone(self.load()[0])
+
+    def test_mismatched_faces_reject_correspondence(self):
+        for faces in (self.target_faces[::-1], self.target_faces[:, ::-1], self.target_faces.astype(float)):
+            with self.subTest(faces=faces):
+                np.savez(self.work / "03-source-uv.npz", verts=self.target, faces=faces)
+                self.assertRejected("faces do not match")
+
+    def test_subdivided_reordered_corners_use_closest_triangle_barycentrics(self):
+        # Each triangle gets a new centre vertex: none of these centres exists in the raw vertex list.
+        tri = self.verts[self.faces[::-1]]
+        centre = tri.mean(axis=1)
+        subdivided = np.stack([np.stack((tri[:, i], tri[:, (i + 1) % 3], centre), axis=1)
+                               for i in range(3)], axis=1).reshape(-1, 3)
+        faces = np.arange(len(subdivided)).reshape(-1, 3)
+        glb.write_glb(self.run / "03-refined.glb", [("split", subdivided, faces,
+                      np.full((len(subdivided), 2), .5))], texture_png=png("red"))
+        with mock.patch.object(texture, "SourceColour", wraps=texture.SourceColour) as constructor:
+            primary, info = self.load()
+        self.assertIsNotNone(primary, info)
+        expected = self.target[self.target_faces].mean(axis=1)
+        from herogen.blender.meshindex import MeshIndex
+        placed, placed_faces = constructor.call_args.args[:2]
+        self.assertLess(MeshIndex(placed, placed_faces).distance(expected).max(), 2e-6)
+
+    def test_surface_samples_reject_a_bridge_even_with_valid_vertices(self):
+        # The raw tetrahedron's interior is not its surface, although every bridge vertex is a raw vertex.
+        faces = np.array([[0, 4, 3]])
+        glb.write_glb(self.run / "03-refined.glb", [("bridge", self.verts, faces, self.uv)],
+                      texture_png=png("red"))
+        info = self.assertRejected("surface distance exceeds")
+        self.assertGreater(info["source_correspondence"]["geometry_distance_raw"]["max"], .001)
 
     def test_displaced_refined_surface_fails_the_exact_surface_check(self):
         self.write_refined(offset=np.array([0, 0, 1e-4]))
         info = self.assertRejected("surface distance exceeds")
-        self.assertGreater(info["surface_distance"]["max"], info["threshold_studs"])
+        check = info["source_correspondence"]
+        self.assertGreater(check["geometry_distance_raw"]["max"], check["threshold_raw"])
+
+    def test_raw_tolerance_scales_with_source_size_and_accepts_float32_roundtrips(self):
+        original = self.verts.copy()
+        rotation = sam3d_mesh.rotation(23, -13, 7)
+        for scale in (.1, 1, 10):
+            with self.subTest(scale=scale):
+                self.verts = original * scale
+                glb.write_glb(self.source_path, [("raw", self.verts, self.faces, self.uv)],
+                              texture_png=png("green"))
+                self.sha = hashlib.sha256(self.source_path.read_bytes()).hexdigest()
+                self.write_record()
+                rounded = self.verts.astype(np.float32).astype(float)
+                rounded = ((rounded @ rotation.T).astype(np.float32).astype(float) @ rotation)
+                glb.write_glb(self.run / "03-refined.glb", [("rounded", rounded, self.faces, self.uv)],
+                              texture_png=png("red"))
+                primary, info = self.load()
+                self.assertIsNotNone(primary, info)
+                check = info["source_correspondence"]
+                self.assertLess(check["geometry_distance_raw"]["size_fraction"]["max"], 1e-7)
+                self.write_refined(offset=np.array([0, 0, 1e-4 * check["raw_size"]]))
+                self.assertRejected("surface distance exceeds")
 
     def test_bad_records_and_geometry_have_clear_fallback_reasons(self):
         for value in ("{", "[]"):
@@ -137,11 +198,10 @@ class RefinedSourceTests(unittest.TestCase):
         glb.write_glb(self.run / "03-refined.glb", [("refined", self.verts, self.faces, self.uv)])
         self.assertRejected("no base-colour texture")
 
-    def test_singular_or_nonfinite_correspondence_falls_back(self):
-        target = self.target.copy()
-        target[:, 2] = 0
+    def test_degenerate_or_nonfinite_correspondence_falls_back(self):
+        target = np.zeros_like(self.target)
         self.save_npz(target)
-        self.assertRejected("singular")
+        self.assertRejected("degenerate")
         target[0, 0] = np.nan
         self.save_npz(target)
         self.assertRejected("correspondence is invalid")

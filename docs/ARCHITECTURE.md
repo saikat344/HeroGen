@@ -452,14 +452,21 @@ Stage 4 first checks whether stage 3f's refined texture can supply the entire se
 (`herogen/blender/refined_colour.py`). `stage-3f.json` must have status `complete`, its `source_sha256` must
 match the current `03-source.glb`, and `03-refined.glb` and `blender-work/03-source-uv.npz` must exist. Both GLBs
 are read with stage 3's `sam3d_mesh.load_source`. The raw source's vertices and the NPZ's vertices share an
-exact one-to-one correspondence; an affine least-squares fit recovers stage 3's frame, including its Y shift.
-The fit must have full rank and its maximum residual must be at most `1e-6 * height` studs. The transformed
-refined surface is checked independently against the NPZ's source triangles with exact nearest-triangle
-distances: up to 4096 area-stratified faces, four barycentric samples per face, plus six vertex extrema. The
-maximum distance has the same bound. Float32 rotation/export round trips over source spans 0.2, 2 and 20
-measured at most `5.34e-8 * height`; a source displaced by `1e-4 * height` fails. These checks use faces and
-corners, so the refined export can split and reorder vertices at its new UV seams. Non-affine source
-deformations that exceed the residual bound retain the view bake.
+exact one-to-one correspondence, with identical faces in identical order. Stage 3's perspective correction
+and outline conformation are non-affine: placement uses `piecewise-linear source correspondence`. Every refined
+vertex locates its closest raw source triangle and barycentric coordinates through `MeshIndex.closest`, then
+takes that same barycentric point on the corresponding NPZ triangle, including stage 3's Y shift. No vertex
+identity between the GLBs is assumed; UV seam splitting, corner reordering and new surface vertices are allowed.
+
+Geometry is checked before placement, in raw units: every refined vertex plus four barycentric samples per face
+(area-stratified to at most 4096 faces) must be within `1e-6 * raw_bbox_diagonal` of the raw triangle surface.
+Float32 rotation/export round trips over raw spans 0.2, 2 and 20 measured a maximum of `3.079e-8` of the diagonal;
+the bound allows about 32 times that rounding noise. A displaced control fails. Correspondence must be finite,
+faces must match, and NPZ triangles reached by vertices or samples must be non-degenerate. These checks validate
+geometry and correspondence consistency; they do not attempt to infer stage 3's deformation from a global fit.
+Placement distances to the NPZ surface are recorded both for directly mapped points (zero by construction up
+to rounding) and for samples interpolated across the placed refined mesh. The latter exposes new refined edges
+that span multiple source triangles under a non-affine map.
 
 On success, `texture.bake(primary=SourceColour(...))` samples the transformed refined mesh for every covered
 texel of both the shared atlas and the Head texture, at every LOD the profile builds. Stage 2f close-ups are
@@ -471,8 +478,9 @@ GLBs, rig, stage output lists or downloads. Stage 3 and stage 3f delete earlier 
 the source hash and completion status prevent reuse after a source replacement or an interrupted refinement.
 
 `stage-4.json` and `sections.json` record `texture.colour_source` (`refined` or `views`), `source_fallback`,
-and `refined`: both GLB/source hashes, the fit residuals and transform, exact surface-distance mean/p95/max,
-sample count, threshold, and any fallback reason. The diagnostic `refined_texture` check reports eligibility
+and `refined`: both GLB/source hashes, `source_correspondence` with the method, sizes, raw geometry and placed
+surface-distance mean/p95/max (also as fractions of bbox diagonal), sample counts, raw threshold, and any fallback
+reason. The diagnostic `refined_texture` check reports eligibility
 without failing a valid view fallback. Each primary bake records full texel coverage and nearest sampled
 colour-source distances separately from the exact frame check. Notes explicitly identify the refined Head
 texture and suppression of close-ups; comparison close-ups are listed separately.
