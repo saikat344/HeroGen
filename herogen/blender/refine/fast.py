@@ -17,6 +17,7 @@ from herogen.refine_budget import BudgetStop
 WAVES = ((('head+0', False), ('body+0', False), ('body+90', False),
           ('body-90', False), ('body+180', False)), (('upper+180', True),))
 CONCURRENCY = 5
+ATTEMPTS = 2
 
 
 def isolated_client(parent, key, persistence_lock=None):
@@ -93,8 +94,8 @@ class Pass:
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
                body_cam, recipe, persistence_lock, user_note=""):
-        from . import _view, imaging as I
-        for index in range(I.HAIR_ATTEMPTS if self.hair else I.ATTEMPTS):
+        from . import _view
+        for index in range(ATTEMPTS):
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
@@ -231,7 +232,6 @@ class Publisher:
 
 def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock,
           user_note=""):
-    from . import imaging as I
     from .backend import blender
 
     stopped, error = False, None
@@ -281,7 +281,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
 
     try:
         # Every attempt can run, while the inherited client limiter still bounds HTTP concurrency/RPM.
-        with ThreadPoolExecutor(max_workers=CONCURRENCY * I.ATTEMPTS + I.HAIR_ATTEMPTS) as pool:
+        with ThreadPoolExecutor(max_workers=(CONCURRENCY + 1) * ATTEMPTS) as pool:
             remaining = {}
             for wave_index, sequence in enumerate(WAVES, 1):
                 jobs = []
