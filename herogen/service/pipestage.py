@@ -1,11 +1,12 @@
-"""Per-stage adapter: `python3 -m herogen.service.pipestage p|2 --run-id <id> --runs <root> --cache <cache>`.
+"""Per-stage adapter: `python3 -m herogen.service.pipestage p|1|2 --run-id <id> --runs <root> --cache <cache>`.
 
 Stage p reads the description as UTF-8 on stdin and calls the pipeline's stagep_prompt, which owns the prompt
 versions, checks, images and stage-p.json. No description or model error text is printed: API errors may echo
 the description. Stage p exit codes: 0 passed, 1 permanent error, 2 argparse usage error, 3 input rejected,
 4 content policy, 5 transient model error, 6 gate failed. Gate failures add status "gate_failed" to the pipeline
 record; input rejection has status "input_rejected" and an error, policy refusal status "error" and an error.
-The runner requires matching records for rejections. Exception messages never decide these codes.
+The runner requires matching records for rejections. Exception messages never decide these codes. Stage 1 of
+description jobs uses the same isolated output and exit codes because its cover prompt includes the description.
 
 The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service runs 2h beside the
 rest of the job instead (see `worker.run_heldout`), so it starts stage 2 through the same public functions the
@@ -22,7 +23,7 @@ from pathlib import Path
 
 
 def prompt_error_exit(error: BaseException | None) -> int:
-    """Inspect explicit exception causes: stage p wraps client errors in PromptStageError."""
+    """Inspect structured API errors, including stage p's PromptStageError exception causes."""
     from herogen.pipeline.client import ApiError
 
     seen = set()
@@ -38,7 +39,7 @@ def prompt_error_exit(error: BaseException | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m herogen.service.pipestage")
-    ap.add_argument("stage", choices=("p", "2"))
+    ap.add_argument("stage", choices=("p", "1", "2"))
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
@@ -46,28 +47,31 @@ def main(argv: list[str] | None = None) -> int:
     from herogen.pipeline.client import ModelClient
     from herogen.pipeline.runfolder import RunFolder, runs_root
     from herogen.pipeline.prompt_sketch import stagep_prompt
-    from herogen.pipeline.stages import GateFailed, InputRejected, stage2_turnaround
+    from herogen.pipeline.stages import GateFailed, InputRejected, stage1_cover, stage2_turnaround
 
     run = RunFolder(runs_root(a.runs), a.run_id)
+    isolated = a.stage in ("p", "1")
     try:
         client = ModelClient(a.cache, mode="live")
         if a.stage == "p":
             rec = stagep_prompt(run, client, sys.stdin.read())
+        elif a.stage == "1":
+            rec = stage1_cover(run, client)
         else:
             rec = stage2_turnaround(run, client)
     except GateFailed as e:
-        if a.stage == "p":
+        if isolated:
             run.write_stage({**e.record, "status": "gate_failed"})
-        print(f"stage {a.stage}: gate failed; stopping" if a.stage == "p" else f"stage 2: {e}; stopping",
+        print(f"stage {a.stage}: gate failed; stopping" if isolated else f"stage 2: {e}; stopping",
               file=sys.stderr)
-        return 6 if a.stage == "p" else 2
+        return 6 if isolated else 2
     except InputRejected:
         print(f"stage {a.stage}: input rejected; stopping", file=sys.stderr)
         return 3
     except Exception as e:  # noqa: BLE001  (one line for the runner; the record holds the rest)
-        print("stage p: error; stopping" if a.stage == "p" else f"stage 2: error: {type(e).__name__}: {e}; stopping",
+        print(f"stage {a.stage}: error; stopping" if isolated else f"stage 2: error: {type(e).__name__}: {e}; stopping",
               file=sys.stderr)
-        return prompt_error_exit(e) if a.stage == "p" else 1
+        return prompt_error_exit(e) if isolated else 1
     print(f"stage {a.stage} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
     return 0
 

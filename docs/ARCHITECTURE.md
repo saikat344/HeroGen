@@ -1899,12 +1899,13 @@ sketch path, taking that image and recording its stage-p origin as the pipeline 
 serves the job page and thumbnails. Model calls use the per-user cache, and the stage-p record's cost joins the
 job's cost; replayed calls cost zero. Invalid descriptions, content-policy refusals and failed gates reject the
 job with a rewording message; model/network errors follow the normal error and retry path. Stage-p output and
-error text are never copied into worker logs or user messages because they can echo the description.
-Stage-p classification uses only the record's `ok`/`status`, subprocess exit code and timeout flag. The adapter
-returns 2 for a failed gate, 3 for input rejection, 4 for content policy, 5 for a transient model failure and 1 for
+error text are never copied into worker logs or user messages because they can echo the description. Stage 1
+of description jobs also uses this adapter and output isolation: its cover prompt includes the description.
+Classification for these stages uses only the record's `ok`/`status`, subprocess exit code and timeout flag. The adapter
+returns 6 for a failed gate, 3 for input rejection, 4 for content policy, 5 for a transient model failure and 1 for
 other errors. It follows explicit exception causes to the client's `ApiError.error_code` and `transient`
 attributes; the client sets these and `http_status` from structured responses and transport/retry state. Neither
-the record's error text nor subprocess output decides a stage-p outcome. Client retry warnings and ledger error
+the record's error text nor subprocess output decides their outcome. Client retry warnings and ledger error
 summaries contain HTTP status or network exception class rather than model error messages.
 Stage rows keep cumulative spending across attempts, and the finished job includes earlier attempts' spending
 even when a retry resumes past completed stages or replays calls for zero new cost. Its cost detail reports that

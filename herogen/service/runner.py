@@ -5,8 +5,9 @@ Each stage runs as the same command a person would type (`python3 -m herogen.pip
 stage needs (the Model API key reaches the model stages, stage 3 and held-out views). Its outcome is read from the stage record it
 writes (`stage-<n>.json`, docs/ARCHITECTURE.md): ok means passed, a record with a failed gate or a rejected
 input means the pipeline refused the sketch (shown to the user as one plain reason; an input rejection keeps the
-measured checks in the logs), and no record means an error (logged in full, shown as one sentence). Options that
-only some versions of a stage CLI have (`--profile`, `--remote-cache`)
+measured checks in the logs), and no record means an error (logged in full, shown as one sentence). Stages p and 1
+of description jobs exclude raw output from logs because it can echo private text. Options that only some versions
+of a stage CLI have (`--profile`, `--remote-cache`)
 are passed only when that CLI's `--help` lists them, so the service follows whichever pipeline it is deployed with.
 
 The Roblox rig (stage 6) runs only when the deployed code has a `herogen.roblox` command; until then the stage is
@@ -254,7 +255,7 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
     if spec.key == "p" and rec.get("status") == "input_rejected":
         return ("The description could not be used. Describe one character in words within the description's "
                 "length limit, then try again.")
-    if spec.key == "p" and rec.get("status") == "content_policy":
+    if spec.key in ("p", "1") and rec.get("status") == "content_policy":
         return "The image model refused this description under its content policy. Try rewording the description."
     checks = failed_checks(rec)
     if spec.key in ("0", "1") and rec.get("status") == "input_rejected":
@@ -369,6 +370,8 @@ class CliRunner:
                 src = named
             return pipe + [str(src), *common, "--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
         if spec.key == "1":
+            if ctx.kind == "prompt":
+                return [py, "-m", "herogen.service.pipestage", "1", *common], None
             return pipe + common + ["--stages", "1", "--live"], None
         if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which runs beside the job
             return [py, "-m", "herogen.service.pipestage", "2", *common], None
@@ -441,8 +444,8 @@ class CliRunner:
         for r in [rec] + [read_record(ctx.run_dir, x) for x in spec.extra]:
             c = r.get("cost_usd") if r else None
             cost += float(c) if isinstance(c, (int, float)) and math.isfinite(c) else 0.0
-        if spec.key == "p":
-            # Stage p's records and model errors can contain the description. Use their status for decisions,
+        if spec.key == "p" or (spec.key == "1" and ctx.kind == "prompt"):
+            # These stages' records and model errors can contain the description. Use their status for decisions,
             # never their text as a message or log detail, including output from a killed subprocess.
             if (code == 0 and rec and rec.get("ok") is True and "status" not in rec and "error" not in rec
                     and not timed_out):
@@ -459,14 +462,14 @@ class CliRunner:
                 status = {3: "input_rejected", 4: "content_policy"}.get(code)
                 safe = {"status": status or (rec or {}).get("status")}
                 # Gate checks come from the record; input and policy refusals need no model-supplied text.
-                if gate:
+                if gate or (code == 3 and spec.key == "1"):
                     safe["checks"] = rec.get("checks")
                 return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected")
             if not timed_out and code == 5:
                 return Outcome("failed", seconds, cost, "The image model service did not answer properly.",
                                "model_unavailable", True)
             code_s, message, transient = describe_error(spec, "", timed_out)
-            detail = f"stage p failed: exit_code={code}; timed_out={timed_out}; record_present={rec is not None}"
+            detail = f"stage {spec.key} failed: exit_code={code}; timed_out={timed_out}; record_present={rec is not None}"
             return Outcome("failed", seconds, cost, message, code_s, transient, detail=detail)
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
