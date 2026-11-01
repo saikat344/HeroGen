@@ -647,7 +647,8 @@ def purge(store, settings: Settings, storage: Storage, volume=None) -> dict[str,
             orphan_runs += 1
     if volume is not None:
         volume.commit()
-    counts = store.purge_expired(settings.audit_retention_days * 86400.0)
+    counts = store.purge_expired(settings.audit_retention_days * 86400.0,
+                                 settings.analytics_retention_days * 86400.0)
     event("retention", jobs=len(removed), cache_files=cache_files, orphan_inputs=orphans, orphan_runs=orphan_runs, **counts)
     return {"jobs": removed, "cache_files": cache_files, "orphan_inputs": orphans, "orphan_runs": orphan_runs, **counts}
 

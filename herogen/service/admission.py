@@ -52,9 +52,10 @@ PHASE_MIGRATION = (
 )
 SCHEMA = LEGACY_SCHEMA + ';\n'.join(PHASE_MIGRATION) + ';\n'
 PUBLIC = {'guest_open', 'admission_status', 'admission_work_begin', 'admission_work_end',
-          'admission_main_done', 'admission_side_prepare', 'admission_side_done'}
+          'admission_main_done', 'admission_side_prepare', 'admission_side_done',
+          'budget_configure', 'budget_report'}
 PUBLIC |= {'admission_record', 'admission_candidates', 'admission_auto_settle'}
-ADMIN = {'budget_configure', 'budget_report', 'budget_reconcile', 'budget_overhead'}
+ADMIN = {'budget_reconcile', 'budget_overhead'}
 
 
 def micro_usd(value) -> int:
@@ -89,19 +90,23 @@ class AdmissionStore:
         return self.user_get(uid)
 
     def budget_configure(self, limit_micro: int, reserve_micro: int, max_active: int, expires_at: float,
-                         code_commit: str, bound_note: str, cost_signature: str, provider_caps_verified: bool = False, enabled: bool = True) -> None:
-        if (not isinstance(limit_micro, int) or not isinstance(reserve_micro, int) or reserve_micro <= 0
-                or limit_micro < reserve_micro or not 1 <= max_active <= 32 or not math.isfinite(expires_at)
-                or expires_at <= self.clock() or not re.fullmatch(r'[a-f0-9]{40}', code_commit)
-                or not re.fullmatch(r'[a-f0-9]{64}', cost_signature) or not bound_note.strip() or (enabled and not provider_caps_verified)):
+                         code_commit: str, bound_note: str, cost_signature: str, provider_caps_verified: bool = False,
+                         enabled: bool = True, actor: str = 'admin') -> None:
+        if (type(limit_micro) is not int or type(reserve_micro) is not int or type(max_active) is not int
+                or reserve_micro <= 0 or limit_micro < reserve_micro or not 1 <= max_active <= 32
+                or isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at)
+                or expires_at <= self.clock() or not isinstance(code_commit, str) or not re.fullmatch(r'[a-f0-9]{40}', code_commit)
+                or not isinstance(cost_signature, str) or not re.fullmatch(r'[a-f0-9]{64}', cost_signature)
+                or not isinstance(bound_note, str) or not bound_note.strip() or (enabled and not provider_caps_verified)):
             raise ValueError('Budget needs a positive verified job bound, sufficient funds, capacity, future expiry, exact commit and provider-cap confirmation.')
         with self._tx() as c:
             c.execute('INSERT INTO admission_policy VALUES (1,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
                       'limit_micro=excluded.limit_micro,reserve_micro=excluded.reserve_micro,max_active=excluded.max_active,'
                       'expires_at=excluded.expires_at,enabled=excluded.enabled,code_commit=excluded.code_commit,cost_signature=excluded.cost_signature,bound_note=excluded.bound_note',
-                      (limit_micro, reserve_micro, max_active, expires_at, int(enabled), code_commit, cost_signature, bound_note[:1000]))
-            self._audit(c, 'admin', 'generation_budget_configured', '', {'limit_micro': limit_micro, 'reserve_micro': reserve_micro,
-                                                                     'max_active': max_active, 'commit': code_commit})
+                      (limit_micro, reserve_micro, max_active, expires_at, int(bool(enabled)), code_commit, cost_signature, bound_note[:1000]))
+            self._audit(c, actor or 'admin', 'generation_budget_configured', '',
+                        {'limit_micro': limit_micro, 'reserve_micro': reserve_micro,
+                         'max_active': max_active, 'enabled': bool(enabled), 'commit': code_commit})
 
     def _admission_status(self, c, code_commit: str, cost_signature: str) -> dict:
         policy = c.execute('SELECT * FROM admission_policy WHERE id=1').fetchone()
