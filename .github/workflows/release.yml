@@ -76,6 +76,7 @@ jobs:
           HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS: ${{ vars.HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS }}
           HEROGEN_SERVICE_SPEND_LIMITS: ${{ vars.HEROGEN_SERVICE_SPEND_LIMITS }}
           HEROGEN_SERVICE_REFINE_CAP_USD: ${{ vars.HEROGEN_SERVICE_REFINE_CAP_USD }}
+          HEROGEN_TEXTURE_NOTES: ${{ vars.HEROGEN_TEXTURE_NOTES }}
         run: python3 tools/release/release.py check "$TAG"
       - uses: actions/setup-python@v5
         with:
@@ -101,4 +102,5 @@ jobs:
           HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS: ${{ vars.HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS }}
           HEROGEN_SERVICE_SPEND_LIMITS: ${{ vars.HEROGEN_SERVICE_SPEND_LIMITS }}
           HEROGEN_SERVICE_REFINE_CAP_USD: ${{ vars.HEROGEN_SERVICE_REFINE_CAP_USD }}
+          HEROGEN_TEXTURE_NOTES: ${{ vars.HEROGEN_TEXTURE_NOTES }}
         run: python3 tools/release/release.py deploy "$TAG"
