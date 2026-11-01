@@ -63,6 +63,61 @@ class RedoCase(unittest.TestCase):
         self.assertFalse(run.exists("02-turnaround.png"))
         self.assertFalse(run.exists("stage-2.json"))
 
+    def test_cover_redo_uses_sketch_after_failed_missing_or_interrupted_cover(self):
+        import base64
+
+        from herogen.pipeline import client as client_mod
+        from herogen.pipeline.client import ModelClient, png_bytes
+        from herogen.pipeline.stages import stage1_cover
+        from tests.test_herogen_pipeline_flow import DUMMY_KEY, FakeAPI
+        from tests.test_herogen_pipeline_synth import figure_mask, paint, place
+
+        sketch = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)), colour=(90, 90, 90))
+        sketch.save(self.parent.file("00-sketch.png"))
+        expected = hashlib.sha256(png_bytes(sketch.convert("RGB"))).hexdigest()
+        cases = ("rejected", "failed_gate", "missing", "truncated", "interrupted_record")
+        for case in cases:
+            with self.subTest(case=case):
+                self.parent.file("stage-1.json").unlink(missing_ok=True)
+                Image.new("RGB", sketch.size, "white").save(self.parent.file("01-cover.png"))
+                if case in ("rejected", "failed_gate"):
+                    self.parent.write_stage({"stage": 1, "ok": case == "failed_gate", "outputs": ["01-cover.png"],
+                                             "checks": [{"name": "outline", "gate": True, "pass": False}]})
+                elif case == "missing":
+                    self.parent.file("01-cover.png").unlink()
+                elif case == "truncated":
+                    self.parent.file("01-cover.png").write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+                else:
+                    self.parent.file("stage-1.json").write_text('{"stage": 1,')
+                before = self.snapshot()
+                run = self.fork(note="green coat", run_id=f"child-{case}")
+                self.assertFalse(run.exists("redo/parent-cover.png"))
+                api = FakeAPI()
+                edit_inputs = []
+
+                def post(client, endpoint, body, **kwargs):
+                    if endpoint == "images/edits":
+                        edit_inputs.extend(hashlib.sha256(base64.b64decode(i["image_url"].split(",", 1)[1])).hexdigest()
+                                           for i in body["images"])
+                    return api.post(client, endpoint, body)
+
+                with mock.patch.dict("os.environ", {"MODEL_API_KEY": DUMMY_KEY}), \
+                        mock.patch.object(ModelClient, "_post", post), \
+                        mock.patch.object(client_mod, "decode_sam_output", api.decode):
+                    rec = stage1_cover(run, ModelClient(self.root / f"cache-{case}", mode="live"))
+                self.assertTrue(rec["ok"])
+                self.assertEqual(edit_inputs, [expected])
+                self.assertEqual(self.snapshot(), before)
+
+    def test_passing_but_corrupted_cover_refused_before_new_run(self):
+        self.parent.file("01-cover.png").write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+        before = self.snapshot()
+        for stage in (1, 2):
+            with self.subTest(stage=stage), self.assertRaisesRegex(ValueError, "unreadable cover"):
+                self.fork(stage)
+            self.assertFalse((self.root / "child").exists())
+        self.assertEqual(self.snapshot(), before)
+
     def test_prompt_origin_and_all_declared_outputs_copied(self):
         self.parent.file("p-attempts/0.png").write_bytes(b"attempt")
         self.parent.write_stage({"stage": "p", "ok": True, "outputs": ["p-attempts/0.png"],

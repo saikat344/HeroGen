@@ -39,8 +39,10 @@ outputs and an existing destination are refused before generation.
 `redo.json` holds `parent_run` (the parent's run id), `from_stage` (1 or 2) and the cleaned `note`. Records
 written through `RunFolder.write_stage` carry the same fields. Copied records retain their original checks,
 details and historical calls, add `reused_from` and `original_cost_usd`, and set `cost_usd` and `seconds` to
-zero for the new version. The parent record remains unchanged. A cover redo also copies the parent cover to
-`redo/parent-cover.png` as the editing reference; this is not a passing cover for the new version. Stage 1
+zero for the new version. The parent record remains unchanged. When the parent's stage-1 record passes,
+a cover redo copies its decodable cover to `redo/parent-cover.png` as the editing reference; this is not
+a passing cover for the new version. A missing, failed or interrupted stage 1 uses the sketch instead.
+A corrupted cover declared by a passing record is refused before generation. Stage 1
 still performs the original input checks on `00-sketch.png` and all cover gates against that sketch.
 Stage 2 uses the copied cover and regenerates the complete four-view sheet, with its existing retry,
 ranking, masks, top selection and gates. Naming a view in a note does not select a single-view edit.
