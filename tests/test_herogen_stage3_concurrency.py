@@ -66,6 +66,17 @@ class BodyPrefetchTest(unittest.TestCase):
                 with stage3._prefetch_body(self.run, self.vs, remote, self.rec, None, enabled=True):
                     pass
 
+    def test_two_failures_preserve_the_original_error_and_record_the_drained_failure(self):
+        primary = RemoteError("Objects failed")
+        secondary = ReplayMiss("Body replay missed")
+        remote = SimpleNamespace(body=Mock(side_effect=secondary))
+        with self.assertRaisesRegex(RemoteError, "Objects failed") as caught:
+            with stage3._prefetch_body(self.run, self.vs, remote, self.rec, None, enabled=True):
+                raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, secondary)
+        self.assertIn("Body replay missed", self.rec.data["notes"])
+
     def test_serial_option_does_not_launch_body(self):
         remote = Mock()
         with stage3._prefetch_body(self.run, self.vs, remote, self.rec, None, enabled=False) as returned:
