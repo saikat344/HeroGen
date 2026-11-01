@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
-    r.add_argument("--turnaround-concurrency", type=int, default=1,
+    r.add_argument("--turnaround-concurrency", type=int, default=4,
                    help="parallel sheet/top calls; values above one may pay for unused candidates")
     r.add_argument("--label", default="", help="label for the input, e.g. 'stand-in sketch'")
     r.add_argument("--views", default=None,

@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
-    ap.add_argument("--turnaround-concurrency", type=int, default=1)
+    ap.add_argument("--turnaround-concurrency", type=int, default=4)
     a = ap.parse_args(argv)
     from herogen.pipeline.client import ModelClient
     from herogen.pipeline.runfolder import RunFolder, runs_root
