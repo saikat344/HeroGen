@@ -548,6 +548,12 @@ For batch runners, `HEROGEN_REFINE_PROFILE=fast` supplies the stage's fallback w
 Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast uses the same close-up
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
+`--refine-note` (or `run_stage3f(..., user_note=...)`) supplies optional design guidance after the fixed
+rules in one quoted slot. The shared note cleaner normalizes Unicode, removes slot delimiters, replaces
+control and format characters, and collapses whitespace. Notes over 300 cleaned characters are rejected.
+Empty cleaned notes leave requests unchanged; non-empty notes and their SHA-256 are recorded as
+`user_note` and `user_note_sha256` in `stage-3f.json`. Only explicit input supplies the note.
+
 Fast renders five cameras from one frozen atlas: `head+0`, `body+0`, `body+90`, `body-90`, `body+180`.
 Each pass launches at most two attempts concurrently, including hair, using the existing registration, outline,
 face containment and hair exclusion logic with unchanged thresholds. The lowest-index passing attempt
