@@ -72,6 +72,16 @@ def publish(parent, child):
 
 
 
+def empty_progress(run, *, done=False):
+    """Reset the pointer before preparation, or finish a preparation-time fallback without versions."""
+    from herogen.blender.record import write_atomic
+    progress = {'profile': 'fast', 'versions': [], 'done': done, 'final_n': None}
+    text = json.dumps(progress, indent=2)
+    write_atomic(run / 'stage-3f-progress.json', text)
+    if not done:
+        write_atomic(run / 'stage-3f-progress-initial.json', text)
+
+
 class Pass:
     """One frozen view's independent attempts and deterministic selection frontier."""
     def __init__(self, key, name, hair, record, folder):

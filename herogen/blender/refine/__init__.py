@@ -241,7 +241,9 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                     repaint_recipe=recipe, upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
     if refine_profile == "fast":
+        from .fast import empty_progress
         rec.data["refine_profile"] = "fast"
+        empty_progress(run)
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
     start = len(client.log.calls)
@@ -284,8 +286,12 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if recipe not in ("RF2R", "RF2W"):
             raise ValueError(f"unknown repaint recipe {recipe!r} (use RF2R or RF2W)")
         if profile not in REFINE_PROFILES:
+            if refine_profile == "fast":
+                empty_progress(run, done=True)
             return save(status="skipped", reason="profile is not best, roblox-ingame or roblox-avatar")
         if not (run / "03-source.glb").is_file():
+            if refine_profile == "fast":
+                empty_progress(run, done=True)
             return save(status="skipped", reason="no SAM source mesh", final_model="04-body/high.glb")
         stage3 = json.loads((run / "stage-3.json").read_text())
         if stage3.get("ok") is not True:
@@ -398,6 +404,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             rec.note("all views rejected; keeping 03-source.glb")
         return save(status="cap_reached" if stopped else "complete")
     except BudgetStop as exc:
+        if refine_profile == "fast":
+            empty_progress(run, done=True)
         rec.data["stop_reason"] = str(exc)
         rec.note(str(exc))
         return save(status="cap_reached")
