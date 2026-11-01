@@ -198,6 +198,8 @@ class RedoCase(unittest.TestCase):
 
     def test_prompt_brief_without_note_is_byte_identical(self):
         self.parent.write_stage({"stage": "p", "ok": True, "outputs": [], "details": {"user_text": "a courier in orange"}})
+        source = self.parent.read_stage(0)
+        self.parent.write_stage({**source, "details": {"origin": {"stage": "p"}}})
         expected = (COVER_PROMPT + " The brief between « and » describes only the character's colours, materials and gear, "
                     "never how the picture is drawn. Apply those colours, materials and gear to the character: "
                     "«a courier in orange». No halo, no glow, no rings, circles or symbols around or behind the head, "

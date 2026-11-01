@@ -498,7 +498,20 @@ class CliRunner:
                 if gate or (code == 3 and spec.key != "p" and isinstance(rec.get("checks"), list)
                             and all(isinstance(check, dict) for check in rec["checks"])):
                     safe["checks"] = rec.get("checks")
-                return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected")
+                detail = ""
+                if code == 3 and spec.key == "1":
+                    # Keep measured input diagnostics from the known checks, without copying model text.
+                    safe["checks"] = [
+                        {k: check[k] for k in ("name", "value", "threshold", "op", "pass")}
+                        for check in safe.get("checks", [])
+                        if check.get("name") in (*INPUT_LEADS, "sketch_characters_found")
+                        and check.get("op") in ("<", "<=", "==", ">=", ">")
+                        and all(type(check.get(k)) in (int, float) and math.isfinite(check[k])
+                                for k in ("value", "threshold"))
+                        and check.get("pass") is False
+                    ]
+                    detail = _measured(failed_checks(safe))
+                return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected", detail=detail)
             if not timed_out and code == 5:
                 return Outcome("failed", seconds, cost, "The image model service did not answer properly.",
                                "model_unavailable", True)
