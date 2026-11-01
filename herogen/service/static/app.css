@@ -227,8 +227,6 @@ main.doc { padding:20px 16px 40px; }
 .note-label { text-transform:uppercase; font-size:9px; letter-spacing:2px; color:var(--muted); margin:0 0 13px; }.work-note .note-label { color:#756347; }
 .work-note h2 { font-size:29px; margin-bottom:14px; }.work-note>p:not(.note-label) { font-size:13px; color:#5b503b; line-height:1.7; }
 #stepMessage:empty { display:none; }.work-note .work-note-foot { border-top:1px solid #cbbd94; padding-top:13px; margin-top:22px; font-size:11px !important; }
-.quality-note { border-top:1px solid #c1b6a6; padding-top:18px; }.quality-note h3 { font:700 22px Georgia,serif; margin-bottom:10px; }
-#qualityStatus { font-size:12px; white-space:pre-line; line-height:1.7; }.quality-note .small { font-size:11px; }.quality-note.review-attention { border-top-color:var(--bad); }
 .generation-facts { border-top:1px solid var(--line); padding-top:16px; }.generation-facts h2 { font-size:18px; margin-bottom:8px; }
 .generation-facts p { font-size:11px; overflow-wrap:anywhere; line-height:1.7; }
 .generation-error,.stage-issues { border:1px solid #c88973; padding:16px 20px; margin:20px 0; background:#fff3e9; border-radius:4px; font-size:13px; white-space:pre-wrap; }

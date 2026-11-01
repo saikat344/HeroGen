@@ -1,4 +1,4 @@
-"""Serializable refinement reservations shared by local runs and the durable service store."""
+"""Serializable per-run texture-refinement spend and pending attempts."""
 from __future__ import annotations
 
 import copy

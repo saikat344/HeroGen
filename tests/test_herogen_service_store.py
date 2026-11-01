@@ -27,7 +27,6 @@ from herogen.service.store import (
     Conflict,
     InvalidTransition,
     NotFound,
-    QuotaExceeded,
     Store,
     StoreError,
     new_id,
@@ -52,72 +51,10 @@ class StoreCase(TempDirCase):
 
     def create(self, key="k" * 8, **kw):
         args = dict(job_id=new_id("j"), user_id=self.user["id"], client_key=key, kind="sketch",
-                    profile="roblox-ingame", jobs_per_day=3, jobs_total=5, storage_max_bytes=10 ** 9,
+                    profile="roblox-ingame", storage_max_bytes=10 ** 9,
                     input_sha="a" * 64)
         args.update(kw)
         return self.store.job_create(**args)
-
-
-class TestRefineReservations(StoreCase):
-    def test_explicit_settlement_is_idempotent_and_stale_attempts_are_fenced(self):
-        job, _ = self.create()
-        claim = self.store.job_claim(job["id"], "first", 60, 2)
-        jid, attempt = job["id"], claim["attempt"]
-        reserve = self.store.job_refine_budget(jid, attempt, "reserve", token="one", amount=.01, cap=.01)
-        self.assertEqual(reserve["pending_attempt_usd"], .01)
-        same = self.store.job_refine_budget(jid, attempt, "reserve", token="one", amount=.01, cap=.01)
-        self.assertEqual(same["spent_usd_total"], .01)
-        settled = self.store.job_refine_budget(jid, attempt, "settle", token="one", amount=0, cap=.01)
-        self.assertEqual(settled["spent_usd_total"], 0)
-        self.assertEqual(settled["pending_attempt_usd"], 0)
-        self.store.job_refine_budget(jid, attempt, "settle", token="one", amount=0, cap=.01)
-        self.store.job_cancel(jid, self.user["id"])
-        with self.assertRaises(StoreError):
-            self.store.job_refine_budget(jid, attempt, "reserve", token="two", amount=.01, cap=.01)
-
-    def test_failed_durable_acknowledgement_prevents_http_send(self):
-        from herogen.blender.refine import Budget
-        from herogen.pipeline.client import IMAGE_MODEL, ModelClient
-        from herogen.service.refine_budget import budget_bridge, remote_budget
-        job, _ = self.create()
-        attempt = self.store.job_claim(job["id"], "first", 60, 2)["attempt"]
-        def operation(action, **kwargs):
-            return self.store.job_refine_budget(job["id"], attempt, action, **kwargs)
-        with budget_bridge(operation) as env, patch.dict(os.environ, env):
-            client = ModelClient(self.tmp / "cache", mode="live")
-            budget = Budget(client, .01, store=remote_budget)
-            client.before_api_attempt = budget.reserve
-            self.store.persist = Mock(side_effect=OSError("commit failed"))
-            with patch.dict(os.environ, {"MODEL_API_KEY": "test-placeholder"}), \
-                    patch("herogen.pipeline.client._open") as send:
-                with self.assertRaisesRegex(RuntimeError, "could not be acknowledged"), \
-                        self.assertLogs("herogen.service", "ERROR") as logged:
-                    client._post("images/edits", {}, model=IMAGE_MODEL, kind="edit", key="k")
-            send.assert_not_called()
-            # The stage sees only "unavailable"; the service log names the store's actual failure.
-            self.assertIn("commit failed", "\n".join(logged.output))
-
-    def test_lost_worker_reservations_survive_store_replacement(self):
-        job, _ = self.create()
-        claim = self.store.job_claim(job["id"], "first", 60, 2)
-        attempt = claim["attempt"]
-        saved = self.tmp / "saved.db"
-        def persist(db):
-            with closing(sqlite3.connect(saved)) as snapshot:
-                db.backup(snapshot)
-        self.store.persist = persist
-        for index in range(60):
-            result = self.store.job_refine_budget(job["id"], attempt, "reserve", token=str(index),
-                                                 amount=.01, cap=.80)
-        self.assertEqual(result["spent_usd_total"], .60)
-        self.assertTrue(saved.is_file())
-        replacement = Store(saved, clock=self.clock)
-        self.addCleanup(replacement.close)
-        for index in range(60, 80):
-            replacement.job_refine_budget(job["id"], attempt, "reserve", token=str(index), amount=.01, cap=.80)
-        result = replacement.job_refine_budget(job["id"], attempt, "reserve", token="blocked", amount=.01, cap=.80)
-        self.assertFalse(result["allowed"])
-        self.assertEqual(result["spent_usd_total"], .80)
 
 
 class TestMethodSets(TempDirCase):
@@ -125,28 +62,8 @@ class TestMethodSets(TempDirCase):
         self.assertFalse(Store.PUBLIC & Store.ADMIN)
         for name in Store.PUBLIC | Store.ADMIN:
             self.assertTrue(callable(getattr(Store, name)), name)
-        for name in ("allow_add", "invite_create", "user_set_status", "user_set_quota", "audit_list", "users_list"):
+        for name in ("generation_update", "user_set_status", "audit_list", "users_list"):
             self.assertIn(name, Store.ADMIN)
-
-    def test_invite_validity_ignores_the_address(self):
-        store = Store(self.tmp / "m.db", clock=Clock())
-        store.invite_create("a" * 64, 1, 3600, email="bob@example.com")
-        self.assertTrue(store.invite_valid("a" * 64))
-        self.assertFalse(store.invite_valid("b" * 64))
-        for email in ("bob@example.com", "eve@example.com"):
-            self.assertFalse(store.signin_eligibility(email, "a" * 64)["invalid_invite"], email)
-        self.assertFalse(store.signin_eligibility("eve@example.com", "a" * 64)["eligible"])
-        make_user(store, "carol@example.com")
-        for email in ("carol@example.com", "nobody@example.com"):
-            self.assertTrue(store.signin_eligibility(email, "b" * 64)["invalid_invite"], email)
-        store.close()
-
-    def test_allowlist_audit_holds_no_address(self):
-        store = Store(self.tmp / "m.db", clock=Clock())
-        store.allow_add("bob@example.com", "", "tag123")
-        store.allow_remove("bob@example.com", "tag123")
-        self.assertNotIn("bob@example.com", json.dumps(store.audit_list()))
-        store.close()
 
 
 class TestIds(TempDirCase):
@@ -164,9 +81,9 @@ class TestIds(TempDirCase):
     def test_errors_keep_their_code_across_pickling(self):
         e = pickle.loads(pickle.dumps(StoreError("nope", "account")))
         self.assertEqual((str(e), e.code), ("nope", "account"))
-        q = pickle.loads(pickle.dumps(QuotaExceeded("full")))
-        self.assertIsInstance(q, QuotaExceeded)
-        self.assertEqual(q.code, "quota")
+        q = pickle.loads(pickle.dumps(StoreError("full")))
+        self.assertIsInstance(q, StoreError)
+        self.assertEqual(q.code, "store_error")
 
 
 class TestJobs(StoreCase):
@@ -183,108 +100,12 @@ class TestJobs(StoreCase):
         self.assertTrue(created3, "keys are per user")
         self.assertNotEqual(c["id"], a["id"])
 
-    def test_daily_and_total_quota(self):
-        for i in range(3):
-            job, _ = self.create(key=f"key-{i:04d}")
-            claim = self.store.job_claim(job["id"], "quota", 60, 2)
-            self.store.job_finish(job["id"], claim["attempt"], "succeeded")
-        with self.assertRaises(QuotaExceeded) as cm:
-            self.create(key="key-0003")
-        self.assertIn("24 hours", str(cm.exception))
-        u = self.store.usage(self.user["id"], 3, 5)
-        self.assertEqual((u["jobs_today"], u["jobs_total"]), (3, 3))
-        self.assertAlmostEqual(u["next_daily_slot_at"], self.clock.t + 86400)
-        self.clock.advance(86401)
-        job, _ = self.create(key="key-0004")
-        claim = self.store.job_claim(job["id"], "quota", 60, 2)
-        self.store.job_finish(job["id"], claim["attempt"], "succeeded")
-        self.create(key="key-0005")
-        with self.assertRaises(QuotaExceeded) as cm:
-            self.create(key="key-0006")
-        self.assertIn("all 5", str(cm.exception))
-
-    def test_per_user_quota_override_and_refund(self):
-        self.store.user_set_quota("alice@example.com", 1, None)
-        j, _ = self.create(key="key-0000")
-        with self.assertRaises(QuotaExceeded):
-            self.create(key="key-0001")
-        # A job that fails for our reasons before spending anything gives its quota back.
-        claim = self.store.job_claim(j["id"], "c1", 60, 2)
-        self.store.job_finish(j["id"], claim["attempt"], "failed", error_code="stage_error", refund=True,
-                              error_message="It broke.")
-        self.assertEqual(self.store.job_get(j["id"])["error_message"],
-                         "It broke. It does not use up one of today's heroes, but it still counts toward your total.")
-        self.create(key="key-0002")
-
-    def test_a_job_that_spent_money_is_never_refunded(self):
-        j, _ = self.create(key="key-0000")
-        c = self.store.job_claim(j["id"], "c", 60, 2)
-        self.store.job_stage_set(j["id"], 1, "1", "passed", cost_usd=0.0125)
-        self.store.job_finish(j["id"], c["attempt"], "failed", error_code="stage_error", refund=True,
-                              error_message="It broke.")
-        job = self.store.job_get(j["id"])
-        self.assertEqual((job["counts_quota"], job["refunded_at"], job["error_message"]), (1, None, "It broke."))
-        k, _ = self.create(key="key-0001")
-        c = self.store.job_claim(k["id"], "c", 60, 2)
-        self.store.job_finish(k["id"], c["attempt"], "failed", error_code="x", refund=True, cost_usd=0.001)
-        self.assertEqual(self.store.job_get(k["id"])["counts_quota"], 1, "a cost reported at the finish counts too")
-
-    def test_out_of_attempts_after_spending_counts(self):
-        j, _ = self.create()
-        self.store.job_claim(j["id"], "c1", 60, 2)
-        self.store.job_stage_set(j["id"], 1, "1", "passed", cost_usd=0.02)
-        self.assertEqual(self.store.job_requeue(j["id"], 1, 2, "timeout", "2", "Slow."), "queued")
-        self.store.job_claim(j["id"], "c2", 60, 2)
-        self.assertEqual(self.store.job_requeue(j["id"], 2, 2, "timeout", "2", "Slow."), "failed")
-        self.assertEqual(self.store.job_get(j["id"])["counts_quota"], 1)
-
-    def test_refunds_are_capped_per_day(self):
-        self.store.user_set_quota("alice@example.com", 10, 10)
-        refunded = []
-        for i in range(4):
-            j, _ = self.create(key=f"key-{i:04d}")
-            c = self.store.job_claim(j["id"], "c", 60, 2)
-            self.store.job_finish(j["id"], c["attempt"], "failed", error_code="x", refund=True)
-            refunded.append(self.store.job_get(j["id"])["counts_quota"] == 0)
-        self.assertEqual(refunded, [True, True, False, False], "at most REFUNDS_PER_DAY (2) a day")
-        self.clock.advance(86401)
-        j, _ = self.create(key="key-0009")
-        c = self.store.job_claim(j["id"], "c", 60, 2)
-        self.store.job_finish(j["id"], c["attempt"], "failed", error_code="x", refund=True)
-        self.assertEqual(self.store.job_get(j["id"])["counts_quota"], 0)
-
-    def test_refunds_give_back_the_day_not_the_lifetime_total(self):
-        self.store.user_set_quota("alice@example.com", 10, 3)
-        for i in range(3):
-            j, _ = self.create(key=f"key-{i:04d}")
-            c = self.store.job_claim(j["id"], "c", 60, 2)
-            self.store.job_finish(j["id"], c["attempt"], "failed", error_code="x", refund=True)
-        u = self.store.usage(self.user["id"], 3, 5)
-        self.assertEqual((u["jobs_today"], u["jobs_total"]), (1, 3), "two refunded today, all three count in total")
-        with self.assertRaises(QuotaExceeded) as cm:
-            self.create(key="key-0009")
-        self.assertIn("all 3", str(cm.exception))
-
-    def test_parallel_creates_never_exceed_one_active_job(self):
-        import concurrent.futures as cf
-
-        def one(i):
-            try:
-                return self.create(key=f"race-{i:04d}", job_id=new_id("j"))[1]
-            except Conflict:
-                return "active"
-
-        with cf.ThreadPoolExecutor(16) as ex:
-            got = list(ex.map(one, range(16)))
-        self.assertEqual(got.count(True), 1)
-        self.assertEqual(got.count("active"), 15)
-        self.assertEqual(len(self.store.jobs_list(self.user["id"])), 1)
 
     def test_storage_limit(self):
         j, _ = self.create(key="key-0000", storage_max_bytes=100)
         c = self.store.job_claim(j["id"], "c", 60, 2)
         self.store.job_finish(j["id"], c["attempt"], "succeeded", bytes_=150)
-        with self.assertRaises(QuotaExceeded) as cm:
+        with self.assertRaises(StoreError) as cm:
             self.create(key="key-0001", storage_max_bytes=100)
         self.assertIn("storage", str(cm.exception))
 
@@ -309,7 +130,7 @@ class TestJobs(StoreCase):
         self.assertEqual(c2["attempt"], 2)
         self.assertEqual(self.store.job_requeue(j["id"], 2, 2, "timeout", "1", "slow"), "failed")
         job = self.store.job_get(j["id"])
-        self.assertEqual((job["state"], job["counts_quota"]), ("failed", 0))
+        self.assertEqual(job["state"], "failed")
 
     def test_out_of_attempts_fails_at_claim_before_paying(self):
         j, _ = self.create()
@@ -318,15 +139,12 @@ class TestJobs(StoreCase):
         self.assertIsNone(self.store.job_claim(j["id"], "c2", 60, 1))
         self.assertEqual(self.store.job_get(j["id"])["state"], "failed")
 
-    def test_lease_expiry_requeues_then_fails(self):
+    def test_lease_expiry_fails(self):
         j, _ = self.create()
-        self.store.job_claim(j["id"], "c1", 60, 2)
-        self.assertEqual(self.store.reconcile_stale(2), [])
-        self.clock.advance(61)
-        self.assertEqual(self.store.reconcile_stale(2), [(j["id"], "queued")])
-        self.store.job_claim(j["id"], "c2", 60, 2)
-        self.clock.advance(61)
-        self.assertEqual(self.store.reconcile_stale(2), [(j["id"], "failed")])
+        self.store.job_claim(j['id'], 'lost', 60, 2)
+        self.clock.advance(60)
+        self.assertEqual(self.store.reconcile_stale(2), [(j['id'], 'failed')])
+        self.assertIsNone(self.store.job_claim(j['id'], 'late', 60, 2))
 
     def test_stage_lease_extends_job_lease(self):
         j, _ = self.create()
@@ -360,22 +178,6 @@ class TestJobs(StoreCase):
         with self.assertRaises(StoreError):
             self.store.job_finish(j["id"], 1, "queued")
 
-    def test_side_stage_runs_once_and_never_touches_the_job(self):
-        j, _ = self.create()
-        c = self.store.job_claim(j["id"], "c", 60, 2)
-        self.assertTrue(self.store.side_claim(j["id"], "2h", "k1", 600))
-        self.assertFalse(self.store.side_claim(j["id"], "2h", "k2", 600), "at most once per job")
-        self.assertTrue(self.store.side_live(j["id"], "2h", "k1"))
-        self.assertFalse(self.store.side_live(j["id"], "2h", "k2"))
-        self.store.job_finish(j["id"], c["attempt"], "succeeded", cost_usd=0.04, cost_detail={"basis": "x"})
-        self.assertTrue(self.store.side_finish(j["id"], "2h", "k1", "unavailable", cost_usd=0.01, message="m"))
-        self.assertFalse(self.store.side_finish(j["id"], "2h", "k1", "passed", cost_usd=0.01), "only once")
-        job = self.store.job_get(j["id"])
-        self.assertEqual((job["state"], job["error_code"], job["counts_quota"]), ("succeeded", None, 1))
-        self.assertAlmostEqual(job["cost_usd"], 0.05, places=6)
-        self.assertEqual(json.loads(job["cost_detail"]), {"basis": "x", "heldout_usd": 0.01})
-        with self.assertRaises(StoreError):
-            self.store.side_claim(j["id"], "3", "k", 60)
 
     def test_renewing_a_lease_extends_it_only_for_its_holder(self):
         lease = lambda sql, *a: self.store._one(sql, a)["lease_until"]  # noqa: E731
@@ -389,43 +191,8 @@ class TestJobs(StoreCase):
         self.assertTrue(self.store.job_renew(j["id"], 1, 600))
         self.assertEqual(lease("SELECT lease_until FROM jobs WHERE id=?", j["id"]), self.clock.t + 600)
         self.assertFalse(self.store.job_renew(j["id"], 2, 600), "not the live attempt")
-        self.assertTrue(self.store.side_claim(j["id"], "2h", "k", 600))
-        self.clock.advance(500)
-        self.assertTrue(self.store.side_renew(j["id"], "2h", "k", 600))
-        self.assertFalse(self.store.side_renew(j["id"], "2h", "other", 600), "another claim")
-        self.assertEqual(lease("SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'", j["id"]),
-                         self.clock.t + 600)
-        self.store.job_cancel(j["id"], self.user["id"])
-        self.assertFalse(self.store.job_renew(j["id"], 1, 600), "a canceled job's lease is not renewed")
-        self.assertTrue(self.store.side_renew(j["id"], "2h", "k", 600), "the held-out views run on beside it")
-        self.store.side_finish(j["id"], "2h", "k", "passed")
-        self.assertFalse(self.store.side_renew(j["id"], "2h", "k", 600), "finished")
-
-    def test_side_stage_finishing_first_joins_the_jobs_cost(self):
-        j, _ = self.create()
-        c = self.store.job_claim(j["id"], "c", 60, 2)
-        self.store.side_claim(j["id"], "2h", "k", 600)
-        self.store.side_finish(j["id"], "2h", "k", "passed", cost_usd=0.0125)
-        self.store.job_finish(j["id"], c["attempt"], "succeeded", cost_usd=0.04)
-        self.assertAlmostEqual(self.store.job_get(j["id"])["cost_usd"], 0.0525, places=6)
-
-    def test_side_stage_is_refused_for_ended_or_deleted_jobs(self):
-        j, _ = self.create()
-        self.store.job_cancel(j["id"], self.user["id"])
-        self.assertFalse(self.store.side_claim(j["id"], "2h", "k", 60))
-        k, _ = self.create(key="key-0001")
-        self.store.job_claim(k["id"], "c", 60, 2)
-        self.store.side_claim(k["id"], "2h", "k", 60)
-        self.store.job_delete(k["id"], self.user["id"])
-        self.assertFalse(self.store.side_live(k["id"], "2h", "k"), "a deleted job's files are not written")
-
-    def test_side_stage_cost_never_decides_a_refund(self):
-        j, _ = self.create()
-        c = self.store.job_claim(j["id"], "c", 60, 2)
-        self.store.side_claim(j["id"], "2h", "k", 600)
-        self.store.side_finish(j["id"], "2h", "k", "passed", cost_usd=0.5)
-        self.store.job_finish(j["id"], c["attempt"], "failed", error_code="x", refund=True, error_message="E.")
-        self.assertEqual(self.store.job_get(j["id"])["counts_quota"], 0, "refunded exactly as without 2h")
+        self.store.job_cancel(j['id'], self.user['id'])
+        self.assertFalse(self.store.job_renew(j['id'], 1, 600))
 
     def test_a_reused_stage_keeps_what_it_spent(self):
         j, _ = self.create()
@@ -437,15 +204,6 @@ class TestJobs(StoreCase):
         row = {r["stage"]: r for r in self.store.job_stages(j["id"])}["1"]
         self.assertEqual((row["cost_usd"], row["seconds"]), (0.02, 3.0))
 
-    def test_cancel_refunds_a_job_that_never_started(self):
-        j, _ = self.create()
-        out = self.store.job_cancel(j["id"], self.user["id"])
-        self.assertEqual((out["state"], out["counts_quota"]), ("canceled", 0))
-        k, _ = self.create(key="key-0001")
-        self.store.job_claim(k["id"], "c", 60, 2)
-        out = self.store.job_cancel(k["id"], self.user["id"])
-        self.assertEqual((out["state"], out["counts_quota"]), ("canceled", 1))
-        self.assertFalse(self.store.job_current(k["id"], 1), "a canceled job's worker stops")
 
     def running(self, stage="1"):
         """A job whose attempt 1 is running `stage`, with stage 0 passed and the held-out views running beside."""
@@ -453,7 +211,7 @@ class TestJobs(StoreCase):
         self.store.job_claim(j["id"], "c", 60, 2)
         self.store.job_stage_set(j["id"], 1, "0", "passed", seconds=1.0)
         self.store.job_stage_set(j["id"], 1, stage, "running", lease_s=60)
-        self.store.side_claim(j["id"], "2h", "side", 3600)
+
         return j["id"]
 
     def states(self, job_id):
@@ -464,18 +222,11 @@ class TestJobs(StoreCase):
         # used to stay running for good, and the page polled every 3 s forever.
         a = self.running()
         self.store.job_cancel(a, self.user["id"])
-        self.assertEqual(self.states(a), {"0": "passed", "1": "canceled", "2h": "running"},
-                         "the held-out views run on beside the job until they finish or their lease runs out")
+        self.assertEqual(self.states(a), {"0": "passed", "1": "canceled"})
         b = self.running()
         self.store.job_delete(b, self.user["id"])
         self.assertEqual(self.states(b)["1"], "canceled")
         c = self.running()
-        self.clock.advance(61)
-        self.store.reconcile_stale(2)
-        self.assertEqual((self.store.job_get(c)["state"], self.states(c)["1"]), ("queued", "pending"),
-                         "requeued: the stage runs again on the next attempt")
-        self.store.job_claim(c, "c2", 60, 2)
-        self.store.job_stage_set(c, 2, "1", "running", lease_s=60)
         self.clock.advance(61)
         self.store.reconcile_stale(2)
         self.assertEqual((self.store.job_get(c)["state"], self.states(c)["1"]), ("failed", "failed"))
@@ -501,6 +252,7 @@ class TestJobs(StoreCase):
     def test_dispatch_respects_running_cap_and_grace(self):
         jobs = [self.create(key=f"key-{i:04d}", user_id=make_user(self.store, f"user{i}@example.com")["id"])[0]
                 for i in range(3)]
+        self.store.generation_update(actor="fixture", max_running=2)
         due = self.store.jobs_to_dispatch(2)
         self.assertEqual([d["id"] for d in due], [jobs[0]["id"], jobs[1]["id"]])
         for d in due:
@@ -520,34 +272,9 @@ class TestJobs(StoreCase):
         self.store.job_mark_purged(j["id"])
         self.assertEqual(self.store.retention_due(30 * 86400), [])
         self.assertIsNone(self.store.job_get(j["id"], self.user["id"]), "purged jobs are gone for the user")
-        self.assertEqual(self.store.usage(self.user["id"], 3, 5)["jobs_total"], 1, "they still count for quota")
+
         counts = self.store.purge_expired(86400)
         self.assertGreaterEqual(counts["audit"], 1)
-
-    def test_account_deletion_forgets_the_address_everywhere(self):
-        self.store.invite_create("f" * 64, 1, 3600, email="alice@example.com")
-        self.store.audit_add("system", "test", "alice@example.com", {"note": "alice@example.com was here"})
-        self.store.user_delete(self.user["id"])
-        blob = json.dumps([dict(r) for t in ("users", "allowlist", "invites", "audit", "login_tokens")
-                           for r in self.store.db.execute(f"SELECT * FROM {t}")])
-        self.assertNotIn("alice@example.com", blob)
-        self.assertIsNotNone(self.store.invite_list()[0]["revoked_at"], "the bound invite cannot pass to anyone")
-
-    def test_account_deletion(self):
-        j, _ = self.create()
-        self.store.job_claim(j["id"], "c", 60, 2)
-        ids = self.store.user_delete(self.user["id"])
-        self.assertEqual(ids, [j["id"]])
-        self.assertIsNone(self.store.user_get(self.user["id"]))
-        job = self.store.job_get(j["id"])
-        self.assertEqual(job["state"], "canceled")
-        self.assertIsNotNone(job["deleted_at"])
-        self.assertIsNone(self.store.session_get(h("ses-alice@example.com"), 3600))
-        emails = [r[0] for r in self.store.db.execute("SELECT email FROM users")]
-        self.assertNotIn("alice@example.com", emails, "the address is forgotten")
-        # The address can be invited again as a new account.
-        again = make_user(self.store, "alice@example.com", session="ses-again")
-        self.assertNotEqual(again["id"], self.user["id"])
 
 
 class TestSessions(StoreCase):
@@ -602,6 +329,8 @@ class TestSchema(TempDirCase):
                                               'user_id TEXT NOT NULL, code_id TEXT, client_key')
                 admission = ';'.join(stmt for stmt in admission.split(';') if 'budget_overhead' not in stmt)
             schema += admission
+        if version >= 10:
+            schema += store_mod.ANALYTICS_SCHEMA
         if version < 4:
             schema = schema.replace("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);", "")
         if version < 3:
@@ -623,6 +352,15 @@ class TestSchema(TempDirCase):
                         f"created_at) VALUES ('j_x','u_x'{code_val},'k',123,'signature',1.0)")
             con.execute("INSERT INTO admission_work(token,job_id,kind,state,created_at) "
                         "VALUES ('w1','j_x','modal','sent',1.0)")
+        if version >= 4:
+            con.execute("INSERT INTO refine_budgets VALUES ('j_x', '{\"spent_usd_total\":0.2}')")
+        if version >= 5:
+            con.execute("INSERT INTO admission_policy VALUES (1,1000,100,5,1234,1,'commit','signature','fixture')")
+        if version >= 6:
+            con.execute("INSERT INTO budget_overhead VALUES (1,50,'fixture',1234)")
+        if version >= 7:
+            con.execute("INSERT INTO admission_calls(job_id,token,receipt) VALUES ('j_x','w1','{}')")
+            con.execute("INSERT INTO admission_processes(token,host,pid) VALUES ('w1','fixture',12)")
         con.execute(f"PRAGMA user_version={version}")
         con.commit()
         con.close()
@@ -632,7 +370,25 @@ class TestSchema(TempDirCase):
         from herogen.service import store as store_mod
 
         for version in range(1, store_mod.SCHEMA_VERSION):
-            st = Store(self.old_database(version))
+            path = self.old_database(version)
+            with sqlite3.connect(path) as before:
+                removed = ('admissions','admission_work','admission_calls','admission_processes',
+                           'admission_policy','budget_overhead','refine_budgets')
+                snapshots = {}
+                for table in removed:
+                    if before.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                        cols = [r[1] for r in before.execute('PRAGMA table_info('+table+')')]
+                        # v5 had a retired code_id; subsequent immutable migrations intentionally remove it.
+                        cols = [c for c in cols if c != 'code_id']
+                        snapshots[table] = (cols, before.execute('SELECT '+','.join(cols)+' FROM '+table).fetchall())
+            st = Store(path)
+            for table in removed:
+                self.assertIsNone(st.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+                self.assertIsNotNone(st.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ('legacy_'+table,)).fetchone())
+                if table in snapshots:
+                    cols, rows = snapshots[table]
+                    self.assertEqual([tuple(r) for r in st.db.execute('SELECT '+','.join(cols)+' FROM legacy_'+table)], rows)
+            self.assertFalse(st.generation_get()['enabled'])
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
             self.assertIsNone(st.job_get("j_x")["parent_job"])
             self.assertEqual(st.job_get("j_x")["note"], "")
@@ -643,72 +399,13 @@ class TestSchema(TempDirCase):
             self.assertEqual(st.db.execute("SELECT COUNT(*) FROM analytics_events").fetchone()[0], 0,
                              f"v{version} gains an empty analytics table")
             if version >= 5:
-                kept = st.db.execute("SELECT amount_micro, closed, cost_signature FROM admissions "
+                kept = st.db.execute("SELECT amount_micro, closed, cost_signature FROM legacy_admissions "
                                      "WHERE job_id='j_x'").fetchone()
                 self.assertEqual(tuple(kept), (123, 0, 'signature'), f"v{version} keeps its reservation")
-                work = st.db.execute("SELECT state, process FROM admission_work WHERE token='w1'").fetchone()
+                work = st.db.execute("SELECT state, process FROM legacy_admission_work WHERE token='w1'").fetchone()
                 self.assertEqual(tuple(work), ('sent', ''), f"v{version} keeps its work ledger")
             st.close()
 
-    def test_v8_settlement_baselines_and_ambiguous_continuations_survive_upgrade(self):
-        from herogen.service.worker import settle_admissions
-        path = self.old_database(8)
-        with closing(sqlite3.connect(path)) as con:
-            for jid, actual, continued in (('j_paid', 8_000_000, 0), ('j_continued', None, 1)):
-                con.execute("INSERT INTO jobs(id,user_id,client_key,kind,profile,state,created_at,continued_after) "
-                            "VALUES (?,'u_x',?,'sketch','best','canceled',1,?)", (jid, jid, continued))
-                con.execute("INSERT INTO admissions(job_id,user_id,client_key,amount_micro,cost_signature,actual_micro,"
-                            "main_done,side_done,closed,created_at) VALUES (?,'u_x',?,18000000,'signature',?,1,1,1,1)",
-                            (jid, jid, actual))
-            con.execute("UPDATE admissions SET main_done=1,side_done=1,closed=1 WHERE job_id='j_x'")
-            for jid, token in (('j_x', 'w1'), ('j_continued', 'w2')):
-                if token == 'w2':
-                    con.execute("INSERT INTO admission_work(token,job_id,kind,state,created_at) "
-                                "VALUES (?,?,'model','closed',1)", (token, jid))
-                con.execute("UPDATE admission_work SET state='closed',process=? WHERE token=?",
-                            (json.dumps({'host': 'retired-container', 'pid': 42, 'stopped': True}), token))
-                sent = dict(call_id=token, model='synthetic', endpoint='responses', key=token,
-                            outcome='sent', deadline=10, price_usd=.1)
-                for receipt in (sent, {**sent, 'outcome': 'ok', 'cost_usd': .05}):
-                    con.execute('INSERT INTO admission_calls(job_id,token,receipt) VALUES (?,?,?)',
-                                (jid, token, json.dumps(receipt)))
-            con.commit()
-        store = Store(path, clock=Clock()); self.addCleanup(store.close)
-        paid = store._one("SELECT * FROM admissions WHERE job_id='j_paid'")
-        self.assertEqual((paid['actual_micro'], paid['baseline_micro'], paid['settled_phase']), (8_000_000, 8_000_000, 0))
-        self.assertEqual(settle_admissions(store), ['j_x'])
-        self.assertEqual(store._one("SELECT actual_micro FROM admissions WHERE job_id='j_x'")['actual_micro'], 50_000)
-        continued = store._one("SELECT * FROM admissions WHERE job_id='j_continued'")
-        self.assertIsNone(continued['baseline_micro'])
-        self.assertIsNone(continued['actual_micro'])
-        self.assertEqual(continued['amount_micro'], 18_000_000)
-        store.budget_reconcile('j_continued', 9_000_000, 'Synthetic cumulative invoice')
-        self.assertEqual(store._one("SELECT baseline_micro FROM admissions WHERE job_id='j_continued'")['baseline_micro'], 9_000_000)
-        fresh = Store(self.tmp / 'fresh.db'); self.addCleanup(fresh.close)
-        for table in ('admissions', 'admission_work', 'admission_calls', 'admission_processes'):
-            self.assertEqual([tuple(r) for r in store.db.execute(f'PRAGMA table_info({table})')],
-                             [tuple(r) for r in fresh.db.execute(f'PRAGMA table_info({table})')])
-
-    def test_v4_reservations_and_private_history_survive_simplification(self):
-        from herogen.service import store as module
-        path=self.tmp/'v4.db'
-        schema=module.SCHEMA.replace(module.ADMISSION_SCHEMA,'')
-        schema=schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n",'')
-        old_admission=module.LEGACY_ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '')
-        old_admission=';'.join(s for s in old_admission.split(';') if 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)
-        old_admission=old_admission.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')
-        con=sqlite3.connect(path)
-        for statement in (schema+old_admission).split(';'):
-            if statement.strip(): con.execute(statement)
-        con.execute("INSERT INTO users(id,email,created_at,kind) VALUES ('u_old','workspace:u_old',1,'judge')")
-        con.execute("INSERT INTO sessions(hash,user_id,created_at,expires_at,last_seen_at) VALUES ('old','u_old',1,9999999999,9999999999)")
-        con.execute("INSERT INTO admissions(job_id,user_id,code_id,client_key,amount_micro,cost_signature,created_at) VALUES ('j_old','u_old','code','key',123,'signature',1)")
-        con.execute('PRAGMA user_version=5'); con.commit(); con.close()
-        store=Store(path); self.addCleanup(store.close)
-        self.assertEqual(store.user_get('u_old')['kind'],'guest')
-        self.assertEqual(store.session_get('old',86400)['id'],'u_old')
-        self.assertEqual(store.budget_report()['admissions'][0]['amount_micro'],123)
-        self.assertFalse(store.budget_report()['admissions'][0]['closed'])
 
     def test_an_unknown_version_is_refused(self):
         path = self.tmp / "new.db"
@@ -744,6 +441,14 @@ class TestSchema(TempDirCase):
         self.assertIs(cm.exception, error)
         with self.assertRaises(sqlite3.ProgrammingError):
             connection.execute("SELECT 1")
+
+
+class SnapshotStore(Store):
+    def write_marker(self, label):
+        self.audit_add('fixture', 'snapshot_test', label)
+
+    def markers(self):
+        return [{'email': r['subject']} for r in reversed(self.audit_list(1000)) if r['action'] == 'snapshot_test']
 
 
 class SimVolume:
@@ -801,7 +506,7 @@ def newest_state(shared_meta: Path) -> list[str]:
         return []
     con = sqlite3.connect(str(reader.local))
     try:
-        return sorted(r[0] for r in con.execute("SELECT email FROM allowlist"))
+        return sorted(r[0] for r in con.execute("SELECT subject FROM audit WHERE action='snapshot_test'"))
     finally:
         con.close()
 
@@ -819,20 +524,20 @@ class Container:
                                 owner=name.encode().hex())
         self.snap.acquire()
         self.snap.restore()
-        self.store = Store(self.snap.local, persist=self.snap.save)
+        self.store = SnapshotStore(self.snap.local, persist=self.snap.save)
         Container.opened.append(self)
 
     def write(self, email: str) -> str:
         for _ in range(3):
             try:
-                self.store.allow_add(email)
+                self.store.write_marker(email)
                 return "ok"
             except Superseded:
                 return "busy"
             except SnapshotConflict:
                 self.store.close()
                 self.snap.restore()
-                self.store = Store(self.snap.local, persist=self.snap.save)
+                self.store = SnapshotStore(self.snap.local, persist=self.snap.save)
         return "busy"
 
 
@@ -901,7 +606,7 @@ class TestSnapshotInterleavings(ContainerCase):
         self.assertEqual(b.write("later@example.com"), "ok", "B is not thrown back to A's snapshot")
         self.assertEqual(newest_state(self.meta), ["first@example.com", "from-b@example.com", "later@example.com"])
         c = Container(self.tmp, "c")
-        self.assertEqual([r["email"] for r in c.store.allow_list()],
+        self.assertEqual([r["email"] for r in c.store.markers()],
                          ["first@example.com", "from-b@example.com", "later@example.com"])
 
     def test_a_crash_after_the_upload_loses_nothing_acknowledged(self):
@@ -915,9 +620,9 @@ class TestSnapshotInterleavings(ContainerCase):
 
         a.vol.after_reload[a.vol.reloads + 2] = crash      # the read-back after the commit never completes
         with self.assertRaises(RuntimeError):
-            a.store.allow_add("unconfirmed@example.com")
+            a.store.write_marker("unconfirmed@example.com")
         b = Container(self.tmp, "b")
-        self.assertIn("first@example.com", [r["email"] for r in b.store.allow_list()])
+        self.assertIn("first@example.com", [r["email"] for r in b.store.markers()])
         self.assertEqual(b.write("from-b@example.com"), "ok")
         self.assertIn("from-b@example.com", newest_state(self.meta))
 
@@ -931,7 +636,7 @@ class TestSnapshotInterleavings(ContainerCase):
 
         a.vol.before_commit = crash
         with self.assertRaises(RuntimeError):
-            a.store.allow_add("never@example.com")
+            a.store.write_marker("never@example.com")
         self.assertEqual(sorted(p.name for p in self.meta.iterdir()), before)
         self.assertEqual(newest_state(self.meta), ["first@example.com"])
 
@@ -956,7 +661,7 @@ class TestSnapshotInterleavings(ContainerCase):
         a.vol.mid_commit = lambda: state.update(b=Container(self.tmp, "b"))
         self.assertEqual(a.write("from-a@example.com"), "busy")
         b = state["b"]
-        restored = [r["email"] for r in b.store.allow_list()]
+        restored = [r["email"] for r in b.store.markers()]
         self.assertIn("from-a@example.com", restored, "B restored A's new snapshot, which was already whole")
         self.assertEqual(b.write("from-b@example.com"), "ok")
         self.assertEqual(newest_state(self.meta), sorted(restored + ["from-b@example.com"]))
@@ -990,8 +695,8 @@ class TestSnapshotInterleavings(ContainerCase):
             sa.save(con)                          # a's first save sees b's larger lease: a never writes
         con.close()
         sb.restore()
-        sbs = Store(sb.local, persist=sb.save)
-        sbs.allow_add("from-b@example.com")
+        sbs = SnapshotStore(sb.local, persist=sb.save)
+        sbs.write_marker("from-b@example.com")
         self.assertEqual(newest_state(self.meta), ["from-b@example.com"])
         sbs.close()
 
@@ -1035,7 +740,7 @@ class TestSnapshotReads(ContainerCase):
                              [f for f in files if f.startswith("meta-")], "nothing was written or removed")
             undo()
         c = Container(self.tmp, "c")                      # a healthy restart later
-        self.assertEqual([r["email"] for r in c.store.allow_list()], self.acked)
+        self.assertEqual([r["email"] for r in c.store.markers()], self.acked)
         self.assertEqual(c.write("after@example.com"), "ok")
         self.assertEqual(newest_state(self.meta), sorted(self.acked + ["after@example.com"]))
 
@@ -1055,7 +760,7 @@ class TestSnapshotReads(ContainerCase):
                 Container(self.tmp, "b")
         finally:
             snapmod.shutil.copyfile = real
-        self.assertEqual([r["email"] for r in Container(self.tmp, "c").store.allow_list()], self.acked)
+        self.assertEqual([r["email"] for r in Container(self.tmp, "c").store.markers()], self.acked)
 
     def test_a_short_read_stops_the_start_and_loses_nothing(self):
         import herogen.service.snapshot as snapmod
@@ -1077,7 +782,7 @@ class TestSnapshotReads(ContainerCase):
             snapmod.shutil.copyfile = real
         self.assertIn("read back", "\n".join(logs.output))
         self.assertEqual(list(self.meta.glob("quarantine-*")), [], "a short read is not corruption")
-        self.assertEqual([r["email"] for r in Container(self.tmp, "c").store.allow_list()], self.acked)
+        self.assertEqual([r["email"] for r in Container(self.tmp, "c").store.markers()], self.acked)
 
     def test_a_corrupt_newest_snapshot_is_quarantined_and_survives_pruning(self):
         newest = max(self.meta.glob("meta-*.db"))
@@ -1088,7 +793,7 @@ class TestSnapshotReads(ContainerCase):
         quarantined = list(self.meta.glob("quarantine-*"))
         self.assertEqual([q.name.endswith(newest.name) for q in quarantined], [True], "kept, under quarantine")
         self.assertFalse(newest.exists())
-        self.assertEqual([r["email"] for r in b.store.allow_list()], self.acked[:4], "the previous snapshot")
+        self.assertEqual([r["email"] for r in b.store.markers()], self.acked[:4], "the previous snapshot")
         self.assertEqual(b.write("b1@example.com"), "ok")
         b.store.close()
         c = Container(self.tmp, "c")                       # another container, with no memory of the corruption
@@ -1114,7 +819,7 @@ class TestSnapshotReads(ContainerCase):
     def test_a_volume_with_nothing_starts_empty(self):
         shutil.rmtree(self.tmp / "shared")
         (self.tmp / "shared").mkdir()
-        self.assertEqual(Container(self.tmp, "fresh").store.allow_list(), [])
+        self.assertEqual(Container(self.tmp, "fresh").store.markers(), [])
 
     def test_snapshots_need_no_side_files(self):
         (self.meta / "meta-00000001-61-0000000001.db-shm").write_bytes(b"x")   # left by an older version
@@ -1186,7 +891,7 @@ class TestOperatorQuarantine(ContainerCase):
         self.assertFalse(wedged.exists())
         self.assertTrue((self.meta / out["as"]).exists(), "kept, under quarantine")
         c = Container(self.tmp, "c")
-        self.assertEqual([r["email"] for r in c.store.allow_list()], ["u0@example.com", "u1@example.com"])
+        self.assertEqual([r["email"] for r in c.store.markers()], ["u0@example.com", "u1@example.com"])
         self.assertEqual(c.write("after@example.com"), "ok")
 
     def test_the_operators_lease_stops_a_running_store(self):
@@ -1214,7 +919,7 @@ class TestOperatorQuarantine(ContainerCase):
         with self.assertLogs("herogen.service", "WARNING") as logs:
             c = Container(self.tmp, "c")
         self.assertIn("an operator allowed it", "\n".join(logs.output))
-        self.assertEqual(c.store.allow_list(), [])
+        self.assertEqual(c.store.markers(), [])
         self.assertEqual(c.write("fresh@example.com"), "ok")
         self.assertEqual(list(self.meta.glob("allow-empty-*")), [], "the permission is used up by the first save")
         self.assertEqual(len(list(self.meta.glob("quarantine-*"))), 3, "every quarantined file is still there")
@@ -1228,7 +933,7 @@ class TestSnapshots(TempDirCase):
         snap = self.snap("a")
         snap.acquire()
         snap.restore()
-        store = Store(snap.local, persist=snap.save)
+        store = SnapshotStore(snap.local, persist=snap.save)
         make_user(store)
         gen = snap.head[2]
         self.assertGreaterEqual(gen, 3)
@@ -1236,9 +941,9 @@ class TestSnapshots(TempDirCase):
         snap2 = self.snap("b")
         snap2.acquire()
         self.assertEqual(snap2.restore(), gen)
-        s2 = Store(snap2.local, persist=snap2.save)
+        s2 = SnapshotStore(snap2.local, persist=snap2.save)
         self.assertEqual([u["email"] for u in s2.users_list()], ["alice@example.com"])
-        s2.allow_add("bob@example.com")
+        s2.write_marker("bob@example.com")
         meta = self.tmp / "vol" / "meta"
         self.assertLessEqual(len(list(meta.glob("meta-*.db"))), 3)
         self.assertEqual(len(list(meta.glob("lease-*"))), 1, "older leases are cleared by the holder")
@@ -1248,7 +953,7 @@ class TestSnapshots(TempDirCase):
         a, b = self.snap("a"), self.snap("b")
         a.acquire()
         a.restore()
-        sa = Store(a.local, persist=a.save)
+        sa = SnapshotStore(a.local, persist=a.save)
         make_user(sa)
         b.epoch, b.owner, b.last = a.epoch, a.owner, None   # b holds a's lease but not its newest snapshot
         con = sqlite3.connect(str(a.local))
@@ -1262,7 +967,7 @@ class TestSnapshots(TempDirCase):
         a = self.snap("a")
         a.acquire()
         a.restore()
-        sa = Store(a.local, persist=a.save)
+        sa = SnapshotStore(a.local, persist=a.save)
         make_user(sa)
         sa.close()
         key = a.head
@@ -1270,8 +975,8 @@ class TestSnapshots(TempDirCase):
         b = self.snap("b")
         b.acquire()
         self.assertEqual(b.restore(), key[2] - 1)
-        sb = Store(b.local, persist=b.save)
-        sb.allow_add("bob@example.com")     # the corrupt file is skipped, not taken as the newest
+        sb = SnapshotStore(b.local, persist=b.save)
+        sb.write_marker("bob@example.com")     # the corrupt file is skipped, not taken as the newest
         self.assertGreater(b.head[:2], key[:2])
         sb.close()
 

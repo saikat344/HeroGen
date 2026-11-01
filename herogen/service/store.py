@@ -1,10 +1,10 @@
-"""The metadata store: users, allowlist, invites, sign-in links, sessions, jobs, stages, audit log.
+"""The metadata store: guest workspaces, admin sign-in, jobs, stages and audit log.
 
 One SQLite database (WAL journal) written by one process at a time. Every write runs in a `BEGIN IMMEDIATE`
 transaction under a lock and calls `persist()` afterwards, which on Modal snapshots the database to its Volume
 before the call returns (see `snapshot.py`); locally the database file itself is the durable copy.
 
-The store never sees a secret: sign-in links, sessions and invite codes arrive as keyed hashes (`auth.py`), and
+The store never sees a secret: sign-in links and sessions arrive as keyed hashes (`auth.py`), and
 nothing here sends email or touches run folders. Rows come back as plain dicts so they cross a Modal call
 unchanged. Rate-limit counters live in memory only: they are lost when the process restarts, which only
 forgives a few requests.
@@ -26,13 +26,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from herogen.service.admission import (
-    AdmissionStore, SCHEMA as ADMISSION_SCHEMA, LEGACY_SCHEMA as LEGACY_ADMISSION_SCHEMA,
-    PHASE_MIGRATION, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN,
-)
+from herogen.service.migrations import SCHEMA as ADMISSION_SCHEMA, LEGACY_SCHEMA as LEGACY_ADMISSION_SCHEMA, PHASE_MIGRATION
+from herogen.service.generation import GenerationStore, SCHEMA as GENERATION_SCHEMA
 from herogen.service.analytics import AnalyticsStore, SCHEMA as ANALYTICS_SCHEMA, PUBLIC as ANALYTICS_PUBLIC
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     6: ("ALTER TABLE admission_work ADD COLUMN process TEXT NOT NULL DEFAULT ''",
@@ -58,6 +56,11 @@ MIGRATIONS = {
         "ALTER TABLE jobs ADD COLUMN stop_after TEXT",
         "ALTER TABLE jobs ADD COLUMN continued_after INTEGER NOT NULL DEFAULT 0"),
     8: PHASE_MIGRATION,
+    10: (*tuple(f"ALTER TABLE {name} RENAME TO legacy_{name}" for name in (
+        'admissions', 'admission_work', 'admission_calls', 'admission_processes',
+        'admission_policy', 'budget_overhead', 'refine_budgets')),
+        GENERATION_SCHEMA.strip(),
+        "INSERT INTO generation_settings(id,max_running) VALUES (1, 5)"),
     9: tuple(s.strip() for s in ANALYTICS_SCHEMA.split(';') if s.strip()),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
@@ -74,15 +77,9 @@ STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped",
 # What a stage the attempt was still running becomes when the attempt ends without recording it (a cancel, a
 # delete, the sweep requeueing or failing a lost worker): requeued, it runs again; otherwise it never finishes.
 STAGE_WHEN_ENDED = {"queued": "pending", "canceled": "canceled"}
-# Stages that run beside the job (they never decide or delay it): only the held-out views, used for scoring.
-SIDE_STAGES = ("2h",)
-SIDE_FINAL = ("passed", "unavailable")
 DISPATCH_GRACE_S = 300.0    # a queued job dispatched this recently is taken to be starting
 SEEN_EVERY_S = 300.0        # how often a session's last-seen time is written
 DAY_S = 86400.0
-REFUNDS_PER_DAY = 2         # failed jobs per user per 24 hours that may give their quota back
-# Shown on a refunded job: the day's slot comes back, the job still counts toward the lifetime total.
-REFUND_NOTE = " It does not use up one of today's heroes, but it still counts toward your total."
 
 SCHEMA = """
 CREATE TABLE users (
@@ -153,10 +150,6 @@ class StoreError(Exception):
         return (type(self), (str(self), self.code))
 
 
-class QuotaExceeded(StoreError):
-    code = "quota"
-
-
 class Conflict(StoreError):
     code = "conflict"
 
@@ -204,27 +197,28 @@ class RateLimiter:
             return True, 0
 
 
-class Store(AdmissionStore, AnalyticsStore):
+class Store(GenerationStore, AnalyticsStore):
     # Methods the service's own functions may invoke by name (modal_app.StoreService.call).
     PUBLIC = frozenset({
-        "rate_hit", "invite_valid", "signin_eligibility", "login_token_create", "login_token_info",
-        "login_complete", "session_get", "session_revoke", "user_get", "usage", "user_delete",
+        "rate_hit", "login_token_create", "login_token_info",
+        "login_complete", "session_get", "session_revoke", "user_get", "user_delete",
         "job_create", "job_get", "jobs_list", "job_dispatch", "job_claim", "job_current", "job_stage_set",
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
-        "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
-        "job_refine_budget", "job_continue", "job_versions",
-    }) | ADMISSION_PUBLIC | ANALYTICS_PUBLIC
+        "job_renew",
+        "job_continue", "job_versions",
+        "guest_open", "generation_get",
+    }) | ANALYTICS_PUBLIC
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
-        "allow_add", "allow_remove", "allow_list", "invite_create", "invite_list", "invite_revoke",
-        "users_list", "user_set_status", "user_set_quota", "audit_list", "jobs_admin_list",
-    }) | ADMISSION_ADMIN
+        "users_list", "user_set_status", "audit_list", "jobs_admin_list",
+        "generation_update",
+    })
 
     def __init__(self, path: Path | str, clock: Callable[[], float] = time.time,
                  persist: Callable[[sqlite3.Connection], None] | None = None,
-                 refunds_per_day: int = REFUNDS_PER_DAY) -> None:
-        self.refunds_per_day = refunds_per_day
+                 max_running: int | None = None) -> None:
+        self.default_max_running = max_running if max_running is not None else int(os.environ.get("HEROGEN_SERVICE_MAX_RUNNING", "5"))
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock
@@ -266,6 +260,10 @@ class Store(AdmissionStore, AnalyticsStore):
                     for v in range(version, SCHEMA_VERSION):
                         for stmt in MIGRATIONS[v]:
                             self.db.execute(stmt)
+                if version == 0:
+                    for stmt in MIGRATIONS[10]:
+                        self.db.execute(stmt)
+                self.db.execute('UPDATE generation_settings SET max_running=? WHERE id=1', (self.default_max_running,))
                 self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 self.db.execute("COMMIT")
             except BaseException:
@@ -308,107 +306,16 @@ class Store(AdmissionStore, AnalyticsStore):
     def rate_hit(self, bucket: str, limit: int, window_s: float) -> tuple[bool, int]:
         return self.rates.hit(bucket, limit, window_s)
 
-    # ---- allowlist and invites --------------------------------------------------------------------------
-
-    def allow_add(self, email: str, note: str = "", subject: str = "") -> None:
-        """`subject` is what the audit log records for the address: a keyed digest (`Signer.tag`), never the
-        address itself."""
-        with self._tx() as c:
-            c.execute("INSERT INTO allowlist(email, added_at, note) VALUES (?,?,?) "
-                      "ON CONFLICT(email) DO UPDATE SET note=excluded.note", (email, self.clock(), note))
-            self._audit(c, "admin", "allow_add", subject)
-
-    def allow_remove(self, email: str, subject: str = "") -> bool:
-        with self._tx() as c:
-            n = c.execute("DELETE FROM allowlist WHERE email=?", (email,)).rowcount
-            self._audit(c, "admin", "allow_remove", subject)
-        return n > 0
-
-    def allow_list(self) -> list[dict[str, Any]]:
-        return self._all("SELECT email, added_at, note FROM allowlist ORDER BY added_at")
-
-    def invite_create(self, code_hash: str, max_uses: int, ttl_s: float, email: str | None = None,
-                      note: str = "") -> dict[str, Any]:
-        if max_uses < 1 or ttl_s <= 0:
-            raise StoreError("an invite needs at least one use and a positive lifetime")
-        iid = new_id("i")
-        now = self.clock()
-        with self._tx() as c:
-            c.execute("INSERT INTO invites(id, code_hash, created_at, expires_at, max_uses, email, note) "
-                      "VALUES (?,?,?,?,?,?,?)", (iid, code_hash, now, now + ttl_s, max_uses, email, note))
-            self._audit(c, "admin", "invite_create", iid, {"max_uses": max_uses, "bound": bool(email)})
-        return self._invite_row(iid)
-
-    def _invite_row(self, iid: str) -> dict[str, Any]:
-        row = self._one("SELECT id, created_at, expires_at, max_uses, uses, email, note, revoked_at FROM invites "
-                        "WHERE id=?", (iid,))
-        if row is None:
-            raise NotFound("no such invite")
-        return row
-
-    def invite_list(self) -> list[dict[str, Any]]:
-        return self._all("SELECT id, created_at, expires_at, max_uses, uses, email, note, revoked_at FROM invites "
-                         "ORDER BY created_at")
-
-    def invite_revoke(self, invite_id: str) -> bool:
-        with self._tx() as c:
-            n = c.execute("UPDATE invites SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
-                          (self.clock(), invite_id)).rowcount
-            self._audit(c, "admin", "invite_revoke", invite_id)
-        return n > 0
-
-    def _open_invite(self, c: sqlite3.Connection, invite_hash: str) -> sqlite3.Row | None:
-        row = c.execute("SELECT * FROM invites WHERE code_hash=?", (invite_hash,)).fetchone()
-        if (row is None or row["revoked_at"] is not None or row["expires_at"] <= self.clock()
-                or row["uses"] >= row["max_uses"]):
-            return None
-        return row
-
-    def invite_valid(self, invite_hash: str) -> bool:
-        """Whether an invite code exists and is open (not revoked, expired or used up), judged from the code alone:
-        the answer never depends on an address. Read-only."""
-        with self.lock:
-            return self._open_invite(self.db, invite_hash) is not None
-
-    def _usable_invite(self, c: sqlite3.Connection, invite_id: str | None, email: str) -> dict[str, Any] | None:
-        if not invite_id:
-            return None
-        row = c.execute("SELECT * FROM invites WHERE id=?", (invite_id,)).fetchone()
-        if (row is None or row["revoked_at"] is not None or row["expires_at"] <= self.clock()
-                or row["uses"] >= row["max_uses"] or (row["email"] and row["email"] != email)):
-            return None
-        return dict(row)
 
     # ---- sign-in ----------------------------------------------------------------------------------------
 
-    def signin_eligibility(self, email: str, invite_hash: str | None) -> dict[str, Any]:
-        """Whether a sign-in link may be sent to `email`: an active account, an allowlisted address, or an invite
-        code usable by this address. `invalid_invite` says whether the code itself is not open, judged from the code
-        alone (see `invite_valid`); a code bound to another address is open but gives this address nothing."""
-        with self.lock:
-            c = self.db
-            user = c.execute("SELECT status FROM users WHERE email=? AND deleted_at IS NULL", (email,)).fetchone()
-            invite_id = None
-            invalid_invite = False
-            if invite_hash:
-                row = self._open_invite(c, invite_hash)
-                invalid_invite = row is None
-                inv = self._usable_invite(c, row["id"] if row else None, email)
-                invite_id = inv["id"] if inv else None
-            if user is not None:
-                return {"eligible": user["status"] == "active", "invite_id": None, "invalid_invite": invalid_invite,
-                        "existing": True}
-            allowed = c.execute("SELECT 1 FROM allowlist WHERE email=?", (email,)).fetchone() is not None
-            return {"eligible": allowed or invite_id is not None, "invite_id": None if allowed else invite_id,
-                    "invalid_invite": invalid_invite, "existing": False}
 
-    def login_token_create(self, token_hash: str, email: str, ttl_s: float, invite_id: str | None = None,
-                           actor: str = "") -> None:
+    def login_token_create(self, token_hash: str, email: str, ttl_s: float, actor: str = "") -> None:
         now = self.clock()
         with self._tx() as c:
-            c.execute("INSERT INTO login_tokens(hash, email, invite_id, created_at, expires_at) VALUES (?,?,?,?,?)",
-                      (token_hash, email, invite_id, now, now + ttl_s))
-            self._audit(c, actor or "anonymous", "signin_link_sent", "", {"invite": bool(invite_id)})
+            c.execute("INSERT INTO login_tokens(hash, email, created_at, expires_at) VALUES (?,?,?,?)",
+                      (token_hash, email, now, now + ttl_s))
+            self._audit(c, actor or "anonymous", "signin_link_sent")
 
     def _live_token(self, c: sqlite3.Connection, token_hash: str) -> dict[str, Any] | None:
         row = c.execute("SELECT * FROM login_tokens WHERE hash=?", (token_hash,)).fetchone()
@@ -416,67 +323,32 @@ class Store(AdmissionStore, AnalyticsStore):
             return None
         return dict(row)
 
-    def login_token_info(self, token_hash: str, terms_version: str) -> dict[str, Any] | None:
-        """What the confirmation page shows before a link is used: its address and whether terms must be
-        accepted. Nothing is consumed."""
+    def login_token_info(self, token_hash: str) -> dict[str, Any] | None:
         with self.lock:
             tok = self._live_token(self.db, token_hash)
-            if tok is None:
-                return None
-            user = self.db.execute("SELECT * FROM users WHERE email=? AND deleted_at IS NULL",
-                                   (tok["email"],)).fetchone()
-        new = user is None
-        return {"email": tok["email"], "new_account": new, "expires_at": tok["expires_at"],
-                "needs_terms": new or (user["terms_version"] or "") != terms_version}
+            return {"email": tok["email"], "expires_at": tok["expires_at"]} if tok else None
 
-    def login_complete(self, token_hash: str, session_hash: str, *, terms_version: str, accept_terms: bool,
-                       adult: bool, session_ttl_s: float) -> dict[str, Any]:
-        """Use a sign-in link: consume it, create the account if this is its first use, and open a session, all in
-        one transaction. Returns {"status": "ok", "user": ...} or {"status": <reason>} with nothing consumed
-        unless the status is "ok" (so a user who still has to accept the terms can do so with the same link)."""
-        now = self.clock()
+    def login_complete(self, token_hash: str, session_hash: str, *, admin_emails, session_ttl_s: float):
         with self._tx() as c:
             tok = self._live_token(c, token_hash)
-            if tok is None:
-                return {"status": "invalid"}
-            email = tok["email"]
-            user = c.execute("SELECT * FROM users WHERE email=? AND deleted_at IS NULL", (email,)).fetchone()
-            if user is not None and user["status"] != "active":
-                return {"status": "disabled"}
-            needs_terms = user is None or (user["terms_version"] or "") != terms_version
-            if needs_terms and not (accept_terms and adult and terms_version):
-                return {"status": "needs_terms"}
-            if user is None:
-                allowed = c.execute("SELECT 1 FROM allowlist WHERE email=?", (email,)).fetchone() is not None
-                inv = None if allowed else self._usable_invite(c, tok["invite_id"], email)
-                if not allowed and inv is None:
-                    return {"status": "not_invited"}
-                uid = new_id("u")
-                c.execute("INSERT INTO users(id, email, created_at, invite_id, terms_version, terms_accepted_at, "
-                          "adult_confirmed_at) VALUES (?,?,?,?,?,?,?)",
-                          (uid, email, now, inv["id"] if inv else None, terms_version, now, now))
-                if inv:
-                    c.execute("UPDATE invites SET uses=uses+1 WHERE id=?", (inv["id"],))
-                self._audit(c, uid, "account_created", uid, {"invite": inv["id"] if inv else None})
-            else:
-                uid = user["id"]
-                if needs_terms:
-                    c.execute("UPDATE users SET terms_version=?, terms_accepted_at=?, adult_confirmed_at=? WHERE id=?",
-                              (terms_version, now, now, uid))
-                    self._audit(c, uid, "terms_accepted", uid, {"version": terms_version})
-            # Every outstanding link for this address dies with the one used.
-            c.execute("UPDATE login_tokens SET used_at=? WHERE email=? AND used_at IS NULL", (now, email))
-            c.execute("INSERT INTO sessions(hash, user_id, created_at, expires_at, last_seen_at) VALUES (?,?,?,?,?)",
-                      (session_hash, uid, now, now + session_ttl_s, now))
-            c.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, uid))
-            self._audit(c, uid, "signed_in", uid)
-            row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        return {"status": "ok", "user": self._public_user(dict(row))}
+            if tok is None or tok['email'] not in admin_emails:
+                return {'status': 'invalid'}
+            user = c.execute('SELECT * FROM users WHERE email=? AND deleted_at IS NULL', (tok['email'],)).fetchone()
+            if user and user['status'] != 'active':
+                return {'status': 'invalid'}
+            uid = user['id'] if user else new_id('u')
+            now = self.clock()
+            if not user:
+                c.execute('INSERT INTO users(id,email,created_at) VALUES (?,?,?)', (uid,tok['email'],now))
+            c.execute('UPDATE login_tokens SET used_at=? WHERE email=? AND used_at IS NULL', (now,tok['email']))
+            c.execute('INSERT INTO sessions(hash,user_id,created_at,expires_at,last_seen_at) VALUES (?,?,?,?,?)', (session_hash,uid,now,now+session_ttl_s,now))
+            c.execute('UPDATE users SET last_login_at=? WHERE id=?', (now,uid))
+            self._audit(c,uid,'signed_in',uid)
+            return {'status':'ok', 'user':self.user_get(uid)}
 
     @staticmethod
     def _public_user(row: dict[str, Any]) -> dict[str, Any]:
-        user = {k: row[k] for k in ("id", "email", "status", "created_at", "terms_version", "quota_daily",
-                                    "quota_total", "last_login_at")}
+        user = {k: row[k] for k in ("id", "email", "status", "created_at", "last_login_at")}
         user['kind'] = row.get('kind', 'account')
         if user['kind'] == 'guest':
             user['email'] = None
@@ -530,12 +402,6 @@ class Store(AdmissionStore, AnalyticsStore):
             self._audit(c, "admin", f"user_{status}", row["id"])
         return self.user_get(row["id"]) or {}
 
-    def user_set_quota(self, email: str, daily: int | None, total: int | None) -> dict[str, Any]:
-        with self._tx() as c:
-            row = self._user_by_email(c, email)
-            c.execute("UPDATE users SET quota_daily=?, quota_total=? WHERE id=?", (daily, total, row["id"]))
-            self._audit(c, "admin", "user_quota", row["id"], {"daily": daily, "total": total})
-        return self.user_get(row["id"]) or {}
 
     def user_delete(self, user_id: str) -> list[str]:
         """Delete an account: the address is forgotten, sessions end, every job is marked deleted. Returns the job
@@ -553,53 +419,26 @@ class Store(AdmissionStore, AnalyticsStore):
             c.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, user_id))
             c.execute("UPDATE users SET email=?, deleted_at=?, status='disabled' WHERE id=?",
                       (f"deleted:{user_id}", now, user_id))
-            for job_id in jobs:
-                self._terminal_admission(c, job_id)
-            # Forget the address everywhere it may be: links, the allowlist, invites bound to it (revoked, so the
-            # code does not become usable by anyone) and any audit entry naming it.
+            # Forget the address in links and audit entries.
             email = row["email"]
             c.execute("DELETE FROM login_tokens WHERE email=?", (email,))
-            c.execute("DELETE FROM allowlist WHERE email=?", (email,))
-            c.execute("UPDATE invites SET email=NULL, revoked_at=COALESCE(revoked_at, ?) WHERE email=?", (now, email))
             c.execute("UPDATE audit SET subject='' WHERE subject=?", (email,))
             c.execute("UPDATE audit SET detail='' WHERE instr(detail, ?) > 0", (email,))
             self._audit(c, user_id, "account_deleted", user_id, {"jobs": len(jobs)})
         return jobs
 
-    def usage(self, user_id: str, jobs_per_day: int, jobs_total: int) -> dict[str, Any]:
-        with self.lock:
-            return self._usage(self.db, user_id, jobs_per_day, jobs_total)
-
-    def _usage(self, c: sqlite3.Connection, user_id: str, jobs_per_day: int, jobs_total: int) -> dict[str, Any]:
-        now = self.clock()
-        user = c.execute("SELECT quota_daily, quota_total FROM users WHERE id=?", (user_id,)).fetchone()
-        day_limit = user["quota_daily"] if user and user["quota_daily"] is not None else jobs_per_day
-        total_limit = user["quota_total"] if user and user["quota_total"] is not None else jobs_total
-        day = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND counts_quota=1 AND created_at>?",
-                        (user_id, now - DAY_S)).fetchone()[0]
-        # A refund gives back the day's slot only: refunded jobs still count toward the lifetime total.
-        total = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND (counts_quota=1 OR refunded_at IS NOT NULL)",
-                          (user_id,)).fetchone()[0]
-        oldest = c.execute("SELECT MIN(created_at) FROM jobs WHERE user_id=? AND counts_quota=1 AND created_at>?",
-                           (user_id, now - DAY_S)).fetchone()[0]
-        stored = c.execute("SELECT COALESCE(SUM(bytes),0) FROM jobs WHERE user_id=? AND deleted_at IS NULL",
-                           (user_id,)).fetchone()[0]
-        return {"jobs_today": day, "jobs_per_day": day_limit, "jobs_total": total, "jobs_total_limit": total_limit,
-                "next_daily_slot_at": (oldest + DAY_S) if day >= day_limit and oldest else None,
-                "stored_bytes": stored}
 
     # ---- jobs -------------------------------------------------------------------------------------------
 
     def job_create(self, *, job_id: str, user_id: str, client_key: str, kind: str, profile: str,
-                   jobs_per_day: int, jobs_total: int, storage_max_bytes: int, input_sha: str = "", prompt: str = "",
-                   name: str = "", code_commit: str = "", admission_required: bool = False, cost_signature: str = '',
+                   storage_max_bytes: int, input_sha: str = "", prompt: str = "",
+                   name: str = "", code_commit: str = "",
                    parent_job: str | None = None, from_stage: str | None = None,
                    note: str = "") -> tuple[dict[str, Any], bool]:
         """Create a queued job, or return the one this user already made with the same `client_key`.
 
         Idempotent: the same key and request returns the first job and `False`; the same key with a different
-        request raises Conflict. The quota (jobs in the last 24 hours and in total, counting jobs that cost money)
-        and the storage limit are checked in the same transaction, before anything is paid for."""
+        request raises Conflict. The spend guard and storage limit are checked in the insertion transaction."""
         if kind not in ("sketch", "prompt") or not valid_id(job_id, "j"):
             raise StoreError("bad job request")
         if parent_job is not None:
@@ -631,38 +470,23 @@ class Store(AdmissionStore, AnalyticsStore):
             user = c.execute("SELECT status,kind FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
             if user is None or user["status"] != "active":
                 raise StoreError("this account cannot start jobs", "account")
-            u = self._usage(c, user_id, jobs_per_day, jobs_total)
-            if user["kind"] != "guest" and u["jobs_total"] >= u["jobs_total_limit"]:
-                raise QuotaExceeded(f"you have used all {u['jobs_total_limit']} heroes of this beta account")
-            if user["kind"] != "guest" and u["jobs_today"] >= u["jobs_per_day"]:
-                raise QuotaExceeded(f"you have made {u['jobs_per_day']} heroes in the last 24 hours; try again later")
-            if u["stored_bytes"] >= storage_max_bytes:
-                raise QuotaExceeded("your saved heroes use all of your storage; delete some to make room")
-            protected = admission_required or user['kind'] == 'guest'
-            if protected:
-                self._admit(c, job_id, user_id, client_key, code_commit, cost_signature)
-            self._workspace_free(c, user_id)
+            used = c.execute("SELECT COALESCE(SUM(bytes),0) FROM jobs WHERE user_id=? AND deleted_at IS NULL", (user_id,)).fetchone()[0]
+            if used >= storage_max_bytes:
+                raise StoreError("Your saved heroes use all of your storage; delete some to make room.", "storage_full")
+            self._guard_generation(c)
             c.execute("INSERT INTO jobs(id, user_id, client_key, kind, input_sha, prompt, name, profile, state, "
                       "created_at, code_commit, parent_job, from_stage, note, stop_after) "
                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (job_id, user_id, client_key, kind, input_sha, prompt, name, profile, "queued", self.clock(),
                        code_commit, parent_job, from_stage, note, from_stage))
-            if protected:
-                c.execute('UPDATE jobs SET budget_required=1 WHERE id=?', (job_id,))
             self._audit(c, user_id, "job_created", job_id, {"kind": kind, "profile": profile})
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row), True
 
-    @staticmethod
-    def _workspace_free(c: sqlite3.Connection, user_id: str) -> None:
-        if c.execute("SELECT 1 FROM jobs WHERE user_id=? AND state IN ('queued','running') "
-                     "AND deleted_at IS NULL LIMIT 1", (user_id,)).fetchone():
-            raise Conflict("A hero is already being generated in this workspace. Wait for it to finish.")
 
     def job_continue(self, job_id: str, user_id: str, storage_max_bytes: int, *,
-                     admission_required: bool = False, code_commit: str = '',
-                     cost_signature: str = '') -> dict[str, Any]:
-        """Resume a stopped version once, in the same quota slot and with a fresh retry allowance."""
+                     code_commit: str = '') -> dict[str, Any]:
+        """Resume a stopped version once, preserving stage costs and granting a fresh retry allowance."""
         with self._tx() as c:
             job = c.execute("SELECT * FROM jobs WHERE id=? AND user_id=? AND deleted_at IS NULL",
                             (job_id, user_id)).fetchone()
@@ -672,18 +496,14 @@ class Store(AdmissionStore, AnalyticsStore):
                 return dict(job)  # an HTTP retry never starts another generation
             if job["state"] != "stopped":
                 raise Conflict("Only a version stopped after cover or turnaround can be continued.")
-            self._workspace_free(c, user_id)
             user = c.execute("SELECT status,kind FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
             if user is None or user["status"] != "active":
                 raise StoreError("This account cannot start jobs.", "account")
             used = c.execute("SELECT COALESCE(SUM(bytes),0) FROM jobs WHERE user_id=? AND deleted_at IS NULL",
                              (user_id,)).fetchone()[0]
             if used >= storage_max_bytes:
-                raise QuotaExceeded("Your saved heroes use all of your storage. Delete some to make room.")
-            protected = admission_required or user['kind'] == 'guest' or bool(job['budget_required'])
-            if protected:
-                self._admit(c, job_id, user_id, job['client_key'], code_commit, cost_signature)
-                c.execute('UPDATE jobs SET budget_required=1,code_commit=? WHERE id=?', (code_commit, job_id))
+                raise StoreError("Your saved heroes use all of your storage. Delete some to make room.", "storage_full")
+            self._guard_generation(c)
             self._set_state(c, job, "queued", continued_after=job["attempts"], stop_after=None, finished_at=None, dispatched_at=None,
                             call_id=None, lease_until=None, error_code=None, error_stage=None, error_message=None)
             self._audit(c, user_id, "job_continued", job_id)
@@ -734,8 +554,6 @@ class Store(AdmissionStore, AnalyticsStore):
         cols["state"] = new
         sets = ", ".join(f"{k}=?" for k in cols)
         c.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*cols.values(), job["id"]))
-        if new in TERMINAL_STATES:
-            self._terminal_admission(c, job["id"])
         if old == "running" and new != "running":
             self._end_stages(c, job["id"], STAGE_WHEN_ENDED.get(new, "failed"))
 
@@ -744,7 +562,7 @@ class Store(AdmissionStore, AnalyticsStore):
         """Close the job's own stages left running when its attempt ends. Only the live attempt may write a stage
         (`job_stage_set`), so after a cancel, a delete or the sweep's requeue or failure nothing else ever would,
         and the stage would show as running for good (the page keeps polling while a stage runs). Side stages
-        (`claim` set) are left alone: they run on beside the job and end with `side_finish` or their lease."""
+        (`claim` set) from historical records are left alone."""
         c.execute("UPDATE job_stages SET state=?, lease_until=NULL WHERE job_id=? AND state='running' AND claim IS "
                   "NULL", (state, job_id))
 
@@ -759,16 +577,21 @@ class Store(AdmissionStore, AnalyticsStore):
         """Queued jobs a worker should be started for now, oldest first, keeping at most `max_running` jobs running
         or starting. A job dispatched less than DISPATCH_GRACE_S ago counts as starting."""
         now = self.clock()
-        with self.lock:
-            busy = self.db.execute(
+        with self._tx() as c:
+            self._expire_leases(c)
+            max_running = c.execute("SELECT max_running FROM generation_settings WHERE id=1").fetchone()[0]
+            busy = c.execute(
                 "SELECT COUNT(*) FROM jobs WHERE state='running' OR (state='queued' AND dispatched_at>?)",
                 (now - DISPATCH_GRACE_S,)).fetchone()[0]
             free = max(0, max_running - busy)
             if not free:
                 return []
-            return [dict(r) for r in self.db.execute(
+            rows = [dict(r) for r in c.execute(
                 "SELECT * FROM jobs WHERE state='queued' AND deleted_at IS NULL AND (dispatched_at IS NULL OR "
-                "dispatched_at<=?) ORDER BY created_at LIMIT ?", (now - DISPATCH_GRACE_S, free))]
+                "dispatched_at<=?) ORDER BY created_at,rowid LIMIT ?", (now - DISPATCH_GRACE_S, free))]
+            for row in rows:
+                c.execute('UPDATE jobs SET dispatched_at=? WHERE id=?', (now, row['id']))
+            return rows
 
     @staticmethod
     def _attempts_in_phase(job) -> int:
@@ -822,22 +645,6 @@ class Store(AdmissionStore, AnalyticsStore):
                       (self.clock() + lease_s, job_id))
         return True
 
-    def job_refine_budget(self, job_id: str, attempt: int, action: str, **kwargs) -> dict:
-        """Reserve/settle per-run API spend, acknowledged only after the metadata snapshot is durable.
-
-        Reservations survive worker and store replacement, including re-entry in the same job attempt.
-        Every operation is fenced against canceled, deleted and superseded job attempts.
-        """
-        from herogen.refine_budget import update
-
-        with self._tx() as c:
-            if self._current(c, job_id, attempt) is None:
-                raise StoreError("The job attempt is no longer current.", "stale")
-            row = c.execute("SELECT state FROM refine_budgets WHERE job_id=?", (job_id,)).fetchone()
-            state = update(json.loads(row[0]) if row else None, action, **kwargs)
-            c.execute("INSERT INTO refine_budgets(job_id, state) VALUES (?,?) ON CONFLICT(job_id) "
-                      "DO UPDATE SET state=excluded.state", (job_id, json.dumps(state)))
-        return state
 
     def group_enter(self, job_id: str, attempt: int, group: str, max_entries: int) -> bool:
         """Count a start of one stage group for one attempt. False once it has started more than `max_entries`
@@ -874,27 +681,18 @@ class Store(AdmissionStore, AnalyticsStore):
     def job_finish(self, job_id: str, attempt: int, state: str, *, error_code: str | None = None,
                    error_stage: str | None = None, error_message: str | None = None, seconds: float | None = None,
                    cost_usd: float | None = None, cost_detail: Any = None, bytes_: int | None = None,
-                   refund: bool = False) -> bool:
-        """End the live attempt as succeeded, rejected or failed. `refund` asks for a failed job to give its quota
-        back because the failure was the service's, not the sketch's; `_refund_ok` decides."""
+                   ) -> bool:
+        """End the live attempt and record its cost."""
         if state not in ("succeeded", "rejected", "failed", "stopped"):
             raise StoreError(f"bad final state {state!r}")
         with self._tx() as c:
             job = self._current(c, job_id, attempt)
             if job is None:
                 return False
-            refunded = state == "failed" and refund and self._refund_ok(c, job, cost_usd)
-            if refunded and error_message is not None:
-                error_message += REFUND_NOTE
-            side = self._side_cost(c, job_id)   # a side stage that finished first: its cost joins the job's
-            if side:
-                cost_usd = round((cost_usd or 0.0) + side, 6)
-                cost_detail = {**(cost_detail or {}), "heldout_usd": round(side, 6)}
             self._set_state(c, job, state, finished_at=self.clock(), error_code=error_code, error_stage=error_stage,
                             error_message=error_message, seconds=seconds, cost_usd=cost_usd,
                             cost_detail=json.dumps(cost_detail) if cost_detail is not None else None,
-                            bytes=bytes_, counts_quota=0 if refunded else job["counts_quota"], lease_until=None,
-                            refunded_at=self.clock() if refunded else None)
+                            bytes=bytes_, lease_until=None)
             self._audit(c, "system", f"job_{state}", job_id, {"stage": error_stage, "code": error_code,
                                                                "attempt": attempt})
         return True
@@ -902,7 +700,7 @@ class Store(AdmissionStore, AnalyticsStore):
     def job_requeue(self, job_id: str, attempt: int, max_attempts: int, error_code: str, error_stage: str | None,
                     error_message: str) -> str | None:
         """After an infrastructure error: queue the job for another attempt, or fail it when it is out of attempts
-        (refunded when `_refund_ok` allows). Returns the new state, or None when `attempt` is not the live
+        Returns the new state, or None when `attempt` is not the live
         attempt."""
         with self._tx() as c:
             job = self._current(c, job_id, attempt)
@@ -921,122 +719,29 @@ class Store(AdmissionStore, AnalyticsStore):
         self._audit(c, "system", "job_requeued", job["id"], {"code": error_code, "stage": error_stage})
         return "queued"
 
-    def _refund_ok(self, c: sqlite3.Connection, job: sqlite3.Row, extra_cost: float | None = None) -> bool:
-        """A failed job gives its quota back only if it spent nothing (its stages' recorded cost, model calls and
-        compute together, is zero) and the user has had fewer than `refunds_per_day` refunds in the last 24 hours.
-        Otherwise a stage that fails after paid calls could be used to run paid work without limit."""
-        # Side stages (the held-out views) are left out: they never change whether a job is refunded.
-        spent = c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage NOT IN "
-                          f"({','.join('?' * len(SIDE_STAGES))})", (job["id"], *SIDE_STAGES)).fetchone()[0]
-        if spent + (extra_cost or 0.0) > 0:
-            return False
-        recent = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND refunded_at>?",
-                           (job["user_id"], self.clock() - DAY_S)).fetchone()[0]
-        return recent < self.refunds_per_day
 
     def _fail_ours(self, c: sqlite3.Connection, job: sqlite3.Row, error_code: str, error_stage: str | None,
                    error_message: str) -> None:
-        """Fail a job for the service's reasons, refunding it when `_refund_ok` allows."""
-        refunded = self._refund_ok(c, job)
+        """Fail a job and retain its recorded stage costs."""
         self._set_state(c, job, "failed", finished_at=self.clock(), error_code=error_code, error_stage=error_stage,
-                        cost_usd=self._recorded_cost(c, job["id"]),
-                        error_message=error_message + (REFUND_NOTE if refunded else ""),
-                        counts_quota=0 if refunded else job["counts_quota"], lease_until=None,
-                        refunded_at=self.clock() if refunded else None)
-        self._audit(c, "system", "job_failed", job["id"], {"code": error_code, "stage": error_stage,
-                                                            "refunded": refunded})
+                        cost_usd=self._recorded_cost(c, job["id"]), error_message=error_message, lease_until=None)
+        self._audit(c, "system", "job_failed", job["id"], {"code": error_code, "stage": error_stage})
 
     def _recorded_cost(self, c: sqlite3.Connection, job_id: str) -> float:
-        """Cumulative own-stage spending plus completed side stages, including on retry or worker loss."""
-        own = c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage NOT IN "
-                        f"({','.join('?' * len(SIDE_STAGES))})", (job_id, *SIDE_STAGES)).fetchone()[0]
-        return round(own + self._side_cost(c, job_id), 6)
+        """Cumulative main-stage spending, including on retry or worker loss."""
+        return round(c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM job_stages WHERE job_id=? AND stage!='2h'", (job_id,)).fetchone()[0], 6)
 
-    # ---- side stages ----------------------------------------------------------------------------------------
-
-    def _side_cost(self, c: sqlite3.Connection, job_id: str) -> float:
-        return c.execute(f"SELECT COALESCE(SUM(cost_usd), 0) FROM job_stages WHERE job_id=? AND stage IN "
-                         f"({','.join('?' * len(SIDE_STAGES))}) AND state IN ('passed', 'unavailable')",
-                         (job_id, *SIDE_STAGES)).fetchone()[0]
-
-    def side_claim(self, job_id: str, stage: str, claim: str, lease_s: float) -> bool:
-        """Start a side stage for a job, at most once per job (no retries, whatever happens to it). Refused when
-        it already started, or the job was canceled, failed, rejected or deleted; the job's own state is never
-        changed."""
-        if stage not in SIDE_STAGES:
-            raise StoreError(f"{stage!r} is not a side stage")
-        now = self.clock()
-        with self._tx() as c:
-            job = c.execute("SELECT state, attempts, deleted_at FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if job is None or job["deleted_at"] is not None or job["state"] not in ("running", "succeeded"):
-                return False
-            n = c.execute("INSERT INTO job_stages(job_id, stage, state, attempt, started_at, claim, lease_until) "
-                          "VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id, stage) DO NOTHING",
-                          (job_id, stage, "running", job["attempts"], now, claim, now + lease_s)).rowcount
-        return n == 1
-
-    def side_renew(self, job_id: str, stage: str, claim: str, lease_s: float) -> bool:
-        """A side stage's heartbeat: keep its lease at least `lease_s` ahead while `claim` holds it and it runs.
-        False once it does not (it finished, or the sweep found its lease run out), and renewing stops."""
-        with self._tx() as c:
-            n = c.execute("UPDATE job_stages SET lease_until=MAX(COALESCE(lease_until, 0), ?) WHERE job_id=? AND "
-                          "stage=? AND claim=? AND state='running'",
-                          (self.clock() + lease_s, job_id, stage, claim)).rowcount
-        return n == 1
-
-    def side_live(self, job_id: str, stage: str, claim: str) -> bool:
-        """True while `claim` holds the side stage and the job has not been deleted (its files may be written)."""
-        row = self._one("SELECT s.state, s.claim, j.deleted_at FROM job_stages s JOIN jobs j ON j.id=s.job_id "
-                        "WHERE s.job_id=? AND s.stage=?", (job_id, stage))
-        return bool(row and row["claim"] == claim and row["state"] == "running" and row["deleted_at"] is None)
-
-    def side_finish(self, job_id: str, stage: str, claim: str, state: str, *, seconds: float | None = None,
-                    cost_usd: float | None = None, message: str = "") -> bool:
-        """Record a side stage's outcome (passed or unavailable). Its cost joins the job's recorded cost, now if
-        the job has finished, else when it does. Nothing else about the job changes: not its state, error,
-        refund or quota."""
-        if state not in SIDE_FINAL:
-            raise StoreError(f"bad side-stage state {state!r}")
-        with self._tx() as c:
-            row = c.execute("SELECT * FROM job_stages WHERE job_id=? AND stage=?", (job_id, stage)).fetchone()
-            if row is None or row["claim"] != claim or row["state"] != "running":
-                return False
-            c.execute("UPDATE job_stages SET state=?, seconds=?, cost_usd=?, message=?, lease_until=NULL "
-                      "WHERE job_id=? AND stage=?", (state, seconds, cost_usd, message[:2000], job_id, stage))
-            job = c.execute("SELECT state, cost_usd, cost_detail FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if job is not None and job["state"] in TERMINAL_STATES and cost_usd:
-                detail = json.loads(job["cost_detail"]) if job["cost_detail"] else {}
-                detail["heldout_usd"] = round(cost_usd, 6)
-                c.execute("UPDATE jobs SET cost_usd=?, cost_detail=? WHERE id=?",
-                          (round((job["cost_usd"] or 0.0) + cost_usd, 6), json.dumps(detail), job_id))
-            self._audit(c, "system", "side_stage_finished", job_id, {"stage": stage, "state": state})
-        return True
-
-    def reconcile_stale(self, max_attempts: int) -> list[tuple[str, str]]:
-        """Running jobs whose lease ran out (the worker died without reporting): requeue or fail each one. A side
-        stage whose lease ran out is recorded as unavailable; its job is not touched."""
-        now = self.clock()
+    def _expire_leases(self, c):
         out = []
-        with self._tx() as c:
-            expired_side = [r['job_id'] for r in c.execute("SELECT job_id FROM job_stages WHERE state='running' AND claim IS NOT NULL AND lease_until<?", (now,))]
-            c.execute("UPDATE job_stages SET state='unavailable', lease_until=NULL, message=? WHERE state='running' "
-                      "AND claim IS NOT NULL AND lease_until<?",
-                      ("The quality check stopped before it finished; the hero is not affected.", now))
-            for job_id in expired_side:
-                c.execute("UPDATE admission_work SET state='uncertain',finished_at=? WHERE job_id=? AND kind='heldout' AND state='open'", (now, job_id))
-                c.execute('UPDATE admissions SET side_done=1 WHERE job_id=?', (job_id,))
-                self._close_admission(c, job_id)
-            for job in c.execute("SELECT * FROM jobs WHERE state='running' AND lease_until<?", (now,)).fetchall():
-                if job['budget_required']:
-                    c.execute("UPDATE admission_work SET state='uncertain',finished_at=? WHERE job_id=? AND kind!='heldout' AND state='open'", (now, job['id']))
-                    self._fail_ours(c, job, 'generation_uncertain', job['stage'],
-                                    'The worker stopped responding. Remote work must be confirmed stopped before another generation.')
-                    out.append((job['id'], 'failed'))
-                else:
-                    out.append((job['id'], self._requeue(c, job, max_attempts, 'worker_lost', job['stage'],
-                                                       'The worker stopped responding.')))
-
+        for job in c.execute("SELECT * FROM jobs WHERE state='running' AND lease_until<=?", (self.clock(),)).fetchall():
+            self._fail_ours(c, job, 'worker_lost', job['stage'], 'The worker stopped responding. Please create another hero.')
+            out.append((job['id'], 'failed'))
         return out
+
+    def reconcile_stale(self, max_attempts):
+        """End lost workers; only their recorded stage cost remains charged."""
+        with self._tx() as c:
+            return self._expire_leases(c)
 
     def job_cancel(self, job_id: str, user_id: str) -> dict[str, Any]:
         with self._tx() as c:
@@ -1045,13 +750,8 @@ class Store(AdmissionStore, AnalyticsStore):
             if job is None:
                 raise NotFound("no such job")
             if job["state"] in ACTIVE_STATES:
-                # A job that never started costs nothing and gives its quota back.
-                refund = job["state"] == "queued" and job["attempts"] == 0
                 self._set_state(c, job, "canceled", finished_at=self.clock(), lease_until=None,
-                                counts_quota=0 if refund else job["counts_quota"])
-                if job['budget_required'] and job['attempts'] == 0:
-                    c.execute('UPDATE admissions SET main_done=1,side_done=1 WHERE job_id=?', (job_id,))
-                    self._close_admission(c, job_id)
+                                cost_usd=self._recorded_cost(c, job_id))
                 self._audit(c, user_id, "job_canceled", job_id)
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row)
@@ -1061,7 +761,6 @@ class Store(AdmissionStore, AnalyticsStore):
         self.job_cancel(job_id, user_id)
         with self._tx() as c:
             c.execute("UPDATE jobs SET note='', deleted_at=? WHERE id=? AND user_id=?", (self.clock(), job_id, user_id))
-            self._terminal_admission(c, job_id)
             self._audit(c, user_id, "job_deleted", job_id)
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row)
@@ -1076,11 +775,10 @@ class Store(AdmissionStore, AnalyticsStore):
                          "OR deleted_at IS NOT NULL)", (cutoff,))
 
     def job_mark_purged(self, job_id: str) -> None:
-        """The job's files are gone: keep the row (quota, cost and audit need it) but drop its inputs."""
+        """The job's files are gone: keep the row for cost accounting and audit but drop its inputs."""
         with self._tx() as c:
             c.execute("UPDATE jobs SET bytes=-1, prompt='', name='', note='', deleted_at=COALESCE(deleted_at, ?) WHERE id=?",
                       (self.clock(), job_id))
-            self._terminal_admission(c, job_id)
             self._audit(c, "system", "job_purged", job_id)
 
     def purge_expired(self, audit_retention_s: float, analytics_retention_s: float = 30 * DAY_S) -> dict[str, int]:

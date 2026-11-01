@@ -25,7 +25,7 @@
   <section id="adminForbidden" class="card narrow" aria-labelledby="forbiddenH" hidden>
     <p class="eyebrow">Restricted console <span></span></p>
     <h1 id="forbiddenH">Admin access required</h1>
-    <p id="forbiddenMsg" class="muted">Sign in with an allowlisted administrator email to view settings and first-party analytics.</p>
+    <p id="forbiddenMsg" class="muted">Sign in with an administrator email to view settings and first-party analytics.</p>
     <div class="row">
       <a id="adminSignInLink" class="button primary-link" href="/admin/signin">Sign in with email</a>
       <a class="button" href="/">Back to HeroGen</a>
@@ -46,86 +46,25 @@
 
     <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" class="admin-panel">
       <div id="budgetStateCard" class="card admin-state-card" role="status" aria-live="polite">
-        <div class="admin-state-row">
-          <div>
-            <p class="note-label">Live-generation admission</p>
-            <p id="budgetSentence" class="admin-sentence">Loading admission state…</p>
-            <p id="budgetDemoNote" class="small muted" hidden></p>
-          </div>
-          <button type="button" id="quickPauseBtn" hidden>Pause now</button>
-        </div>
+        <p class="note-label">Live generation</p><p id="budgetSentence" class="admin-sentence">Loading settings…</p>
+        <button type="button" id="quickPauseBtn">Pause / resume</button>
       </div>
-
-      <div class="admin-grid-2">
-        <section class="card" aria-labelledby="policySummaryH">
-          <div class="row admin-card-head">
-            <h2 id="policySummaryH">Current budget &amp; capacity</h2>
-            <button type="button" id="refreshBudgetBtn" class="small">Refresh</button>
-          </div>
-          <div id="budgetKpis" class="kpi-grid"></div>
-          <div id="budgetBarWrap" class="budget-meter-wrap"></div>
-          <dl id="policyFacts" class="admin-dl"></dl>
-        </section>
-
-        <section class="card" aria-labelledby="verifySummaryH">
-          <h2 id="verifySummaryH">Running code &amp; cost bound</h2>
-          <p class="small muted">Admission requires the running commit and cost-affecting configuration signature to match the configured policy.</p>
-          <dl id="verifyFacts" class="admin-dl"></dl>
-        </section>
-      </div>
-
-      <section class="card" aria-labelledby="openResH">
-        <div class="row admin-card-head">
-          <h2 id="openResH">Open reservations</h2>
-          <span id="openResCount" class="state">0 open</span>
-        </div>
-        <p class="small muted">Read-only view. Reconciling stuck or completed reservations is CLI-only: <code>python3 -m herogen.service admin --data &lt;dir&gt; generation-reconcile &lt;job_id&gt; --actual-usd &lt;amount&gt; --evidence &lt;note&gt;</code> (or via <code>modal run -m herogen.service.modal_app::admin</code>).</p>
-        <div id="openResBody"></div>
+      <section class="card"><div class="row"><h2>Generation spending</h2><button type="button" id="refreshBudgetBtn">Refresh</button></div>
+        <div id="budgetKpis" class="kpi-grid"></div><div id="budgetBarWrap" class="budget-meter-wrap"></div>
       </section>
-
-      <section class="card" aria-labelledby="editBudgetH">
-        <h2 id="editBudgetH">Configure live-generation admission</h2>
-        <p class="small muted">Saves with the running service’s commit and cost signature. Configuring this policy sets HeroGen’s conservative reservation gate; it does not purchase credits or set billing limits on external providers.</p>
-        <form id="budgetForm" novalidate>
-          <fieldset class="admin-mode-fieldset">
-            <legend>Admission mode</legend>
-            <div class="admin-radio-row">
-              <label class="radio-card"><input type="radio" name="budgetMode" id="modeAccepting" value="accepting"> <span><b>Accepting</b><small>Allow new live generations within the bounds below</small></span></label>
-              <label class="radio-card"><input type="radio" name="budgetMode" id="modePaused" value="paused" checked> <span><b>Paused</b><small>Refuse new live generations immediately</small></span></label>
-            </div>
+      <section class="card"><h2>Generation settings</h2>
+        <p class="small muted">Queued and running heroes count at the running estimate until they finish. Finished heroes count at their recorded cost.</p>
+        <form id="budgetForm">
+          <fieldset><legend>Live generation</legend>
+            <label><input type="radio" name="budgetMode" id="modeAccepting"> Accepting heroes</label>
+            <label><input type="radio" name="budgetMode" id="modePaused" checked> Paused</label>
           </fieldset>
-
           <div class="admin-form-grid">
-            <div>
-              <label for="limitUsd">Total limit (USD)</label>
-              <input id="limitUsd" name="limit_usd" type="text" inputmode="decimal" autocomplete="off" placeholder="10.00" required>
-            </div>
-            <div>
-              <label for="reserveUsd">Per-hero reserve (USD)</label>
-              <input id="reserveUsd" name="reserve_usd" type="text" inputmode="decimal" autocomplete="off" placeholder="3.00" required>
-            </div>
-            <div>
-              <label for="maxActive">Max active (1–32)</label>
-              <input id="maxActive" name="max_active" type="number" min="1" max="32" step="1" value="1" required>
-            </div>
-            <div>
-              <label for="durationDays">Duration (days)</label>
-              <input id="durationDays" name="days" type="number" min="0.1" max="3650" step="any" value="14" required>
-            </div>
+            <div><label for="limitUsd">Total limit (USD)</label><input id="limitUsd" type="number" min="0" step="0.000001" required></div>
+            <div><label for="runningEstimateUsd">Running estimate per hero (USD)</label><input id="runningEstimateUsd" type="number" min="0" step="0.000001" required></div>
+            <div><label for="maxRunning">Max running (1–32)</label><input id="maxRunning" type="number" min="1" max="32" step="1" required></div>
           </div>
-
-          <label for="boundNote">Bound note</label>
-          <textarea id="boundNote" name="bound_note" rows="2" maxlength="1000" placeholder="How the per-hero reserve bound was measured for this commit…" required></textarea>
-
-          <label class="check admin-cap-check" for="confirmProviderCaps">
-            <input type="checkbox" id="confirmProviderCaps" name="confirm_provider_caps">
-            <span>Provider spending caps are set (required to enable live generation).</span>
-          </label>
-
-          <div class="row admin-submit-row">
-            <button type="submit" id="saveBudgetBtn" class="primary">Save admission settings</button>
-            <p id="budgetFormMsg" class="msg small" role="status" aria-live="polite"></p>
-          </div>
+          <div class="row admin-submit-row"><button type="submit" id="saveBudgetBtn" class="primary">Save settings</button><p id="budgetFormMsg" class="msg small" role="status" aria-live="polite"></p></div>
         </form>
       </section>
     </section>
@@ -181,8 +120,6 @@
         <div id="jobTotalsKpis" class="kpi-grid"></div>
         <h3 class="admin-subhead">Main pipeline (in execution order)</h3>
         <div id="mainStagesWrap" class="admin-table-wrap"></div>
-        <h3 class="admin-subhead">Side stage (runs separately after main completion)</h3>
-        <div id="sideStagesWrap" class="admin-table-wrap"></div>
       </section>
 
       <section class="card" aria-labelledby="secBudgetAnalyticsH">

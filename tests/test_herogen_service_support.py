@@ -54,7 +54,7 @@ def png(w: int = 400, h: int = 600, colour=(30, 30, 30), mode: str = "RGB", **sa
 def settings(tmp: Path, **kw) -> Settings:
     base = dict(mode="dev", base_url="http://testserver", data_dir=tmp / "data", meta_path=tmp / "meta.db",
                 outbox_path=tmp / "outbox.jsonl", signing_key=secrets.token_urlsafe(48).encode(),
-                terms_version="t1", allowed_hosts=("testserver",), jobs_per_day=3, jobs_total=5,
+                terms_version="t1", allowed_hosts=("testserver",),
                 max_running_jobs=2, rate_api_ip=(10_000, 60))
     base.update(kw)
     return Settings(**base)
@@ -70,14 +70,14 @@ class TempDirCase(unittest.TestCase):
 
 
 def make_user(store, email: str = "alice@example.com", terms: str = "t1", session: str | None = None) -> dict:
-    """An active account, created through the real sign-in path (allowlist, link, terms). Its session's hash is
+    """An active account, created through the real administrator link sign-in path. Its session's hash is
     sha256("ses-<email>") unless `session` names another value to hash."""
     import hashlib
 
-    store.allow_add(email)
+    store.generation_update(actor="fixture", enabled=True, limit_usd=1000)
     h = hashlib.sha256(secrets.token_bytes(16)).hexdigest()
     store.login_token_create(h, email, 600)
     ses = hashlib.sha256((session or f"ses-{email}").encode()).hexdigest()
-    res = store.login_complete(h, ses, terms_version=terms, accept_terms=True, adult=True, session_ttl_s=3600)
+    res = store.login_complete(h, ses, admin_emails=(email,), session_ttl_s=3600)
     assert res["status"] == "ok", res
     return res["user"]

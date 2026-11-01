@@ -1070,22 +1070,16 @@ class StageTests(unittest.TestCase):
         self.assertEqual(retry["status"], "cap_reached")
         self.assertEqual(retry["budget"]["pending_attempt_usd"], .01)
 
-    def test_service_budget_is_read_even_when_the_local_record_is_lost(self):
-        from herogen.refine_budget import update
-        from herogen.service.refine_budget import budget_bridge
-        durable = {"state": None}
-        def operation(action, **kwargs):
-            durable["state"] = update(durable["state"], action, **kwargs)
-            return durable["state"]
-        with budget_bridge(operation) as env, mock.patch.dict(os.environ, env):
-            self.client.error = KeyboardInterrupt()
-            with self.assertRaises(KeyboardInterrupt):
-                stage.run_stage3f(self.run, self.client, cap_usd=.01)
-            (self.run / "stage-3f.json").unlink()
-            replacement = FakeClient(self.run / "replacement-cache")
-            rec = stage.run_stage3f(self.run, replacement, cap_usd=.01)
-        self.assertEqual(rec["status"], "cap_reached")
-        self.assertEqual(rec["budget"]["prior_usd"], .01)
+    def test_cap_and_retry_use_run_record_without_bridge_environment(self):
+        clean_env = {key: value for key, value in os.environ.items()
+                     if not key.startswith(('HEROGEN_REFINE_BUDGET', 'HEROGEN_CALL_LEDGER'))}
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            first = stage.run_stage3f(self.run, self.client, cap_usd=.01)
+            replacement = FakeClient(self.run / 'replacement-cache')
+            second = stage.run_stage3f(self.run, replacement, cap_usd=.01)
+        self.assertEqual(first['status'], 'cap_reached')
+        self.assertEqual(second['status'], 'cap_reached')
+        self.assertLessEqual(second['budget']['spent_usd_total'], .01)
         self.assertEqual(replacement.log.cost_usd(), 0)
 
     def test_normal_repaint_cannot_add_hair_to_a_bald_scalp(self):

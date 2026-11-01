@@ -78,7 +78,7 @@ class RedoModelErrorsTest(JobCase):
         return self.store.job_create(
             job_id=child_id, user_id=self.uid, client_key=f"redo-errors-{stage}", kind="sketch",
             profile=self.parent["profile"], input_sha=self.parent["input_sha"], parent_job=self.parent["id"],
-            from_stage=str(stage), note=self.note, jobs_per_day=10, jobs_total=10, storage_max_bytes=10**10)[0]
+            from_stage=str(stage), note=self.note, storage_max_bytes=10**10)[0]
 
     def run_failure(self, stage, state, code):
         child = self.child(stage)
@@ -92,18 +92,16 @@ class RedoModelErrorsTest(JobCase):
         self.assertNotIn(self.note, "\n".join(self.output))
         return child, saved
 
-    def test_redo_policy_refusals_are_private_rejections_without_refunds(self):
+    def test_redo_policy_refusals_are_private_rejections_remain_private(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
         self.fail_top = True  # An unreached top must not affect the refusal.
         for stage in (1, 2):
             with self.subTest(stage=stage):
                 child, saved = self.run_failure(stage, "rejected", "rejected")
-                self.assertEqual(saved["counts_quota"], 1)
-                self.assertIsNone(saved["refunded_at"])
                 self.assertIn("content policy", saved["error_message"])
                 self.assertIn("rewording", saved["error_message"])
                 if stage == 2:
-                    self.assertEqual(saved["cost_usd"], 0, "a refusal before any paid answer still keeps quota")
+                    self.assertEqual(saved["cost_usd"], 0, "a refusal before any paid answer costs nothing")
                 record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(stage)
                 self.assertEqual(record["status"], "error")
 
@@ -125,8 +123,6 @@ class RedoModelErrorsTest(JobCase):
         for stage in (1, 2):
             with self.subTest(stage=stage):
                 child, saved = self.run_failure(stage, "queued", "model_unavailable")
-                self.assertEqual(saved["counts_quota"], 1)
-                self.assertIsNone(saved["refunded_at"])
                 self.store.job_cancel(child["id"], self.uid)
 
     def test_redo_permanent_errors_ignore_markers_in_echoed_text(self):

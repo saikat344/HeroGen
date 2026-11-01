@@ -52,11 +52,7 @@ SURFACES = ("landing", "gallery_detail", "workbench")
 CREATE_RESULTS = (
     "accepted",
     "generation_paused",
-    "cost_bound_unverified",
     "generation_budget_exhausted",
-    "generation_capacity",
-    "workspace_active",
-    "quota",
     "conflict",
     "busy",
     "upload_rejected",
@@ -77,13 +73,13 @@ CREATE_RESULTS = (
     "public_access_closed",
     "csrf",
     "account",
+    "storage_full",
     "bad_request",
     "internal",
     "network_error",
 )
 
 MAIN_STAGE_ORDER = ("p", "0", "1", "2", "3", "3f", "4", "6", "5")
-SIDE_STAGE_ORDER = ("2h",)
 FINAL_JOB_STATES = ("succeeded", "rejected", "failed", "canceled")
 ACTIVE_JOB_STATES = ("queued", "running")
 
@@ -169,91 +165,6 @@ def format_usd_plain(micro: int) -> str:
     if cents == cents.to_integral_value():
         return f"${val:,.2f}"
     return f"${val.normalize():f}"
-
-
-def budget_sentence(policy: dict[str, Any] | None, status: dict[str, Any], now: float,
-                    code_commit: str = "") -> str:
-    """One plain-English sentence describing current live-generation admission state."""
-    if status.get("accepting") and policy is not None:
-        max_active = int(policy["max_active"])
-        slots = "one at a time" if max_active == 1 else f"up to {max_active} at a time"
-        return (f"Accepting heroes now: {slots}, up to {format_usd_plain(policy['reserve_micro'])} each, "
-                f"{format_usd_plain(policy['limit_micro'])} in total")
-    if policy is None:
-        return "Paused — no live-generation budget has been configured yet"
-    if not policy["enabled"]:
-        return "Paused"
-    if policy["expires_at"] <= now:
-        return "Paused — the configured budget window has expired (generation_paused)"
-    reason = str(status.get("reason") or "generation_paused")
-    if reason == "cost_bound_unverified":
-        if not re.fullmatch(r"[a-f0-9]{40}", code_commit):
-            return "Refusing live generations (cost_bound_unverified): running service has no verified 40-character commit"
-        if policy["code_commit"] != code_commit:
-            return "Refusing live generations (cost_bound_unverified): running commit differs from the policy commit"
-        return "Refusing live generations (cost_bound_unverified): running cost signature differs from the policy"
-    if reason == "generation_budget_exhausted":
-        return "Refusing live generations (generation_budget_exhausted): remaining budget is below the per-hero reserve"
-    if reason == "generation_capacity":
-        return "Refusing live generations (generation_capacity): all active generation slots are occupied"
-    return f"Paused ({reason})"
-
-
-def budget_summary(report: dict[str, Any], now: float) -> dict[str, Any]:
-    """USD budget figures derived conservatively from `store.budget_report()`."""
-    policy = report.get("policy")
-    admissions = report.get("admissions") or []
-    overhead_row = report.get("overhead")
-    work = report.get("work") or []
-    uncertain_jobs = {w["job_id"] for w in work if w.get("state") == "uncertain"}
-
-    open_rows = [a for a in admissions if not a["closed"]]
-    closed_rows = [a for a in admissions if a["closed"]]
-    reserved_micro = sum(
-        a["actual_micro"] if a["actual_micro"] is not None else a["amount_micro"]
-        for a in open_rows
-    )
-    closed_micro = sum(
-        a["actual_micro"] if a["actual_micro"] is not None else a["amount_micro"]
-        for a in closed_rows
-    )
-    overhead_micro = int(overhead_row["amount_micro"]) if overhead_row else 0
-    used_micro = closed_micro + overhead_micro
-    committed_micro = used_micro + reserved_micro
-    limit_micro = int(policy["limit_micro"]) if policy else None
-    remaining_micro = max(0, limit_micro - committed_micro) if limit_micro is not None else None
-
-    return {
-        "configured": policy is not None,
-        "enabled": bool(policy["enabled"]) if policy else False,
-        "expired": bool(policy and policy["expires_at"] <= now),
-        "limit_usd": micro_to_usd(limit_micro),
-        "reserve_usd": micro_to_usd(int(policy["reserve_micro"])) if policy else None,
-        "max_active": int(policy["max_active"]) if policy else None,
-        "expires_at": policy["expires_at"] if policy else None,
-        "bound_note": policy["bound_note"] if policy else "",
-        "used_usd": micro_to_usd(used_micro),
-        "reserved_usd": micro_to_usd(reserved_micro),
-        "remaining_usd": micro_to_usd(remaining_micro),
-        "overhead_usd": micro_to_usd(overhead_micro),
-        "committed_usd": micro_to_usd(committed_micro),
-        "active_reservations": len(open_rows),
-        "open_reservations": [
-            {
-                "job_id": a["job_id"],
-                "created_at": a["created_at"],
-                "age_seconds": max(0.0, round(now - a["created_at"], 1)),
-                "amount_usd": micro_to_usd(int(a["amount_micro"])),
-                "main_done": bool(a["main_done"]),
-                "side_done": bool(a["side_done"] or not a["side_required"]),
-                "uncertain": a["job_id"] in uncertain_jobs,
-            }
-            for a in open_rows
-        ],
-        "policy_commit": policy["code_commit"] if policy else None,
-        "policy_cost_signature": policy["cost_signature"] if policy else None,
-        "alerts": list(report.get("summary", {}).get("alerts") or []),
-    }
 
 
 def _percentile(sorted_vals: list[float], q: float, digits: int) -> float | None:
@@ -374,6 +285,7 @@ class AnalyticsStore:
             idea_started = suggestion_clicks + starter_selects + upload_selects + idea_typed
             download_clicks = sum(download_by_fmt.values())
 
+            budget_rep = self.generation_get()
             job_rows = self._all(
                 "SELECT j.id, j.state, j.seconds, j.cost_usd, COALESCE(u.kind, 'account') AS user_kind "
                 "FROM jobs j LEFT JOIN users u ON u.id = j.user_id WHERE j.created_at>=?",
@@ -381,10 +293,9 @@ class AnalyticsStore:
             )
             stage_rows = self._all(
                 "SELECT js.job_id, js.stage, js.state, js.seconds, js.cost_usd "
-                "FROM job_stages js JOIN jobs j ON j.id = js.job_id WHERE j.created_at>=?",
+                "FROM job_stages js JOIN jobs j ON j.id = js.job_id WHERE j.created_at>=? AND js.stage!='2h'",
                 (since,),
             )
-            budget_rep = self.budget_report()
 
         state_counts: dict[str, int] = {}
         user_kind_jobs: dict[str, int] = {"account": 0, "guest": 0}
@@ -480,7 +391,6 @@ class AnalyticsStore:
             },
             "stages": {
                 "main": [build_stage(k) for k in MAIN_STAGE_ORDER],
-                "side": [build_stage(k) for k in SIDE_STAGE_ORDER],
                 "job_totals": {
                     "jobs": accepted_jobs,
                     "timed_jobs": len(job_secs),
@@ -492,7 +402,7 @@ class AnalyticsStore:
                     "total_cost_usd": round(sum(job_costs), 6),
                 },
             },
-            "budget": budget_summary(budget_rep, now),
+            "budget": budget_rep,
             "gallery": {
                 "picker_selections": [
                     {"id": hid, "count": cnt}

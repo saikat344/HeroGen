@@ -1,7 +1,7 @@
 """Service settings, read once from the environment (see docs/ARCHITECTURE.md, "Service").
 
 Secrets come only from the environment, which on Modal is filled from Modal secrets:
-`HEROGEN_SESSION_KEY` (signs session ids, CSRF tokens, sign-in links and invite codes), `HEROGEN_EMAIL_API_KEY`
+`HEROGEN_SESSION_KEY` (signs session ids, CSRF tokens, sign-in links), `HEROGEN_EMAIL_API_KEY`
 (the email provider) and `MODEL_API_KEY` (the Meta Model API, read by herogen.pipeline in the stage workers only).
 The private admin allowlist also stays in runtime secrets, never the image. Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default below.
 """
@@ -49,10 +49,7 @@ class Settings:
     legal_dir: Path | None = None
     admin_emails: tuple[str, ...] = field(default=(), repr=False)
     # Quotas and limits
-    jobs_per_day: int = 5
-    jobs_total: int = 50
     max_running_jobs: int = 5
-    heldout_concurrency: int = 2      # held-out view runs at once, service-wide (they yield to the jobs' own work)
     max_attempts: int = 2
     user_storage_max_bytes: int = 2 * 1024 ** 3
     upload_max_bytes: int = 12 * 1024 ** 2
@@ -84,18 +81,6 @@ class Settings:
     code_commit: str = ""
 
     @property
-    def cost_signature(self) -> str:
-        """Bind the reservation bound to deployment selectors and cost-affecting limits."""
-        import hashlib
-        import json
-        payload = {name: getattr(self, name) for name in (
-            'profiles', 'stage3_args', 'refine_cap_usd', 'stage_timeout_s', 'blender_timeout_s', 'max_attempts',
-            'upload_max_side', 'prompt_max_chars', 'heldout_concurrency')}
-        payload['prompt_selectors'] = {key: os.environ.get(key, '') for key in (
-            'HEROGEN_PROMPT_SKETCH_VERSION', 'HEROGEN_SAME_CHARACTER_VERSION')}
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-
-    @property
     def secure_cookies(self) -> bool:
         return self.base_url.startswith("https://")
 
@@ -123,8 +108,7 @@ class Settings:
         """The limits a signed-in user may see."""
         from herogen.service.uploads import prompt_limit
 
-        return {"jobs_per_day": self.jobs_per_day, "jobs_total": self.jobs_total,
-                "upload_max_bytes": self.upload_max_bytes, "upload_min_side": self.upload_min_side,
+        return {"upload_max_bytes": self.upload_max_bytes, "upload_min_side": self.upload_min_side,
                 "prompt_max_chars": prompt_limit(self.prompt_max_chars), "name_max_chars": self.name_max_chars,
                 "retention_days": self.retention_days, "profiles": list(self.profiles),
                 "default_profile": self.default_profile, "terms_version": self.terms_version}
@@ -151,10 +135,7 @@ ENV = {
     "terms_version": "HEROGEN_SERVICE_TERMS_VERSION",
     "legal_dir": "HEROGEN_SERVICE_LEGAL_DIR",
     "admin_emails": "HEROGEN_SERVICE_ADMIN_EMAILS",
-    "jobs_per_day": "HEROGEN_SERVICE_JOBS_PER_DAY",
-    "jobs_total": "HEROGEN_SERVICE_JOBS_TOTAL",
     "max_running_jobs": "HEROGEN_SERVICE_MAX_RUNNING",
-    "heldout_concurrency": "HEROGEN_SERVICE_HELDOUT_MAX",
     "max_attempts": "HEROGEN_SERVICE_MAX_ATTEMPTS",
     "user_storage_max_bytes": "HEROGEN_SERVICE_USER_STORAGE",
     "upload_max_bytes": "HEROGEN_SERVICE_UPLOAD_MAX_BYTES",
@@ -243,8 +224,8 @@ def validate(s: Settings, require_key: bool = True) -> None:
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
     if not math.isfinite(s.refine_cap_usd) or s.refine_cap_usd < 0:
         raise ConfigError(f"{ENV['refine_cap_usd']} must be finite and nonnegative")
-    for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
-                 "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
+    for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "max_running_jobs",
+                 "max_attempts", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
                  "upload_min_side",
                  "prompt_max_chars", "retention_days", "audit_retention_days", "analytics_retention_days",
                  "stage_timeout_s", "blender_timeout_s"):

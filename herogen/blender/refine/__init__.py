@@ -26,23 +26,19 @@ HAIR_ORDER = ("head+90", "head+135", "head+180", "head-135", "head-90",
 
 
 class Budget:
-    def __init__(self, client, cap, prior=0.0, *, state=None, store=None):
+    def __init__(self, client, cap, prior=0.0, *, state=None):
         if not math.isfinite(cap) or cap < 0:
             raise ValueError("texture-refine API cap must be finite and nonnegative")
         if not math.isfinite(prior) or prior < 0:
             raise ValueError("texture-refine prior spend must be finite and nonnegative")
         self.client, self.cap, self.prior = client, cap, prior
         self.start = len(client.log.calls)
-        self.store = store
         self.state = state if state and "attempts" in state else None
         self.active = None
         self._update("read")
 
     def _update(self, action, **kwargs):
-        if self.store is None:
-            self.state = update_budget(self.state, action, cap=self.cap, prior=self.prior, **kwargs)
-        else:
-            self.state = self.store(action, cap=self.cap, prior=self.prior, **kwargs)
+        self.state = update_budget(self.state, action, cap=self.cap, prior=self.prior, **kwargs)
         return self.state
 
     def spent(self):
@@ -167,7 +163,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                budget_store=None, upscale_texture=False, recipe="RF2R"):
+                upscale_texture=False, recipe="RF2R"):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -186,10 +182,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         old = json.loads(record_path.read_text())
         prior = float((old.get("budget") or {}).get("spent_usd_total", old.get("cost_usd") or 0.0))
         old_budget = old.get("budget")
-    from herogen.service.refine_budget import bridge_enabled, remote_budget
-    if budget_store is None and bridge_enabled():
-        budget_store = remote_budget
-    budget = Budget(client, cap_usd, prior, state=old_budget, store=budget_store)
+    budget = Budget(client, cap_usd, prior, state=old_budget)
     prior = budget.state["spent_usd_total"]
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(upscale_texture=upscale_texture),

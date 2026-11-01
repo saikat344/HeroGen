@@ -1,6 +1,6 @@
 """The service's HTTP layer: a Starlette ASGI app (served by Modal's ASGI support, or uvicorn in dev mode).
 
-Pages: `/` (sign in, new hero, your heroes), `/signin` (the page a sign-in link opens), `/admin` (admin settings
+Pages: `/` (guest workspace and new heroes), `/admin/signin` (admin links), `/admin` (admin settings
 and first-party analytics), `/viewer` (the Studio viewer when the deployed code has it, else a minimal one),
 `/terms`, `/privacy`, `/healthz`.
 API (JSON; every unsafe method needs the CSRF header): see docs/ARCHITECTURE.md, "Service", for the table.
@@ -42,25 +42,20 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from herogen.service import bundle, labapi
-from herogen.service.admission import micro_usd
 from herogen.service.analytics import (
     DEFAULT_DAYS,
     MAX_DAYS,
     MIN_DAYS,
-    budget_sentence,
-    budget_summary,
     validate_batch,
 )
-from herogen.service.auth import TOKEN_RE, Signer, mask_email, normalize_email, normalize_invite
+from herogen.service.auth import TOKEN_RE, Signer, mask_email, normalize_email
 from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
 from herogen.service.runner import STAGE_LABELS, plan_for
 from herogen.service.storage import SAFE_SEGMENT, Storage
 from herogen.service.store import (
-    SIDE_STAGES,
     Conflict,
     NotFound,
-    QuotaExceeded,
     RateLimiter,
     StoreError,
     new_id,
@@ -363,11 +358,9 @@ class App:
         data: dict[str, Any] = {"signed_in": u is not None, "is_admin": self.s.is_admin(u),
                                 "limits": self.s.public(), "terms_ready": self.terms_ready(),
                                 "public_demo": self.s.public_demo}
-        if self.s.public_demo:
-            data['generation'] = await self.call(self.svc.store.admission_status, self.s.code_commit, self.s.cost_signature)
+        data['generation'] = await self.call(self.svc.store.generation_get)
         if u is not None:
             data["user"] = {"email": u["email"], "created_at": u["created_at"], "kind": u.get('kind', 'account')}
-            data["usage"] = await self.call(self.svc.store.usage, u["id"], self.s.jobs_per_day, self.s.jobs_total)
         data["csrf"], new = self.csrf_for(request)
         resp = JSONResponse(data)
         if new:
@@ -375,8 +368,6 @@ class App:
         return resp
 
     async def public_access(self, request: Request) -> Response:
-        if not self.s.public_demo:
-            return error(503, 'public_access_closed', 'Public live access is not open. The gallery remains available.')
         if (limited := await self.limit(f"guest-ip:{self.svc.signer.tag(self.client_ip(request))}", self.s.rate_auth_ip)) is not None:
             return limited
         session = self.svc.signer.new_token()
@@ -388,7 +379,7 @@ class App:
         except StoreError as exc:
             if exc.code == 'busy':
                 return busy_response()
-            return error(503, exc.code, str(exc), {'Retry-After': '5'} if exc.code == 'generation_capacity' else None)
+            return error(503, exc.code, str(exc), None)
         csrf_cookie = self.svc.signer.new_token()
         resp = JSONResponse({'ok': True, 'csrf': self.svc.signer.csrf_token(csrf_cookie)})
         self.set_cookie(resp, self.session_cookie, session, self.s.session_ttl_s)
@@ -405,35 +396,20 @@ class App:
             return error(400, "bad_email", "Enter a valid email address.")
         if (r := await self.limit(f"auth-email:{self.svc.signer.tag(email)}", self.s.rate_auth_email)) is not None:
             return r
-        raw_code = body.get("invite_code")
-        invite_hash = None
-        if raw_code not in (None, ""):
-            code = normalize_invite(raw_code)
-            if code is None:
-                return error(400, "invalid_invite", "That invite code is not valid.")
-            invite_hash = self.svc.signer.hash("invite", code)
-            # Judged from the code alone (a read, the same for every address), so it says nothing about who has
-            # an account.
-            if not await self.call(self.svc.store.invite_valid, invite_hash):
-                return error(400, "invalid_invite", "That invite code is not valid, has expired or has been used up.")
-        # The same answer, after the same work, for every address. Whether it may sign in, the link (a durable store
-        # write) and the email all happen after the response has gone.
-        task = BackgroundTask(self._signin_link, email, invite_hash, ip_tag)
+        task = BackgroundTask(self._signin_link, email, ip_tag)
         return JSONResponse({"ok": True, "message": "If this address can sign in, a sign-in link is on its way. "
                                                     "It expires in "
                                                     f"{max(1, self.s.link_ttl_s // 60)} minutes."}, background=task)
 
-    def _signin_link(self, email: str, invite_hash: str | None, ip_tag: str) -> None:
+    def _signin_link(self, email: str, ip_tag: str) -> None:
         """After the response: check the address, make the link and send it, when the address may sign in."""
         try:
-            elig = self.svc.store.signin_eligibility(email, invite_hash)
-            event("signin_requested", eligible=elig["eligible"], ip=ip_tag)
-            if not elig["eligible"]:
+            if email not in self.s.admin_emails:
                 return
             token = self.svc.signer.new_token()
             self.svc.store.login_token_create(self.svc.signer.hash("login", token), email, self.s.link_ttl_s,
-                                              elig["invite_id"], f"ip:{ip_tag}")
-            link = f"{self.s.origin}/signin#t={token}"
+                                              actor=f"ip:{ip_tag}")
+            link = f"{self.s.origin}/admin/signin#t={token}"
             self.svc.sender.send(signin_message(email, link, max(1, self.s.link_ttl_s // 60)))
             event("signin_email_sent")
         except EmailError as e:
@@ -454,31 +430,23 @@ class App:
         token = await self._token(request, await self.json_body(request))
         if isinstance(token, JSONResponse):
             return token
-        info = await self.call(self.svc.store.login_token_info, self.svc.signer.hash("login", token),
-                               self.s.terms_version)
-        if info is None:
+        info = await self.call(self.svc.store.login_token_info, self.svc.signer.hash("login", token))
+        if info is None or info["email"] not in self.s.admin_emails:
             return error(400, "invalid_link", "This sign-in link has expired or was already used. Ask for a new one.")
-        return JSONResponse({"email": mask_email(info["email"]), "new_account": info["new_account"],
-                             "needs_terms": info["needs_terms"], "terms_version": self.s.terms_version,
-                             "terms_ready": self.terms_ready()})
+        return JSONResponse({"email": mask_email(info["email"])})
 
     async def auth_verify(self, request: Request) -> Response:
         body = await self.json_body(request)
         token = await self._token(request, body)
         if isinstance(token, JSONResponse):
             return token
-        if not self.terms_ready():
-            return error(503, "signups_closed", "Sign-in is not open yet: the terms have not been published.")
         session = self.svc.signer.new_token()
         res = await self.call(self.svc.store.login_complete, self.svc.signer.hash("login", token),
-                              self.svc.signer.hash("session", session), terms_version=self.s.terms_version,
-                              accept_terms=body.get("accept_terms") is True, adult=body.get("adult") is True,
+                              self.svc.signer.hash("session", session), admin_emails=self.s.admin_emails,
                               session_ttl_s=self.s.session_ttl_s)
         status = res["status"]
-        if status == "needs_terms":
-            return error(400, "needs_terms", "Please confirm that you are 18 or older and accept the terms.")
         if status != "ok":
-            # One message for an unknown, used, expired, disabled or uninvited link.
+            # One message for an unknown, used, expired, disabled or non-admin link.
             return error(400, "invalid_link", "This sign-in link has expired or was already used. Ask for a new one.")
         fresh = self.svc.signer.new_token()  # a new CSRF cookie at the privilege change
         resp = JSONResponse({"ok": True, "csrf": self.svc.signer.csrf_token(fresh)})
@@ -496,29 +464,9 @@ class App:
         self.clear_cookie(resp, self.csrf_cookie)
         return resp
 
-    async def delete_account(self, request: Request) -> Response:
-        u = await self.require_user(request)
-        body = await self.json_body(request)
-        if body.get("confirm") != "delete my account":
-            return error(400, "confirm", "Type the confirmation text to delete your account.")
-        jobs = await self.call(self.svc.store.user_delete, u["id"])
-        await self.call(self._delete_user_files, u["id"])
-        event("account_deleted", user=u["id"], jobs=len(jobs))
-        resp = JSONResponse({"ok": True})
-        self.clear_cookie(resp, self.session_cookie)
-        self.clear_cookie(resp, self.csrf_cookie)
-        return resp
-
-    def _delete_user_files(self, user_id: str) -> None:
-        self.svc.storage.volume.refresh(0)
-        self.svc.storage.delete_user(user_id)
-        self.svc.storage.volume.commit()
 
     # ---- jobs -------------------------------------------------------------------------------------------
 
-    async def quota(self, request: Request) -> Response:
-        u = await self.require_user(request)
-        return JSONResponse(await self.call(self.svc.store.usage, u["id"], self.s.jobs_per_day, self.s.jobs_total))
 
     async def jobs_list(self, request: Request) -> Response:
         u = await self.require_user(request)
@@ -578,10 +526,9 @@ class App:
         try:
             job, created = await self.call(
                 self.svc.store.job_create, job_id=job_id, user_id=u["id"], client_key=key, kind=kind, profile=profile,
-                jobs_per_day=self.s.jobs_per_day, jobs_total=self.s.jobs_total,
                 storage_max_bytes=self.s.user_storage_max_bytes, input_sha=sha, prompt=prompt, name=name,
-                code_commit=self.s.code_commit, admission_required=self.s.public_demo, cost_signature=self.s.cost_signature)
-        except (QuotaExceeded, Conflict, StoreError) as e:
+                code_commit=self.s.code_commit)
+        except (Conflict, StoreError) as e:
             if e.code == "busy":
                 # Not confirmed either way: the job may have been saved. Its sketch stays (so a saved job can run;
                 # retention removes it if no job claims it), and sending the same form again with the same
@@ -591,9 +538,8 @@ class App:
                                      "second one.")
             if png is not None:
                 await self.call(self._drop_input, u["id"], job_id)
-            status = {"quota": 429, "conflict": 409, 'workspace_active': 409, 'generation_paused': 503, 'cost_bound_unverified': 503,
-                      'generation_budget_exhausted': 503, 'generation_capacity': 503}.get(e.code, 400)
-            headers = {'Retry-After': '5'} if e.code == 'generation_capacity' else None
+            status = {"conflict": 409, "generation_paused": 503, "generation_budget_exhausted": 503}.get(e.code, 400)
+            headers = None
             return error(status, e.code, str(e), headers)
         if not created and png is not None:
             await self.call(self._drop_input, u["id"], job_id)
@@ -626,7 +572,6 @@ class App:
         for spec in plan_for(job["kind"], job["profile"]):
             r = rows.get(spec.key)
             stages.append({"key": spec.key, "label": spec.label, "state": r["state"] if r else "pending",
-                           "side": spec.key in SIDE_STAGES,
                            "seconds": r["seconds"] if r else None, "cost_usd": r["cost_usd"] if r else None,
                            "message": r["message"] if r else ""})
         err = None
@@ -720,10 +665,8 @@ class App:
                 self.svc.store.job_create, job_id=new, user_id=u["id"], client_key=key,
                 kind=parent["kind"], profile=parent["profile"], input_sha=parent["input_sha"],
                 prompt=parent["prompt"], name=parent["name"], code_commit=self.s.code_commit,
-                jobs_per_day=self.s.jobs_per_day, jobs_total=self.s.jobs_total,
                 storage_max_bytes=self.s.user_storage_max_bytes,
-                parent_job=jid, from_stage=str(stage), note=note,
-                admission_required=self.s.public_demo, cost_signature=self.s.cost_signature)
+                parent_job=jid, from_stage=str(stage), note=note)
         except StoreError as e:
             if e.code != "busy":
                 await self.call(self._delete_files, u["id"], new)
@@ -752,8 +695,7 @@ class App:
         if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
             return r
         await self.call(self.svc.store.job_continue, jid, u["id"], self.s.user_storage_max_bytes,
-                        admission_required=self.s.public_demo, code_commit=self.s.code_commit,
-                        cost_signature=self.s.cost_signature)
+                        code_commit=self.s.code_commit)
         try:
             await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
         except Exception:
@@ -926,95 +868,21 @@ class App:
             return error(400, "bad_days", f"Query parameter days must be an integer from {MIN_DAYS} to {MAX_DAYS}.")
         return JSONResponse(await self.call(self.svc.store.analytics_report, days))
 
-    async def _budget_view(self) -> dict[str, Any]:
-        def load() -> dict[str, Any]:
-            now = self.now()
-            report = self.svc.store.budget_report()
-            status = self.svc.store.admission_status(self.s.code_commit, self.s.cost_signature)
-            summary = budget_summary(report, now)
-            policy = report.get("policy")
-            commit_valid = bool(re.fullmatch(r"[a-f0-9]{40}", self.s.code_commit))
-            return {
-                **summary,
-                "accepting": bool(status.get("accepting")),
-                "reason": status.get("reason"),
-                "sentence": budget_sentence(policy, status, now, self.s.code_commit),
-                "public_demo": self.s.public_demo,
-                "running": {
-                    "code_commit": self.s.code_commit or None,
-                    "commit_valid": commit_valid,
-                    "cost_signature": self.s.cost_signature,
-                },
-                "commit_matches": bool(policy and commit_valid and policy["code_commit"] == self.s.code_commit),
-                "cost_signature_matches": bool(policy and policy["cost_signature"] == self.s.cost_signature),
-                "now": round(now, 3),
-            }
-
-        return await self.call(load)
-
-    async def admin_budget_get(self, request: Request) -> Response:
+    async def admin_generation_get(self, request: Request) -> Response:
         await self.require_admin(request)
-        return JSONResponse(await self._budget_view())
+        return JSONResponse(await self.call(self.svc.store.generation_get))
 
-    async def admin_budget_post(self, request: Request) -> Response:
+    async def admin_generation_post(self, request: Request) -> Response:
         u = await self.require_admin(request)
         body = await self.json_body(request)
-        enabled = body.get("enabled")
-        if not isinstance(enabled, bool):
-            return error(400, "invalid_budget", "Choose whether live generation is enabled or paused.")
-        confirm_caps = body.get("confirm_provider_caps") is True
-        if enabled and not confirm_caps:
-            return error(400, "invalid_budget",
-                         "Confirm that provider spending caps are set before enabling live generation.")
-        raw_limit = body.get("limit_usd")
-        raw_reserve = body.get("reserve_usd")
-        if isinstance(raw_limit, bool) or raw_limit in (None, ""):
-            return error(400, "invalid_budget", "Enter a total budget limit in USD.")
-        if isinstance(raw_reserve, bool) or raw_reserve in (None, ""):
-            return error(400, "invalid_budget", "Enter a per-hero reserve in USD.")
+        if not body or any(value is None for value in body.values()) or set(body) - {'enabled', 'limit_usd', 'running_estimate_usd', 'max_running'}:
+            return error(400, 'invalid_settings', 'Choose generation settings to update.')
         try:
-            limit_micro = micro_usd(raw_limit)
-            reserve_micro = micro_usd(raw_reserve)
+            updated = await self.call(self.svc.store.generation_update, actor=u['id'], **body)
         except ValueError as exc:
-            return error(400, "invalid_budget", str(exc))
-        if reserve_micro <= 0:
-            return error(400, "invalid_budget", "Per-hero reserve must be greater than $0.")
-        if limit_micro < reserve_micro:
-            return error(400, "invalid_budget", "Total budget limit must be at least the per-hero reserve.")
-        max_active = body.get("max_active")
-        if type(max_active) is not int or not (1 <= max_active <= 32):
-            return error(400, "invalid_budget", "Max active generations must be an integer from 1 to 32.")
-        days = body.get("days")
-        if (isinstance(days, bool) or not isinstance(days, (int, float))
-                or not math.isfinite(days) or not (0 < days <= 3650)):
-            return error(400, "invalid_budget", "Duration in days must be greater than 0 (up to 3650).")
-        bound_note = body.get("bound_note")
-        if not isinstance(bound_note, str) or not bound_note.strip():
-            return error(400, "invalid_budget",
-                         "Enter a bound note describing how the per-hero cost bound was verified.")
-        expires_at = self.now() + float(days) * 86400.0
-        try:
-            await self.call(
-                self.svc.store.budget_configure,
-                limit_micro,
-                reserve_micro,
-                max_active,
-                expires_at,
-                self.s.code_commit,
-                bound_note.strip(),
-                self.s.cost_signature,
-                confirm_caps,
-                enabled,
-                u["id"],
-            )
-        except ValueError as exc:
-            msg = str(exc)
-            if not re.fullmatch(r"[a-f0-9]{40}", self.s.code_commit):
-                msg = "Running service does not have a 40-character commit SHA configured (HEROGEN_SERVICE_COMMIT)."
-            return error(400, "invalid_budget", msg)
-        event("generation_budget_updated", actor=u["id"], enabled=enabled, limit_micro=limit_micro,
-              reserve_micro=reserve_micro, max_active=max_active)
-        return JSONResponse(await self._budget_view())
+            return error(400, 'invalid_settings', str(exc))
+        await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
+        return JSONResponse(updated)
 
     async def not_found(self, request: Request) -> Response:
         return error(404, "not_found", "Not found.")
@@ -1086,7 +954,7 @@ def create_app(svc: Services) -> SecurityHeaders:
     async def http_error(request: Request, exc: HTTPException) -> Response:
         codes = {401: "signed_out", 403: "forbidden", 404: "not_found", 405: "method", 413: "too_large",
                  415: "media_type"}
-        msg = {401: "Open your guest workspace to continue." if s.public_demo else "Sign in first.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
+        msg = {401: "Open your guest workspace to continue.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
         return error(exc.status_code, codes.get(exc.status_code, "bad_request"), msg)
 
     async def server_error(request: Request, exc: Exception) -> Response:
@@ -1098,17 +966,17 @@ def create_app(svc: Services) -> SecurityHeaders:
         503 with Retry-After; the others keep their meaning."""
         if exc.code == "busy":
             return busy_response()
-        status = {"quota": 429, "conflict": 409, "not_found": 404, "account": 400,
-                  "workspace_active": 409, "generation_paused": 503, "cost_bound_unverified": 503,
-                  "generation_budget_exhausted": 503, "generation_capacity": 503}.get(exc.code)
+        status = {"conflict": 409, "not_found": 404, "account": 400, "storage_full": 429,
+                  "generation_paused": 503,
+                  "generation_budget_exhausted": 503}.get(exc.code)
         if status is None:
             log.error("store refused %s %s: %s", request.method, request.url.path, exc.code)
             return error(500, "internal", "Something went wrong on our side. Please try again.")
-        headers = {'Retry-After': '5'} if exc.code == 'generation_capacity' else None
+        headers = None
         return error(status, exc.code, str(exc), headers)
 
     routes = [
-        Route("/", a.index), Route("/signin", a.index), Route("/admin/signin", a.index), Route("/admin", a.admin_page),
+        Route("/", a.index), Route("/admin/signin", a.index), Route("/admin", a.admin_page),
         Route("/viewer", a.viewer), Route("/terms", a.legal), Route("/privacy", a.legal), Route("/healthz", a.healthz),
         Route("/assets/{path:path}", a.assets), Route("/static/{path:path}", a.studio_assets),
         Route("/gallery/{id}", a.gallery_page),
@@ -1117,15 +985,15 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/api/session", a.session),
         Route("/api/events", a.events, methods=["POST"], max_body_size=EVENTS_LIMIT),
         Route("/api/admin/analytics", a.admin_analytics, methods=["GET"]),
-        Route("/api/admin/generation-budget", a.admin_budget_get, methods=["GET"]),
-        Route("/api/admin/generation-budget", a.admin_budget_post, methods=["POST"], max_body_size=JSON_LIMIT),
+        Route("/api/admin/generation", a.admin_generation_get, methods=["GET"]),
+        Route("/api/admin/generation", a.admin_generation_post, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/demo/access", a.public_access, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/request", a.auth_request, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/link", a.auth_link, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/verify", a.auth_verify, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/logout", a.logout, methods=["POST"], max_body_size=JSON_LIMIT),
-        Route("/api/account", a.delete_account, methods=["DELETE"], max_body_size=JSON_LIMIT),
-        Route("/api/quota", a.quota),
+
+
         Route("/api/jobs", a.jobs_list, methods=["GET"]),
         Route("/api/jobs", a.job_create, methods=["POST"], max_body_size=upload_limit),
         Route("/api/jobs/{job}", a.job_get, methods=["GET"]),
@@ -1150,4 +1018,3 @@ def create_app(svc: Services) -> SecurityHeaders:
     app.state.herogen = a
     # Outside Starlette's own error middleware, so its 500 responses carry the headers too.
     return SecurityHeaders(app, s)
-

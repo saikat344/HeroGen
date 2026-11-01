@@ -18,7 +18,7 @@ class RedoRetentionTest(JobCase):
             job_id=child_id, user_id=self.user["id"], client_key="redo-retention-0001",
             kind=parent["kind"], profile=parent["profile"], input_sha=parent["input_sha"],
             prompt=parent["prompt"], name=parent["name"], parent_job=parent["id"], from_stage="1",
-            note=note, jobs_per_day=10, jobs_total=10, storage_max_bytes=10**10)
+            note=note, storage_max_bytes=10**10)
         self.assertEqual(self.go(child), "stopped")
         self.assertEqual(self.store.job_get(child_id)["note"], note)
         return child_id
