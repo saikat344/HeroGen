@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import itertools
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -110,13 +111,21 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
     return out
 
 
+def validate_workers(workers: int) -> None:
+    """Reject invalid candidate concurrency before doing geometry work."""
+    if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 12:
+        raise ValueError("cut workers must be an integer from 1 through 12")
+
+
 def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tuple, cover: dict,
-           dome: tuple[int, int], gate: float) -> tuple[dict, dict]:
+           dome: tuple[int, int], gate: float, workers: int = 3) -> tuple[dict, dict]:
     """Cut offsets (joint -> studs along the cut normal) for the reference mesh, and the record of the search.
 
     `poses` are the gate poses (the ungated ones left out); `cover_mesh` (verts, faces) and `cover` (add_covers
     keyword arguments) shape the shoulder covers as stage 4 does; `dome` is (rings, ring_points) of the caps;
-    `gate` the joint-gap gate the margin is measured from."""
+    `gate` the joint-gap gate the margin is measured from. `workers` (1 through 12) bounds concurrent candidate
+    evaluations; results are consumed in the original candidate order, including equal-score ties."""
+    validate_workers(workers)
     t0 = time.monotonic()
     rig = split.build_rig(sk)
     radius = {j: float(rig.bones[CHILD[j]][2]) for j in JOINTS}
@@ -124,6 +133,12 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
     def worst_gaps(fractions: dict, joints: set | None = None) -> dict:
         offsets = {j: fractions.get(kind, 0.0) * radius[j] for kind in fractions for j in joints_of(kind)}
         return worst_by_joint(verts, faces, sk, offsets, {"gate": poses}, cover_mesh, cover, dome, joints)["gate"]
+
+    def evaluate(fr: dict):
+        try:
+            return fr, worst_gaps(fr, requested), None
+        except UnmeasurableJoints as exc:
+            return fr, None, exc.reasons
 
     zero = worst_gaps({})
     eligible = sorted(k for kinds in GROUPS.values() for k in kinds
@@ -140,23 +155,25 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
         best_score = float("inf")
         best = {}
         tried = [{"fractions": {}, "worst_gap": round(unmoved, 4), "score": round(unmoved, 4)}]
-        for combo in itertools.product(FRACTIONS, repeat=len(movable)):
-            fr = dict(zip(movable, combo))
-            if not any(fr.values()):
-                continue
-            try:
-                g = worst_gaps(fr, set(own) | set(others))     # only the joints this group's cuts can change
-            except UnmeasurableJoints as exc:
-                tried.append({"fractions": fr, "unmeasurable_joints": exc.reasons})
-                continue
-            worst = max(g[j] for j in own)
-            score = worst + NOISE_STUDS * sum(abs(f) for f in fr.values())
-            # a move may not open a neighbouring joint (one whose sections it changes) by more than the noise
-            worse = [j for j in others if g[j] > zero[j] + NOISE_STUDS]
-            tried.append({"fractions": fr, "worst_gap": round(worst, 4), "score": round(score, 4),
-                          "neighbours_opened": worse})
-            if worst < unmoved - NOISE_STUDS and not worse and score < best_score:
-                best_score, best = score, fr
+        candidates = [dict(zip(movable, combo)) for combo in itertools.product(FRACTIONS, repeat=len(movable))
+                      if any(combo)]
+        requested = set(own) | set(others)     # only the joints this group's cuts can change
+        # map preserves product order even when a later candidate finishes first. The serial path also
+        # keeps profiling straightforward and avoids thread overhead for a single worker.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = map(evaluate, candidates) if workers == 1 else pool.map(evaluate, candidates)
+            for fr, g, missing in results:
+                if missing is not None:
+                    tried.append({"fractions": fr, "unmeasurable_joints": missing})
+                    continue
+                worst = max(g[j] for j in own)
+                score = worst + NOISE_STUDS * sum(abs(f) for f in fr.values())
+                # a move may not open a neighbouring joint by more than the noise
+                worse = [j for j in others if g[j] > zero[j] + NOISE_STUDS]
+                tried.append({"fractions": fr, "worst_gap": round(worst, 4), "score": round(score, 4),
+                              "neighbours_opened": worse})
+                if worst < unmoved - NOISE_STUDS and not worse and score < best_score:
+                    best_score, best = score, fr
         chosen.update(best)
         trials[group] = {"joints": own, "neighbours": others, "tried": tried}
     offsets = {j: chosen[k] * radius[j] for kinds in GROUPS.values() for k in kinds for j in joints_of(k)}

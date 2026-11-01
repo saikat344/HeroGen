@@ -169,6 +169,11 @@ class MeshIndex:
             qq, tt = qq[good], tt[good]
             dmin = np.full(len(p), np.inf)
             if len(qq):
+                # A triangle can occupy several searched cells. Evaluate each point/triangle pair once;
+                # removing repetitions leaves both the arithmetic and the minimum unchanged.
+                pairs = np.sort(qq * self.n + tt)
+                pairs = pairs[np.r_[True, pairs[1:] != pairs[:-1]]]
+                qq, tt = pairs // self.n, pairs % self.n
                 np.minimum.at(dmin, qq, self._pair_distance(p[qq], tt))
             whole = count >= full          # the box covers the whole grid: nothing is left unsearched
             done = keep & ((dmin <= r) | whole)
@@ -311,7 +316,7 @@ class MeshIndex:
 
     # ---- rays ---------------------------------------------------------------------------------------------
 
-    def ray_hits(self, origins: np.ndarray, dirs: np.ndarray, t_min: float = 1e-3, step_cells: int = 8) -> np.ndarray:
+    def ray_hits(self, origins: np.ndarray, dirs: np.ndarray, t_min: float = 1e-3, step_cells: int = 2) -> np.ndarray:
         """True for each ray (origin, unit direction) that hits a triangle at t > t_min (`carve.ray_hits`)."""
         return self._ray_query(origins, dirs, t_min, np.inf, step_cells, "both", any_hit=True)[0] >= 0
 

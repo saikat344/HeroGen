@@ -316,11 +316,12 @@ def _texture_source_checks(turnaround: dict, transfer: dict | None, expected_vie
 
 
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
-               profile: str = DEFAULT_PROFILE, cut_search: bool = True) -> dict:
+               profile: str = DEFAULT_PROFILE, cut_search: bool = True, cut_workers: int = 3) -> dict:
     """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
     cut at its joint (for comparison; the record says so)."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
+    cuts.validate_workers(cut_workers)
     builds = LOD_BUILD[profile]
     # An earlier record must not outlive a run that stops: nothing after stage 4 may read a stale pass.
     (run / "stage-4.json").unlink(missing_ok=True)
@@ -426,7 +427,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
     if cut_search:
         cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
-                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE)
+                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE,
+                                              workers=cut_workers)
     else:
         cut_offsets = {}
         cut_record = {"method": "not searched: every cut at its joint (comparison run)", "chosen_fraction": {},
