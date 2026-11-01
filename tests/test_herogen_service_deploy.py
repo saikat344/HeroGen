@@ -69,7 +69,8 @@ def fake_modal():
     m.App = App
     m.Image = types.SimpleNamespace(debian_slim=lambda **k: _Chain(m.image_log))
     m.Volume = types.SimpleNamespace(from_name=lambda n, **k: Named("volume", n, **k))
-    m.Secret = types.SimpleNamespace(from_name=lambda n, **k: Named("secret", n, **k))
+    m.Secret = types.SimpleNamespace(from_name=lambda n, **k: Named("secret", n, **k),
+                                    from_dict=lambda values: Named("secret", "runtime", values=values))
     m.Period = lambda **k: ("period", k)
     m.Cron = lambda s: ("cron", s)
     m.enter = m.method = m.concurrent = m.asgi_app = passthrough
@@ -177,6 +178,22 @@ class TestModalApp(TempDirCase):
         envs = [k for name, a, k in fake.image_log if name == "env"] + [a[0] for name, a, k in fake.image_log
                                                                         if name == "env" and a]
         self.assertFalse(any("s" * 40 in json.dumps(e) or "e" * 40 in json.dumps(e) for e in envs))
+
+    def test_admin_allowlist_is_runtime_only_and_retention_reaches_image(self):
+        private = {"HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
+        mod, fake = self.load({**PROD, **private, "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS": "14"})
+        self.assertNotIn("HEROGEN_SERVICE_ADMIN_EMAILS", mod.IMAGE_ENV)
+        for name, args, _ in fake.image_log:
+            if name == "env":
+                self.assertNotIn("HEROGEN_SERVICE_ADMIN_EMAILS", args[0])
+        for name in ("web", "admin_command"):
+            runtime = [s for s in fake.functions[name]["secrets"] if s.name == "runtime"]
+            self.assertEqual([s.kw["values"] for s in runtime], [private])
+        for name, kw in fake.functions.items():
+            if name not in ("web", "admin_command"):
+                self.assertFalse(any(s.name == "runtime" for s in kw.get("secrets", [])))
+        self.assertEqual(mod.IMAGE_ENV["HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS"], "14")
+        self.assertEqual(fake.functions["retention"]["image"].environment["HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS"], "14")
 
     def test_pipeline_prompt_selectors_are_baked_into_the_worker_image(self):
         selectors = {"HEROGEN_PROMPT_SKETCH_VERSION": "hero-sketch-v1",
@@ -311,7 +328,7 @@ class TestSettings(TempDirCase):
 
     def test_deploy_env_drops_secrets(self):
         env = {"HEROGEN_SERVICE_JOBS_TOTAL": "9", "HEROGEN_SESSION_KEY": "s", "HEROGEN_EMAIL_API_KEY": "e",
-               "MODEL_API_KEY": "m", "HOME": "/x"}
+               "MODEL_API_KEY": "m", "HOME": "/x", "HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
         self.assertEqual(config.env_for_deploy(env), {"HEROGEN_SERVICE_JOBS_TOTAL": "9"})
 
 
