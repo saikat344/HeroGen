@@ -104,7 +104,7 @@ vol = modal.Volume.from_name(os.environ.get("HEROGEN_BODY_VOLUME", "herogen-sam3
                              create_if_missing=True)
 
 _fn_kwargs = dict(image=image, timeout=TIMEOUT, retries=0, scaledown_window=300,
-                  min_containers=int(os.environ.get("HEROGEN_BODY_MIN_CONTAINERS", "1")),
+                  min_containers=int(os.environ.get("HEROGEN_BODY_MIN_CONTAINERS", "0")),
                   max_containers=int(os.environ.get("HEROGEN_BODY_MAX_CONTAINERS", "1")), volumes={"/cache": vol}, secrets=[modal.Secret.from_name("huggingface")])
 if CPU_MODE:
     _fn_kwargs.update(cpu=8.0, memory=32768)
@@ -296,6 +296,11 @@ class Model:
     @modal.enter()
     def load(self):
         _model_state(None)
+
+    @modal.method()
+    def warm(self):
+        """Return after the container entry hook has loaded the model."""
+        return None
 
     @modal.method()
     def identity(self):
