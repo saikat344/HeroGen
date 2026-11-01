@@ -1,4 +1,4 @@
-// Presentation follows reported stage states; the held-out review is a separate side task.
+// Presentation follows reported model and export stage states.
 import { trackOnce } from './analytics.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
@@ -6,6 +6,7 @@ const COPY = {
   1: ['Artwork', 'Painting your hero', 'Create the coloured character artwork that guides the next steps.'],
   2: ['Character views', 'Seeing every side', 'Create front, back and side views for reconstruction.'],
   3: ['3D shape', 'Building the 3D shape', 'Reconstruct the character in three dimensions.'],
+  '3f': ['Texture refine', 'Refining the texture', 'Improve the texture on your website model.'],
   4: ['Game body', 'Preparing the game body', 'Build the body parts and textures for the selected target.'],
   6: ['Roblox rig', 'Preparing the Roblox rig', 'Prepare the Roblox rig when this export is available.'],
   5: ['Results', 'Collecting your results', 'Prepare the results and available downloads.'],
@@ -22,7 +23,7 @@ export function generationState(job) {
   const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
   const title = { queued: 'Waiting for a free worker', running: 'Your hero is taking shape.',
     succeeded: 'Meet your hero.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
-  const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your results are available. Some steps need attention below.' : 'Explore the result and the available downloads.') :
+  const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your model is ready. See the notes below.' : 'Explore the result and the available downloads.') :
     job.state === 'queued' ? 'Your job is saved. It will begin when a worker is available.' :
     job.state === 'canceled' ? 'The job has stopped. Any saved images remain available to inspect.' :
     INTERRUPTED.has(job.state) ? 'Review the reported issue below. Saved outputs remain available.' :
@@ -31,7 +32,7 @@ export function generationState(job) {
     passed: main.filter((s) => s.state === 'passed').length,
     steps: main.map((s) => ({ ...s, title: COPY[s.key]?.[0] || s.label || s.key,
       description: COPY[s.key]?.[2] || 'Follow the status reported by the service.',
-      status: s.state === 'pending' && TERMINAL.has(job.state) ? 'Not reached' : STATE[s.state] || s.state || 'Not reported' })) };
+      status: s.state === 'pending' && TERMINAL.has(job.state) ? (job.state === 'succeeded' && ['4', '6', '5'].includes(s.key) && job.export_state === 'running' ? 'Waiting' : 'Not reached') : STATE[s.state] || s.state || 'Not reported' })) };
 }
 const IMAGES = [['sketch', 'Starting image'], ['cover', 'Artwork'], ['turnaround', 'Character views'],
   ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right']];
@@ -111,7 +112,12 @@ export function generationView($, select3D) {
       text($('#stepDescription'), state.terminal ? (job.state === 'succeeded' ? 'Inspect the model, review the recorded checks, then bring the available files into your game.' : state.subtitle) : (focus?.description || 'Your saved job will start when the service is ready.'));
       text($('#stepMessage'), state.focus?.message || '');
       const issues = state.steps.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
-      $('#stageIssues').replaceChildren(...issues.map((s) => node('p', `${s.title} · ${s.status}${s.message ? ` — ${s.message}` : ''}`)));
+      const robloxState = job.roblox_state || job.export_state;
+      const robloxReason = (job.roblox_message || job.export_message || 'the export could not be prepared.').replace(/^Roblox (?:body|files) unavailable for this hero: /, '');
+      const exportNote = job.state === 'succeeded' ? (robloxState === 'running' ? 'Roblox files: being prepared' : robloxState === 'ready' ? 'Roblox files: ready' : robloxState === 'unavailable' ? `Roblox files: not available for this hero: ${robloxReason}` : '') : '';
+      text($('#exportStatus'), exportNote);
+      $('#exportStatus').hidden = !exportNote;
+      $('#stageIssues').replaceChildren(...issues.map((s) => node('p', s.message || `${s.title} was skipped.`)));
       $('#stageIssues').hidden = !issues.length;
       const available = IMAGES.filter(([k]) => job.images?.[k]);
       const nextSignature = JSON.stringify(available.map(([k]) => [k, job.images[k]]));
@@ -124,7 +130,7 @@ export function generationView($, select3D) {
         }));
       }
       $('#modelTab').hidden = !job.downloads?.glb?.available;
-      const latest = [...available].reverse().find(([k]) => k !== 'heldout')?.[0] || available.at(-1)?.[0] || null;
+      const latest = available.at(-1)?.[0] || null;
       if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !job.downloads?.glb?.available)) {
         pick(job.downloads?.glb?.available ? 'model' : latest);
       } else pick(selected, true);

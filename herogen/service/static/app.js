@@ -184,7 +184,7 @@ async function preview(url) {
 
 // Poll while the job is queued or running.
 function polls(j) {
-  return j.state === 'queued' || j.state === 'running';
+  return j.state === 'queued' || j.state === 'running' || j.export_state === 'running';
 }
 
 function followJob(j, reveal = false) {

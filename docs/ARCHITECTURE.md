@@ -1920,31 +1920,33 @@ remote store calls and separate model, Blender and export workers. Runtime model
 
 ### Spend guard and queue
 
-Schema version 11 adds migration 10 without changing earlier migrations. It renames `admissions`,
-`admission_work`, `admission_calls`, `admission_processes`, `admission_policy`, `budget_overhead` and
-`refine_budgets` to `legacy_<name>`. Their rows remain intact and unused. Jobs, stages, analytics and
-sessions remain. The new `generation_settings` table has exactly one row: `enabled` (default false),
-`limit_usd` (default zero), `running_estimate_usd` (default 1.50) and `max_running` (initialized from
-`HEROGEN_SERVICE_MAX_RUNNING`, default five). Deploys preserve the row. Settings have no expiry or
-binding to a code commit or cost signature.
+Migration 10 (schema 11) retired the historical accounting tables by renaming them to
+`legacy_<name>`, preserving their data. Historical bootstrap and upgrade SQL lives only in
+`herogen/service/migrations.py`; service code has no calls to those retired mechanisms.
+Migration 11 (schema 12) adds `generation_settings.spend_limits_enabled`, default false.
+`HEROGEN_SERVICE_SPEND_LIMITS=true|false` chooses its initial value on a fresh store or upgrade;
+subsequent deploys preserve the saved admin setting. Migration 12 (schema 13) adds model-readiness
+and export-phase state and timing columns without changing earlier migrations.
 
-Job creation checks the following in the same `BEGIN IMMEDIATE` transaction as the job insert:
+Fresh stores accept heroes immediately: generation is enabled and spend limits are off. The independent
+pause switch remains an emergency stop and returns `generation_paused` with “Live generation is paused
+right now.” With spend limits off, creation and continuation skip the spend comparison entirely, and
+texture refinement receives no cap, constructs no Budget, and installs no before/after-call hooks.
+Per-stage call-log costs and per-job cumulative costs are still recorded and included in admin analytics.
+
+Only when `spend_limits_enabled` is on, creation checks this condition in the insertion transaction:
 
 ```
 spent + (queued_and_running_count + 1) * running_estimate_usd <= limit_usd
 ```
 
-`spent` sums recorded `jobs.cost_usd` for every final state, including failed, rejected, canceled and
-stopped jobs, even after file deletion. Queued and running jobs count at the estimate. A final job
-immediately stops counting that estimate; no reconciliation or operator action is required. Lease
-expiry fails a lost worker and records its cumulative stage cost. The sweep performs this expiry;
-guard and settings reads also expire stale leases before counting. The estimate is an admission
-measure based on stage cost records, not a provider invoice or a guaranteed bound on actual charges.
-
-Disabled generation returns `generation_paused` with “Live generation is paused right now.” Insufficient
-budget returns `generation_budget_exhausted` with “The live-generation budget is used up for now.”
-The existing per-IP and per-user request rate limits remain and return clear HTTP errors. Upload and
-storage limits remain. There are no account job quotas, workspace-active refusals or capacity refusals.
+`spent` sums recorded job costs in every final state, including failed, rejected, canceled and stopped
+jobs, even after file deletion. Running exports add their recorded stage costs as they finish. Queued
+and running model-generation jobs count at the running estimate; succeeded jobs preparing exports no
+longer count at that estimate. An exhausted limit returns `generation_budget_exhausted` with
+“The live-generation budget is used up for now.” The gate also enables the refinement cap from
+`HEROGEN_SERVICE_REFINE_CAP_USD` (default $0.80). These are the only spending checks. Request rate,
+upload and storage limits remain, independently of spend limits. There are no account generation quotas.
 
 The dispatcher atomically selects the oldest queued jobs and marks them starting, up to `max_running`,
 counting running and recently dispatched jobs. It retries an unclaimed dispatch after its grace period.
@@ -1958,21 +1960,57 @@ IndexedDB draft, sessionStorage pending key, or restore-after-sign-in flow.
 
 ### Job execution and failures
 
-The service runs `p` (prompt inputs), `0`, `1`, `2`, `3`, `3f`, `4`, `6` and `5`, with profile-based
-selection. Stage 2 runs through `pipestage.py` so the pipeline CLI cannot append stage 2h. The service
-never plans, invokes, displays or counts 2h. Pipeline and Lab held-out functionality remains available.
-The optional Roblox export and results-page failures remain recorded without discarding the GLB.
-Model errors, including `ApiError` and `ReplayMiss`, remain failed stages and failed jobs.
+The service runs `p` (prompt inputs), `0`, `1`, `2`, `3`, `3f`, then the export phase `4`, `6`, `5`,
+with profile-based selection. `pipestage.py` invokes only the requested cover or turnaround function.
+Pipeline and Lab evaluation remain separate from the website generation path.
 
-Claims and stage writes are fenced by attempt number. The orchestrator renews leases, and stage leases
-cover stage timeouts plus a margin. Canceled or deleted workers stop at the next stage boundary. Stale
-leases end the job as failed. Transient reported failures may retry within `max_attempts`, resuming
-passing records. Stage costs accumulate across retries. Hosted groups copy files to local storage and
-commit after stages only while their attempt remains current; deletion during a copy-back removes the
-copied files again. Per-user replay caches avoid repeating completed model calls.
+Before a model exists, transient model/GPU errors use the existing bounded automatic retry path;
+other errors fail with the stage's message. A rejected stage 3 with a saved source or mesh instead
+continues with a visible “The 3D shape is rough” note. Without a mesh it fails clearly. Refinement
+is skipped for that rejected shape because it requires a passing stage-3 record.
 
-Texture refinement uses its in-process Budget and `stage-3f.json` persisted spend, default cap $0.80.
-There is no remote budget bridge, pipe, socket, environment variable or metadata-table access.
+Once a mesh exists, failures or rejections of texture refine, game body, Roblox rig, or results never
+fail the hero. Their `job_stages` rows become `skipped` with a visitor-facing reason; stage JSON keeps
+the actual rejection or error. Model failures (`ApiError`, `ReplayMiss`) remain fully logged and recorded.
+A failed game body also skips the rig, which depends on it. Results may still run independently.
+`UnmeasurableJoints` becomes a rejected stage-4 record naming the joints, rather than an internal crash.
+No measurement, gate or quality threshold is relaxed.
+
+| Stage outcome | Visitor result |
+| --- | --- |
+| p/0/1/2 error or rejection | Existing retry for transient errors; otherwise a clear failure |
+| 3 rejection, source/mesh exists | Rough-shape note; source model; refinement skipped |
+| 3 rejection, no mesh exists | Clear failure: no mesh was saved |
+| 3f failure/rejection | Source model with the unrefined texture and a note |
+| 3f cap stop (limits on) | Successful recorded fallback, retaining completed refinement if exported |
+| 4 failure/rejection | Website GLB; game body and dependent rig unavailable, with notes |
+| 6 failure/rejection | Website GLB; Roblox files unavailable, with a note |
+| 5 failure/rejection | Workbench viewer and website GLB remain available, with a note |
+
+The website model is `03-refined.glb` only when refinement passed and produced it; otherwise
+`03-source.glb`, then `03-mesh.glb`. Older runs without those files can use `04-body/high.glb`.
+All website profiles use that same model for the workbench, viewer and GLB download. The Roblox
+bundle uses its separate game body and is offered as soon as stages 4 and 6 passed and files exist,
+even while the results page is still being prepared.
+
+At website-model readiness, the job becomes `succeeded`, with `model_ready_at`, `finished_at` and
+`seconds` (job-start to model readiness). The viewer, GLB and “Meet your hero.” appear immediately.
+The generation concurrency slot is freed and the next queued hero is dispatched before stage 4 starts.
+The same orchestrator continues game-body and export workers in the background on the same job.
+`export_state` is separately `running`, `ready` or `unavailable`, with a short reason; the workbench
+reports the separate `roblox_state` (derived from actual stage outputs) and says “Roblox files: being prepared”, “ready”, or “not available for this hero: <reason>”. It keeps
+polling while exports run. A results-page error does not invalidate already produced Roblox files.
+
+Claims and writes remain fenced by attempt. Succeeded jobs retain their attempt lease only during
+exports. Heartbeats and stage leases cover copying and worker timeouts. A verified saved-mesh checkpoint also lets lease expiry recover the source model if the orchestrator dies
+during refinement. If an export worker is lost,
+the sweep marks remaining export stages skipped and exports unavailable, preserving visitor success.
+Deletion fences copying back and removes files even if it races a commit. Per-user replay caches
+avoid repeating completed calls. Stage costs accumulate across retries and background exports.
+
+`export_started_at`, `export_finished_at` and `export_seconds` record the export phase duration.
+Analytics reports time-to-model, total time-to-export (model time plus export duration), and export
+duration separately, while the admin table retains every stage's own timing and cost.
 
 ### Authentication and administration
 
@@ -1984,12 +2022,12 @@ There are no public email accounts, invites or allowlist administration.
 
 `GET /admin`, `GET /api/admin/analytics` and `GET`/`POST /api/admin/generation` require an admin session.
 Unsafe requests require CSRF and same-origin checks. Settings shows accepting/paused status, pause/resume,
-total limit, running estimate, max running, and spent/running/remaining figures. Every settings change is
+“Spend limits: off (no spending checks)” with a switch, max running, and recorded cost figures. Total-limit and running-estimate inputs appear only when the spend gate is on. Every settings change is
 audited with the admin user id. The CLI supports:
 
 ```
 python3 -m herogen.service admin --data <dir> generation-settings \
-    [--enable|--pause] [--limit-usd X] [--running-estimate-usd Y] [--max-running N]
+    [--enable|--pause] [--spend-limits true|false] [--limit-usd X] [--running-estimate-usd Y] [--max-running N]
 ```
 
 No flags prints current settings JSON. Operational jobs, users/status, audit, analytics-report and
@@ -2180,11 +2218,11 @@ and stage 3 removes it at entry, before validating options or loading views. The
 Cost uses the shared `COST_BASIS`: configured per-image list-price estimates, with cached calls free. A run is
 estimated at $0.425 with one accepted sample per view; the sample-limit projection is $0.825 before transport
 retries, using the configured prices of $0.01 per Muse Image image and $0.0025 per SAM 3.1 segmentation.
-`--refine-cap-usd` defaults to $0.80; the service sets it with `HEROGEN_SERVICE_REFINE_CAP_USD`. Before every uncached HTTP attempt, including retries, the projected
+`--refine-cap-usd` defaults to $0.80 for the standalone CLI; `none` disables the cap. The service passes `none` unless its spend gate is on, then uses `HEROGEN_SERVICE_REFINE_CAP_USD`. Before every uncached HTTP attempt, including retries, the projected
 cost is checked against the cap. Unknown outcomes count toward spend. Reservations have unique tokens and
 remain charged until explicitly settled. An answered request enters the call log before limiter release,
 settlement or ledger writes can fail. Local runs persist reservation state in the run record before sending.
-The service uses the same in-process Budget. Its stage record persists cumulative spend and pending
+With spend limits on, the service uses the same in-process Budget; with limits off, no Budget or call hooks are installed. Its stage record persists cumulative spend and pending
 attempts before sending; retries in that run folder load that state. No remote store is consulted.
 `cost_usd` reports the current invocation, as in other stages.
 Cache hits remain usable with a zero cap, and a replay miss remains an error. Records distinguish
@@ -2223,7 +2261,7 @@ disabled while submitting. Starter art and gallery models are external deploymen
 from Git. Missing illustrations are hidden; uploads and text remain usable.
 
 `generation.js` renders only reported main stages, available images and downloads. Queued heroes show
-“Waiting for a free worker”. Polling continues only while queued or running. Failed and rejected stages
+“Waiting for a free worker”. Polling continues while queued, running, or preparing background exports. Succeeded heroes show “Meet your hero.” with a note list for skipped stages. Failed and rejected stages
 show their recorded reason; saved outputs remain inspectable. Developer mode remains read-only and
 uses the owner-checked Lab API. No separate quality-review section is present.
 
@@ -2240,7 +2278,7 @@ bytes. Global Privacy Control suppresses event collection. Migration 9's analyti
 remain unchanged.
 
 The admin Analytics tab displays daily visitors/page views, the creation funnel, remaining refusal
-codes, final job states, main-stage timing/cost totals, gallery engagement and device split over 1–90
+codes, final job states, per-stage timing/cost totals, separate time-to-model and time-to-export metrics, gallery engagement and device split over 1–90
 days. It has no side-stage table. Spending figures come from the same guard as Settings: recorded
 finished spend, queued/running estimates and remaining budget. `analytics-report [--days N]` prints
 the same report JSON. Both admin tabs retain keyboard navigation and the shared responsive theme.

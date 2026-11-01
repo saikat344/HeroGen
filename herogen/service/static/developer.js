@@ -125,7 +125,7 @@ export function developerMode(button, panel, getRun) {
     link.href = `/viewer#run=r1/${encodeURIComponent(job.id)}`;
     panel.append(link);
     panel.append(node('h3', 'Explore an improvement'));
-    panel.append(node('p', 'Choose a recorded failure, inspect its matching view or pose, then compare frozen versions on the same inputs and held-out references. Scores against generated views measure consistency with those views. Missing measurements remain unrecorded.'));
+    panel.append(node('p', 'Choose a recorded failure, inspect its matching view or pose, then compare frozen versions on the same inputs and reference artwork. Scores against generated views measure consistency with those views. Missing measurements remain unrecorded.'));
     panel.append(node('p', 'Source map: herogen/pipeline (image stages), herogen/blender (body and scores), herogen/roblox (export), herogen/service (jobs and attempts).', 'small muted'));
     if (active) {
       const target = [...panel.querySelectorAll('[data-dev-focus]')].find((n) => n.getAttribute('data-dev-focus') === active);
