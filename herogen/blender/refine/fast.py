@@ -67,6 +67,57 @@ def publish(parent, child):
         parent.network_attempts += child.network_attempts - child._initial_network_attempts
 
 
+
+def parallel_view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, **kwargs):
+    """Select the first passing index, regardless of completion order, and drain paid requests."""
+    from . import _view, imaging as I
+
+    count = I.HAIR_ATTEMPTS if hair else I.ATTEMPTS
+    cancelled = threading.Event()
+    futures, children = [], []
+    persistence_lock = threading.RLock()
+    error = None
+    selected = None
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        for index in range(count):
+            child = isolated_client(client, f'attempt-{index}', persistence_lock)
+            if hasattr(child, 'network_attempts'):
+                child._initial_network_attempts = child.network_attempts
+            children.append(child)
+            private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
+            projection = []
+            future = pool.submit(_view, child, prep, current, tex, cam, hair, folder / f'attempt-{index}',
+                                 private, timeout, cover, **{**kwargs, 'apply': lambda *a, p=projection: p.append(a) or 0},
+                                 attempts=1, attempt_start=index, cancelled=cancelled)
+            futures.append((future, private, projection, index))
+        for future, private, projection, index in futures:
+            try:
+                future.result()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            if selected is None and private['accepted'] and error is None:
+                selected = (private, projection, index)
+                cancelled.set()
+    for child in children:
+        publish(client, child)
+    record['attempts'] = [a for _, private, _, _ in futures for a in private['attempts']]
+    record['tries'] = len(record['attempts'])
+    if error is not None:
+        raise error
+    if selected is not None:
+        private, projection, index = selected
+        record.update({k: v for k, v in private.items() if k not in ('tries', 'attempts')})
+        record['selected_attempt'] = index
+        for source in (folder / f'attempt-{index}').iterdir():
+            if source.is_file():
+                shutil.copy2(source, folder / source.name)
+        kwargs['apply'](*projection[0])
+    else:
+        record['reason'] = futures[-1][1]['reason']
+    return current
+
+
 def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock):
     from . import _view
     from .backend import blender
@@ -113,7 +164,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
 
                 # A worker owns its record until it is joined. Persist only completed records in save().
                 private = copy.deepcopy(record)
-                future = pool.submit(_view, child, prep, current, tex, cams[name], hair, work / key,
+                future = pool.submit(parallel_view, child, prep, current, tex, cams[name], hair, work / key,
                                      private, timeout, cover, face_exclusion=head_found, body_cam=cams['body+0'],
                                      repaint=recipe, rendered=folder, apply=defer)
                 futures.append((future, key, record, private, projection))

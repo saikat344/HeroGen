@@ -108,12 +108,12 @@ class FastStageTests(unittest.TestCase):
         self.assertTrue(self.renders[5].endswith('body+180/texture.png'))
         self.assertEqual(sum(v['accepted'] for v in rec['views'].values()), 6)
         self.assertEqual(rec['thresholds']['outline'], fixture.refine.GATE)
-        self.assertEqual(len(rec['calls']), 31)  # six edits, four masks each, plus hair head mask
+        self.assertGreaterEqual(len(rec['calls']), 31)  # concurrent attempts can finish before cancellation
 
     def test_third_head_attempt_is_preserved(self):
         original = FakeClient.edit_image
         def edit(child, prompt, images, **kw):
-            if child.cache_dir.name == 'head+0' and kw['attempt'] < 2:
+            if 'head+0' in child.cache_dir.parts and kw['attempt'] < 2:
                 child._call(IMAGE_MODEL, 'edit')
                 return Image.new('RGB', images[0].size, (115, 115, 115))
             return original(child, prompt, images, **kw)
@@ -122,6 +122,26 @@ class FastStageTests(unittest.TestCase):
             rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
         self.assertTrue(rec['views']['head+0']['accepted'])
         self.assertEqual(rec['views']['head+0']['tries'], 3)
+
+
+    def test_parallel_attempts_choose_lowest_passing_index(self):
+        original = FakeClient.edit_image
+        barrier = threading.Barrier(3)
+        seen = []
+        def edit(child, prompt, images, **kw):
+            if 'head+0' in child.cache_dir.parts:
+                seen.append(kw['attempt'])
+                barrier.wait(timeout=5)
+                if kw['attempt'] == 0:
+                    child._call(IMAGE_MODEL, 'edit')
+                    return Image.new('RGB', images[0].size, (115, 115, 115))
+            return original(child, prompt, images, **kw)
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(FakeClient, 'edit_image', edit):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertCountEqual(seen, [0, 1, 2])
+        self.assertEqual(rec['views']['head+0']['selected_attempt'], 1)
+        self.assertEqual(rec['views']['head+0']['attempts'][0]['reason'], 'outline moved')
 
     def test_default_recipe_and_feather_reach_ordered_projection(self):
         from herogen.blender.refine import imaging
@@ -136,9 +156,9 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(rec['recipes'], ['RF2R', 'RF3H'])
         self.assertEqual(rec['repaint_recipe'], 'RF2R')
         sent = [text for text, _, _ in self.client.inputs]
-        self.assertCountEqual(sent, [prompts.prompt(v['prompt'], v['camera']['angle'])
-                                     for v in rec['views'].values()])
-        self.assertEqual(sum('Only make it sharp' in text for text in sent), 5)
+        self.assertEqual(set(sent), {prompts.prompt(v['prompt'], v['camera']['angle'])
+                                     for v in rec['views'].values()})
+        self.assertGreaterEqual(sum('Only make it sharp' in text for text in sent), 5)
         self.assertFalse(any('scratches, pitting, rust' in text for text in sent))
         for call in self.tex.apply.call_args_list:
             cam, _, feather = call.args[:3]
@@ -175,7 +195,7 @@ class FastStageTests(unittest.TestCase):
     def test_model_error_drains_other_passes_and_stays_loud(self):
         original = FakeClient.edit_image
         def edit(child, *args, **kw):
-            if child.cache_dir.name == 'body+90':
+            if 'body+90' in child.cache_dir.parts:
                 raise ApiError('offline fixture')
             return original(child, *args, **kw)
         with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
