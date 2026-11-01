@@ -88,12 +88,12 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
     """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
     normal, hair = (3, 2) if maximum else (1, 1)
     if refine_profile == "fast":
-        from .fast import WAVES
+        from .fast import ATTEMPTS, WAVES
         sequence = [view for wave in WAVES for view in wave]
         normal_count = sum(not hair for _, hair in sequence)
         hair_count = len(sequence) - normal_count
         # All attempts may start before a first acceptance can cancel them, including duplicate render masks.
-        normal, hair = 3, 2
+        normal = hair = ATTEMPTS
         images = normal_count * normal + hair_count * hair
         segments = 2 + normal_count * normal * 4 + hair_count * hair * 5
         return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
