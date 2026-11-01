@@ -22,7 +22,7 @@ EMAIL_MAX = 254
 # Deliberately strict: one @, a dotted domain, no spaces, quotes, angle brackets or control characters.
 _EMAIL = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
                     r"[A-Za-z]{2,63}$")
-PURPOSES = ("login", "session", "csrf", "invite", "tag")
+PURPOSES = ("login", "session", "csrf", "invite", "judge-code", "tag")
 
 
 class Signer:

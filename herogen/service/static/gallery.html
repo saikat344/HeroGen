@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HeroGen · Public gallery</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  },
+  "integrity": {
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js": "sha384-qlO/ZugKPxAQUAvTlQoo0QECzxJIJySZmCF/DHdb2Xn/hHndFwX/vfUAC9Hbk6LP",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js": "sha384-oxY9vSeh7Mrt5WmhN8xfWoDRnmoW9krEiRBY7vJKaK90jMUidM0fhbUwcblpBgTu",
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js": "sha384-jHGXS4+FuVOBnZkNme2ury3Ccg5DWDLYK22xX/WGdZCZsjRM4J+3n6Qc4CXx1Hjf"
+  }
+}
+</script>
+<script type="module" src="/assets/gallery-viewer.js"></script>
+</head>
+<body class="entry-page gallery-page">
+<header class="top"><a class="brand" href="/#gallery"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a><div class="spacer"></div><a href="/#gallery">← All heroes</a></header>
+<main><p class="eyebrow">Previously generated with HeroGen</p><h1 id="publicTitle">Opening your character…</h1><p id="publicDescription"></p><p class="muted small">A saved project result, not a live generation. Refined mesh; game-readiness is not implied.</p>
+<div class="public-viewer-grid"><section class="artboard"><div class="artboard-top"><span>Inspect the real 3D result</span><button id="reloadPublicModel" type="button">Reload 3D</button></div><canvas id="publicCanvas" aria-label="3D model — drag to orbit and scroll to zoom"></canvas><p id="publicModelStatus" role="status">Loading the 3D model…</p></section><aside class="artboard public-reference"><div class="artboard-top"><span id="referenceLabel">Character artwork</span><button id="referenceToggle" type="button">Show starting sketch</button></div><img id="publicReference" alt="" hidden><p id="referenceStatus" role="status"></p></aside></div>
+<details class="public-record"><summary>Developer Mode · saved refinement record</summary><p class="small muted">Stage-specific evidence from this saved run. Accepted refinement views are not a held-out quality score. The exported mesh was subsequently re-exported with corrected normals.</p><dl id="publicRecord"></dl><p id="publicRecordStatus" class="small muted"></p></details>
+<p id="publicVersion" class="small muted"></p><p><a href="/">Create your own hero →</a></p></main>
+<footer class="foot">Your idea. Your character. Your game.</footer></body></html>

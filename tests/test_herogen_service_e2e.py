@@ -195,13 +195,16 @@ def free_port() -> int:
 
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT,
                      "set E2E_CDP_PORT to a Chrome remote-debugging port (and install requirements-dev.txt)")
-class TestServicePage(TempDirCase):
+class ServiceBrowserCase(TempDirCase):
     def setUp(self) -> None:
         super().setUp()
         port = free_port()
         self.url = f"http://127.0.0.1:{port}"
-        self.s = settings(self.tmp, base_url=self.url, allowed_hosts=("127.0.0.1",))
+        self.s = settings(self.tmp, base_url=self.url, allowed_hosts=("127.0.0.1",), **getattr(self, "service_settings", {}))
         self.store = Store(self.s.meta_path)
+        if self.s.public_demo:
+            self.store.budget_configure(100_000_000, 10_000_000, 1, time.time()+86400*14, self.s.code_commit,
+                'Synthetic browser fixture; no paid work', self.s.cost_signature, provider_caps_verified=True)
         self.sender = FakeSender()
         self.runner = GatedRunner()
         storage = Storage(self.s.data_dir)
@@ -232,9 +235,7 @@ class TestServicePage(TempDirCase):
     def signin(self, email: str = "alice@example.com") -> None:
         t = self.tab
         self.store.allow_add(email)
-        t.goto(self.url + "/")
-        t.wait("!document.querySelector('#entry').hidden")
-        t.eval("document.querySelector('#headerSignIn').click()")
+        t.goto(self.url + "/admin/signin")
         t.wait("document.querySelector('#signinDialog').open")
         t.eval(f"document.querySelector('#email').value = {json.dumps(email)}; "
                "document.querySelector('#signinForm').requestSubmit()")
@@ -265,6 +266,7 @@ class TestServicePage(TempDirCase):
         }})()""")
         self.tab.wait(f"document.querySelector('#detailH').textContent === {json.dumps(name)}")
 
+class TestServicePage(ServiceBrowserCase):
     def test_public_entry_preserves_image_draft_through_signin(self):
         t = self.tab
         t.goto(self.url + '/')
@@ -282,7 +284,7 @@ class TestServicePage(TempDirCase):
             document.querySelector('#name').value = 'Saved draft';
             document.querySelector('#jobForm').requestSubmit();
         }})()""")
-        t.wait("document.querySelector('#signinDialog').open")
+        t.wait("document.querySelector('#judgeDialog').open")
         self.assertTrue(t.eval("/saved/.test(document.querySelector('#jobMsg').textContent)"))
         self.signin()
         t.wait("document.querySelector('#uploadName').textContent === 'draft.png'")
@@ -313,7 +315,7 @@ class TestServicePage(TempDirCase):
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#entry').hidden")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#signinDialog').open")
+        t.wait("document.querySelector('#judgeDialog').open")
         self.signin()
         self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
         t.eval("document.querySelector('#signOut').click()")
@@ -328,7 +330,7 @@ class TestServicePage(TempDirCase):
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#entry').hidden")
         t.eval("document.querySelector('#prompt').value='Original idea'; document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#signinDialog').open")
+        t.wait("document.querySelector('#judgeDialog').open")
         self.signin()
         t.eval("""(() => {
             const original=window.fetch;
@@ -539,3 +541,42 @@ class TestServicePage(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, "set E2E_CDP_PORT and install requirements-dev.txt")
+class TestPublicLivePage(ServiceBrowserCase):
+    service_settings = {'public_demo': True, 'code_commit': 'a'*40}
+
+    def test_no_account_live_entry_preserves_draft_and_allowance_on_reload(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("document.querySelector('#headerSignIn').textContent === 'Try live demo'")
+        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("document.querySelector('#judgeDialog').open")
+        self.assertFalse(t.eval("document.querySelector('#judgeCode').required"))
+        self.assertTrue(t.eval("document.querySelector('#judgeCodeFields').hidden"))
+        t.eval("document.querySelector('#judgeForm').requestSubmit()")
+        t.wait("!document.querySelector('#judgeDialog').open && !document.querySelector('#app').hidden")
+        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
+        self.assertEqual(len(self.store.judge_codes_list()), 1)
+        t.eval("document.querySelector('#jobForm').requestSubmit()")
+        t.wait("!document.querySelector('#detail').hidden")
+        self.runner.gate.set()
+        t.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
+        t.goto(self.url + '/')
+        t.wait("/0 generations left/.test(document.querySelector('#judgeAccessText').textContent)")
+        self.assertEqual(len(self.store.judge_codes_list()), 1)
+        t.eval("document.querySelector('[data-idea=moon]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("/used its generation allowance/.test(document.querySelector('#jobMsg').textContent)")
+        self.assertEqual(len(self.store.jobs_admin_list()), 1)
+
+    def test_unfunded_public_entry_has_clear_recovery(self):
+        self.store.db.execute('UPDATE admission_policy SET enabled=0')
+        t = self.tab; t.goto(self.url + '/')
+        t.wait("!document.querySelector('#headerSignIn').disabled")
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("document.querySelector('#judgeDialog').open")
+        t.eval("document.querySelector('#judgeForm').requestSubmit()")
+        t.wait("/unavailable/.test(document.querySelector('#judgeMsg').textContent)")
+        self.assertTrue(t.eval("document.querySelector('#judgeDialog').open"))
+        self.assertEqual(self.store.judge_codes_list(), [])

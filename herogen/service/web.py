@@ -36,7 +36,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from herogen.service import bundle, labapi
@@ -284,6 +284,32 @@ class App:
                         headers={"Content-Security-Policy": "default-src 'none'; style-src 'self'; "
                                                             "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"})
 
+    async def public_gallery(self, request: Request) -> Response:
+        from herogen.service.gallery import GalleryUnavailable, catalog
+        try:
+            items = await self.call(catalog, self.s.gallery_dir)
+        except GalleryUnavailable:
+            return error(503, "gallery_unavailable", "The public gallery is temporarily unavailable.")
+        key = request.path_params.get("id")
+        if key:
+            item = next((item for item in items if item["id"] == key), None)
+            if item is None:
+                return error(404, "not_found", "This public character was not found.")
+            return JSONResponse(item)
+        return JSONResponse({"items": items})
+
+    async def gallery_asset(self, request: Request) -> Response:
+        from herogen.service.gallery import GalleryUnavailable, artifact
+        try:
+            content, mime = await self.call(artifact, self.s.gallery_dir, request.path_params["id"],
+                                            request.path_params["kind"])
+        except (GalleryUnavailable, OSError, ValueError, KeyError, TypeError):
+            return error(404, "not_found", "This public artifact is unavailable.")
+        return FileResponse(content, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+
+    async def gallery_page(self, request: Request) -> Response:
+        return self.page("gallery.html")
+
     async def healthz(self, request: Request) -> Response:
         return JSONResponse({"ok": True, "commit": self.s.code_commit or None})
 
@@ -299,14 +325,67 @@ class App:
 
     async def session(self, request: Request) -> Response:
         u = await self.user(request)
-        data: dict[str, Any] = {"signed_in": u is not None, "limits": self.s.public(), "terms_ready": self.terms_ready()}
+        data: dict[str, Any] = {"signed_in": u is not None, "limits": self.s.public(), "terms_ready": self.terms_ready(),
+                                "judge_access": self.s.judge_access, "public_demo": self.s.public_demo,
+                                "public_demo_jobs": self.s.public_demo_jobs}
+        if self.s.judge_access or self.s.public_demo:
+            data['generation'] = await self.call(self.svc.store.admission_status, self.s.code_commit, self.s.cost_signature)
         if u is not None:
-            data["user"] = {"email": u["email"], "created_at": u["created_at"]}
+            data["user"] = {"email": u["email"], "created_at": u["created_at"], "kind": u.get('kind', 'account')}
+            if u.get('kind') == 'judge':
+                data['judge'] = await self.call(self.svc.store.judge_info, u['id'])
             data["usage"] = await self.call(self.svc.store.usage, u["id"], self.s.jobs_per_day, self.s.jobs_total)
         data["csrf"], new = self.csrf_for(request)
         resp = JSONResponse(data)
         if new:
             self.set_cookie(resp, self.csrf_cookie, new, self.s.session_ttl_s)
+        return resp
+
+    async def judge_access(self, request: Request) -> Response:
+        if not self.s.judge_access:
+            return error(503, 'judge_access_closed', 'Judge access is not open yet. The public gallery remains available.')
+        if (limited := await self.limit(f"judge-ip:{self.svc.signer.tag(self.client_ip(request))}", self.s.rate_auth_ip)) is not None:
+            return limited
+        body = await self.json_body(request)
+        raw_code = body.get('code')
+        code = normalize_invite(raw_code) if isinstance(raw_code, str) and len(raw_code) <= 64 else None
+        if code is None:
+            return error(400, 'judge_code', 'Enter the judge code supplied with the submission.')
+        session = self.svc.signer.new_token()
+        previous = request.cookies.get(self.session_cookie, '')
+        old_hash = self.svc.signer.hash('session', previous) if TOKEN_RE.fullmatch(previous) else ''
+        try:
+            await self.call(self.svc.store.judge_redeem, self.svc.signer.hash('judge-code', code),
+                            self.svc.signer.hash('session', session), self.s.session_ttl_s, old_hash)
+        except StoreError as exc:
+            if exc.code == 'busy':
+                return busy_response()
+            return error(403, exc.code, str(exc))
+        csrf_cookie = self.svc.signer.new_token()
+        resp = JSONResponse({'ok': True, 'csrf': self.svc.signer.csrf_token(csrf_cookie)})
+        self.set_cookie(resp, self.session_cookie, session, self.s.session_ttl_s)
+        self.set_cookie(resp, self.csrf_cookie, csrf_cookie, self.s.session_ttl_s)
+        return resp
+
+    async def public_access(self, request: Request) -> Response:
+        if not self.s.public_demo:
+            return error(503, 'public_access_closed', 'Public live access is not open. The gallery remains available.')
+        if (limited := await self.limit(f"judge-ip:{self.svc.signer.tag(self.client_ip(request))}", self.s.rate_auth_ip)) is not None:
+            return limited
+        session = self.svc.signer.new_token()
+        previous = request.cookies.get(self.session_cookie, '')
+        old_hash = self.svc.signer.hash('session', previous) if TOKEN_RE.fullmatch(previous) else ''
+        try:
+            await self.call(self.svc.store.public_demo_redeem, self.svc.signer.hash('session', session),
+                            self.s.session_ttl_s, old_hash, self.s.public_demo_jobs, self.s.code_commit, self.s.cost_signature)
+        except StoreError as exc:
+            if exc.code == 'busy':
+                return busy_response()
+            return error(503, exc.code, str(exc), {'Retry-After': '5'} if exc.code == 'generation_capacity' else None)
+        csrf_cookie = self.svc.signer.new_token()
+        resp = JSONResponse({'ok': True, 'csrf': self.svc.signer.csrf_token(csrf_cookie)})
+        self.set_cookie(resp, self.session_cookie, session, self.s.session_ttl_s)
+        self.set_cookie(resp, self.csrf_cookie, csrf_cookie, self.s.session_ttl_s)
         return resp
 
     async def auth_request(self, request: Request) -> Response:
@@ -492,7 +571,7 @@ class App:
                 self.svc.store.job_create, job_id=job_id, user_id=u["id"], client_key=key, kind=kind, profile=profile,
                 jobs_per_day=self.s.jobs_per_day, jobs_total=self.s.jobs_total,
                 storage_max_bytes=self.s.user_storage_max_bytes, input_sha=sha, prompt=prompt, name=name,
-                code_commit=self.s.code_commit)
+                code_commit=self.s.code_commit, admission_required=self.s.judge_access or self.s.public_demo, cost_signature=self.s.cost_signature)
         except (QuotaExceeded, Conflict, StoreError) as e:
             if e.code == "busy":
                 # Not confirmed either way: the job may have been saved. Its sketch stays (so a saved job can run;
@@ -503,8 +582,11 @@ class App:
                                      "second one.")
             if png is not None:
                 await self.call(self._drop_input, u["id"], job_id)
-            status = {"quota": 429, "conflict": 409}.get(e.code, 400)
-            return error(status, e.code, str(e))
+            status = {"quota": 429, "conflict": 409, 'judge_allowance': 429, 'judge_code': 403,
+                      'judge_active': 409, 'generation_paused': 503, 'cost_bound_unverified': 503,
+                      'generation_budget_exhausted': 503, 'generation_capacity': 503}.get(e.code, 400)
+            headers = {'Retry-After': '5'} if e.code == 'generation_capacity' else None
+            return error(status, e.code, str(e), headers)
         if not created and png is not None:
             await self.call(self._drop_input, u["id"], job_id)
         if created:
@@ -782,7 +864,7 @@ def create_app(svc: Services) -> SecurityHeaders:
 
     async def http_error(request: Request, exc: HTTPException) -> Response:
         codes = {401: "signed_out", 404: "not_found", 405: "method", 413: "too_large", 415: "media_type"}
-        msg = {401: "Sign in first.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
+        msg = {401: "Open Judge access to continue." if s.judge_access else "Sign in first.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
         return error(exc.status_code, codes.get(exc.status_code, "bad_request"), msg)
 
     async def server_error(request: Request, exc: Exception) -> Response:
@@ -801,10 +883,15 @@ def create_app(svc: Services) -> SecurityHeaders:
         return error(status, exc.code, str(exc))
 
     routes = [
-        Route("/", a.index), Route("/signin", a.index), Route("/viewer", a.viewer),
+        Route("/", a.index), Route("/signin", a.index), Route("/admin/signin", a.index), Route("/viewer", a.viewer),
         Route("/terms", a.legal), Route("/privacy", a.legal), Route("/healthz", a.healthz),
         Route("/assets/{path:path}", a.assets), Route("/static/{path:path}", a.studio_assets),
+        Route("/gallery/{id}", a.gallery_page),
+        Route("/api/gallery", a.public_gallery), Route("/api/gallery/{id}", a.public_gallery),
+        Route("/gallery-assets/{id}/{kind}", a.gallery_asset),
         Route("/api/session", a.session),
+        Route("/api/demo/access", a.public_access, methods=["POST"], max_body_size=JSON_LIMIT),
+        Route("/api/judge/access", a.judge_access, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/request", a.auth_request, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/link", a.auth_link, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/verify", a.auth_verify, methods=["POST"], max_body_size=JSON_LIMIT),

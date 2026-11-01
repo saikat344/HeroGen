@@ -39,9 +39,19 @@ class E2EImportTest(unittest.TestCase):
         self.assertEqual((r["errors"], r["failures"]), ([], []))
         self.assertEqual(r["tests"], len(r["skipped"]), "without the extras nothing may run")
         self.assertTrue(r["skipped"], "TestServicePage must be reported as skipped")
+        classes = {test_id.rsplit('.', 2)[-2] for test_id, _ in r['skipped']}
+        self.assertEqual(classes, {'TestServicePage', 'TestPublicLivePage'})
         for test_id, reason in r["skipped"]:
-            self.assertIn("TestServicePage", test_id)
             self.assertIn("E2E_CDP_PORT", reason, "the skip must say what to set up")
+
+    def test_public_gallery_module_also_skips_without_web_extras(self):
+        child = CHILD.replace('import tests.test_herogen_service_e2e as e2e', 'sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]) / "tests"))\nimport tests.test_herogen_service_gallery as e2e')
+        p = subprocess.run([sys.executable, '-c', child, str(_ROOT)], capture_output=True, text=True, cwd=_ROOT, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        result = json.loads(p.stdout)
+        self.assertEqual((result['errors'], result['failures']), ([], []))
+        self.assertEqual(result['tests'], len(result['skipped']))
+        self.assertEqual(result['tests'], 4)
 
 
 if __name__ == "__main__":

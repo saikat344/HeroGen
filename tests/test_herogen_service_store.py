@@ -574,7 +574,11 @@ class TestSchema(TempDirCase):
         """A database made with the schema of an older version, holding one job."""
         from herogen.service import store as store_mod
 
-        schema = store_mod.SCHEMA.replace("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);", "")
+        schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '')
+        schema = schema.replace(", kind TEXT NOT NULL DEFAULT 'account'", '')
+        schema = schema.replace(', budget_required INTEGER NOT NULL DEFAULT 0', '')
+        if version < 4:
+            schema = schema.replace("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);", "")
         if version < 3:
             schema = schema.replace("claim TEXT, lease_until REAL,", "")
         if version < 2:
@@ -595,7 +599,7 @@ class TestSchema(TempDirCase):
     def test_older_databases_are_upgraded_keeping_their_rows(self):
         from herogen.service import store as store_mod
 
-        for version in (1, 2, 3):
+        for version in (1, 2, 3, 4):
             st = Store(self.old_database(version))
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
             self.assertIsNone(st.job_get("j_x")["refunded_at"], "existing rows keep their data")

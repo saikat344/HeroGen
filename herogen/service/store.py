@@ -26,12 +26,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+from herogen.service.admission import AdmissionStore, SCHEMA as ADMISSION_SCHEMA, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN
+
+SCHEMA_VERSION = 5
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
     2: ("ALTER TABLE job_stages ADD COLUMN claim TEXT", "ALTER TABLE job_stages ADD COLUMN lease_until REAL"),
     3: ("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL)",),
+    4: ("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'account'",
+        "ALTER TABLE jobs ADD COLUMN budget_required INTEGER NOT NULL DEFAULT 0",
+        *tuple(s.strip() for s in ADMISSION_SCHEMA.split(';') if s.strip())),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -61,7 +66,7 @@ SCHEMA = """
 CREATE TABLE users (
   id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
   created_at REAL NOT NULL, invite_id TEXT, terms_version TEXT, terms_accepted_at REAL, adult_confirmed_at REAL,
-  quota_daily INTEGER, quota_total INTEGER, last_login_at REAL, deleted_at REAL
+  quota_daily INTEGER, quota_total INTEGER, last_login_at REAL, deleted_at REAL, kind TEXT NOT NULL DEFAULT 'account'
 );
 CREATE TABLE allowlist (email TEXT PRIMARY KEY, added_at REAL NOT NULL, note TEXT NOT NULL DEFAULT '');
 CREATE TABLE invites (
@@ -86,7 +91,7 @@ CREATE TABLE jobs (
   started_at REAL, finished_at REAL, attempts INTEGER NOT NULL DEFAULT 0, lease_until REAL, stage TEXT,
   error_code TEXT, error_stage TEXT, error_message TEXT, counts_quota INTEGER NOT NULL DEFAULT 1,
   seconds REAL, cost_usd REAL, cost_detail TEXT, code_commit TEXT NOT NULL DEFAULT '', bytes INTEGER,
-  deleted_at REAL, refunded_at REAL, UNIQUE(user_id, client_key)
+  deleted_at REAL, refunded_at REAL, budget_required INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, client_key)
 );
 CREATE INDEX jobs_user ON jobs(user_id, created_at);
 CREATE INDEX jobs_state ON jobs(state);
@@ -106,6 +111,9 @@ CREATE TABLE audit (
 );
 CREATE INDEX audit_at ON audit(at);
 """
+
+
+SCHEMA += ADMISSION_SCHEMA
 
 
 class StoreError(Exception):
@@ -173,7 +181,7 @@ class RateLimiter:
             return True, 0
 
 
-class Store:
+class Store(AdmissionStore):
     # Methods the service's own functions may invoke by name (modal_app.StoreService.call).
     PUBLIC = frozenset({
         "rate_hit", "invite_valid", "signin_eligibility", "login_token_create", "login_token_info",
@@ -183,12 +191,12 @@ class Store:
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
         "job_refine_budget",
-    })
+    }) | ADMISSION_PUBLIC
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
         "allow_add", "allow_remove", "allow_list", "invite_create", "invite_list", "invite_revoke",
         "users_list", "user_set_status", "user_set_quota", "audit_list", "jobs_admin_list",
-    })
+    }) | ADMISSION_ADMIN
 
     def __init__(self, path: Path | str, clock: Callable[[], float] = time.time,
                  persist: Callable[[sqlite3.Connection], None] | None = None,
@@ -444,8 +452,12 @@ class Store:
 
     @staticmethod
     def _public_user(row: dict[str, Any]) -> dict[str, Any]:
-        return {k: row[k] for k in ("id", "email", "status", "created_at", "terms_version", "quota_daily",
+        user = {k: row[k] for k in ("id", "email", "status", "created_at", "terms_version", "quota_daily",
                                     "quota_total", "last_login_at")}
+        user['kind'] = row.get('kind', 'account')
+        if user['kind'] == 'judge':
+            user['email'] = None
+        return user
 
     def session_get(self, session_hash: str, idle_s: float) -> dict[str, Any] | None:
         """The signed-in user for a session, or None when the session is unknown, revoked, expired or idle."""
@@ -458,7 +470,12 @@ class Store:
         if now - row["last_seen_at"] >= SEEN_EVERY_S:
             with self._tx() as c:
                 c.execute("UPDATE sessions SET last_seen_at=? WHERE hash=?", (now, session_hash))
-        return self.user_get(row["user_id"])
+        user = self.user_get(row["user_id"])
+        if user and user.get('kind') == 'judge':
+            access = self.judge_info(user['id'])
+            if not access or not access['valid']:
+                return None
+        return user
 
     def session_revoke(self, session_hash: str) -> None:
         with self._tx() as c:
@@ -554,7 +571,7 @@ class Store:
 
     def job_create(self, *, job_id: str, user_id: str, client_key: str, kind: str, profile: str,
                    jobs_per_day: int, jobs_total: int, storage_max_bytes: int, input_sha: str = "", prompt: str = "",
-                   name: str = "", code_commit: str = "") -> tuple[dict[str, Any], bool]:
+                   name: str = "", code_commit: str = "", admission_required: bool = False, cost_signature: str = '') -> tuple[dict[str, Any], bool]:
         """Create a queued job, or return the one this user already made with the same `client_key`.
 
         Idempotent: the same key and request returns the first job and `False`; the same key with a different
@@ -570,7 +587,7 @@ class Store:
                 if not same:
                     raise Conflict("this request key was already used for a different hero")
                 return dict(old), False
-            user = c.execute("SELECT status FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+            user = c.execute("SELECT status,kind FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
             if user is None or user["status"] != "active":
                 raise StoreError("this account cannot start jobs", "account")
             u = self._usage(c, user_id, jobs_per_day, jobs_total)
@@ -580,10 +597,15 @@ class Store:
                 raise QuotaExceeded(f"you have made {u['jobs_per_day']} heroes in the last 24 hours; try again later")
             if u["stored_bytes"] >= storage_max_bytes:
                 raise QuotaExceeded("your saved heroes use all of your storage; delete some to make room")
+            protected = admission_required or user['kind'] == 'judge'
+            if protected:
+                self._admit(c, job_id, user_id, client_key, code_commit, cost_signature)
             c.execute("INSERT INTO jobs(id, user_id, client_key, kind, input_sha, prompt, name, profile, state, "
                       "created_at, code_commit) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                       (job_id, user_id, client_key, kind, input_sha, prompt, name, profile, "queued", self.clock(),
                        code_commit))
+            if protected:
+                c.execute('UPDATE jobs SET budget_required=1 WHERE id=?', (job_id,))
             self._audit(c, user_id, "job_created", job_id, {"kind": kind, "profile": profile})
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row), True
@@ -910,6 +932,9 @@ class Store:
                 refund = job["state"] == "queued" and job["attempts"] == 0
                 self._set_state(c, job, "canceled", finished_at=self.clock(), lease_until=None,
                                 counts_quota=0 if refund else job["counts_quota"])
+                if job['budget_required'] and job['attempts'] == 0:
+                    c.execute('UPDATE admissions SET main_done=1,side_done=1 WHERE job_id=?', (job_id,))
+                    self._close_admission(c, job_id)
                 self._audit(c, user_id, "job_canceled", job_id)
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row)
