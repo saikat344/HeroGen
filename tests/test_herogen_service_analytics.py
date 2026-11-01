@@ -275,7 +275,7 @@ class TestAdminAuthSettingsAndAnalyticsReport(WebCase):
         self.assertNotIn('side', http_report['stages'])
         self.assertEqual(http_report['budget'], budget)
         paused = ops.post('/api/admin/generation', json={'enabled':False})
-        self.assertEqual(paused.json()['sentence'], 'Paused')
+        self.assertEqual(paused.json()['sentence'], 'Live generation is paused right now.')
         with self.assertRaises(SystemExit):
             admin.run(['analytics-report', '--days', '0'], self.store, self.svc.signer)
 
