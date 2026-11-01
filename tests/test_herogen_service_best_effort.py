@@ -38,6 +38,19 @@ class BestEffortTest(JobCase):
                     self.assertIn('rough', rows['3']['message'])
                     self.assertEqual(rows['3f']['state'], 'skipped')
 
+    def test_successful_texture_fallbacks_are_visible(self):
+        from herogen.service.runner import write_record
+        for status in ('cap_reached', 'complete'):
+            class TextureFallback(FakeRunner):
+                def _stage_3f(self, ctx, run):
+                    write_record(run, {'stage': '3f', 'ok': True, 'status': status, 'cost_usd': .01})
+            self.runner = TextureFallback()
+            job = self.new_job()
+            self.assertEqual(self.go(job), 'succeeded')
+            self.assertEqual(self.stages(job)['3f']['state'], 'skipped')
+            self.assertTrue(self.stages(job)['3f']['message'])
+            self.assertEqual(glb_path(self.storage.run_dir(self.user['id'], job['id'])).name, '03-source.glb')
+
     def test_rejected_shape_without_mesh_fails_clearly(self):
         class NoMesh(FakeRunner):
             def _stage_3(self, ctx, run):

@@ -479,6 +479,13 @@ class CliRunner:
             code_s, message, transient = describe_error(spec, "", timed_out)
             detail = f"stage {spec.key} failed: exit_code={code}; timed_out={timed_out}; record_present={rec is not None}"
             return Outcome("failed", seconds, cost, message, code_s, transient, detail=detail)
+        if spec.key == '3f' and rec and rec.get('ok') is True and not timed_out:
+            if rec.get('status') == 'cap_reached':
+                return Outcome('skipped', seconds, cost,
+                               'Texture refine reached its spending cap. Showing the best texture completed.')
+            if rec.get('status') == 'complete' and not (ctx.run_dir / '03-refined.glb').is_file():
+                return Outcome('skipped', seconds, cost,
+                               'Texture refine kept the unrefined texture because its views did not pass the checks.')
         if spec.key == '3f' and rec and rec.get('status') == 'skipped' and not timed_out:
             return Outcome('skipped', seconds, cost,
                            'Texture refine was skipped: ' + str(rec.get('reason') or 'not available')
