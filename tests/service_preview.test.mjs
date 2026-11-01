@@ -5,13 +5,13 @@ import { SourceTextModule, SyntheticModule } from 'node:vm';
 
 async function setup() {
   const loads=[], scenes=[], renderers=[], cameras=[], controls=[];
-  class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(x,y,z){Object.assign(this,{x,y,z});} copy(v){Object.assign(this,v);} setScalar(){} }
+  class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(x,y,z){Object.assign(this,{x,y,z});} copy(v){Object.assign(this,v);} setScalar(){} toArray(){return [this.x,this.y,this.z];} }
   class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);} remove(n){this.models=this.models.filter(v=>v!==n);} }
   class Renderer { constructor(){this.disposed=false;this.renders=0;this.lastModels=[];renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(scene){this.renders++;this.lastModels=[...scene.models];} }
   class Camera { constructor(){this.position=new Vector3();cameras.push(this);} updateProjectionMatrix(){} }
   class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} }
   class Light { constructor(){this.position=new Vector3();this.scale=new Vector3();this.geometry={dispose(){}};this.material={color:{set(){}},dispose(){}};} }
-  class Controls { constructor(){this.target=new Vector3();controls.push(this);} update(){} dispose(){} }
+  class Controls { constructor(){this.target=new Vector3();this.listeners={};controls.push(this);} addEventListener(name,callback){this.listeners[name]=callback;} update(){} dispose(){} }
   class Loader { load(url,done,progress,fail){loads.push({url,done,fail});} }
   const three={WebGLRenderer:Renderer,Scene,HemisphereLight:Light,DirectionalLight:Light,GridHelper:Light,
     PerspectiveCamera:Camera,Vector3,Box3,MeshStandardMaterial:class { constructor(options){Object.assign(this,options);} dispose(){this.disposed=true;} }};
@@ -108,4 +108,19 @@ test('an unsuccessful refinement keeps the existing model visible',async()=>{
   const update=v.show(s.canvas,'version-1.glb',{preserveCamera:true});s.loads[1].fail(new Error('offline'));
   await assert.rejects(update,/offline/);assert.equal(first.disposed,0);
   assert.equal(s.scenes[0].models.includes(first),true);assert.equal(typeof s.renderers[0].loop,'function');
+});
+
+test('comparison cameras mirror position, target and zoom in either direction',async()=>{
+  const s=await setup(),a=s.api.createPreview({damping:false}),b=s.api.createPreview({damping:false});
+  const one=a.show(s.canvas,'one.glb'),two=b.show({...s.canvas},'two.glb');
+  s.loads[0].done({scene:s.model()});s.loads[1].done({scene:s.model()});await Promise.all([one,two]);
+  assert.equal(s.controls[0].enableDamping,false);assert.equal(s.controls[1].enableDamping,false);
+  a.onView(value=>b.setView(value));b.onView(value=>a.setView(value));
+  a.setView({position:[4,5,6],target:[1,2,3],zoom:1.5});
+  s.controls[0].listeners.change();
+  assert.deepEqual(b.view(),a.view());
+  b.setView({position:[6,5,4],target:[3,2,1],zoom:2});
+  s.controls[1].listeners.change();
+  assert.deepEqual(a.view(),b.view());
+  a.dispose();b.dispose();
 });

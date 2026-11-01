@@ -5,6 +5,7 @@ import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
 import { generationView } from '/assets/generation.js';
+import { variationsView } from '/assets/variations.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
@@ -19,10 +20,27 @@ function setScreen(next) {
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
 const generation = generationView($, (url, options) => preview(url, options));
+const variations = variationsView($, { api, select: openJob, key: idemKey,
+  textureNotes: () => S.session?.limits?.texture_notes === true,
+  created: j => { ++S.revision; followJob(j, true); refreshList().catch(e => banner(e.message)); },
+  changeIdea: async j => {
+    try {
+      let file = null;
+      if (j.kind === 'sketch') {
+        const response = await fetch(j.images.sketch, {credentials: 'same-origin'});
+        if (!response.ok) throw new Error('The saved input could not be loaded. Try again.');
+        file = new File([await response.blob()], 'character.png', {type: 'image/png'});
+      }
+      returnToEntry(); history.pushState(null, '', '/'); entry.setFile(file);
+      $('#prompt').value = j.prompt || ''; $('#prompt').dispatchEvent(new Event('input'));
+      $('#name').value = j.name || ''; $('#profile').value = j.profile; $('#go').focus();
+    } catch (e) { banner(e.message); }
+  }
+});
 function returnToEntry() {
   ++S.revision; clearTimeout(S.timer); S.current = null;
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
-  developer.update(null); generation.reset(); setScreen('entry'); show('#jobLoading', false);
+  developer.update(null); generation.reset(); variations.reset(); setScreen('entry'); show('#jobLoading', false);
 }
 function signIn() {
   if (location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
@@ -135,8 +153,9 @@ function renderJob(j) {
   if (Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${fmtUsd(j.cost_usd)}`);
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
   const err = $('#detailErr');
-  err.hidden = !j.error; err.textContent = j.error ? j.error.message : '';
+  err.hidden = !j.error || j.input_rejected || !!j.parent_job; err.textContent = j.error ? j.error.message : '';
   generation.update(j);
+  variations.update(j);
   const dl = $('#downloads');
   const items = [];
   const g = j.downloads.glb;
@@ -321,7 +340,7 @@ function initJobs() {
 
 async function signedIn() {
   const guest = S.session.user.kind === 'guest';
-  $('#who').textContent = guest ? 'Private guest workspace' : S.session.user.email; show('#who'); show('#signOut', !guest);
+  $('#who').textContent = guest ? 'Private workspace' : S.session.user.email; show('#who'); show('#signOut', !guest);
   updateAccessSummary();
   show('#developerMode'); show('#app');
   const jobs = await refreshList();
@@ -381,6 +400,12 @@ async function boot() {
   const signinRoute = ['/admin/signin'].includes(location.pathname);
   $('#headerSignIn').textContent = 'Admin sign in';
   initSignin(); initJobs(); initGuestAccess();
+  document.querySelectorAll('[data-work-shade]').forEach(button => button.addEventListener('click', async () => {
+    const mode = button.dataset.workShade;
+    const module = await import('/assets/preview.js'); module.shading(mode);
+    document.querySelectorAll('[data-work-shade]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    track('shade_toggle', {mode});
+  }));
   bindOrbitDrag($('#preview'), 'workbench');
   document.querySelectorAll('a[href="/terms"],a[href="/privacy"]').forEach((link) => link.addEventListener('click', () => track('page_view', { page: 'legal' }, { flush: true })));
   $('#backToIdeas').addEventListener('click', () => {

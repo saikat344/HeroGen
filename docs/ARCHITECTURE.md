@@ -29,14 +29,19 @@ of this pipeline.
 
 ### Run versions and appearance notes
 
-`herogen.pipeline.redo.fork_run` creates a new, absent run folder from a parent at stage 1 (cover) or 2
-(turnaround). It validates all earlier records and outputs before publishing a staged copy by rename.
+`herogen.pipeline.redo.fork_run` creates a new, absent run folder from a parent at stage 1 (cover), 2
+(turnaround), or `3f` (texture). It validates all earlier records and outputs before publishing a staged copy by rename.
 Stage 0 is required; stage p is copied when present, preserving the original character brief. Stage 1 and
 its masks are also copied for a stage-2 redo. Output paths must remain inside the parent, with no links.
 No file is linked to the parent or opened there for writing. Failed earlier gates, missing files, linked
 outputs and an existing destination are refused before generation.
 
-`redo.json` holds `parent_run` (the parent's run id), `from_stage` (1 or 2) and the cleaned `note`. Records
+Texture continuation requires passing stages 0 through 3 and `03-source.glb`. It copies their declared outputs,
+character views, stage-3 renders and joints, and the specific reconstruction files `03-mesh.npz`,
+`03-source-uv.npz`, and `03-source-texture.png` from `blender-work` when present. Later textures and exports
+are regenerated. The service runs stages 3f, 4, 6 and 5 with the existing fast profile and checks.
+
+`redo.json` holds `parent_run` (the parent's run id), `from_stage` (1, 2, or `"3f"`) and the cleaned `note`. Records
 written through `RunFolder.write_stage` carry the same fields. Copied records retain their original checks,
 details and historical calls, add `reused_from` and `original_cost_usd`, and set `cost_usd` and `seconds` to
 zero for the new version. The parent record remains unchanged. When the parent's stage-1 record passes,
@@ -70,13 +75,16 @@ CSRF middleware:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/jobs/<id>/redo` | Accepts `stage: "cover"|"turnaround"` and optional `note`; requires the normal `Idempotency-Key`. Copies the owned inactive parent's earlier run data, commits the copy, then creates a new queued job with the parent's input, profile and owner, `parent_job`, `from_stage`, `note`, and `stop_after`. Different requests with one key conflict. |
+| `POST /api/jobs/<id>/redo` | Accepts `stage: "cover"\|"turnaround"\|"texture"`, optional `note`, and optional boolean `build_all`; requires the normal `Idempotency-Key`. Copies the owned inactive parent's earlier run data, commits the copy, then creates a new queued job with the parent's input, profile and owner, `parent_job`, `from_stage`, `note`, and `stop_after`. Texture always runs through the remaining stages. `build_all: true` also makes cover and view variations run through the remaining stages; the default preserves single-step redos. Different requests with one key conflict. |
+| `POST /api/jobs/<id>/retry-input` | Resubmits an owned hero rejected by a recorded stage-0 or stage-1 `input_rejected` check as a new root hero, preserving its cleaned input, name and profile. Requires session, CSRF, the normal job rate limit and `Idempotency-Key`; another owner's hero returns 404. |
 | `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains prior stage spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
-| `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, and `cover_thumbnail_url`, pointing at the existing owner-checked cover route or null. |
+| `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, recorded `seconds` and `cost_usd`, `model_url`, and `cover_thumbnail_url`. Asset URLs use the existing owner-checked run routes. |
 
 The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
 fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
 Version columns are migration 7 (schema version 8), following the existing admission migrations unchanged.
+Schema version 14 adds `build_all`, preserving the requested build mode across idempotent submissions
+even after a single-step version has been continued.
 Redo and continuation use the same transactional generation spend guard as new heroes. Stopped versions
 count at their recorded cost. Continuation checks the guard before requeueing and resumes the existing
 run folder with its earlier stage costs. Multiple heroes may be queued in one guest workspace. Storage
@@ -89,6 +97,25 @@ Continuation resumes after the completed records and runs the ordinary remaining
 or ambiguous store acknowledgement keeps the prepared files until retention; refusal or idempotent
 replay removes the unused copy. Retention removes prepared run folders older than a day only when no
 metadata job claims them, covering unconfirmed creations that were never saved.
+
+The workbench selects one family version at a time in its result dropdown or Branches panel. Recipe is a
+read-only view of that version's recorded models, prompt version identifiers, profile, note and continuation
+stage. Compare loads two owner-checked website models in separate viewers and mirrors orbit position, target
+and zoom in both directions. Below 768 pixels Branches starts as a version list with an optional tree view.
+Retry and Refine always submit a new version. Failed variations retain their saved ancestors; input-check
+rejections instead offer a new root hero with the same input or a return to the populated entry form.
+
+`HEROGEN_TEXTURE_NOTES=1` exposes the texture-only note field and enables texture notes server-side. Without
+the flag, texture continuation accepts an empty note and is presented as Retry texture. `clean_note` validates
+every supplied note on the server, with a 300-character limit. The note is stored for `note_for(run, '3f')`;
+this continuation code does not add it to the stage-3f prompt.
+
+Website stage hints use seven-day medians after at least three measured finishes. Before calculating them,
+the service reads the corresponding pipeline records and excludes reused records and zero-cost records whose
+recorded model calls or nested remote-call metadata are all cached or replayed. Missing records do not supply
+timing evidence. Action estimates sum medians of the remaining steps only when each required step has a median;
+skipped or unavailable steps are omitted. Before enough measurements exist, the UI says the estimate needs
+more real runs.
 
 ## Stage record: `stage-<n>.json`
 

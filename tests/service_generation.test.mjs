@@ -27,6 +27,12 @@ test('queued retry and missing schema stay honest', () => {
   const custom=generationState({state:'running',stages:[stage('future','running')]});
   assert.equal(custom.steps[0].title,'Stage future');
 });
+test('single-step versions are terminal saved results', () => {
+  const state = generationState({state:'stopped',stages:[stage('2','passed'),stage('3','pending')]});
+  assert.equal(state.terminal,true);
+  assert.equal(state.title,'Your version is saved.');
+  assert.equal(state.steps[1].status,'Not reached');
+});
 
 test('the entry and admin browser modules parse as ES modules', () => {
   for (const name of ['app', 'admin']) {
@@ -37,8 +43,8 @@ test('the entry and admin browser modules parse as ES modules', () => {
 test('stage timing reports running elapsed, finished measurements and supplied medians only',()=>{
   assert.equal(stageTiming({state:'running',elapsed_seconds:65.9}),'65 s elapsed');
   assert.equal(stageTiming({state:'passed',seconds:120,cost_usd:.125,typical_seconds:119}),
-    '120.0 s recorded · $0.1250 recorded · usually about 2 min');
-  assert.equal(stageTiming({state:'passed',seconds:0,cost_usd:0}),'0.0 s recorded · $0.0000 recorded');
+    '120.0 s · $0.13 · usually about 2 min');
+  assert.equal(stageTiming({state:'passed',seconds:0,cost_usd:0}),'0.0 s · $0.00');
   assert.equal(stageTiming({state:'pending'}),'');
   assert.equal(stageTiming({state:'running',seconds:10,cost_usd:.1,elapsed_seconds:12,typical_seconds:60}),
     '12 s elapsed · usually about 60 s');

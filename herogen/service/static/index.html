@@ -128,16 +128,27 @@
       <ol id="stages" tabindex="0" role="list" class="stages generation-stages" aria-label="Generation stages"></ol>
       <div class="generation-grid">
         <section class="artboard" aria-labelledby="artifactLabel">
+          <div class="selected-result"><label for="versionSelect">Selected result</label><select id="versionSelect" aria-label="Selected version"></select></div>
           <div class="artboard-top"><span id="artifactLabel">Your character workbench</span><div class="artboard-tabs" aria-label="Preview type"><button type="button" id="artTab" aria-pressed="true">Images</button><button type="button" id="modelTab" aria-pressed="false" hidden>3D preview</button></div></div>
           <div class="artboard-canvas"><img id="artboardImage" alt="" hidden><div id="artboardEmpty"><span class="waiting-symbol" aria-hidden="true">✧</span><h2>A little imagination.<br>A new dimension.</h2><p id="artboardEmptyText">Your first image will appear here when it is ready.</p></div><div id="previewWrap" hidden><canvas id="preview" aria-label="3D preview of the body"></canvas></div><div id="imageError" class="artifact-error" role="status" hidden><p>This image could not be loaded.</p><button type="button" id="retryImage">Try image again</button></div><div id="previewError" class="artifact-error" role="status" hidden><p>The inline 3D preview could not be loaded. You can still download the file or open the full viewer.</p></div></div>
           <div id="images" class="artifact-strip" aria-label="Available character images"></div>
           <p id="orbitHint" class="artboard-hint" hidden>Drag to orbit · Scroll to zoom</p>
+          <div id="workbenchShading" class="artboard-tabs artboard-hint" aria-label="Model shading" hidden><button type="button" data-work-shade="textured" aria-pressed="true">Textured</button><button type="button" data-work-shade="clay" aria-pressed="false">Clay</button><button type="button" data-work-shade="wire" aria-pressed="false">Wire</button></div>
           <p id="modelNote" class="artboard-hint" role="status" hidden></p>
           <div id="modelUpdate" class="artboard-hint" hidden><button type="button" id="updateModel">Sharper version ready - Update</button><p id="modelUpdateNote"></p></div>
         </section>
         <aside class="generation-notes">
+          <section class="variation-actions"><div class="row"><button id="retryVersion" type="button">Retry</button><button id="refineVersion" type="button">Refine</button></div><p class="small">Each action starts a new attempt</p><p id="attemptTime" class="small muted"></p><p id="variationError" role="alert" class="err" hidden></p></section>
+          <section id="variationFailure" class="generation-error" hidden><h2>This variation needs attention</h2><p id="variationReason"></p><p>The previous result is saved.</p><button id="retryFailedVersion" type="button">Try again</button></section>
+          <section id="inputRefusal" class="generation-error" hidden><h2>Let’s revisit your input</h2><p id="inputReason"></p><div class="row"><button id="retryInput" type="button">Try again</button><button id="changeIdea" type="button">Change my idea</button></div></section>
+          <h2 class="behind-heading">Behind the build</h2>
+          <div class="behind-tabs" role="tablist" aria-label="Behind the build"><button id="liveTab" type="button" role="tab" aria-selected="true" aria-controls="livePanel" tabindex="0">Live</button><button id="recipeTab" type="button" role="tab" aria-selected="false" aria-controls="recipePanel" tabindex="-1">Recipe</button><button id="branchesTab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Branches</button></div>
+          <div id="livePanel" role="tabpanel" aria-labelledby="liveTab">
           <section class="work-note"><p class="note-label">On the workbench</p><h2 id="currentStep"></h2><p id="stepDescription"></p><p id="stepMessage" class="small"></p><p class="work-note-foot">Every new result appears here as it becomes available.</p></section>
           <section class="generation-facts"><h2 id="detailH"></h2><p id="detailSub" class="muted small"></p></section>
+          </div>
+          <div id="recipePanel" role="tabpanel" aria-labelledby="recipeTab" hidden></div>
+          <div id="branchesPanel" role="tabpanel" aria-labelledby="branchesTab" hidden><div class="row"><h3>Versions</h3><button id="viewTree" type="button" aria-pressed="false">View tree</button></div><p id="branchesStatus" role="status" class="small"></p><div id="versionTree"></div><button id="compareVersions" type="button" disabled>Compare variations</button></div>
         </aside>
       </div>
       <div id="detailErr" class="generation-error" role="alert" hidden></div>
@@ -148,6 +159,9 @@
       </section>
       <div class="generation-bottom"><span>Your progress is saved by the service. You can return to this hero later.</span><button type="button" id="deleteJob" class="link danger">Delete hero</button></div>
     </section>
+
+    <dialog id="refineDialog" aria-labelledby="refineHeading"><form id="refineForm"><div class="row"><h2 id="refineHeading">What would you change?</h2><button id="closeRefine" type="button" aria-label="Close refinement">×</button></div><label for="refineStage">Continue from</label><select id="refineStage"><option value="texture">Texture only · same shape</option><option value="turnaround">From the views</option></select><div id="refineNoteWrap"><label for="refineNote">Describe the change</label><textarea id="refineNote" rows="4" maxlength="300" aria-describedby="refineCount"></textarea><p id="refineCount" class="small muted">0 / 300 characters</p></div><p id="refineTime" class="small muted"></p><p class="small">Each action starts a new attempt</p><p id="refineError" class="err" role="alert" hidden></p><button id="submitRefine" type="submit">Create variation</button></form></dialog>
+    <dialog id="compareDialog" aria-labelledby="compareHeading"><div class="row"><h2 id="compareHeading">Compare variations</h2><button id="closeCompare" type="button" aria-label="Close comparison">×</button></div><p class="small muted">Drag either model to orbit both views.</p><div class="compare-grid"><section><label for="compareA">First version</label><select id="compareA"></select><p id="compareLabelA"></p><canvas id="compareCanvasA" aria-label="First version model"></canvas></section><section><label for="compareB">Second version</label><select id="compareB"></select><p id="compareLabelB"></p><canvas id="compareCanvasB" aria-label="Second version model"></canvas></section></div><p id="compareStatus" class="small muted" role="status"></p><p id="compareError" role="alert" class="err" hidden></p></dialog>
 
     <section id="developerPanel" class="card developer" aria-labelledby="developerH" hidden></section>
 
