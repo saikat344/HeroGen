@@ -231,6 +231,25 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(rec['budget']['spent_usd_total'], 0)
         self.assertFalse(rec['views']['hair-upper+180']['accepted'])
 
+    def test_first_attempt_selection_does_not_wait_for_earlier_pass(self):
+        original_edit = FakeClient.edit_image
+        original_collect = fast.Pass.collect
+        body_selected = threading.Event()
+        def edit(child, prompt, images, **kw):
+            if 'head+0' in child.cache_dir.parts and kw['attempt'] == 0:
+                self.assertTrue(body_selected.wait(5))
+            return original_edit(child, prompt, images, **kw)
+        def collect(job, index):
+            original_collect(job, index)
+            if job.key == 'body+0' and index == 0:
+                self.assertTrue(job.cancelled.is_set())
+                body_selected.set()
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(FakeClient, 'edit_image', edit), \
+             mock.patch.object(fast.Pass, 'collect', collect):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertTrue(body_selected.is_set())
+
     def test_progress_contract_atomic_order_and_final_copy(self):
         import os
         replaced = []
