@@ -150,7 +150,7 @@ data_vol = modal.Volume.from_name(f"{APP_NAME}-data", create_if_missing=True)
 meta_vol = modal.Volume.from_name(f"{APP_NAME}-meta", create_if_missing=True)
 legal_vol = modal.Volume.from_name(f"{APP_NAME}-legal", create_if_missing=True)
 web_secret = modal.Secret.from_name(WEB_SECRET)
-# A deploying shell can supply the private allowlist without baking it into any image.
+# A deploying shell can supply private admin addresses without baking them into any image.
 web_secrets = [web_secret]
 if modal.is_local() and "HEROGEN_SERVICE_ADMIN_EMAILS" in os.environ:
     web_secrets.append(modal.Secret.from_dict({

@@ -3,7 +3,7 @@
 Secrets come only from the environment, which on Modal is filled from Modal secrets:
 `HEROGEN_SESSION_KEY` (signs session ids, CSRF tokens, sign-in links), `HEROGEN_EMAIL_API_KEY`
 (the email provider) and `MODEL_API_KEY` (the Meta Model API, read by herogen.pipeline in the stage workers only).
-The private admin allowlist also stays in runtime secrets, never the image. Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default below.
+Private admin addresses also stay in runtime secrets, never the image. Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default below.
 """
 
 from __future__ import annotations
