@@ -28,7 +28,7 @@ from typing import Any
 
 from herogen.service.admission import AdmissionStore, SCHEMA as ADMISSION_SCHEMA, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
@@ -44,16 +44,22 @@ MIGRATIONS = {
         "INSERT INTO admissions SELECT job_id,user_id,client_key,amount_micro,cost_signature,actual_micro,main_done,side_required,side_done,closed,created_at,evidence FROM admissions_old",
         "DROP TABLE admissions_old",
         next(stmt.strip() for stmt in ADMISSION_SCHEMA.split(';') if 'CREATE TABLE IF NOT EXISTS budget_overhead' in stmt)),
+    6: ("ALTER TABLE jobs ADD COLUMN parent_job TEXT",
+        "ALTER TABLE jobs ADD COLUMN from_stage TEXT",
+        "ALTER TABLE jobs ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN stop_after TEXT",
+        "ALTER TABLE jobs ADD COLUMN continued_after INTEGER NOT NULL DEFAULT 0"),
+
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
-TERMINAL_STATES = ("succeeded", "rejected", "failed", "canceled")
+TERMINAL_STATES = ("succeeded", "rejected", "failed", "canceled", "stopped")
 STATES = ACTIVE_STATES + TERMINAL_STATES
 # The only state changes a job may make. Deleting a job is a flag (`deleted_at`), not a state.
 TRANSITIONS = {
     "queued": {"running", "canceled", "failed"},
-    "running": {"succeeded", "rejected", "failed", "canceled", "queued"},
-    "succeeded": set(), "rejected": set(), "failed": set(), "canceled": set(),
+    "running": {"stopped", "succeeded", "rejected", "failed", "canceled", "queued"},
+    "stopped": {"queued"}, "succeeded": set(), "rejected": set(), "failed": set(), "canceled": set(),
 }
 STAGE_STATES = ("pending", "running", "passed", "rejected", "failed", "skipped", "unavailable", "canceled")
 # What a stage the attempt was still running becomes when the attempt ends without recording it (a cancel, a
@@ -98,6 +104,7 @@ CREATE TABLE jobs (
   started_at REAL, finished_at REAL, attempts INTEGER NOT NULL DEFAULT 0, lease_until REAL, stage TEXT,
   error_code TEXT, error_stage TEXT, error_message TEXT, counts_quota INTEGER NOT NULL DEFAULT 1,
   seconds REAL, cost_usd REAL, cost_detail TEXT, code_commit TEXT NOT NULL DEFAULT '', bytes INTEGER,
+  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,
   deleted_at REAL, refunded_at REAL, budget_required INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, client_key)
 );
 CREATE INDEX jobs_user ON jobs(user_id, created_at);
@@ -197,7 +204,7 @@ class Store(AdmissionStore):
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
-        "job_refine_budget",
+        "job_refine_budget", "job_continue", "job_versions",
     }) | ADMISSION_PUBLIC
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
@@ -576,7 +583,9 @@ class Store(AdmissionStore):
 
     def job_create(self, *, job_id: str, user_id: str, client_key: str, kind: str, profile: str,
                    jobs_per_day: int, jobs_total: int, storage_max_bytes: int, input_sha: str = "", prompt: str = "",
-                   name: str = "", code_commit: str = "", admission_required: bool = False, cost_signature: str = '') -> tuple[dict[str, Any], bool]:
+                   name: str = "", code_commit: str = "", admission_required: bool = False, cost_signature: str = '',
+                   parent_job: str | None = None, from_stage: str | None = None,
+                   note: str = "") -> tuple[dict[str, Any], bool]:
         """Create a queued job, or return the one this user already made with the same `client_key`.
 
         Idempotent: the same key and request returns the first job and `False`; the same key with a different
@@ -584,11 +593,29 @@ class Store(AdmissionStore):
         and the storage limit are checked in the same transaction, before anything is paid for."""
         if kind not in ("sketch", "prompt") or not valid_id(job_id, "j"):
             raise StoreError("bad job request")
+        if parent_job is not None:
+            from herogen.pipeline.redo import clean_note
+
+            note = clean_note(note)
+            if from_stage not in ("1", "2"):
+                raise StoreError("Choose cover or turnaround to redo.")
+        elif from_stage is not None or note:
+            raise StoreError("Choose an earlier hero to redo.")
         with self._tx() as c:
+            if parent_job is not None:
+                parent = c.execute("SELECT * FROM jobs WHERE id=? AND user_id=? AND deleted_at IS NULL",
+                                   (parent_job, user_id)).fetchone()
+                if parent is None:
+                    raise NotFound("No such hero.")
+                if parent["state"] in ACTIVE_STATES:
+                    raise Conflict("Wait for this hero to stop before making a new version.")
+                if (kind, input_sha, prompt, name, profile) != tuple(parent[k] for k in (
+                        "kind", "input_sha", "prompt", "name", "profile")):
+                    raise StoreError("The new version must use the earlier hero's input.")
             old = c.execute("SELECT * FROM jobs WHERE user_id=? AND client_key=?", (user_id, client_key)).fetchone()
             if old is not None:
-                same = (old["kind"], old["input_sha"], old["prompt"], old["name"], old["profile"]) == (
-                    kind, input_sha, prompt, name, profile)
+                same = (old["kind"], old["input_sha"], old["prompt"], old["name"], old["profile"], old["parent_job"], old["from_stage"], old["note"]) == (
+                    kind, input_sha, prompt, name, profile, parent_job, from_stage, note)
                 if not same:
                     raise Conflict("this request key was already used for a different hero")
                 return dict(old), False
@@ -605,15 +632,67 @@ class Store(AdmissionStore):
             protected = admission_required or user['kind'] == 'guest'
             if protected:
                 self._admit(c, job_id, user_id, client_key, code_commit, cost_signature)
+            self._workspace_free(c, user_id)
             c.execute("INSERT INTO jobs(id, user_id, client_key, kind, input_sha, prompt, name, profile, state, "
-                      "created_at, code_commit) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      "created_at, code_commit, parent_job, from_stage, note, stop_after) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (job_id, user_id, client_key, kind, input_sha, prompt, name, profile, "queued", self.clock(),
-                       code_commit))
+                       code_commit, parent_job, from_stage, note, from_stage))
             if protected:
                 c.execute('UPDATE jobs SET budget_required=1 WHERE id=?', (job_id,))
             self._audit(c, user_id, "job_created", job_id, {"kind": kind, "profile": profile})
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row), True
+
+    @staticmethod
+    def _workspace_free(c: sqlite3.Connection, user_id: str) -> None:
+        if c.execute("SELECT 1 FROM jobs WHERE user_id=? AND state IN ('queued','running') "
+                     "AND deleted_at IS NULL LIMIT 1", (user_id,)).fetchone():
+            raise Conflict("A hero is already being generated in this workspace. Wait for it to finish.")
+
+    def job_continue(self, job_id: str, user_id: str, storage_max_bytes: int) -> dict[str, Any]:
+        """Resume a stopped version once, in the same quota slot and with a fresh retry allowance."""
+        with self._tx() as c:
+            job = c.execute("SELECT * FROM jobs WHERE id=? AND user_id=? AND deleted_at IS NULL",
+                            (job_id, user_id)).fetchone()
+            if job is None:
+                raise NotFound("No such hero.")
+            if job["state"] in ACTIVE_STATES and job["continued_after"] > 0 and job["stop_after"] is None:
+                return dict(job)  # an HTTP retry never starts another generation
+            if job["state"] != "stopped":
+                raise Conflict("Only a version stopped after cover or turnaround can be continued.")
+            self._workspace_free(c, user_id)
+            user = c.execute("SELECT status FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+            if user is None or user["status"] != "active":
+                raise StoreError("This account cannot start jobs.", "account")
+            used = c.execute("SELECT COALESCE(SUM(bytes),0) FROM jobs WHERE user_id=? AND deleted_at IS NULL",
+                             (user_id,)).fetchone()[0]
+            if used >= storage_max_bytes:
+                raise QuotaExceeded("Your saved heroes use all of your storage. Delete some to make room.")
+            self._set_state(c, job, "queued", continued_after=job["attempts"], stop_after=None, finished_at=None, dispatched_at=None,
+                            call_id=None, lease_until=None, error_code=None, error_stage=None, error_message=None)
+            self._audit(c, user_id, "job_continued", job_id)
+            return dict(c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def job_versions(self, job_id: str, user_id: str) -> list[dict[str, Any]]:
+        """The owned version family, including descendants; deleted versions are never returned."""
+        with self.lock:
+            jobs = {r["id"]: dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE user_id=?",
+                                                            (user_id,))}
+            if job_id not in jobs or jobs[job_id]["deleted_at"] is not None:
+                raise NotFound("No such hero.")
+            root, seen = job_id, set()
+            while jobs[root]["parent_job"] in jobs and root not in seen:
+                seen.add(root)
+                root = jobs[root]["parent_job"]
+            family = {root}
+            for _ in range(len(jobs)):
+                added = {jid for jid, j in jobs.items() if j["parent_job"] in family} - family
+                if not added:
+                    break
+                family.update(added)
+            return sorted((jobs[j] for j in family if jobs[j]["deleted_at"] is None),
+                          key=lambda j: (j["created_at"], j["id"]))
 
     def job_get(self, job_id: str, user_id: str | None = None) -> dict[str, Any] | None:
         if user_id is None:
@@ -676,6 +755,10 @@ class Store(AdmissionStore):
                 "SELECT * FROM jobs WHERE state='queued' AND deleted_at IS NULL AND (dispatched_at IS NULL OR "
                 "dispatched_at<=?) ORDER BY created_at LIMIT ?", (now - DISPATCH_GRACE_S, free))]
 
+    @staticmethod
+    def _attempts_in_phase(job) -> int:
+        return job["attempts"] - job["continued_after"]
+
     def job_claim(self, job_id: str, call_id: str, lease_s: float, max_attempts: int) -> dict[str, Any] | None:
         """A worker's first call. Starts the next attempt of a queued job and returns {"attempt", "job"}; returns
         None for a job that is running, finished, deleted or unknown, so a duplicate or re-run worker (Modal may
@@ -686,7 +769,7 @@ class Store(AdmissionStore):
             job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if job is None or job["state"] != "queued" or job["deleted_at"] is not None:
                 return None
-            if job["attempts"] >= max_attempts:
+            if self._attempts_in_phase(job) >= max_attempts:
                 self._fail_ours(c, job, "attempts", job["stage"], "The job stopped unexpectedly several times.")
                 return None
             attempt = job["attempts"] + 1
@@ -779,7 +862,7 @@ class Store(AdmissionStore):
                    refund: bool = False) -> bool:
         """End the live attempt as succeeded, rejected or failed. `refund` asks for a failed job to give its quota
         back because the failure was the service's, not the sketch's; `_refund_ok` decides."""
-        if state not in ("succeeded", "rejected", "failed"):
+        if state not in ("succeeded", "rejected", "failed", "stopped"):
             raise StoreError(f"bad final state {state!r}")
         with self._tx() as c:
             job = self._current(c, job_id, attempt)
@@ -814,7 +897,7 @@ class Store(AdmissionStore):
 
     def _requeue(self, c: sqlite3.Connection, job: sqlite3.Row, max_attempts: int, error_code: str,
                  error_stage: str | None, error_message: str) -> str:
-        if job["attempts"] >= max_attempts:
+        if self._attempts_in_phase(job) >= max_attempts:
             self._fail_ours(c, job, error_code, error_stage, error_message)
             return "failed"
         self._set_state(c, job, "queued", lease_until=None, dispatched_at=None, call_id=None,
@@ -974,7 +1057,7 @@ class Store(AdmissionStore):
         """Finished jobs older than the retention period, and deleted jobs whose files may still exist."""
         cutoff = self.clock() - retention_s
         return self._all("SELECT id, user_id FROM jobs WHERE bytes IS NOT -1 AND ((state IN "
-                         "('succeeded','rejected','failed','canceled') AND COALESCE(finished_at, created_at)<?) "
+                         "('succeeded','rejected','failed','canceled','stopped') AND COALESCE(finished_at, created_at)<?) "
                          "OR deleted_at IS NOT NULL)", (cutoff,))
 
     def job_mark_purged(self, job_id: str) -> None:

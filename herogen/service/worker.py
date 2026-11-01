@@ -302,7 +302,9 @@ def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, gro
     """Run the stages of one group for one attempt; see the module docstring."""
     jid = job["id"]
     plan = plan_for(job["kind"], job["profile"])
-    mine = [(i, s) for i, s in enumerate(plan) if s.group == group]
+    stop = job.get("stop_after")
+    boundary = next((i for i, s in enumerate(plan) if s.key == stop), len(plan))
+    mine = [(i, s) for i, s in enumerate(plan) if s.group == group and i <= boundary]
     total = GroupResult("ok")
     if not mine:
         return total
@@ -319,7 +321,8 @@ def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, gro
             if not store.job_current(jid, attempt):
                 return GroupResult("stale", spec.key)
             if index < resume and record_ok(ctx.run_dir, spec):
-                store.job_stage_set(jid, attempt, spec.key, "passed", message="kept from an earlier attempt")
+                store.job_stage_set(jid, attempt, spec.key, "passed", message="kept from an earlier attempt",
+                                    **({"seconds": 0.0, "cost_usd": 0.0} if spec.key not in prior else {}))
                 continue
             timeout = settings.blender_timeout_s if spec.group == "blender" else settings.stage_timeout_s
             if not store.job_stage_set(jid, attempt, spec.key, "running", lease_s=timeout + LEASE_MARGIN_S):
@@ -460,15 +463,17 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
         if volume is not None:
             volume.reload()
         run_dir = storage.run_dir(job["user_id"], job_id)
-        resume = resume_index(run_dir, plan_for(job["kind"], job["profile"])) if attempt > 1 else 0
-        if job["kind"] == "sketch" and not storage.input_path(job["user_id"], job_id).is_file():
+        resume = (resume_index(run_dir, plan_for(job["kind"], job["profile"]))
+                  if attempt > 1 or job.get("parent_job") else 0)
+        if (job["kind"] == "sketch" and not job.get("parent_job")
+                and not storage.input_path(job["user_id"], job_id).is_file()):
             store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0", refund=True,
                              error_message="The uploaded sketch was not saved.")
             return "failed"
         seconds = cost = compute = 0.0
         # Outcomes count new work. Stored stage rows also include earlier attempts and restarted groups.
         own_stages = {s.key for s in plan_for(job["kind"], job["profile"]) if s.group in GROUPS}
-        for group in GROUPS:
+        for group in (("model",) if job.get("stop_after") else GROUPS):
             try:
                 res = execute(job, attempt, group, resume)
             except Exception as e:
@@ -480,7 +485,7 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
             compute += res.compute_usd
             recorded = sum(r["cost_usd"] or 0.0 for r in store.job_stages(job_id) if r["stage"] in own_stages)
             carried = max(0.0, recorded - cost - compute)
-            if group == "model" and res.status == "ok" and heldout is not None:
+            if group == "model" and res.status == "ok" and heldout is not None and not job.get("stop_after"):
                 try:
                     heldout(job)
                 except Exception:
@@ -517,11 +522,12 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
                     redispatch(job_id)
                 return state
         took = round(time.monotonic() - t0, 2)
-        store.job_finish(job_id, attempt, "succeeded", seconds=took, cost_usd=round(carried + cost + compute, 6),
+        final_state = "stopped" if job.get("stop_after") else "succeeded"
+        store.job_finish(job_id, attempt, final_state, seconds=took, cost_usd=round(carried + cost + compute, 6),
                          cost_detail=detail, bytes_=_bytes(storage, job, volume))
-        event("job_finished", job=job_id, attempt=attempt, state="succeeded", seconds=took,
+        event("job_finished", job=job_id, attempt=attempt, state=final_state, seconds=took,
               cost_usd=round(carried + cost + compute, 6))
-        return "succeeded"
+        return final_state
 
 
 def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
@@ -588,11 +594,16 @@ def purge(store, settings: Settings, storage: Storage, volume=None) -> dict[str,
         if store.job_get(jid) is None:
             path.unlink()
             orphans += 1
+    orphan_runs = 0
+    for uid, jid, _path in storage.runs_before(time.time() - 86400.0):
+        if store.job_get(jid) is None:
+            storage.delete_job(uid, jid)
+            orphan_runs += 1
     if volume is not None:
         volume.commit()
     counts = store.purge_expired(settings.audit_retention_days * 86400.0)
-    event("retention", jobs=len(removed), cache_files=cache_files, orphan_inputs=orphans, **counts)
-    return {"jobs": removed, "cache_files": cache_files, "orphan_inputs": orphans, **counts}
+    event("retention", jobs=len(removed), cache_files=cache_files, orphan_inputs=orphans, orphan_runs=orphan_runs, **counts)
+    return {"jobs": removed, "cache_files": cache_files, "orphan_inputs": orphans, "orphan_runs": orphan_runs, **counts}
 
 
 class ThreadBackend:
