@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import shutil
 import tempfile
 import unittest
@@ -31,6 +32,51 @@ def _open_edges(faces):
     e = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
     _, c = np.unique(e, axis=0, return_counts=True)
     return int((c == 1).sum())
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class FastJointRecordTests(unittest.TestCase):
+    def test_unverified_seams_are_informational_but_measured_gaps_still_gate(self):
+        from herogen.blender.record import StageRecord
+        from herogen.blender.stage4 import GAP_GATE, _gap_check, _record_unverified
+
+        for gap, expected in ((GAP_GATE, True), (GAP_GATE + .000001, False)):
+            with self.subTest(gap=gap), tempfile.TemporaryDirectory() as tmp:
+                rec = StageRecord(Path(tmp), 4, "game body")
+                _record_unverified(rec, {"RightElbow": "no shared rim"})
+                rec.add(_gap_check("max_joint_gap_high", gap))
+                result = rec.finish()
+                self.assertEqual(result["ok"], expected)
+                self.assertEqual(result["unverified_joints"], [{
+                    "joint": "RightElbow", "reason": "no shared rim",
+                    "message": "The right elbow seam could not be checked on this character's joints."}])
+                self.assertFalse(result["checks"][0]["gate"])
+                self.assertTrue(result["checks"][1]["gate"])
+                self.assertEqual(result["checks"][1]["threshold"], .15)
+
+    def test_no_measured_gaps_is_unknown_rather_than_zero(self):
+        from herogen.blender.stage4 import _gap_check, _max_gap
+
+        self.assertIsNone(_max_gap([], fast=True))
+        with self.assertRaises(ValueError) as original:
+            max([])
+        with self.assertRaises(ValueError) as full:
+            _max_gap([], fast=False)
+        self.assertEqual(str(full.exception).encode(), str(original.exception).encode())
+        result = _gap_check("max_joint_gap_high", _max_gap([], fast=True))
+        self.assertIsNone(result["value"])
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["gate"])
+
+    def test_unverified_seam_does_not_excuse_an_empty_final_part(self):
+        from herogen.blender.record import StageRecord, check
+        from herogen.blender.stage4 import _record_unverified
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = StageRecord(Path(tmp), 4, "game body")
+            _record_unverified(rec, {"RightWrist": "empty section RightHand"})
+            rec.add(check("sections_non_empty", 14, 15))
+            self.assertFalse(rec.finish()["ok"])
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender(), "Blender is required")
@@ -319,6 +365,62 @@ class TestSections(SyntheticBase):
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class TestEndToEndBlender(SyntheticBase):
+    def test_fast_rimless_mesh_exports_fifteen_parts_and_preserves_gap_failure(self):
+        from herogen.blender import glb, stage4
+
+        run = self.tmp / "rimless"
+        synth.write_run(run, synth.humanoid(), size=384, ppu=60.)
+        vs = views.load_views(run, 5.5)
+        sk = joints.estimate(vs, 5.5)
+        verts, faces, _ = carve.build_mesh(vs, 5.5, 96)
+        sections, _ = split.build_sections(verts, faces, sk, rings=1, ring_points=8)
+        verts, faces, count = [], [], 0
+        for section in sections.values():
+            centre = section.verts.mean(axis=0)
+            verts.append(centre + .6 * (section.verts - centre))
+            faces.append(section.faces + count)
+            count += len(section.verts)
+        work = run / "blender-work"
+        work.mkdir()
+        np.savez(work / "03-mesh.npz", verts=np.concatenate(verts), faces=np.concatenate(faces))
+        (run / "stage-3.json").write_text(json.dumps({"ok": True, "mesh_source": "carve",
+                                                     "shape_views": list(vs.views)}))
+        with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "0"}):
+            with self.assertRaises(cuts.UnmeasurableJoints) as exc:
+                stage4.run_stage4(run, cut_search=False)
+        full_message = str(exc.exception).encode()
+        self.assertIn(b"RightElbow: no shared rim", full_message)
+        measure = pose.joint_gaps
+
+        def violated(*args, **kwargs):
+            result = measure(*args, **kwargs)
+            for row in result.values():
+                # Waist retains a shared rim in this mesh. Its actual gate must still run.
+                self.assertIn("Waist", row)
+                row["Waist"] = stage4.GAP_GATE + .01
+            return result
+
+        with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "1"}), \
+                mock.patch.object(pose, "joint_gaps", side_effect=violated):
+            result = stage4.run_stage4(run, cut_search=False)
+        self.assertFalse(result["ok"])
+        recorded = json.loads((run / "stage-4.json").read_text())
+        unknown = {row["joint"]: row for row in recorded["unverified_joints"]}
+        self.assertIn("RightElbow", unknown)
+        self.assertIn("no shared rim", unknown["RightElbow"]["reason"])
+        self.assertIn("right elbow seam", unknown["RightElbow"]["message"])
+        checks = {c["name"]: c for c in recorded["checks"]}
+        self.assertFalse(checks["measurable_joints"]["gate"])
+        self.assertTrue(checks["max_joint_gap_high"]["gate"])
+        self.assertFalse(checks["max_joint_gap_high"]["pass"])
+        self.assertEqual(checks["sections_non_empty"]["value"], 15)
+        body = json.loads((run / "04-body" / "sections.json").read_text())
+        self.assertTrue(all(s["triangles_high"] > 0 for s in body["sections"]))
+        meshes = glb.load_glb(run / "04-body" / "high.glb").meshes
+        self.assertEqual({m.name for m in meshes}, set(SECTIONS))
+        self.assertTrue(all(len(m.faces) for m in meshes))
+        self.assertTrue(all("RightElbow" not in row for row in body["pose_test"]["gaps_high"].values()))
+
     @unittest.skipUnless(importlib.util.find_spec("scipy") is not None, "scipy is required for refined colour")
     def test_refined_colours_reach_exported_head_and_torso_in_both_lods(self):
         import hashlib

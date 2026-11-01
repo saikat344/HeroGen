@@ -79,6 +79,16 @@ class UpstreamGateTest(unittest.TestCase):
                 self._main("--stages", "4", "--cut-workers", workers)
             self.assertEqual(exc.exception.code, 2)
 
+    def test_fast_flag_reaches_stage4_only_when_requested(self):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        for args, expected in (([], {}), (["--fast"], {"fast": True})):
+            with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()), \
+                    patch("herogen.blender.stage4.run_stage4", return_value={"ok": True, "seconds": 0,
+                                                                           "checks": []}) as run:
+                code, _ = self._main("--stages", "4", *args)
+                self.assertEqual(code, 0)
+                self.assertEqual({k: v for k, v in run.call_args.kwargs.items() if k == "fast"}, expected)
+
     def test_missing_remote_result_without_fallback_is_a_clear_error(self):
         from herogen.blender import synth
 
