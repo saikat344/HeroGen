@@ -76,11 +76,16 @@ CSRF middleware:
 
 The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
 fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
+Version columns are migration 6 (schema version 7), following the existing admission migrations unchanged.
+In public mode, and for every guest or previously budgeted job, redo and continuation use the same atomic
+budget admission as a new hero. A stopped version releases capacity only after its compute is confirmed
+finished, retaining its monetary allocation. Continuation reserves another full job bound for its fresh retry
+allowance, adding it to prior allocations or reconciled spending before reopening the same job's receipt.
 Redo admission uses the same active account, daily/lifetime quota and storage checks as new heroes, in
 one transaction. Both new hero creation and continuation atomically refuse another queued or running
 job in the same user's workspace. Continuation needs storage capacity and the existing request rate limit;
-it does not consume a second quota slot. This service version requires sign-in and has no guest admission
-path. Missing or foreign jobs return the same plain 404 message.
+it does not consume a second quota slot. Sessions can belong to signed-in accounts or private guest
+workspaces. Missing or foreign jobs return the same plain 404 message.
 
 Workers resume after the copied passing records even on a new job's first attempt. A redo with
 `stop_after` runs only its model group through the requested stage; no later worker group, held-out view

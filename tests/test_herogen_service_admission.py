@@ -176,6 +176,129 @@ class TestGuestHTTP(WebCase):
     def enter(self):
         b=Browser(self.app); b.session(); r=b.post('/api/demo/access',json={})
         self.assertEqual(r.status_code,200,r.text); b.csrf=r.json()['csrf']; return b
+
+    def redo(self, browser, parent, stage='cover', key='redo-key-0001'):
+        return browser.post(f'/api/jobs/{parent}/redo', json={'stage': stage, 'note': 'green coat'},
+                            headers={'Idempotency-Key': key})
+
+    def reservation(self, jid):
+        return next(row for row in self.store.budget_report()['admissions'] if row['job_id'] == jid)
+
+    def test_guest_redo_and_continue_reserve_budget_without_consuming_another_quota_slot(self):
+        for stage in ('cover', 'turnaround'):
+            with self.subTest(stage=stage):
+                b = self.enter()
+                parent = self.make_job(b).json()['id']
+                self.assertEqual(self.finish(parent), 'succeeded')
+                before = self.store.budget_report()['summary']['committed_micro']
+                r = self.redo(b, parent, stage)
+                self.assertEqual(r.status_code, 201, r.text)
+                child = r.json()['id']
+                self.assertEqual(self.store.job_get(child)['budget_required'], 1)
+                self.assertEqual(self.reservation(child)['amount_micro'], 10_000_000)
+                self.assertFalse(self.reservation(child)['closed'])
+                self.assertEqual(self.store.budget_report()['summary']['committed_micro'], before + 10_000_000)
+                self.assertEqual(self.redo(b, parent, stage).status_code, 200)
+                self.assertEqual(self.finish(child), 'stopped')
+                self.assertTrue(self.reservation(child)['closed'])
+                self.assertEqual(self.store.budget_report()['summary']['active'], 0)
+                quota = b.get('/api/quota').json()['jobs_total']
+                for _ in range(2):
+                    r = b.post(f'/api/jobs/{child}/continue')
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertFalse(self.reservation(child)['closed'])
+                    self.assertEqual(self.reservation(child)['amount_micro'], 20_000_000)
+                self.assertEqual(b.get('/api/quota').json()['jobs_total'], quota)
+                self.assertEqual(self.finish(child), 'succeeded')
+                self.assertTrue(self.reservation(child)['closed'])
+
+    def test_guest_redo_and_continue_refused_by_pause_budget_and_cost_verification(self):
+        b = self.enter()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent).json()['id']
+        self.assertEqual(self.finish(child), 'stopped')
+        committed = self.store.budget_report()['summary']['committed_micro']
+        uid = self.store.job_get(child)['user_id']
+        for reason, policy in (
+            ('generation_paused', {'enabled': False}),
+            ('generation_budget_exhausted', {'limit_micro': committed}),
+            ('cost_bound_unverified', {'cost_signature': 'b' * 64}),
+        ):
+            policy_args = dict(limit_micro=1_000_000_000, reserve_micro=10_000_000, max_active=5,
+                               expires_at=self.clock() + 86400, code_commit=self.s.code_commit,
+                               cost_signature=self.s.cost_signature, bound_note='Synthetic bound',
+                               provider_caps_verified=True)
+            policy_args.update(policy)
+            self.store.budget_configure(**policy_args)
+            submitted = list(self.submitted)
+            for action in ('redo', 'continue'):
+                with self.subTest(reason=reason, action=action):
+                    r = (self.redo(b, parent, key='redo-key-0002') if action == 'redo'
+                         else b.post(f'/api/jobs/{child}/continue'))
+                    self.assertEqual(r.status_code, 503, r.text)
+                    self.assertEqual(r.json()['error']['code'], reason)
+                    self.assertEqual(self.store.job_get(child)['state'], 'stopped')
+                    self.assertEqual(self.store.budget_report()['summary']['committed_micro'], committed)
+                    self.assertEqual(len(self.store.jobs_list(uid)), 2)
+                    self.assertEqual(len(list(self.svc.storage.runs_root(uid).iterdir())), 2)
+                    self.assertEqual(self.submitted, submitted)
+
+    def test_public_account_redo_and_continue_use_admission(self):
+        b = self.signin()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent).json()['id']
+        self.assertEqual(self.store.job_get(child)['budget_required'], 1)
+        self.assertEqual(self.finish(child), 'stopped')
+        self.store.db.execute('UPDATE admission_policy SET enabled=0')
+        for r in (self.redo(b, parent, key='redo-key-0002'), b.post(f'/api/jobs/{child}/continue')):
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.json()['error']['code'], 'generation_paused')
+
+    def test_guest_redo_and_continue_respect_global_capacity(self):
+        b = self.enter()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent).json()['id']
+        self.assertEqual(self.finish(child), 'stopped')
+        self.store.db.execute('UPDATE admission_policy SET max_active=1')
+        self.assertEqual(self.make_job(self.enter()).status_code, 201)
+        for r in (self.redo(b, parent, key='redo-key-0002'), b.post(f'/api/jobs/{child}/continue')):
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.json()['error']['code'], 'generation_capacity')
+            self.assertEqual(r.headers['retry-after'], '5')
+        self.assertEqual(self.store.job_get(child)['state'], 'stopped')
+        self.assertTrue(self.reservation(child)['closed'])
+
+    def test_guest_continuation_retains_reconciled_prior_spend(self):
+        b = self.enter()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent).json()['id']
+        self.assertEqual(self.finish(child), 'stopped')
+        self.store.budget_reconcile(child, 123, 'Synthetic receipt: no paid calls')
+        r = b.post(f'/api/jobs/{child}/continue')
+        self.assertEqual(r.status_code, 200, r.text)
+        row = self.reservation(child)
+        self.assertEqual(row['amount_micro'], 10_000_123)
+        self.assertIsNone(row['actual_micro'])
+        self.assertEqual(self.store.budget_report()['summary']['committed_micro'], 20_000_123)
+
+    def test_guest_continuation_cannot_reopen_uncertain_compute(self):
+        b = self.enter()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent).json()['id']
+        claim = self.store.job_claim(child, 'synthetic', 60, 2)
+        self.store.admission_work_begin(child, 'uncertain', 'model', self.s.cost_signature)
+        self.store.job_finish(child, claim['attempt'], 'stopped')
+        self.store.admission_work_end(child, 'uncertain', False)
+        r = b.post(f'/api/jobs/{child}/continue')
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()['error']['code'], 'workspace_active')
+        self.assertEqual(self.store.job_get(child)['state'], 'stopped')
+        self.assertEqual(self.reservation(child)['amount_micro'], 10_000_000)
     def test_guest_entry_is_private_csrf_protected_and_not_compute(self):
         b=Browser(self.app); b.session()
         self.assertEqual(b.post('/api/demo/access',json={},csrf=False).status_code,403)

@@ -537,9 +537,9 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
         return _run_job(store, settings, storage, job_id, call_id, execute, redispatch, volume, heldout)
     finally:
         job = store.job_get(job_id)
-        if job and job.get('budget_required') and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled'):
+        if job and job.get('budget_required') and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled', 'stopped'):
             stages = store.job_stages(job_id)
-            if heldout is None or not any(s['stage'] == '2' and s['state'] == 'passed' for s in stages):
+            if job['state'] == 'stopped' or heldout is None or not any(s['stage'] == '2' and s['state'] == 'passed' for s in stages):
                 store.admission_side_done(job_id)
             store.admission_main_done(job_id)
 
