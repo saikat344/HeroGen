@@ -1124,9 +1124,10 @@ class StageTests(unittest.TestCase):
         with mock.patch.object(refine, "rebake_views", return_value={"body+0": 0.97, "body+45": 1.03}) as rebake:
             rec = stage.run_stage3f(self.run, self.client)
         self.assertEqual(rebake.call_count, 1)
-        self.assertEqual(rec["exposure_gains"], {"body+0": 0.97, "body+45": 1.03})
+        self.assertNotIn("exposure_gains", rec)
         self.assertEqual(rec["thresholds"]["closeup_feather_px"], refine.CLOSEUP_FEATHER_PX)
-        self.assertEqual(rec["thresholds"]["exposure_mode"], refine.EXPOSURE_MODE)
+        self.assertEqual(rec["thresholds"]["exposure_mode"], "off")
+        self.assertFalse(refine.EXPOSURE_SOLVE)
 
         with mock.patch.object(refine, "CLOSEUP_FEATHER", False), \
                 mock.patch.object(refine, "EXPOSURE_SOLVE", False), \
