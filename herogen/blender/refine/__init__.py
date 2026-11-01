@@ -7,6 +7,8 @@ import math
 import os
 import threading
 import uuid
+from concurrent.futures import CancelledError
+from contextvars import ContextVar
 from pathlib import Path
 
 from PIL import Image
@@ -25,6 +27,7 @@ REFINE_ORDER = ("head+0", "head+40", "head-40", "head+90", "head-90", "head+180"
 # Negative angles -90/-135 are 270/225 degrees, with the same orientation and projection.
 HAIR_ORDER = ("head+90", "head+135", "head+180", "head-135", "head-90",
               "upper+135", "upper+180", "upper-135")
+_attempt_cancelled = ContextVar("refine_attempt_cancelled", default=None)
 
 
 class Budget:
@@ -208,7 +211,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                upscale_texture=False, recipe="RF2R", refine_profile=None, user_note=""):
+                upscale_texture=False, recipe="RF2R", refine_profile=None, user_note: str = ""):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -262,19 +265,37 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     previous_settle = client.after_api_attempt
 
     def guard(model):
+        def check_cancelled():
+            cancelled = _attempt_cancelled.get()
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError("lower attempt accepted")
+
         with budget.lock:
-            budget.before_attempt(model)
+            check_cancelled()
+            budget.reserve(model)
+        acquired = False
+        try:
+            # A limiter can wait for another attempt to settle. Never hold the state lock while waiting.
             if previous_guard is not None:
                 previous_guard(model)
-            budget.reserve(model)
-            save(ok=False, status="running")
+                acquired = True
+            with budget.lock:
+                check_cancelled()  # selection may have cancelled this attempt during the limiter wait
+                save(ok=False, status="running")
+        except BaseException:
+            with budget.lock:
+                budget.settle(0)
+                save(ok=False, status="running")
+            if acquired and previous_settle is not None:
+                previous_settle(0)
+            raise
 
     def settle(cost):
         with budget.lock:
             budget.settle(cost)
             save(ok=False, status="running")
-            if previous_settle is not None:
-                previous_settle(cost)
+        if previous_settle is not None:
+            previous_settle(cost)
 
     def save(**extra):
         with budget.lock:
