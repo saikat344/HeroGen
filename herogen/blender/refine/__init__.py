@@ -100,7 +100,7 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
 
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
           closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
-          apply=None, attempts=None):
+          apply=None, attempts=None, attempt_start=0, cancelled=None):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -134,7 +134,10 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         if not measurable:
             record.update(accepted=False, reason="render outline not measurable")
             return current
-    for attempt in range(attempts if attempts is not None else I.HAIR_ATTEMPTS if hair else I.ATTEMPTS):
+    for attempt in range(attempt_start, attempt_start + (attempts if attempts is not None else I.HAIR_ATTEMPTS if hair else I.ATTEMPTS)):
+        if cancelled is not None and cancelled.is_set():
+            record.update(reason="cancelled: lower attempt accepted")
+            return current
         trial = {"try": attempt + 1, "accepted": False, "reason": "incomplete"}
         record["attempts"].append(trial)
         record["tries"] = attempt + 1
@@ -162,6 +165,10 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             passed, measures = I.outline_gate(figure, fig_e, closeup=(body_cam is not None and I.is_closeup(cam, body_cam)))
             reason = "outline moved"
         trial.update(registration=reg, checks=measures)
+        if cancelled is not None and cancelled.is_set():
+            record.update(reason="cancelled: lower attempt accepted")
+            trial["reason"] = record["reason"]
+            return current
         if passed:
             if parts is None:
                 parts = I.part_masks(client, inp, figure.shape)

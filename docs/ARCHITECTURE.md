@@ -549,7 +549,10 @@ Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast use
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
 Fast renders five cameras from one frozen atlas: `head+0`, `body+0`, `body+90`, `body-90`, `body+180`.
-At most five workers edit and gate those views concurrently. Each worker uses the existing registration,
+At most five passes run concurrently. Each pass launches its three normal attempts (two for hair)
+concurrently against the frozen render and takes the lowest-index passing attempt. Higher attempts
+are cancelled before additional calls where possible; active requests drain and retain their caches.
+Each worker uses the existing registration,
 outline, face containment and hair exclusion logic, including its unchanged thresholds. Accepted results
 are projected through `Texture.apply` in the listed order, never in completion order. A second wave,
 `hair-upper+180`, sees the first wave's paint and uses the existing hair gates and weight map. A missing
@@ -557,7 +560,7 @@ head skips the head close-up. Fast retains the normal three-sample and hair two-
 it cannot be combined with close-up texture upscaling. This schedule changes repaint inputs and is a
 quality/latency tradeoff, not an output-equivalent execution of `best`.
 
-Every worker has its own call log and cache directory beneath `cache/fast/<pass>`. It copies matching
+Every worker has its own call log and cache directory beneath `cache/fast/<pass>/fast/attempt-<index>`. It copies matching
 root cache families on demand; after draining, complete families and call logs are published in pass
 order. Transport retry reservations share a lock, while active reservation tokens are local to each
 thread. The lock spans local budget updates and stage-record persistence before an HTTP
