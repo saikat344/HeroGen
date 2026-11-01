@@ -92,6 +92,11 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
         sequence = [view for wave in WAVES for view in wave]
         normal_count = sum(not hair for _, hair in sequence)
         hair_count = len(sequence) - normal_count
+        # All attempts may start before a first acceptance can cancel them, including duplicate render masks.
+        normal, hair = 3, 2
+        images = normal_count * normal + hair_count * hair
+        segments = 2 + normal_count * normal * 4 + hair_count * hair * 5
+        return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
     else:
         normal_count, hair_count = len(REFINE_ORDER), len(HAIR_ORDER)
     images = normal_count * normal + hair_count * hair
@@ -380,7 +385,9 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 save(ok=False, status="running")
         accepted = sum(v["accepted"] for v in rec.data["views"].values())
         rec.add(check("accepted_views", accepted, 1, gate=False))
-        if accepted:
+        if accepted and refine_profile == "fast":
+            rec.data.update(outputs=["03-refined.glb"], final_model="03-refined.glb")
+        elif accepted:
             from .backend import blender
             if I.EXPOSURE_SOLVE or I.CLOSEUP_FEATHER:
                 gains = I.rebake_views(tex, work, rec.data["views"], body_cam=cams["body+0"])

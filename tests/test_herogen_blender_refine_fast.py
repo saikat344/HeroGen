@@ -17,6 +17,10 @@ from tests.test_herogen_blender_refine import FakeClient, HAVE_REFINE
 
 
 class ConcurrentBudgetTests(unittest.TestCase):
+    def test_estimate_reserves_all_parallel_requests(self):
+        self.assertEqual(stage.cost_estimate(refine_profile='fast'), .35)
+        self.assertEqual(stage.cost_estimate(True, refine_profile='fast'), .35)
+
     def test_atomic_limit_and_thread_local_settlement(self):
         client = ModelClient('unused')
         budget = stage.Budget(client, .03)
@@ -58,6 +62,8 @@ class ConcurrentBudgetTests(unittest.TestCase):
             self.assertTrue((a.cache_dir / 'k.png').is_file())
             self.assertFalse((b.cache_dir / 'k.png').exists())
             self.assertIsNot(a.log, b.log)
+            self.assertIs(a.limiter, parent.limiter)
+            self.assertIs(a.before_api_attempt, parent.before_api_attempt)
             a.log.add(IMAGE_MODEL, 'edit', 'n', True)
             a._save_png('n.png', Image.new('RGB', (4, 4), 'red'))
             a._save_entry('n', {'image': 'n.png'})
@@ -68,7 +74,16 @@ class ConcurrentBudgetTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
 class FastStageTests(unittest.TestCase):
-    setUp = fixture.StageTests.setUp
+    def setUp(self):
+        fixture.StageTests.setUp(self)
+        def save(path):
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new('RGB', (4, 4), 'blue').save(path)
+            return path
+        self.tex.save.side_effect = save
+        import numpy as np
+        self.tex.render_view.return_value = (np.zeros((64, 64, 3)), np.zeros((64, 64), bool))
     identity = staticmethod(fixture.StageTests.identity)
 
     def render_many(self, mode, args, log, **kw):
@@ -103,9 +118,10 @@ class FastStageTests(unittest.TestCase):
             rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
         self.assertEqual(rec['status'], 'complete')
         self.assertEqual(len(set(started[:5])), 5)
-        self.assertEqual(projected, ['head+0', 'body+0', 'body+90', 'body-90', 'body+180', 'upper+180'])
+        self.assertEqual(projected[:5], ['head+0', 'body+0', 'body+90', 'body-90', 'body+180'])
+        self.assertEqual(projected[-6:], ['head+0', 'body+0', 'body+90', 'body-90', 'body+180', 'upper+180'])
         self.assertEqual(len(set(self.renders[:5])), 1)
-        self.assertTrue(self.renders[5].endswith('body+180/texture.png'))
+        self.assertTrue(self.renders[5].endswith('texture-v1.png'))
         self.assertEqual(sum(v['accepted'] for v in rec['views'].values()), 6)
         self.assertEqual(rec['thresholds']['outline'], fixture.refine.GATE)
         self.assertGreaterEqual(len(rec['calls']), 31)  # concurrent attempts can finish before cancellation
@@ -177,9 +193,9 @@ class FastStageTests(unittest.TestCase):
              mock.patch.object(imaging, 'load_accepted_views', wraps=imaging.load_accepted_views) as load:
             rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
         self.assertEqual(rec['status'], 'complete')
-        load.assert_called_once()
-        self.tex.reset.assert_called_once()
-        self.assertEqual(self.tex.apply.call_count, 12)  # six projections, then six final rebake projections
+        self.assertEqual(load.call_count, 2)
+        self.assertEqual(self.tex.reset.call_count, 2)
+        self.assertEqual(self.tex.apply.call_count, 11)  # five first-wave views, then the full six-view version
         for key, view in rec['views'].items():
             folder = self.run / 'blender-work' / 'texture-refine' / key
             self.assertTrue((folder / (view['camera']['name'] + '.png')).is_file())
@@ -205,7 +221,7 @@ class FastStageTests(unittest.TestCase):
         rec = json.loads((self.run / 'stage-3f.json').read_text())
         self.assertEqual(rec['status'], 'error')
         self.assertFalse((self.run / '03-refined.glb').exists())
-        self.assertNotIn('hair-upper+180', rec['views'])
+        self.assertEqual(rec['views']['hair-upper+180']['reason'], 'not attempted: model error')
         self.assertGreater(len(rec['calls']), 0)
 
     def test_zero_cap_skips_all_paid_attempts_without_overspend(self):
@@ -214,6 +230,99 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(rec['status'], 'cap_reached')
         self.assertEqual(rec['budget']['spent_usd_total'], 0)
         self.assertFalse(rec['views']['hair-upper+180']['accepted'])
+
+    def test_progress_contract_atomic_order_and_final_copy(self):
+        import os
+        replaced = []
+        replace = os.replace
+        def checked(source, target):
+            source, target = Path(source), Path(target)
+            if target.name == 'stage-3f-progress.json':
+                progress = json.loads(source.read_text())
+                for version in progress['versions']:
+                    self.assertTrue((self.run / version['glb']).is_file())
+            replaced.append(target.name)
+            return replace(source, target)
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(fast.os, 'replace', side_effect=checked):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertEqual(set(progress), {'profile', 'versions', 'done', 'final_n'})
+        self.assertEqual(progress['profile'], 'fast')
+        self.assertIs(progress['done'], True)
+        self.assertEqual(progress['final_n'], 2)
+        previous = set()
+        for n, version in enumerate(progress['versions'], 1):
+            self.assertEqual(set(version), {'n', 'glb', 'accepted', 'rejected', 'pending', 'time',
+                                            'atlas_sha256', 'code_sha', 'wave'})
+            self.assertEqual(version['n'], n)
+            self.assertEqual(version['wave'], n)
+            self.assertGreater(set(version['accepted']), previous)
+            previous = set(version['accepted'])
+            self.assertLess(replaced.index(version['glb']), replaced.index('stage-3f-progress-v%d.json' % n))
+            self.assertEqual(len(version['atlas_sha256']), 64)
+            snapshot = json.loads((self.run / ('stage-3f-progress-v%d.json' % n)).read_text())
+            self.assertFalse(snapshot['done'])
+            self.assertEqual(snapshot['versions'][-1], version)
+        last = self.run / progress['versions'][-1]['glb']
+        self.assertEqual((self.run / '03-refined.glb').read_bytes(), last.read_bytes())
+
+    def test_failed_export_keeps_previous_progress_pointer(self):
+        exports = []
+        def blender(mode, args, log, **kw):
+            if mode == 'export':
+                exports.append(args['out'])
+                if len(exports) == 2:
+                    Path(args['out']).write_bytes(b'partial')
+                    raise RuntimeError('export fixture')
+            return self.render_many(mode, args, log, **kw)
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=blender):
+            with self.assertRaisesRegex(RuntimeError, 'export fixture'):
+                stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertFalse(progress['done'])
+        self.assertEqual(len(progress['versions']), 1)
+        self.assertTrue((self.run / progress['versions'][0]['glb']).is_file())
+        self.assertFalse((self.run / '03-refined-v2.part.glb').exists())
+        self.assertFalse((self.run / '03-refined.glb').exists())
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertGreater(len(record['calls']), 0)  # export failures still drain/publish paid call evidence
+
+    def test_all_rejected_has_no_version_and_finished_fallback(self):
+        self.client.reject = True
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            record = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(record['final_model'], '03-source.glb')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertEqual(progress, {'profile': 'fast', 'versions': [], 'done': True, 'final_n': None})
+        self.assertFalse(list(self.run.glob('03-refined*.glb')))
+
+    def test_retry_publication_cannot_change_wave_two_frozen_input(self):
+        original = FakeClient.edit_image
+        wave_two_started = threading.Event()
+        def edit(child, prompt, images, **kw):
+            if 'head+0' in child.cache_dir.parts:
+                if kw['attempt'] == 0:
+                    child._call(IMAGE_MODEL, 'edit')
+                    return Image.new('RGB', images[0].size, (115, 115, 115))
+                self.assertTrue(wave_two_started.wait(5))
+            elif 'hair-upper+180' in child.cache_dir.parts:
+                wave_two_started.set()
+            return original(child, prompt, images, **kw)
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(FakeClient, 'edit_image', edit):
+            record = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        first = progress['versions'][0]
+        self.assertNotIn('head+0', first['accepted'])
+        self.assertIn('head+0', first['pending'])
+        self.assertIn('hair-upper+180', first['pending'])
+        self.assertIn('head+0', progress['versions'][-1]['accepted'])
+        self.assertEqual(record['views']['head+0']['selected_attempt'], 1)
+        self.assertTrue(self.renders[5].endswith('texture-v1.png'))
+        self.assertEqual(record['waves'][1]['frozen_atlas'], 'texture-v1.png')
+        for before, after in zip(progress['versions'], progress['versions'][1:]):
+            self.assertLess(set(before['accepted']), set(after['accepted']))
 
     def test_bad_profile_and_upscale_combination_fail_before_output_deletion(self):
         final = self.run / '03-refined.glb'
@@ -228,6 +337,38 @@ class FastStageTests(unittest.TestCase):
         self.assertNotIn('refine_profile', rec)
         self.assertNotIn('waves', rec)
         self.assertEqual(len(rec['views']), 20)
+
+
+@unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
+class ReprojectionTests(unittest.TestCase):
+    def test_reprojection_resets_base_and_reproduces_atlas_hash(self):
+        import hashlib
+        import numpy as np
+        from herogen.blender.refine import cameras, character, imaging as I
+        xs, zs = np.meshgrid(np.linspace(-.2, .2, 16), np.linspace(.1, .9, 24))
+        pos = np.stack([xs, np.zeros_like(xs), zs], -1)
+        normal = np.broadcast_to([0., -1., 0.], pos.shape).copy()
+        base = np.full(pos.shape, .1, np.float32)
+        cam = cameras.camera('body+0', [0., 0., .5], 0, 1., (64, 64))
+        ones = np.ones((64, 64), np.float32)
+        view = {'key': 'body+0', 'cam': cam, 'hair': False, 'closeup': False,
+                'alpha': ones, 'refined': np.full((64, 64, 3), .7, np.float32),
+                'base_feather': ones, 'weight': ones, 'depth': ones * 2,
+                'valid': ones.astype(bool)}
+        with mock.patch.object(character, 'BODY_RES', (64, 64)), \
+             mock.patch.object(I, 'load_accepted_views', return_value=[view]):
+            texture = I.Texture.from_arrays(pos, normal, np.ones(pos.shape[:2], bool), base, 1.)
+            records = {'body+0': {'accepted': True}}
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'texture.png'
+                fast.reproject(texture, Path(tmp), records, cam)
+                texture.save(path)
+                first = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertGreater(float(texture.T.mean()), .6)
+                texture.T[:] = 0  # rebuilding must not depend on the previous blended atlas
+                fast.reproject(texture, Path(tmp), records, cam)
+                texture.save(path)
+                self.assertEqual(first, hashlib.sha256(path.read_bytes()).hexdigest())
 
 
 class PlumbingTests(unittest.TestCase):
