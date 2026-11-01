@@ -653,7 +653,9 @@ class Store(AdmissionStore):
                      "AND deleted_at IS NULL LIMIT 1", (user_id,)).fetchone():
             raise Conflict("A hero is already being generated in this workspace. Wait for it to finish.")
 
-    def job_continue(self, job_id: str, user_id: str, storage_max_bytes: int) -> dict[str, Any]:
+    def job_continue(self, job_id: str, user_id: str, storage_max_bytes: int, *,
+                     admission_required: bool = False, code_commit: str = '',
+                     cost_signature: str = '') -> dict[str, Any]:
         """Resume a stopped version once, in the same quota slot and with a fresh retry allowance."""
         with self._tx() as c:
             job = c.execute("SELECT * FROM jobs WHERE id=? AND user_id=? AND deleted_at IS NULL",
@@ -665,13 +667,17 @@ class Store(AdmissionStore):
             if job["state"] != "stopped":
                 raise Conflict("Only a version stopped after cover or turnaround can be continued.")
             self._workspace_free(c, user_id)
-            user = c.execute("SELECT status FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+            user = c.execute("SELECT status,kind FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
             if user is None or user["status"] != "active":
                 raise StoreError("This account cannot start jobs.", "account")
             used = c.execute("SELECT COALESCE(SUM(bytes),0) FROM jobs WHERE user_id=? AND deleted_at IS NULL",
                              (user_id,)).fetchone()[0]
             if used >= storage_max_bytes:
                 raise QuotaExceeded("Your saved heroes use all of your storage. Delete some to make room.")
+            protected = admission_required or user['kind'] == 'guest' or bool(job['budget_required'])
+            if protected:
+                self._admit(c, job_id, user_id, job['client_key'], code_commit, cost_signature)
+                c.execute('UPDATE jobs SET budget_required=1,code_commit=? WHERE id=?', (code_commit, job_id))
             self._set_state(c, job, "queued", continued_after=job["attempts"], stop_after=None, finished_at=None, dispatched_at=None,
                             call_id=None, lease_until=None, error_code=None, error_stage=None, error_message=None)
             self._audit(c, user_id, "job_continued", job_id)

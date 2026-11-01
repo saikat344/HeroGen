@@ -686,7 +686,8 @@ class App:
                 prompt=parent["prompt"], name=parent["name"], code_commit=self.s.code_commit,
                 jobs_per_day=self.s.jobs_per_day, jobs_total=self.s.jobs_total,
                 storage_max_bytes=self.s.user_storage_max_bytes,
-                parent_job=jid, from_stage=str(stage), note=note)
+                parent_job=jid, from_stage=str(stage), note=note,
+                admission_required=self.s.public_demo, cost_signature=self.s.cost_signature)
         except StoreError as e:
             if e.code != "busy":
                 await self.call(self._delete_files, u["id"], new)
@@ -714,7 +715,9 @@ class App:
         jid = self._job_id(request)
         if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
             return r
-        await self.call(self.svc.store.job_continue, jid, u["id"], self.s.user_storage_max_bytes)
+        await self.call(self.svc.store.job_continue, jid, u["id"], self.s.user_storage_max_bytes,
+                        admission_required=self.s.public_demo, code_commit=self.s.code_commit,
+                        cost_signature=self.s.cost_signature)
         try:
             await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
         except Exception:
@@ -929,11 +932,14 @@ def create_app(svc: Services) -> SecurityHeaders:
         503 with Retry-After; the others keep their meaning."""
         if exc.code == "busy":
             return busy_response()
-        status = {"quota": 429, "conflict": 409, "not_found": 404}.get(exc.code)
+        status = {"quota": 429, "conflict": 409, "not_found": 404, "account": 400,
+                  "workspace_active": 409, "generation_paused": 503, "cost_bound_unverified": 503,
+                  "generation_budget_exhausted": 503, "generation_capacity": 503}.get(exc.code)
         if status is None:
             log.error("store refused %s %s: %s", request.method, request.url.path, exc.code)
             return error(500, "internal", "Something went wrong on our side. Please try again.")
-        return error(status, exc.code, str(exc))
+        headers = {'Retry-After': '5'} if exc.code == 'generation_capacity' else None
+        return error(status, exc.code, str(exc), headers)
 
     routes = [
         Route("/", a.index), Route("/signin", a.index), Route("/admin/signin", a.index), Route("/viewer", a.viewer),
@@ -974,5 +980,4 @@ def create_app(svc: Services) -> SecurityHeaders:
     app.state.herogen = a
     # Outside Starlette's own error middleware, so its 500 responses carry the headers too.
     return SecurityHeaders(app, s)
-
 

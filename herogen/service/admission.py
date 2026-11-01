@@ -120,7 +120,11 @@ class AdmissionStore:
                         'generation_capacity': 'All live-generation slots are occupied. No job was queued; please try again shortly.'}
             raise StoreError(messages[status['reason']], status['reason'])
         reserve = c.execute('SELECT reserve_micro FROM admission_policy WHERE id=1').fetchone()[0]
-        c.execute('INSERT INTO admissions(job_id,user_id,client_key,amount_micro,cost_signature,created_at) VALUES (?,?,?,?,?,?)',
+        # A continuation gets a fresh retry allowance. Reserve its full bound in addition to all prior
+        # spending on this job, including a reconciled amount, before reopening its compute receipt.
+        c.execute('INSERT INTO admissions(job_id,user_id,client_key,amount_micro,cost_signature,created_at) VALUES (?,?,?,?,?,?) '
+                  'ON CONFLICT(job_id) DO UPDATE SET amount_micro=COALESCE(admissions.actual_micro,admissions.amount_micro)+excluded.amount_micro, '
+                  'actual_micro=NULL,cost_signature=excluded.cost_signature,main_done=0,side_required=1,side_done=0,closed=0,evidence=\'\'',
                   (job_id, user_id, client_key, reserve, cost_signature, self.clock()))
         self._audit(c, user_id, 'generation_reserved', job_id, {'micro_usd': reserve})
 
@@ -202,7 +206,7 @@ class AdmissionStore:
 
     def _terminal_admission(self, c, job_id: str) -> None:
         job = c.execute('SELECT state,deleted_at FROM jobs WHERE id=?', (job_id,)).fetchone()
-        if job and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled'):
+        if job and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled', 'stopped'):
             c.execute('UPDATE admissions SET main_done=1 WHERE job_id=?', (job_id,))
             if job['state'] != 'succeeded' or job['deleted_at'] is not None:
                 # A queued side worker can no longer claim this job; running paid work retains its receipt.
