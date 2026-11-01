@@ -658,7 +658,10 @@ class TestSweep(JobCase):
         self.assertEqual(self.go(job, call="call-1"), "succeeded")
 
     def test_queue_respects_the_running_cap(self):
-        jobs = [self.new_job() for _ in range(4)]
+        jobs = []
+        for i in range(4):
+            self.user = make_user(self.store, f"queue{i}@example.com")
+            jobs.append(self.new_job())
         sent = []
         reconcile(self.store, self.s, lambda jid: sent.append(jid) or "c")
         self.assertEqual(sent, [jobs[0]["id"], jobs[1]["id"]])

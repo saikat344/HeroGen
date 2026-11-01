@@ -493,7 +493,9 @@ class App:
     def job_summary(j: dict[str, Any]) -> dict[str, Any]:
         return {"id": j["id"], "kind": j["kind"], "name": j["name"], "profile": j["profile"], "state": j["state"],
                 "created_at": j["created_at"], "finished_at": j["finished_at"], "stage": j["stage"],
-                "stage_label": STAGE_LABELS.get(j["stage"] or "", None)}
+                "stage_label": STAGE_LABELS.get(j["stage"] or "", None),
+                "parent_job": j["parent_job"], "from_stage": j["from_stage"], "note": j["note"],
+                "stop_after": j["stop_after"]}
 
     async def job_create(self, request: Request) -> Response:
         u = await self.require_user(request)
@@ -647,6 +649,87 @@ class App:
         if view is None:
             return error(404, "not_found", "No such hero.")
         return JSONResponse(view)
+
+    async def job_redo(self, request: Request) -> Response:
+        u = await self.require_user(request)
+        jid = self._job_id(request)
+        parent = await self.call(self.svc.store.job_get, jid, u["id"])
+        if parent is None:
+            return error(404, "not_found", "No such hero.")
+        key = request.headers.get("idempotency-key", "")
+        if not IDEMPOTENCY_RE.match(key):
+            return error(400, "idempotency_key", "Use an Idempotency-Key of 8 to 64 letters, digits, - or _.")
+        if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
+            return r
+        data = await self.json_body(request)
+        stage = {"cover": 1, "turnaround": 2}.get(data.get("stage")) if isinstance(data.get("stage"), str) else None
+        if stage is None:
+            return error(400, "bad_stage", "Choose cover or turnaround to redo.")
+        from herogen.pipeline.redo import clean_note
+
+        try:
+            note = clean_note(data.get("note", ""))
+        except ValueError as e:
+            return error(400, "bad_note", str(e))
+        if parent["state"] in ("queued", "running"):
+            return error(409, "conflict", "Wait for this hero to stop before making a new version.")
+        new = new_id("j")
+        try:
+            await self.call(self._prepare_redo, u["id"], new, jid, stage, note)
+        except (ValueError, OSError):
+            return error(409, "not_ready", "The earlier version is missing a passing stage or an output. "
+                         "Choose another version.")
+        try:
+            job, created = await self.call(
+                self.svc.store.job_create, job_id=new, user_id=u["id"], client_key=key,
+                kind=parent["kind"], profile=parent["profile"], input_sha=parent["input_sha"],
+                prompt=parent["prompt"], name=parent["name"], code_commit=self.s.code_commit,
+                jobs_per_day=self.s.jobs_per_day, jobs_total=self.s.jobs_total,
+                storage_max_bytes=self.s.user_storage_max_bytes,
+                parent_job=jid, from_stage=str(stage), note=note)
+        except StoreError as e:
+            if e.code != "busy":
+                await self.call(self._delete_files, u["id"], new)
+            raise
+        if not created:
+            await self.call(self._delete_files, u["id"], new)
+        else:
+            try:
+                await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
+            except Exception:
+                log.exception("dispatch after redo failed")
+        return JSONResponse(await self.job_view(job["id"], u["id"]), status_code=201 if created else 200)
+
+    def _prepare_redo(self, user_id: str, new: str, parent: str, stage: int, note: str) -> None:
+        from herogen.pipeline.redo import fork_run
+
+        st = self.svc.storage
+        st.volume.refresh(0)
+        with st.volume.reading():
+            fork_run(st.runs_root(user_id), new, st.run_dir(user_id, parent), stage, note)
+        st.volume.commit()
+
+    async def job_continue(self, request: Request) -> Response:
+        u = await self.require_user(request)
+        jid = self._job_id(request)
+        if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
+            return r
+        await self.call(self.svc.store.job_continue, jid, u["id"], self.s.user_storage_max_bytes)
+        try:
+            await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
+        except Exception:
+            log.exception("dispatch after continue failed")
+        return JSONResponse(await self.job_view(jid, u["id"]))
+
+    async def job_versions(self, request: Request) -> Response:
+        u = await self.require_user(request)
+        jobs = await self.call(self.svc.store.job_versions, self._job_id(request), u["id"])
+        versions = []
+        for job in jobs:
+            files = await self.call(self._files, u["id"], job)
+            versions.append({**self.job_summary(job), "status": job["state"],
+                             "cover_thumbnail_url": files["images"].get("cover")})
+        return JSONResponse({"versions": versions})
 
     async def job_cancel(self, request: Request) -> Response:
         u = await self.require_user(request)
@@ -871,6 +954,9 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/api/jobs", a.job_create, methods=["POST"], max_body_size=upload_limit),
         Route("/api/jobs/{job}", a.job_get, methods=["GET"]),
         Route("/api/jobs/{job}", a.job_delete, methods=["DELETE"], max_body_size=JSON_LIMIT),
+        Route("/api/jobs/{job}/redo", a.job_redo, methods=["POST"], max_body_size=JSON_LIMIT),
+        Route("/api/jobs/{job}/continue", a.job_continue, methods=["POST"], max_body_size=JSON_LIMIT),
+        Route("/api/jobs/{job}/versions", a.job_versions),
         Route("/api/jobs/{job}/cancel", a.job_cancel, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/download/{what:str}", a.download),
         Route("/api/workspace", a.lab_workspace),
