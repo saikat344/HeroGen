@@ -65,7 +65,12 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   Volumes are `herogen-sam3d-objects-ckpt` and `herogen-sam3d-body-ckpt` unless `HEROGEN_OBJECTS_VOLUME` or
   `HEROGEN_BODY_VOLUME` names another. SAM 3D Objects runs on an A100-40GB by default (`--objects-gpu`; it needs
   about 23 GB), SAM 3D Body on an A10G (`--body-gpu`, `none` for CPU); `--remote-timeout` bounds each call.
-  Every call is an ephemeral Modal app that stops when the call returns.
+  By default local calls use an ephemeral Modal app. For persistent warm models, deploy both runners with
+  `modal deploy herogen/blender/remote/objects.py` and `modal deploy herogen/blender/remote/body.py`, then set
+  `HEROGEN_REMOTE_DEPLOYED=1`. Each deployment keeps one initialized model container warm by default;
+  `HEROGEN_OBJECTS_MIN_CONTAINERS` / `HEROGEN_BODY_MIN_CONTAINERS` configure that count at deployment.
+  Stop finite deployments with `modal app stop` after draining their inputs. The hosted service uses these
+  persistent deployments through its bridge.
 
 ## Running
 

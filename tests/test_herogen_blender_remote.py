@@ -300,7 +300,8 @@ class RunnerFiles(unittest.TestCase):
     def test_generic_app_and_volume_names_overridable_by_environment(self):
         objects, body = (REMOTE / "objects.py").read_text(), (REMOTE / "body.py").read_text()
         self.assertEqual(self.constants("objects.py")["APP"], "'herogen-sam3d-objects'")
-        self.assertIn('modal.App("herogen-sam3d-body")', body)
+        self.assertIn('APP = "herogen-sam3d-body"', body)
+        self.assertIn('modal.App(os.environ.get("HEROGEN_BODY_APP", APP))', body)
         self.assertIn('os.environ.get("HEROGEN_OBJECTS_VOLUME", "herogen-sam3d-objects-ckpt")', objects)
         self.assertIn('os.environ.get("HEROGEN_BODY_VOLUME", "herogen-sam3d-body-ckpt")', body)
         for text, prefix in ((objects, "HEROGEN_OBJECTS"), (body, "HEROGEN_BODY")):
@@ -386,8 +387,9 @@ class RunnerFiles(unittest.TestCase):
         self.assertIn('git checkout {DINOV3_COMMIT}"', body)
         self.assertIn("dinov3_check,", body)
         tree = ast.parse(body)
-        infer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "infer")
-        first = [ast.unparse(n) for n in infer.body if not isinstance(n, (ast.Import, ast.ImportFrom))][0]
+        infer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_model_state")
+        first = [ast.unparse(n) for n in infer.body if not isinstance(n, (ast.Import, ast.ImportFrom))
+                 and not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))][0]
         self.assertEqual(first, "_pin_dinov3()")              # before anything imports the model
         keep = [n for n in tree.body if (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in
                                          ("DINOV3_DIR", "DINOV3_HUB_CALL"))
@@ -419,12 +421,13 @@ class RunnerFiles(unittest.TestCase):
         infer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "infer")
         self.assertEqual([a.arg for a in infer.args.args], ["jobs", "detector"])
         self.assertEqual(ast.literal_eval(infer.args.defaults[0]), None)
-        src = ast.get_source_segment(body, infer)
+        loader = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_model_state")
+        src = ast.get_source_segment(body, loader) + "\n" + ast.get_source_segment(body, infer)
         self.assertIn("det = None\n    if detector is not None:", src)
         self.assertIn("human_detector=det", src)
         self.assertIn("outs = est.process_one_image(tmp, bboxes=caller_box)", src)
         self.assertIn('box_source = f"detector ({detector})"', src)
-        self.assertIn('infer.remote(payload, spec.get("detector"))', body)
+        self.assertIn('Model().infer.remote(payload, spec.get("detector"))', body)
 
 
 if __name__ == "__main__":

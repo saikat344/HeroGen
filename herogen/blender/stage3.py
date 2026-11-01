@@ -1,6 +1,9 @@
 """Stage 3: hybrid body and joints, recorded carve fallback, and multiview visual acceptance."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+
 import json
 import os
 from pathlib import Path
@@ -207,10 +210,42 @@ def _body_joints(run: Path, vs, height: float, verts, faces, remote, rec: StageR
     return bj.write_joints(run / "03-joints.json", "sam3d-body", pts, evidence, extra)
 
 
+@contextmanager
+def _prefetch_body(run, vs, remote, rec, detector, *, enabled):
+    """Start only Body inference early; conversion and record mutations stay on the caller thread."""
+    if not enabled:
+        yield remote
+        return
+    client = _remote(run, remote)
+    def request():
+        return client.body(run / "views" / "front.png", body_box(vs), BODY_BOX_SOURCE, detector=detector)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_remote_source, "sam3d-body", run, request)
+
+        class Prefetched:
+            consumed = False
+
+            def objects(self, *args, **kwargs):
+                return client.objects(*args, **kwargs)
+
+            def body(self, *args, **kwargs):
+                self.consumed = True
+                return future.result()
+
+        proxy = Prefetched()
+        try:
+            yield proxy
+        finally:
+            # Objects can fail before joint conversion. Drain and account any paid Body result anyway.
+            if not proxy.consumed:
+                _account(rec, "sam-3d-body", future.result())
+
+
 def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
                mesh_source: str = "sam3d-objects", joints_source: str = "sam3d-body", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
-               body_detector: str | None = None, quality_client=None) -> dict:
+               body_detector: str | None = None, quality_client=None, parallel_models: bool = True) -> dict:
     """Build the hybrid by default; a failed hybrid build retries the local carve once, with a reason.
 
     Quality rejection is a completed build and never triggers another constructor. Spend from a failed
@@ -223,7 +258,8 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     rec = StageRecord(run, 3, "base mesh")
     rec.data.update(mesh_source_requested=mesh_source, joints_source_requested=joints_source, fallback=None)
     kwargs = dict(height=height, nz=nz, timeout=timeout, remote=remote, y_method=y_method,
-                  limb_roots=limb_roots, body_detector=body_detector, rec=rec, quality_client=quality_client)
+                  limb_roots=limb_roots, body_detector=body_detector, rec=rec, quality_client=quality_client,
+                  parallel_models=parallel_models)
     from .remote.client import RemoteError
 
     try:
@@ -247,7 +283,8 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
 def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
                mesh_source: str = "carve", joints_source: str = "silhouette", remote=None,
                fallback: bool = True, y_method: str = "mesh", limb_roots: str = "silhouette",
-               body_detector: str | None = None, rec: StageRecord | None = None, quality_client=None) -> dict:
+               body_detector: str | None = None, rec: StageRecord | None = None, quality_client=None,
+               parallel_models: bool = True) -> dict:
     """Stage 3. `mesh_source` "carve" (default) or "sam3d-objects"; `joints_source` "silhouette" (default) or
     "sam3d-body". A remote source that fails falls back to the local one (recorded) unless `fallback` is off.
     `body_detector` "vitdet" lets SAM 3D Body find the person itself (default None: the front mask's box)."""
@@ -280,132 +317,135 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
     work = work_dir(run)
     for stale in ("03-source-uv.npz", "03-source-texture.png"):
         (work / stale).unlink(missing_ok=True)
-    used_source, source_info, objects_res = mesh_source, None, None
-    if mesh_source == "sam3d-objects":
-        try:
-            verts, faces, source_info, objects_res = _remote_source("sam3d-objects", run, _objects_mesh, run, vs,
-                                                                    height, _remote(run, remote), rec)
-        except RemoteError as exc:
-            if not fallback:
-                raise
-            rec.note(f"sam3d-objects failed ({error_text(exc, run)[:200]}); fell back to the carve")
-            used_source = "carve"
-    if used_source == "carve":
-        for stale in ("03-source-uv.npz", "03-source-texture.png"):     # a source that failed part-way
-            (work / stale).unlink(missing_ok=True)
-        verts, faces, info = carve.build_mesh(vs, height, nz, skeleton=skeleton)
-        if info["detached_side_prior_voxels"]:
-            rec.note(f"detached side-view parts (scarf tail, strap) removed from body columns: "
-                     f"{info['detached_side_prior_voxels']} voxels removed")
-        if info["arm_depth_prior_columns"]:
-            rec.note(f"arm depth prior applied to {info['arm_depth_prior_columns']} voxel columns "
-                     "(arms hang over the torso in the side views and no view constrains their depth)")
-        method = ("visual hull: voxel centre kept if inside every mask; arms rounded where no view constrains "
-                  "their depth; gaussian blur; surface nets; Taubin smoothing")
-        shape_views = sorted(v for v in vs.views if not _derived(vs, v))
-        pose_views = []
-    else:
-        from . import sam3d_mesh
+    with _prefetch_body(run, vs, remote, rec, body_detector,
+                        enabled=parallel_models and mesh_source == "sam3d-objects"
+                        and joints_source == "sam3d-body") as remote:
+        used_source, source_info, objects_res = mesh_source, None, None
+        if mesh_source == "sam3d-objects":
+            try:
+                verts, faces, source_info, objects_res = _remote_source("sam3d-objects", run, _objects_mesh, run, vs,
+                                                                        height, _remote(run, remote), rec)
+            except RemoteError as exc:
+                if not fallback:
+                    raise
+                rec.note(f"sam3d-objects failed ({error_text(exc, run)[:200]}); fell back to the carve")
+                used_source = "carve"
+        if used_source == "carve":
+            for stale in ("03-source-uv.npz", "03-source-texture.png"):     # a source that failed part-way
+                (work / stale).unlink(missing_ok=True)
+            verts, faces, info = carve.build_mesh(vs, height, nz, skeleton=skeleton)
+            if info["detached_side_prior_voxels"]:
+                rec.note(f"detached side-view parts (scarf tail, strap) removed from body columns: "
+                         f"{info['detached_side_prior_voxels']} voxels removed")
+            if info["arm_depth_prior_columns"]:
+                rec.note(f"arm depth prior applied to {info['arm_depth_prior_columns']} voxel columns "
+                         "(arms hang over the torso in the side views and no view constrains their depth)")
+            method = ("visual hull: voxel centre kept if inside every mask; arms rounded where no view constrains "
+                      "their depth; gaussian blur; surface nets; Taubin smoothing")
+            shape_views = sorted(v for v in vs.views if not _derived(vs, v))
+            pose_views = []
+        else:
+            from . import sam3d_mesh
 
-        info = {"source": source_info}
-        method = sam3d_mesh.__doc__.strip()
-        shape_views = ["front"]
-        pose = source_info.get("pose_fit") or {}
-        pose_views = pose.get("views", []) if pose.get("status") == "fitted" else []
-    work.mkdir(parents=True, exist_ok=True)
-    mesh_npz = work / "03-mesh.npz"
+            info = {"source": source_info}
+            method = sam3d_mesh.__doc__.strip()
+            shape_views = ["front"]
+            pose = source_info.get("pose_fit") or {}
+            pose_views = pose.get("views", []) if pose.get("status") == "fitted" else []
+        work.mkdir(parents=True, exist_ok=True)
+        mesh_npz = work / "03-mesh.npz"
 
-    def save_mesh(tmp: Path) -> None:
-        with open(tmp, "wb") as fh:
-            np.savez(fh, verts=verts, faces=faces)
+        def save_mesh(tmp: Path) -> None:
+            with open(tmp, "wb") as fh:
+                np.savez(fh, verts=verts, faces=faces)
 
-    _replace(mesh_npz, save_mesh)
-    if objects_res is not None and used_source == "sam3d-objects":
-        from .glb import add_missing_normals
+        _replace(mesh_npz, save_mesh)
+        if objects_res is not None and used_source == "sam3d-objects":
+            from .glb import add_missing_normals
 
-        def save_source(tmp: Path) -> None:
-            added = add_missing_normals(objects_res.path("mesh.glb"), tmp)
-            if added:
-                rec.note(f"03-source.glb: added seam-aware smooth normals (1e-6 grid; primitives: {added})")
+            def save_source(tmp: Path) -> None:
+                added = add_missing_normals(objects_res.path("mesh.glb"), tmp)
+                if added:
+                    rec.note(f"03-source.glb: added seam-aware smooth normals (1e-6 grid; primitives: {added})")
 
-        _replace(run / "03-source.glb", save_source)
-    joints_used = "silhouette"
-    if joints_source == "sam3d-body":
-        try:
-            jrec = _remote_source("sam3d-body", run, _body_joints, run, vs, height, verts, faces,
-                                  _remote(run, remote), rec, skeleton, y_method=y_method, limb_roots=limb_roots,
-                                  body_detector=body_detector)
-            joints_used = "sam3d-body"
-            if jrec.get("flagged"):
-                rec.note(f"sam3d-body joints more than {bj.FLAG_STUDS} studs from the silhouette finder: "
-                         + ", ".join(jrec["flagged"]))
-        except RemoteError as exc:
-            if not fallback:
-                raise
-            (run / "03-joints.json").unlink(missing_ok=True)
-            rec.note(f"sam3d-body failed ({error_text(exc, run)[:200]}); fell back to the silhouette joints")
-    if joints_used == "silhouette" and skeleton is not None:
-        bj.write_joints(run / "03-joints.json", "silhouette", skeleton.joints, skeleton.evidence)
-    renders = run / "03-renders"
-    renders.mkdir(exist_ok=True)
-    cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
-    job = {"tasks": [{"task": "silhouettes", "mesh": str(mesh_npz.resolve()),
-                      "glb": str((run / "03-mesh.glb").resolve()), "cameras": cams,
-                      "out_dir": str(renders.resolve())}]}
-    res = bl.run_job(job, work, "stage3", timeout=timeout)
-    rec.data["tools"] = [f"blender {res['blender']}"]
-    ious = {}
-    for v in VIEWS:
-        if v not in vs.views:
-            continue
-        rendered = load_mask(renders / f"{v}.png")
-        ious[v] = round(iou(rendered, vs.views[v].mask), 4)
-        # All observed IoUs remain diagnostics, with construction/registration provenance.
-        method_v = str((vs.meta.get("mask_method") or {}).get(v, ""))
-        derived = _derived(vs, v)
-        unseen = v not in shape_views and not derived
-        posed = "; its pitch was registered on this view" if v in pose_views else ""
-        note = ({"note": f"derived view ({method_v}); not gated"} if derived else
-                {"note": f"shape not built from this view (mesh source {used_source} saw only "
-                         f"{', '.join(shape_views)}){posed}"} if unseen else {})
-        rec.add(check(f"silhouette_iou_{v}", ious[v], IOU_GATE, gate=False, **note))
-    if used_source == "carve":
-        # front/back and left/right are mirror silhouettes, so only three directions are independent; the carve
-        # needs at least the front-or-back and left-or-right pair.
-        indep = sum(any(v in vs.views for v in grp) for grp in (("front", "back"), ("left", "right"), ("top",)))
-        rec.add(check("independent_views", indep, 2, views=sorted(vs.views)))
-    else:
-        rec.add(check("front_view_present", int("front" in vs.views), 1))
-    tri = int(len(faces))
-    rec.add(check("triangles", tri, None, gate=False))
-    e_all = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
-    _, counts = np.unique(e_all, axis=0, return_counts=True)
-    rec.add(check("open_edges", int((counts == 1).sum()), None, passed=bool((counts == 1).sum() == 0)))
-    rec.add(check("non_manifold_edges", int((counts > 2).sum()), None, gate=False,
-                  note="edges shared by more than two triangles"))
-    rec.data["outputs"] = (["03-mesh.glb"] + (["03-source.glb"] if used_source == "sam3d-objects" else [])
-                           + (["03-joints.json"] if (run / "03-joints.json").exists() else [])
-                           + [f"03-renders/{v}.png" for v in VIEWS if v in vs.views])
-    rec.data["mesh_source"] = used_source
-    rec.data.setdefault("mesh_source_requested", mesh_source)
-    rec.data["joints_source"] = joints_used
-    rec.data["shape_views"] = shape_views
-    rec.data["pose_views"] = pose_views
-    rec.data["mesh"] = {**info, "triangles": tri, "vertices": int(len(verts)), "height_studs": height,
-                        "pixels_per_stud": round(vs.pps, 4), "figure_height_px": vs.height_px,
-                        "views_missing": vs.missing, "iou": ious,
-                        "frame": "studs, +Z up, feet at z=0, faces -Y, " + (
-                            "x/y centred on the figure's bounding box" if used_source == "carve" else
-                            "x centred on the mesh's bounding box (its front outline conformed to the front mask), "
-                            "y registered on the observed depth views"),
-                        "method": method}
-    from .body_acceptance import assess
+            _replace(run / "03-source.glb", save_source)
+        joints_used = "silhouette"
+        if joints_source == "sam3d-body":
+            try:
+                jrec = _remote_source("sam3d-body", run, _body_joints, run, vs, height, verts, faces,
+                                      _remote(run, remote), rec, skeleton, y_method=y_method, limb_roots=limb_roots,
+                                      body_detector=body_detector)
+                joints_used = "sam3d-body"
+                if jrec.get("flagged"):
+                    rec.note(f"sam3d-body joints more than {bj.FLAG_STUDS} studs from the silhouette finder: "
+                             + ", ".join(jrec["flagged"]))
+            except RemoteError as exc:
+                if not fallback:
+                    raise
+                (run / "03-joints.json").unlink(missing_ok=True)
+                rec.note(f"sam3d-body failed ({error_text(exc, run)[:200]}); fell back to the silhouette joints")
+        if joints_used == "silhouette" and skeleton is not None:
+            bj.write_joints(run / "03-joints.json", "silhouette", skeleton.joints, skeleton.evidence)
+        renders = run / "03-renders"
+        renders.mkdir(exist_ok=True)
+        cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
+        job = {"tasks": [{"task": "silhouettes", "mesh": str(mesh_npz.resolve()),
+                          "glb": str((run / "03-mesh.glb").resolve()), "cameras": cams,
+                          "out_dir": str(renders.resolve())}]}
+        res = bl.run_job(job, work, "stage3", timeout=timeout)
+        rec.data["tools"] = [f"blender {res['blender']}"]
+        ious = {}
+        for v in VIEWS:
+            if v not in vs.views:
+                continue
+            rendered = load_mask(renders / f"{v}.png")
+            ious[v] = round(iou(rendered, vs.views[v].mask), 4)
+            # All observed IoUs remain diagnostics, with construction/registration provenance.
+            method_v = str((vs.meta.get("mask_method") or {}).get(v, ""))
+            derived = _derived(vs, v)
+            unseen = v not in shape_views and not derived
+            posed = "; its pitch was registered on this view" if v in pose_views else ""
+            note = ({"note": f"derived view ({method_v}); not gated"} if derived else
+                    {"note": f"shape not built from this view (mesh source {used_source} saw only "
+                             f"{', '.join(shape_views)}){posed}"} if unseen else {})
+            rec.add(check(f"silhouette_iou_{v}", ious[v], IOU_GATE, gate=False, **note))
+        if used_source == "carve":
+            # front/back and left/right are mirror silhouettes, so only three directions are independent; the carve
+            # needs at least the front-or-back and left-or-right pair.
+            indep = sum(any(v in vs.views for v in grp) for grp in (("front", "back"), ("left", "right"), ("top",)))
+            rec.add(check("independent_views", indep, 2, views=sorted(vs.views)))
+        else:
+            rec.add(check("front_view_present", int("front" in vs.views), 1))
+        tri = int(len(faces))
+        rec.add(check("triangles", tri, None, gate=False))
+        e_all = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
+        _, counts = np.unique(e_all, axis=0, return_counts=True)
+        rec.add(check("open_edges", int((counts == 1).sum()), None, passed=bool((counts == 1).sum() == 0)))
+        rec.add(check("non_manifold_edges", int((counts > 2).sum()), None, gate=False,
+                      note="edges shared by more than two triangles"))
+        rec.data["outputs"] = (["03-mesh.glb"] + (["03-source.glb"] if used_source == "sam3d-objects" else [])
+                               + (["03-joints.json"] if (run / "03-joints.json").exists() else [])
+                               + [f"03-renders/{v}.png" for v in VIEWS if v in vs.views])
+        rec.data["mesh_source"] = used_source
+        rec.data.setdefault("mesh_source_requested", mesh_source)
+        rec.data["joints_source"] = joints_used
+        rec.data["shape_views"] = shape_views
+        rec.data["pose_views"] = pose_views
+        rec.data["mesh"] = {**info, "triangles": tri, "vertices": int(len(verts)), "height_studs": height,
+                            "pixels_per_stud": round(vs.pps, 4), "figure_height_px": vs.height_px,
+                            "views_missing": vs.missing, "iou": ious,
+                            "frame": "studs, +Z up, feet at z=0, faces -Y, " + (
+                                "x/y centred on the figure's bounding box" if used_source == "carve" else
+                                "x centred on the mesh's bounding box (its front outline conformed to the front mask), "
+                                "y registered on the observed depth views"),
+                            "method": method}
+        from .body_acceptance import assess
 
-    if all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
-        assess(run, verts, faces, rec, client=quality_client)
-    else:
-        rec.note("visual acceptance skipped because the mesh failed structural checks")
-    rec.data["rejection_reasons"] = [
-        f"{c['name']}: {c.get('reason', 'required structural check failed')}"
-        for c in rec.data["checks"] if c.get("gate", True) and not c["pass"]]
-    return rec.finish()
+        if all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
+            assess(run, verts, faces, rec, client=quality_client)
+        else:
+            rec.note("visual acceptance skipped because the mesh failed structural checks")
+        rec.data["rejection_reasons"] = [
+            f"{c['name']}: {c.get('reason', 'required structural check failed')}"
+            for c in rec.data["checks"] if c.get("gate", True) and not c["pass"]]
+        return rec.finish()

@@ -357,6 +357,35 @@ class TestBridge(TempDirCase):
         self.assertEqual(top["gpu_type"], "A100-40GB")
         self.assertIn("wall_seconds", top)
 
+    def test_persistent_lookup_checks_source_and_gpu_before_inference(self):
+        from unittest import mock
+        import hashlib
+        from types import SimpleNamespace
+
+        path = self.runner("objects", "default-app")
+        (self.tmp / "job.json").write_text(json.dumps({"jobs": []}))
+        out = self.tmp / "out"
+        out.mkdir()
+        identity = {"gpu": "A100-40GB", "runner_sha": hashlib.sha256(path.read_bytes()).hexdigest()[:16]}
+        model = SimpleNamespace(identity=SimpleNamespace(remote=mock.Mock(return_value=identity)),
+                                infer=SimpleNamespace(remote=mock.Mock(return_value=({"runs": {}}, {}))))
+        factory = mock.Mock(return_value=lambda: model)
+        modal = SimpleNamespace(Cls=SimpleNamespace(from_name=factory))
+        args = ["run", f"{path}::main", "--job", str(self.tmp / "job.json"), "--out", str(out)]
+        with mock.patch.dict(sys.modules, {"modal": modal}), \
+                mock.patch.dict(os.environ, {"HEROGEN_OBJECTS_APP": "isolated-app",
+                                             "HEROGEN_OBJECTS_GPU": "A100-40GB"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(modal_bridge.main(args), 0)
+            factory.assert_called_with("isolated-app", "Model")
+            model.infer.remote.assert_called_once()
+            for wrong in ({**identity, "gpu": "T4"}, {**identity, "runner_sha": "wrong"}):
+                model.identity.remote.return_value = wrong
+                model.infer.remote.reset_mock()
+                with self.assertRaisesRegex(modal_bridge.BridgeError, "differs"):
+                    modal_bridge.main(args)
+                model.infer.remote.assert_not_called()
+
     def test_body_payload_and_refusals(self):
         (self.tmp / "img.png").write_bytes(b"IMG")
         args, kw = modal_bridge.payload("body", {"jobs": [{"name": "job", "image": str(self.tmp / "img.png"),
