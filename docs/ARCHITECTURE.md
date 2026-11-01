@@ -2393,7 +2393,10 @@ with face exclusion disabled and the hair disagreement rule intact. A head with 
 the empty face mask excludes no pixels. Empty hair detections are also valid. The face containment gate
 continues to reject newly painted faces, including when the render has none. An empty front probe is an error.
 
-The frozen named prompts `RF2R` and `RF3H` live in `refine/prompts.py`; editing a prompt requires a new name.
+The frozen named prompts `RF2R`, `RF2W` and `RF3H` live in `refine/prompts.py`; editing a prompt requires a new name.
+Normal passes default to the clean repaint `RF2R`. `--refine-recipe RF2W` selects artwork wear,
+material contrast, painted highlights and value range while forbidding cast shadows and directional lighting.
+Hair passes always use `RF3H`; face and hair gates are recipe-independent.
 Every call supplies the current mesh render first and the cover second, including hair mode. Normal passes
 run head angles 0, 40, -40, 90, -90, 180, then body angles 0, 45, -45, 90, -90, 180. Head renders are 1024
 square; body renders are 1024 by 1536. The head frame is 1.30 times the detected head's larger side; the body

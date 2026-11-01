@@ -80,7 +80,7 @@ def cost_estimate(maximum=False, upscale_texture=False):
 
 
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
-          closeup_reference=None, closeup_recipe="RF5U"):
+          closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R"):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -99,7 +99,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     _, _, depth = project(cam, positions)
     figure = alpha > 0.5
     parts = None
-    recipe = closeup_recipe if closeup_reference is not None else "RF3H" if hair else "RF2R"
+    recipe = closeup_recipe if closeup_reference is not None else "RF3H" if hair else repaint
     record.update(prompt=recipe, camera=cam)
     if closeup_reference is not None:
         measurable, source_checks = I.closeup_outline(figure, I.closeup_figure_mask(render_rgb, figure), cam["zoom"])
@@ -165,7 +165,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                budget_store=None, upscale_texture=False):
+                budget_store=None, upscale_texture=False, recipe="RF2R"):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -192,8 +192,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(upscale_texture=upscale_texture),
                     estimate_max_samples_usd=cost_estimate(True, upscale_texture),
-                    recipes=["RF2R", "RF3H"] + (["RF5U"] if upscale_texture else []),
-                    upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
+                    recipes=[recipe, "RF3H"] + (["RF5U"] if upscale_texture else []),
+                    repaint_recipe=recipe, upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
@@ -226,6 +226,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     current_record = None
     try:
         save(ok=False, status="running")
+        if recipe not in ("RF2R", "RF2W"):
+            raise ValueError(f"unknown repaint recipe {recipe!r} (use RF2R or RF2W)")
         if profile not in REFINE_PROFILES:
             return save(status="skipped", reason="profile is not best, roblox-ingame or roblox-avatar")
         if not (run / "03-source.glb").is_file():
@@ -277,7 +279,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             save(ok=False, status="running")
             try:
                 current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"])
+                                current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe)
             except BudgetStop as exc:
                 current_record.update(accepted=False, reason=str(exc))
                 rec.data["stop_reason"] = str(exc)
