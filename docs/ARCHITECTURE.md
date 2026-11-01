@@ -273,6 +273,8 @@ measures. An unmeasurable baseline stops stage 4 with an error naming the joints
 missing rims; the stage 3 mesh and joint placement need correction before cuts can be chosen. A candidate move
 that removes an own or neighbouring joint's measurement is rejected and recorded in the trial's
 `unmeasurable_joints` map (joint to reason), without a gap or score. Missing measurements never count as zero.
+The search evaluates candidates on `--cut-workers` threads (1 to 12, default 3) and consumes their results in the
+original order, so the chosen cuts and every trial record are identical for any worker count.
 
 **Atlases.** The sections other than the Head share one UV atlas per LOD: Blender's Smart UV Project unwraps them
 without margin, and
