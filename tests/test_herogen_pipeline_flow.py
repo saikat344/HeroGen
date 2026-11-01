@@ -201,12 +201,14 @@ class CoverBriefTest(_RunsTest):
 
     def test_recorded_brief_reaches_cover_and_hash_is_recorded(self):
         run = RunFolder(self.root, "brief")
-        run.write_stage({"stage": "p", "ok": True, "details": {"user_text": self.BRIEF}})
+        run.write_stage({"stage": "p", "ok": True,
+                         "details": {"user_text": self.BRIEF, "prompt_version": prompts.load("hero-sketch-v2").ref()}})
+        Image.open(self.sketch).save(run.file("p-full-body.png"))
         api = FakeAPI()
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
                 mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: api.post(c, e, b)), \
                 mock.patch.object(client_mod, "decode_sam_output", api.decode):
-            self.assertEqual(run_pipeline(self.sketch, "brief", [0, 1], mode="live", runs=str(self.root)), 0)
+            self.assertEqual(run_pipeline(None, "brief", [0, 1], mode="live", runs=str(self.root)), 0)
         prompt, = api.prompts
         self.assertIn("«" + self.BRIEF + "»", prompt)
         self.assertIn("only the character's colours, materials and gear", prompt)
@@ -219,8 +221,9 @@ class CoverBriefTest(_RunsTest):
 
     def test_brief_slot_is_bounded_and_cannot_be_closed(self):
         run = RunFolder(self.root, "slot")
+        stages.stage0_input(run, self.sketch, origin={"stage": "p"})
         def prompt(text):
-            run.write_stage({"stage": "p", "details": {"user_text": text}})
+            run.write_stage({"stage": "p", "ok": True, "details": {"user_text": text}})
             return stages.cover_prompt(run)[0]
         baseline = prompt("knight")
         head, tail = baseline.split("«knight»")
@@ -229,8 +232,64 @@ class CoverBriefTest(_RunsTest):
         for text in ("a" * 301, "", None):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 prompt(text)
-        run.write_stage({"stage": "p", "details": {}})
+        run.write_stage({"stage": "p", "ok": True, "details": {}})
         self.assertEqual(stages.cover_prompt(run), (self.LEGACY, False))
+
+    def test_brief_requires_passing_prompt_and_generated_input(self):
+        run = RunFolder(self.root, "origin")
+        for prompt_ok in (None, False, True):
+            for source_ok, origin in ((None, None), (False, {"stage": "p"}), (True, None),
+                                      (True, {"stage": "upload"}), (True, {"stage": "p"})):
+                with self.subTest(prompt_ok=prompt_ok, source_ok=source_ok, origin=origin):
+                    run.write_stage({"stage": "p", "ok": prompt_ok, "details": {"user_text": self.BRIEF}})
+                    run.write_stage({"stage": 0, "ok": source_ok, "details": {"origin": origin}})
+                    prompt, used = stages.cover_prompt(run)
+                    expected = prompt_ok is True and source_ok is True and origin == {"stage": "p"}
+                    self.assertEqual(used, expected)
+                    if expected:
+                        self.assertIn(self.BRIEF, prompt)
+                    else:
+                        self.assertEqual(prompt, self.LEGACY)
+
+    def test_upload_after_failed_or_successful_prompt_preserves_cache_replay(self):
+        from test_herogen_pipeline_prompt import FakeAPI as PromptAPI
+
+        seed = FakeAPI()
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: seed.post(c, e, b)), \
+                mock.patch.object(client_mod, "decode_sam_output", seed.decode):
+            self.assertEqual(run_pipeline(self.sketch, "seed", [0, 1], mode="live", runs=str(self.root)), 0)
+        seed_keys = [c["key"] for c in RunFolder(self.root, "seed").read_stage(1)["calls"]]
+        for failed in (True, False):
+            with self.subTest(failed=failed):
+                rid = "failed-p" if failed else "reused-p"
+                run = RunFolder(self.root, rid)
+                api = PromptAPI(edits=("two",) if failed else ("ok",))
+                with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                        mock.patch.object(ModelClient, "_post", lambda c, e, b, **kw: api.post(c, e, b, **kw)), \
+                        mock.patch.object(client_mod, "decode_sam_output", api.decode):
+                    self.assertEqual(run_pipeline(None, rid, ["p", 0], mode="live", runs=str(self.root),
+                                                  cache=str(self.root / f"{rid}-cache"), prompt=self.BRIEF),
+                                     2 if failed else 0)
+                prior = run.read_stage("p")
+                self.assertEqual(prior["ok"], not failed)
+                with mock.patch.object(ModelClient, "_post", side_effect=AssertionError("network during replay")):
+                    self.assertEqual(run_pipeline(self.sketch, rid, [0, 1], mode="replay", runs=str(self.root)), 0)
+                rec = run.read_stage(1)
+                self.assertNotIn("origin", run.read_stage(0)["details"])
+                self.assertEqual(rec["details"]["prompt"], self.LEGACY)
+                self.assertFalse(rec["details"]["brief_slot_used"])
+                self.assertEqual([c["key"] for c in rec["calls"]], seed_keys)
+                self.assertTrue(all(c["cached"] for c in rec["calls"]))
+                live = FakeAPI()
+                with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                        mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: live.post(c, e, b)), \
+                        mock.patch.object(client_mod, "decode_sam_output", live.decode):
+                    self.assertEqual(run_pipeline(self.sketch, rid, [0, 1], mode="live", runs=str(self.root),
+                                                  cache=str(self.root / f"{rid}-upload-cache")), 0)
+                self.assertEqual(live.prompts, [self.LEGACY])
+                self.assertFalse(run.read_stage(1)["details"]["brief_slot_used"])
+                self.assertEqual(run.read_stage("p"), prior)
 
 
 class FlowTest(_RunsTest):
