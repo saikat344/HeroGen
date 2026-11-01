@@ -87,6 +87,35 @@ class TestVariations(WebCase):
         self.assertEqual(note_for(run, 2), '')
         self.assertTrue(from_env({'HEROGEN_TEXTURE_NOTES': '1'}, require_key=False).texture_notes)
 
+    def test_texture_continuation_passes_its_note_to_the_cli(self):
+        from unittest import mock
+        from herogen.service.runner import PLAN, CliRunner, base_env
+
+        self.configure(texture_notes=True)
+        child = self.redo(note='«Blue»\ncoat 雪').json()
+        commands = []
+        case = self
+
+        class InspectingRunner(FakeRunner):
+            def _stage_3f(self, ctx, run):
+                cli = CliRunner(python='py')
+                cli._flags['herogen.blender'] = '--refine-profile --refine-note'
+                spec = next(s for s in PLAN if s.key == '3f')
+                env = base_env(ctx.env)
+                argv, stdin = cli.command(spec, ctx, env, case.tmp)
+                commands.append(argv)
+                case.assertIsNone(stdin)
+                case.assertEqual(argv[-2:], ['--refine-note', 'Blue coat 雪'])
+                case.assertNotIn('Blue coat 雪', env.values())
+                super()._stage_3f(ctx, run)
+
+        runner = InspectingRunner()
+        with mock.patch.dict('os.environ', {'HEROGEN_FAST_LANE': '1', 'HEROGEN_SERVICE_REFINE_PROFILE': ''}):
+            self.assertEqual(self.finish(child['id'], runner), 'succeeded')
+        self.assertEqual(runner.calls, ['3f', '4', '6', '5'])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][commands[0].index('--refine-profile') + 1], 'fast')
+
     def test_texture_requires_inactive_parent_and_passing_stage_three(self):
         self.store.db.execute("UPDATE jobs SET state='running' WHERE id=?", (self.parent,))
         self.assertEqual(self.redo().status_code, 409)
