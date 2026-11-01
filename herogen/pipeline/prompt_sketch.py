@@ -81,13 +81,13 @@ class PromptStageError(RuntimeError):
 # ---- the user's text ---------------------------------------------------------------------------------
 
 
-def clean_user_text(text: Any, *, max_chars: int, delimiters: tuple[str, ...]) -> str:
+def clean_user_text(text: Any, *, max_chars: int, delimiters: tuple[str, ...], allow_empty: bool = False) -> str:
     """The user's character brief, made safe to place inside the bounded slot.
 
     NFKC-normalised; control, format (zero-width, bidirectional) and line/paragraph separator characters become
     spaces; the slot's delimiters are removed so the text can't close its slot; whitespace runs collapse to one
     space. The cleaned text must hold at least one letter and at most ``max_chars`` characters: longer text is
-    refused, never cut, so what is drawn is always what the user wrote.
+    refused, never cut, so what is drawn is always what the user wrote. Optional slots may allow empty text.
     """
     if not isinstance(text, str):
         raise PromptRejected("the prompt must be text")
@@ -96,6 +96,8 @@ def clean_user_text(text: Any, *, max_chars: int, delimiters: tuple[str, ...]) -
     for d in delimiters:
         s = s.replace(d, " ")
     s = " ".join(s.split())
+    if not s and allow_empty:
+        return ""
     if not s:
         raise PromptRejected("the prompt is empty; describe the character, for example 'a knight in battered armour'")
     if not any(unicodedata.category(ch).startswith("L") for ch in s):

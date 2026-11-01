@@ -11,14 +11,14 @@ from pathlib import Path
 from herogen.pipeline.runfolder import RunFolder
 
 
-def clean_note(note: object = "") -> str:
+def clean_note(note: object = "", *, allow_empty: bool = False) -> str:
     """An optional, bounded character-change slot, using the character brief's text rules."""
     if note == "":
         return ""
     from herogen.pipeline.prompt_sketch import PromptRejected, clean_user_text
 
     try:
-        return clean_user_text(note, max_chars=300, delimiters=("«", "»"))
+        return clean_user_text(note, max_chars=300, delimiters=("«", "»"), allow_empty=allow_empty)
     except PromptRejected as e:
         raise ValueError("Describe changes to the character's look in words, using at most 300 characters.") from e
 
