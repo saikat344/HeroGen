@@ -259,6 +259,16 @@ class TestAdmission(TempDirCase):
                              (json.dumps(dict(snapshot['calls'][0],deadline=self.clock()+1000)),job['id']))
         self.assertFalse(self.store.admission_auto_settle(job['id'],snapshot))
 
+    def test_unassigned_call_receipt_retains_its_full_bound(self):
+        job,_ = self.settlement_job(complete={'outcome': 'ok', 'cost_usd': .0031})
+        orphan = dict(call_id='unassigned', model='synthetic', endpoint='responses', key='unassigned',
+                      outcome='sent', deadline=self.clock()+120, price_usd=2)
+        self.store.db.execute('INSERT INTO admission_calls(job_id,token,receipt) VALUES (?,?,?)',
+                              (job['id'], 'missing-token', json.dumps(orphan)))
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store), [job['id']])
+        self.assertEqual(self.reservation(job['id'])['actual_micro'], 2_003_100)
+
     def test_stage_subprocess_acknowledges_ledger_and_records_its_process_group(self):
         user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
         self.store.admission_work_begin(job['id'],'stage','model',self.s.cost_signature,process=identity())
@@ -475,7 +485,7 @@ class TestAdmission(TempDirCase):
         self.store.admission_side_done(child['id'],continued_after=0)
         row=self.reservation(child['id'])
         self.assertEqual((row['main_done'],row['side_done'],row['closed']),(0,0,0))
-        # The continuation runs, finishes, and settles its cumulative ledger.
+        # The continuation settles only new receipts on top of the retained baseline.
         claim=self.store.job_claim(child['id'],'call',60,2)
         self.store.admission_work_begin(child['id'],'phase1','model',self.s.cost_signature,process=identity())
         sent=dict(call_id='p1',model='synthetic',endpoint='responses',key='p1hash',outcome='sent',
@@ -495,7 +505,127 @@ class TestAdmission(TempDirCase):
         row=self.reservation(child['id'])
         self.assertEqual(row['actual_micro'],1_813_100)
         self.assertTrue(row['auto_settled'])
-        self.assertIn('3 calls, 2 charged at full price',row['evidence'])
+        self.assertIn('1 calls, 0 charged at full price',row['evidence'])
+
+    def phase_work(self, jid, token, cost_usd, *, price_usd=1, outcome='ok', foreign=False):
+        process = {'host': 'retired-container', 'pid': 42} if foreign else identity()
+        self.store.admission_work_begin(jid, token, 'model', self.s.cost_signature, process=process)
+        sent = dict(call_id=token, model='synthetic', endpoint='responses', key=token,
+                    outcome='sent', deadline=self.clock()+120, price_usd=price_usd)
+        self.store.admission_record(jid, token, 'call', row=sent)
+        self.store.admission_record(jid, token, 'call', row={**sent, 'outcome': outcome, 'cost_usd': cost_usd})
+        if foreign:
+            self.store.admission_record(jid, token, 'process_start', host=process['host'], pid=43)
+        self.store.admission_work_end(jid, token, not foreign, worker_stopped=not foreign)
+
+    def continue_child(self, child, user):
+        return self.store.job_continue(child['id'], user['id'], 10**10,
+            code_commit=self.s.code_commit, cost_signature=self.s.cost_signature)
+
+    def test_reconciled_continuation_preserves_invoice_and_global_limit(self):
+        self.configure(limit_micro=28_000_000)
+        user,_ = self.guest(); parent,child = self.redo_pair(user)
+        self.store.budget_reconcile(parent['id'], 10_000_000, 'Synthetic parent invoice')
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.phase_work(child['id'], 'phase0', .025)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.store.budget_reconcile(child['id'], 8_000_000, 'Synthetic phase-0 invoice', work_stopped=True)
+        self.continue_child(child, user)
+        self.assertEqual(self.store.budget_report()['summary']['committed_micro'], 28_000_000)
+        self.store.job_claim(child['id'], 'phase1', 60, 2)
+        self.phase_work(child['id'], 'phase1', 1)
+        self.close(child)
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store), [child['id']])
+        row = self.reservation(child['id'])
+        self.assertEqual(row['actual_micro'], 9_000_000)
+        self.assertEqual(self.store.budget_report()['summary']['committed_micro'], 19_000_000)
+        other,_ = self.guest()
+        with self.assertRaises(StoreError) as caught:
+            self.job(other)
+        self.assertEqual(caught.exception.code, 'generation_budget_exhausted')
+
+    def test_reconciled_unknown_phase_is_not_recharged_or_tripped(self):
+        user,_ = self.guest(); _,child = self.redo_pair(user)
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.phase_work(child['id'], 'timeout', 0, price_usd=8, outcome='unknown')
+        self.phase_work(child['id'], 'retry', .05)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.store.budget_reconcile(child['id'], 50_000, 'Synthetic invoice: timeout unbilled')
+        self.continue_child(child, user)
+        self.store.job_claim(child['id'], 'phase1', 60, 2)
+        self.phase_work(child['id'], 'phase1', 2.5, price_usd=3)
+        self.close(child); self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store), [child['id']])
+        self.assertEqual(self.reservation(child['id'])['actual_micro'], 2_550_000)
+        self.assertTrue(self.store.budget_report()['policy']['enabled'])
+
+    def test_reconciled_foreign_phase_does_not_block_continuation_settlement(self):
+        user,_ = self.guest(); _,child = self.redo_pair(user)
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.phase_work(child['id'], 'foreign', .025, foreign=True)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.store.budget_reconcile(child['id'], 50_000, 'Synthetic confirmed container shutdown', work_stopped=True)
+        self.continue_child(child, user)
+        # Phase-0 receipts are immutable evidence; stale acknowledgements cannot write into Phase 1.
+        with self.assertRaisesRegex(ValueError, 'No live reservation'):
+            self.store.admission_record(child['id'], 'foreign', 'process_stopped', host='retired-container', pid=43)
+        self.store.job_claim(child['id'], 'phase1', 60, 2)
+        self.phase_work(child['id'], 'phase1', .0031)
+        snapshot = self.store._admission_snapshot(child['id'])
+        self.assertEqual([w['token'] for w in snapshot['work']], ['phase1'])
+        self.assertEqual(snapshot['processes'], [])
+        self.assertEqual({r['call_id'] for r in snapshot['calls']}, {'phase1'})
+        self.assertEqual(self.store._one("SELECT stopped FROM admission_processes WHERE token='foreign'")['stopped'], 0)
+        self.close(child); self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store), [child['id']])
+        self.assertEqual(self.reservation(child['id'])['actual_micro'], 53_100)
+
+    def test_unreconciled_continuation_bounds_both_phases_and_unknown_calls(self):
+        user,_ = self.guest(); _,child = self.redo_pair(user)
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.phase_work(child['id'], 'phase0', .025)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.continue_child(child, user)
+        self.store.job_claim(child['id'], 'phase1', 60, 2)
+        self.phase_work(child['id'], 'phase1', .001, price_usd=2.5, outcome='unknown')
+        self.close(child)
+        # Still enforce this phase's deadline and stopped-process proof.
+        self.clock.advance(180)
+        self.assertEqual(settle_admissions(self.store), [])
+        self.clock.advance(.001)
+        self.assertEqual(settle_admissions(self.store), [child['id']])
+        row = self.reservation(child['id'])
+        self.assertEqual(row['actual_micro'], 2_525_000)
+        self.assertIn('2 calls, 1 charged at full price', row['evidence'])
+
+    def test_continuation_phase_fences_stale_snapshot_after_cancellation(self):
+        user,_ = self.guest(); _,child = self.redo_pair(user)
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.phase_work(child['id'], 'phase0', .025)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.clock.advance(181)
+        snapshot = self.store._admission_snapshot(child['id'])
+        self.continue_child(child, user)
+        self.close(child)
+        self.assertFalse(self.store.admission_auto_settle(child['id'], snapshot))
+        self.assertIsNone(self.reservation(child['id'])['actual_micro'])
+        self.assertEqual(settle_admissions(self.store), [child['id']])
+        self.assertEqual(self.reservation(child['id'])['actual_micro'], 25_000)
+
+    def test_reconciliation_never_lowers_recorded_spending(self):
+        user,_ = self.guest(); _,child = self.redo_pair(user)
+        claim = self.store.job_claim(child['id'], 'phase0', 60, 2)
+        self.store.job_finish(child['id'], claim['attempt'], 'stopped')
+        self.store.budget_reconcile(child['id'], 123, 'Synthetic phase-0 invoice')
+        with self.assertRaisesRegex(ValueError, 'cannot lower'):
+            self.store.budget_reconcile(child['id'], 122, 'Synthetic smaller total')
+        self.continue_child(child, user)
+        self.close(child)
+        with self.assertRaisesRegex(ValueError, 'cannot lower'):
+            self.store.budget_reconcile(child['id'], 122, 'Synthetic smaller cumulative total')
+        self.store.budget_reconcile(child['id'], 124, 'Synthetic cumulative invoice')
+        self.assertEqual(self.reservation(child['id'])['actual_micro'], 124)
 
     def test_deleting_redo_job_erases_note_and_settles_or_closes_its_admission(self):
         u,_=self.guest(); parent,closed=self.redo_pair(u,child_key='closed-child')
@@ -748,6 +878,11 @@ class TestGuestHTTP(WebCase):
         self.assertEqual(row['amount_micro'], 10_000_123)
         self.assertIsNone(row['actual_micro'])
         self.assertEqual(self.store.budget_report()['summary']['committed_micro'], 20_000_123)
+        self.assertEqual(self.finish(child), 'succeeded')
+        self.clock.advance(61)
+        self.assertCountEqual(settle_admissions(self.store), [parent, child])
+        self.assertEqual(self.reservation(child)['actual_micro'], 123)
+        self.assertEqual(self.store.budget_report()['summary']['committed_micro'], 123)
 
     def test_guest_continuation_cannot_reopen_uncertain_compute(self):
         b = self.enter()

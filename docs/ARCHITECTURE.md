@@ -81,6 +81,13 @@ In public mode, and for every guest or previously budgeted job, redo and continu
 budget admission as a new hero. A stopped version releases capacity only after its compute is confirmed
 finished, retaining its monetary allocation. Continuation reserves another full job bound for its fresh retry
 allowance, adding it to prior allocations or reconciled spending before reopening the same job's receipt.
+Migration 8 (schema version 9) retains reconciled cumulative spending as `baseline_micro` and marks each
+work token with its admission phase. Its calls and process groups inherit that phase. Settlement adds the
+ledger bound of unsettled phases to the baseline; reconciled phases are never charged or probed again.
+Without prior reconciliation, both phases retain their ledger and stopped-process checks. An older
+unreconciled continuation has no recoverable phase split: migration preserves its allocation and requires
+manual cumulative reconciliation before automatic settlement can resume. Reconciliation cannot lower a
+previously recorded cumulative figure.
 Redo admission uses the same active account, daily/lifetime quota and storage checks as new heroes, in
 one transaction. Both new hero creation and continuation atomically refuse another queued or running
 job in the same user's workspace. Continuation needs storage capacity and the existing request rate limit;
@@ -2551,7 +2558,7 @@ CSRF, origin checks and secure session cookies protect every state-changing requ
 access remains separate at `/admin/signin` and shares the global admission limits when public mode is enabled.
 There is no Facebook login or special judge-account route.
 
-The metadata schema v7 migrates v1–v6 stores, preserving existing reservations and guest histories while
+The metadata schema v9 migrates v1–v8 stores, preserving existing reservations and guest histories while
 retiring the invitation-specific workspace tables. Admission and job insertion run in one SQLite transaction.
 A repeated Idempotency-Key returns the original workspace's job without another reservation. One active
 reservation per workspace is enforced, including canceled work whose remote shutdown is uncertain. A global
@@ -2605,7 +2612,8 @@ price, and unknown Modal calls at function timeout times price per second. The s
 micro-USD. This is a ledger bound, never a provider invoice. It uses `budget_reconcile(..., work_stopped=True)`
 to close receipts and release the slot and unused reservation, with evidence
 `auto-settled: <n> calls, <k> charged at full price, ledger <path>` and an `auto_settled` audit entry.
-The transaction compares the complete stopped-work/ledger snapshot and requires an unreconciled admission:
+The transaction compares the admission phase, retained baseline and complete unsettled-work/ledger snapshot,
+and requires an unreconciled admission:
 a manual reconciliation that commits first wins, and concurrent sweep calls cannot settle twice.
 `generation-budget-report` identifies auto-settled jobs and exposes reservations and unresolved work;
 `generation-reconcile` remains available with operator evidence and requires confirmation of stopped work

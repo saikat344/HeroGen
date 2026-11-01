@@ -580,13 +580,14 @@ class TestSchema(TempDirCase):
         from herogen.service import store as store_mod
 
         schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '')
-        schema = schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, "
+        if version < 8:
+            schema = schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, "
                                 "note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n", "")
         if version < 5:
             schema = schema.replace(", kind TEXT NOT NULL DEFAULT 'account'", '')
             schema = schema.replace(', budget_required INTEGER NOT NULL DEFAULT 0', '')
         else:
-            admission = store_mod.ADMISSION_SCHEMA
+            admission = store_mod.LEGACY_ADMISSION_SCHEMA
             if version < 7:
                 admission = admission.replace(", process TEXT NOT NULL DEFAULT ''", '')
                 admission = ';'.join(stmt for stmt in admission.split(';')
@@ -643,12 +644,51 @@ class TestSchema(TempDirCase):
                 self.assertEqual(tuple(work), ('sent', ''), f"v{version} keeps its work ledger")
             st.close()
 
+    def test_v8_settlement_baselines_and_ambiguous_continuations_survive_upgrade(self):
+        from herogen.service.worker import settle_admissions
+        path = self.old_database(8)
+        with closing(sqlite3.connect(path)) as con:
+            for jid, actual, continued in (('j_paid', 8_000_000, 0), ('j_continued', None, 1)):
+                con.execute("INSERT INTO jobs(id,user_id,client_key,kind,profile,state,created_at,continued_after) "
+                            "VALUES (?,'u_x',?,'sketch','best','canceled',1,?)", (jid, jid, continued))
+                con.execute("INSERT INTO admissions(job_id,user_id,client_key,amount_micro,cost_signature,actual_micro,"
+                            "main_done,side_done,closed,created_at) VALUES (?,'u_x',?,18000000,'signature',?,1,1,1,1)",
+                            (jid, jid, actual))
+            con.execute("UPDATE admissions SET main_done=1,side_done=1,closed=1 WHERE job_id='j_x'")
+            for jid, token in (('j_x', 'w1'), ('j_continued', 'w2')):
+                if token == 'w2':
+                    con.execute("INSERT INTO admission_work(token,job_id,kind,state,created_at) "
+                                "VALUES (?,?,'model','closed',1)", (token, jid))
+                con.execute("UPDATE admission_work SET state='closed',process=? WHERE token=?",
+                            (json.dumps({'host': 'retired-container', 'pid': 42, 'stopped': True}), token))
+                sent = dict(call_id=token, model='synthetic', endpoint='responses', key=token,
+                            outcome='sent', deadline=10, price_usd=.1)
+                for receipt in (sent, {**sent, 'outcome': 'ok', 'cost_usd': .05}):
+                    con.execute('INSERT INTO admission_calls(job_id,token,receipt) VALUES (?,?,?)',
+                                (jid, token, json.dumps(receipt)))
+            con.commit()
+        store = Store(path, clock=Clock()); self.addCleanup(store.close)
+        paid = store._one("SELECT * FROM admissions WHERE job_id='j_paid'")
+        self.assertEqual((paid['actual_micro'], paid['baseline_micro'], paid['settled_phase']), (8_000_000, 8_000_000, 0))
+        self.assertEqual(settle_admissions(store), ['j_x'])
+        self.assertEqual(store._one("SELECT actual_micro FROM admissions WHERE job_id='j_x'")['actual_micro'], 50_000)
+        continued = store._one("SELECT * FROM admissions WHERE job_id='j_continued'")
+        self.assertIsNone(continued['baseline_micro'])
+        self.assertIsNone(continued['actual_micro'])
+        self.assertEqual(continued['amount_micro'], 18_000_000)
+        store.budget_reconcile('j_continued', 9_000_000, 'Synthetic cumulative invoice')
+        self.assertEqual(store._one("SELECT baseline_micro FROM admissions WHERE job_id='j_continued'")['baseline_micro'], 9_000_000)
+        fresh = Store(self.tmp / 'fresh.db'); self.addCleanup(fresh.close)
+        for table in ('admissions', 'admission_work', 'admission_calls', 'admission_processes'):
+            self.assertEqual([tuple(r) for r in store.db.execute(f'PRAGMA table_info({table})')],
+                             [tuple(r) for r in fresh.db.execute(f'PRAGMA table_info({table})')])
+
     def test_v4_reservations_and_private_history_survive_simplification(self):
         from herogen.service import store as module
         path=self.tmp/'v4.db'
         schema=module.SCHEMA.replace(module.ADMISSION_SCHEMA,'')
         schema=schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n",'')
-        old_admission=module.ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '')
+        old_admission=module.LEGACY_ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '')
         old_admission=';'.join(s for s in old_admission.split(';') if 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)
         old_admission=old_admission.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')
         con=sqlite3.connect(path)

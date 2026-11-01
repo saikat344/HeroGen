@@ -602,7 +602,7 @@ def settle_admissions(store, process_stopped=stopped) -> list[str]:
     settled = []
     for candidate in store.admission_candidates():
         jid = candidate['job_id']
-        snapshot = {k: candidate[k] for k in ('work', 'processes', 'calls')}
+        snapshot = {k: candidate[k] for k in ('phase', 'baseline_micro', 'settled_phase', 'work', 'processes', 'calls')}
         try:
             work = snapshot['work']
             if not work or any(not w['process'] for w in work):
