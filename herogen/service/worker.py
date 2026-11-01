@@ -8,22 +8,24 @@ canceled, deleted or superseded attempt stops at the next stage), records the st
 that covers the stage's timeout, and records the outcome. The orchestrator also renews its
 lease while they run (`LeaseKeeper`).
 
-Errors are sorted three ways. A rejection (a gate failed) finishes the job as rejected with the stage's reason.
-A transient error (a timeout, the model service answering 429 or 5xx) queues the job for another attempt while
-attempts remain. Anything else, and a job out of attempts, fails it. A worker that dies without
-reporting is found by `reconcile` once its lease runs out. A retried attempt resumes after the stages that
-already passed, and the per-user model cache makes repeated model calls free.
+Before a mesh exists, rejections stop generation, transient errors retry while attempts remain, and other
+errors fail. A rejected shape with a saved mesh continues with a rough-shape note. Later stage failures become
+explicit skipped stages; the website model succeeds before the game-body and export groups start. Those groups
+retain an attempt lease but do not occupy a model-generation slot. Their status is recorded separately.
+
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,6 +42,7 @@ from herogen.service.runner import (
     record_ok,
     resume_index,
     stage3_args,
+    write_record,
 )
 from herogen.service.storage import Storage
 
@@ -100,6 +103,7 @@ class GroupResult:
     seconds: float = 0.0
     cost_usd: float = 0.0
     compute_usd: float = 0.0
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -132,13 +136,9 @@ class InPlaceWorkdir:
         pass
 
 
-def _excluded(rel: Path, exclude: tuple[str, ...]) -> bool:
-    return bool(rel.parts) and rel.parts[0] in exclude
-
-
-def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -> list[Path]:
+def _mirror(src: Path, dst: Path, delete: bool) -> list[Path]:
     """Make `dst` hold `src`'s files: copy new or changed ones (size or mtime), and with `delete` remove files
-    `src` no longer has. Paths whose first part is in `exclude` are neither copied nor deleted. Links are never
+    `src` no longer has. Links are never
     followed or copied. Returns the files it wrote in `dst`."""
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
@@ -149,7 +149,7 @@ def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -
         for f in files:
             s = Path(dirpath) / f
             rel = rel_dir / f
-            if s.is_symlink() or f.endswith(".part") or _excluded(rel, exclude):
+            if s.is_symlink() or f.endswith(".part"):
                 continue
             seen.add(rel)
             d = dst / rel
@@ -167,7 +167,7 @@ def _mirror(src: Path, dst: Path, delete: bool, exclude: tuple[str, ...] = ()) -
         for dirpath, _dirs, files in os.walk(dst):
             for f in files:
                 rel = Path(dirpath).relative_to(dst) / f
-                if rel not in seen and not _excluded(rel, exclude):
+                if rel not in seen:
                     (dst / rel).unlink()
     return written
 
@@ -238,7 +238,7 @@ class CopyWorkdir:
         if not self.still_current():
             return
         r, loc = self.remote, self.local
-        written = _mirror(loc.run_dir, r.run_dir, delete=True, exclude=("heldout", "stage-2h.json"))
+        written = _mirror(loc.run_dir, r.run_dir, delete=True)
         written += _mirror(loc.cache_dir, r.cache_dir, delete=False)
         written += _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
         if loc.input_path.is_file():
@@ -260,6 +260,41 @@ def make_context(settings: Settings, storage: Storage, job: dict[str, Any], *, s
                         cache_dir=storage.cache_dir(uid), remote_cache_dir=storage.remote_cache_dir(uid),
                         stage3_args=stage3_args(settings.stage3_args), timeout_s=settings.stage_timeout_s,
                         blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd if spend_limits_enabled else None)
+
+
+def website_model(run_dir: Path) -> Path | None:
+    from herogen.service.bundle import glb_path
+
+    return glb_path(run_dir)
+
+
+def degradation_note(spec, out):
+    if spec.key == '3':
+        return 'The 3D shape is rough. Showing the best mesh available.'
+    reason = out.message.split('Checks that failed:')[0].strip()
+    if 'stage rejected this hero.' in reason:
+        reason = reason.split('stage rejected this hero.', 1)[1].strip()
+    if out.code == 'stage_error':
+        reason = f'the {spec.label} stage stopped unexpectedly.'
+    reason = reason[:1].lower() + reason[1:]
+    if spec.key == '3f':
+        return 'Texture refine was skipped: ' + reason.rstrip('.') + '. Showing the unrefined texture.'
+    if spec.key == '4':
+        return out.message if out.message.startswith('Roblox body unavailable') else 'Roblox body unavailable for this hero: ' + reason
+    if spec.key == '6':
+        return 'Roblox files unavailable for this hero: ' + reason
+    return 'The results page was skipped. Your model is available in this workbench.'
+
+
+def skip_stage(store, jid, attempt, spec, ctx, message, detail=""):
+    record = read_record(ctx.run_dir, spec.record)
+    if detail and record is not None:
+        write_record(ctx.run_dir, {**record, "ok": False, "status": "error", "error": detail})
+    else:
+        write_record(ctx.run_dir, {'stage': spec.key, 'name': spec.label, 'ok': False,
+                              'status': 'error' if detail else 'skipped', 'reason': message,
+                              **({'error': detail} if detail else {}), 'outputs': [], 'cost_usd': 0})
+    store.job_stage_set(jid, attempt, spec.key, 'skipped', message=message)
 
 
 def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
@@ -288,21 +323,52 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                 store.job_stage_set(jid, attempt, spec.key, "passed", message="kept from an earlier attempt",
                                     **({"seconds": 0.0, "cost_usd": 0.0} if spec.key not in prior else {}))
                 continue
-            timeout = settings.blender_timeout_s if spec.group == "blender" else settings.stage_timeout_s
+            rows = {r['stage']: r for r in store.job_stages(jid)}
+            dependency = '4' if spec.key == '6' else '3' if spec.key == '3f' else None
+            if dependency and rows.get(dependency, {}).get('state') == 'skipped':
+                why = ('Roblox rig was skipped because the game body is unavailable.' if spec.key == '6' else
+                       'Texture refine was skipped because the 3D shape is rough. Showing the unrefined texture.')
+                skip_stage(store, jid, attempt, spec, ctx, why)
+                workdir.sync()
+                continue
+            timeout = settings.blender_timeout_s if spec.group in ("blender", "body") else settings.stage_timeout_s
             if not store.job_stage_set(jid, attempt, spec.key, "running", lease_s=timeout + LEASE_MARGIN_S):
                 return GroupResult("stale", spec.key)
             event("stage_started", job=jid, attempt=attempt, stage=spec.key)
+            stage_t0 = time.monotonic()
             try:
                 out = runner.run(spec, ctx)
             except Exception as e:
+                from herogen.pipeline.client import ApiError, ReplayMiss
+
                 log.exception("stage %s of %s raised", spec.key, jid)
-                out = Outcome("failed", message=f"The {spec.label} stage stopped with an internal error.",
-                              code="stage_error", detail=f"{type(e).__name__}")
+                saved = read_record(ctx.run_dir, spec.record) or {}
+                cost = saved.get("cost_usd", 0.0)
+                cost = cost if isinstance(cost, (int, float)) and math.isfinite(cost) else 0.0
+                model_error = spec.key in ('3f', '4', '6', '5') and isinstance(e, (ApiError, ReplayMiss))
+                out = Outcome("failed", seconds=round(time.monotonic() - stage_t0, 2), cost_usd=cost, message=("The image model did not answer." if model_error else
+                              f"The {spec.label} stage stopped with an internal error."),
+                              code="model_unavailable" if model_error else "stage_error",
+                              detail=traceback.format_exc())
+            if spec.key == '3' and out.state == 'rejected' and website_model(ctx.run_dir) is None:
+                out = Outcome('failed', out.seconds, out.cost_usd,
+                              'The 3D shape did not pass its checks and no mesh was saved.',
+                              'model_missing', detail=out.detail)
+            degraded = out.state in ('failed', 'rejected') and (
+                spec.key in ('3f', '4', '6', '5') or spec.key == '3' and out.state == 'rejected'
+            ) and website_model(ctx.run_dir) is not None
+            if (spec.key in ('3f', '4', '6', '5') and out.state in ('failed', 'rejected')
+                    and read_record(ctx.run_dir, spec.record) is None):
+                write_record(ctx.run_dir, {'stage': spec.key, 'name': spec.label, 'ok': False,
+                    'status': 'error' if out.state == 'failed' else 'rejected',
+                    'error': out.detail or out.message, 'seconds': out.seconds, 'cost_usd': out.cost_usd})
             compute = round(out.seconds * compute_price_per_s, 6)
             workdir.sync()
-            store.job_stage_set(jid, attempt, spec.key, out.state, seconds=out.seconds,
+            store.job_stage_set(jid, attempt, spec.key, "skipped" if degraded else out.state, seconds=out.seconds,
                                 cost_usd=round((prior.get(spec.key, {}).get("cost_usd") or 0.0)
-                                               + out.cost_usd + compute, 6), message=out.message)
+                                               + out.cost_usd + compute, 6), message=degradation_note(spec, out) if degraded else out.message,
+                                mesh_saved=spec.key == "3" and out.state in ("passed", "rejected")
+                                           and website_model(ctx.run_dir) is not None)
             event("stage_finished", job=jid, attempt=attempt, stage=spec.key, state=out.state, code=out.code,
                   seconds=out.seconds, cost_usd=out.cost_usd, compute_usd=compute)
             if out.detail and out.state in ("failed", "rejected"):
@@ -310,7 +376,7 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             total.seconds += out.seconds
             total.cost_usd += out.cost_usd
             total.compute_usd += compute
-            if spec.optional and out.state in ("rejected", "failed"):
+            if degraded or spec.optional and out.state in ("rejected", "failed"):
                 continue  # recorded on the stage (the Roblox download shows why); the GLB is still delivered
             if out.state == "rejected":
                 return GroupResult("rejected", spec.key, "rejected", out.message, False, total.seconds,
@@ -358,7 +424,8 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 res = execute(job, attempt, group, resume)
             except Exception as e:
                 log.exception("group %s of %s failed", group, job_id)
-                res = GroupResult("error", None, "worker_error", "A worker stopped unexpectedly.", True)
+                res = GroupResult("error", None, "worker_error", "A worker stopped unexpectedly.", True,
+                                  detail=traceback.format_exc())
                 event("group_crashed", job=job_id, attempt=attempt, group=group, error=type(e).__name__)
             seconds += res.seconds
             cost += res.cost_usd
@@ -369,6 +436,39 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                       "previous_work_usd": round(carried, 6),
                       "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
                                "list price"}
+            if group == 'blender' and res.status == 'error':
+                if volume is not None:
+                    volume.reload()
+                rows = {r['stage']: r for r in store.job_stages(job_id)}
+                if rows.get('3', {}).get('state') in ('passed', 'skipped') and website_model(run_dir):
+                    ctx = make_context(settings, storage, job)
+                    spec = next(s for s in plan_for(job['kind'], job['profile']) if s.key == '3f')
+                    skip_stage(store, job_id, attempt, spec, ctx,
+                               'Texture refine was skipped: its worker stopped. Showing the unrefined texture.',
+                               res.detail or res.message)
+                    if volume is not None:
+                        volume.commit()
+                    res.status = 'ok'
+            if group == 'blender' and res.status == 'ok' and not job.get('stop_after'):
+                if volume is not None:
+                    volume.reload()
+                if website_model(run_dir) is None:
+                    res = GroupResult('error', '3', 'model_missing',
+                                      'The 3D shape could not be saved. Please create another hero.')
+                elif store.job_model_ready(job_id, attempt, bytes_=_bytes(storage, job, volume)):
+                    if redispatch is not None:
+                        redispatch(job_id)
+            ready = (store.job_get(job_id) or {}).get('state') == 'succeeded'
+            if ready and res.status in ('error', 'rejected'):
+                # Worker infrastructure failures during export also preserve visitor success.
+                ctx = make_context(settings, storage, job)
+                for spec in plan_for(job['kind'], job['profile']):
+                    rows = {r['stage']: r for r in store.job_stages(job_id)}
+                    if spec.group == group and rows.get(spec.key, {}).get('state') not in ('passed', 'skipped'):
+                        skip_stage(store, job_id, attempt, spec, ctx, res.message, res.detail or res.message)
+                if volume is not None:
+                    volume.commit()
+                res.status = 'ok'
             if res.status == "stale":
                 event("job_stale", job=job_id, attempt=attempt, group=group)
                 return (store.job_get(job_id) or {}).get("state")
@@ -396,8 +496,28 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 return state
         took = round(time.monotonic() - t0, 2)
         final_state = "stopped" if job.get("stop_after") else "succeeded"
-        store.job_finish(job_id, attempt, final_state, seconds=took, cost_usd=round(carried + cost + compute, 6),
-                         cost_detail=detail, bytes_=_bytes(storage, job, volume))
+        if final_state == 'succeeded':
+            from herogen.service.bundle import BundleUnavailable, roblox_files
+
+            try:
+                rows = {r['stage']: r for r in store.job_stages(job_id)}
+                if any(rows.get(k, {}).get('state') != 'passed' for k in ('4', '6')):
+                    raise BundleUnavailable('The Roblox export could not be prepared.')
+                roblox_files(run_dir)
+                export_state, export_message = 'ready', ''
+            except BundleUnavailable as exc:
+                export_state = 'unavailable'
+                rows = {r['stage']: r for r in store.job_stages(job_id)}
+                export_message = next((rows[k]['message'] for k in ('4', '6')
+                                       if rows.get(k, {}).get('state') == 'skipped' and rows[k]['message']), str(exc))
+            for prefix in ('Roblox body unavailable for this hero: ', 'Roblox files unavailable for this hero: '):
+                export_message = export_message.removeprefix(prefix)
+            store.job_export_finish(job_id, attempt, state=export_state, message=export_message,
+                                    cost_detail=detail,
+                                    bytes_=_bytes(storage, job, volume))
+        else:
+            store.job_finish(job_id, attempt, final_state, seconds=took, cost_usd=round(carried + cost + compute, 6),
+                             cost_detail=detail, bytes_=_bytes(storage, job, volume))
         event("job_finished", job=job_id, attempt=attempt, state=final_state, seconds=took,
               cost_usd=round(carried + cost + compute, 6))
         return final_state

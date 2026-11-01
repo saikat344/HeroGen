@@ -592,6 +592,12 @@ class App:
         return {**self.job_summary(job), "prompt": job["prompt"], "started_at": job["started_at"],
                 "attempts": job["attempts"], "stages": stages, "error": err, "seconds": job["seconds"],
                 "cost_usd": job["cost_usd"], "cost_is_estimate": True,
+                "model_ready_at": job["model_ready_at"], "export_state": job["export_state"],
+                "roblox_state": ('ready' if files['downloads']['roblox']['available'] else 'unavailable'
+                    if any(rows.get(k, {}).get('state') in ('skipped', 'failed', 'rejected') for k in ('4', '6'))
+                    else job['export_state']),
+                "roblox_message": files['downloads']['roblox'].get('reason', ''),
+                "export_message": job["export_message"], "export_seconds": job["export_seconds"],
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
                 "code_commit": job["code_commit"] or None, "images": files["images"],
                 "downloads": files["downloads"], "roblox_readme": files["readme"],
@@ -615,6 +621,10 @@ class App:
             readme = None
             if done:
                 try:
+                    rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
+                    if any(rows.get(k, {}).get('state') != 'passed' for k in ('4', '6')):
+                        raise bundle.BundleUnavailable(job.get('export_message') or ('Roblox files are being prepared.'
+                            if job['export_state'] == 'running' else 'Roblox files are not available for this hero.'))
                     bundle.roblox_files(run)
                     downloads["roblox"] = {"available": True, "url": f"/api/jobs/{job['id']}/download/roblox"}
                     readme = bundle.roblox_readme(run)
@@ -770,6 +780,9 @@ class App:
                         return "This hero has no body file at that level of detail."
                     return p.read_bytes(), "model/gltf-binary", f"herogen-{base}-{lod}.glb"
                 try:
+                    rows = {r['stage']: r for r in self.svc.store.job_stages(jid)}
+                    if any(rows.get(k, {}).get('state') != 'passed' for k in ('4', '6')):
+                        return job.get('export_message') or 'Roblox files are being prepared or are unavailable.'
                     return bundle.roblox_bundle(run), "application/zip", f"herogen-{base}-roblox.zip"
                 except bundle.BundleUnavailable as e:
                     return str(e)

@@ -134,7 +134,7 @@ class TestBundle(TempDirCase):
         self.assertIn("not been built", str(cm.exception))
 
     def test_glb(self):
-        self.assertEqual(bundle.glb_path(self.run, "high"), self.run / "04-body" / "high.glb")
+        self.assertEqual(bundle.glb_path(self.run, "high"), self.run / "03-refined.glb")
         self.assertIsNone(bundle.glb_path(self.run, "low"))
         self.assertIsNone(bundle.glb_path(self.run, "../../x"))
         glb = box_glb()

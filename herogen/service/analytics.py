@@ -287,13 +287,13 @@ class AnalyticsStore:
 
             budget_rep = self.generation_get()
             job_rows = self._all(
-                "SELECT j.id, j.state, j.seconds, j.cost_usd, COALESCE(u.kind, 'account') AS user_kind "
+                "SELECT j.id, j.state, j.seconds, j.export_seconds, j.model_ready_at, j.cost_usd, COALESCE(u.kind, 'account') AS user_kind "
                 "FROM jobs j LEFT JOIN users u ON u.id = j.user_id WHERE j.created_at>=?",
                 (since,),
             )
             stage_rows = self._all(
                 "SELECT js.job_id, js.stage, js.state, js.seconds, js.cost_usd "
-                "FROM job_stages js JOIN jobs j ON j.id = js.job_id WHERE j.created_at>=? AND js.stage!='2h'",
+                "FROM job_stages js JOIN jobs j ON j.id = js.job_id WHERE j.created_at>=?",
                 (since,),
             )
 
@@ -321,6 +321,10 @@ class AnalyticsStore:
             elif jr["id"] in stage_cost_by_job:
                 raw_job_costs.append(round(stage_cost_by_job[jr["id"]], 6))
 
+        model_secs = _finite([j["seconds"] for j in job_rows if j["model_ready_at"] is not None])
+        export_durations = _finite([j["export_seconds"] for j in job_rows])
+        export_secs = _finite([j["seconds"] + j["export_seconds"] for j in job_rows
+                               if j["seconds"] is not None and j["export_seconds"] is not None])
         job_secs = _finite(raw_job_secs)
         job_costs = _finite(raw_job_costs)
         accepted_jobs = len(job_rows)
@@ -393,6 +397,12 @@ class AnalyticsStore:
                 "main": [build_stage(k) for k in MAIN_STAGE_ORDER],
                 "job_totals": {
                     "jobs": accepted_jobs,
+                    "time_to_model": {"count": len(model_secs), "median_seconds": _percentile(model_secs, .5, 2),
+                                      "p90_seconds": _percentile(model_secs, .9, 2)},
+                    "export_duration": {"count": len(export_durations),
+                                        "median_seconds": _percentile(export_durations, .5, 2)},
+                    "time_to_export": {"count": len(export_secs), "median_seconds": _percentile(export_secs, .5, 2),
+                                       "p90_seconds": _percentile(export_secs, .9, 2)},
                     "timed_jobs": len(job_secs),
                     "median_seconds": _percentile(job_secs, 0.5, 2),
                     "p90_seconds": _percentile(job_secs, 0.9, 2),

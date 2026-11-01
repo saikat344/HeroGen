@@ -29,7 +29,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -55,11 +54,11 @@ PLAN = (
     StageSpec("2", "turnaround", "model", "stage-2.json"),
     StageSpec("3", "base mesh", "blender", "stage-3.json"),
     StageSpec("3f", "texture refine", "blender", "stage-3f.json"),
-    StageSpec("4", "game body", "blender", "stage-4.json"),
+    StageSpec("4", "game body", "body", "stage-4.json"),
     StageSpec("6", "Roblox rig", "export", "stage-6.json", optional=True),
     StageSpec("5", "results page", "export", "stage-5.json", optional=True),
 )
-GROUPS = ("model", "blender", "export")
+GROUPS = ("model", "blender", "body", "export")
 STAGE_LABELS = {s.key: s.label for s in PLAN}
 INPUT_LABELS = {"sketch": "uploaded sketch", "prompt": "sketch drawn from a description"}
 
@@ -254,6 +253,8 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
     if spec.key in ("p", "1", "2") and rec.get("status") == "content_policy":
         text = "description" if spec.key == "p" else "appearance note or character description"
         return f"The image model refused this {text} under its content policy. Try rewording the {text}."
+    if spec.key == '4' and rec.get('joint_reasons'):
+        return "Roblox body unavailable for this hero: these joints could not be separated: " + ", ".join(rec['joint_reasons']) + "."
     checks = failed_checks(rec)
     if spec.key in ("0", "1") and rec.get("status") == "input_rejected":
         reason = _input_reason(checks) or "We couldn't use this image."
@@ -296,7 +297,7 @@ def describe_error(spec: StageSpec, text: str, timed_out: bool) -> tuple[str, st
         return "timeout", f"The {spec.label} stage took too long and was stopped.", True
     if spec.key != "p" and spec.group == "model" and transient_failure(text):
         return "model_unavailable", "The image model service did not answer properly.", True
-    if spec.group == "blender" and "RemoteError" in text and transient_failure(text):
+    if spec.group in ("blender", "body") and "RemoteError" in text and transient_failure(text):
         return "gpu_unavailable", "The 3D reconstruction service did not answer properly.", True
     return "stage_error", f"The {spec.label} stage stopped with an internal error.", False
 
@@ -369,7 +370,7 @@ class CliRunner:
             return pipe + [str(src), *common, "--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
         if spec.key == "1":
             return [py, "-m", "herogen.service.pipestage", "1", *common], None
-        if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which the service omits
+        if spec.key == "2":
             return [py, "-m", "herogen.service.pipestage", "2", *common], None
         if spec.key == "5":
             return pipe + common + ["--stages", "5"], None
@@ -410,7 +411,7 @@ class CliRunner:
                 p = ctx.run_dir / stale
                 if p.exists() and spec.key != "3f":  # preserve the per-run API spend across retries
                     p.unlink()
-            timeout = ctx.blender_timeout_s if spec.group == "blender" else ctx.timeout_s
+            timeout = ctx.blender_timeout_s if spec.group in ("blender", "body") else ctx.timeout_s
             t0 = time.monotonic()
             timed_out = False
             try:
@@ -429,7 +430,9 @@ class CliRunner:
     def outcome(spec: StageSpec, ctx: StageContext, seconds: float, code: int, out: str, err: str,
                 timed_out: bool) -> Outcome:
         rec = read_record(ctx.run_dir, spec.record)
-        tail = scrub((out[-3000:] + "\n--- stderr ---\n" + err[-6000:]).replace(str(Path.home()), "~"))
+        full = spec.key in ("3f", "4", "6", "5")
+        tail = scrub(((out if full else out[-3000:]) + "\n--- stderr ---\n"
+                      + (err if full else err[-6000:])).replace(str(Path.home()), "~"))
         cost = 0.0
         for r in [rec] + [read_record(ctx.run_dir, x) for x in spec.extra]:
             c = r.get("cost_usd") if r else None
@@ -476,6 +479,10 @@ class CliRunner:
             code_s, message, transient = describe_error(spec, "", timed_out)
             detail = f"stage {spec.key} failed: exit_code={code}; timed_out={timed_out}; record_present={rec is not None}"
             return Outcome("failed", seconds, cost, message, code_s, transient, detail=detail)
+        if spec.key == '3f' and rec and rec.get('status') == 'skipped' and not timed_out:
+            return Outcome('skipped', seconds, cost,
+                           'Texture refine was skipped: ' + str(rec.get('reason') or 'not available')
+                           + '. Showing the unrefined texture.')
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
         if (spec.key in ("0", "1") and rec is not None and rec.get("ok") is False
@@ -486,6 +493,11 @@ class CliRunner:
             raw = _measured(failed_checks(rec))
             return Outcome("rejected", seconds, cost, describe_rejection(spec, rec), "rejected",
                            detail=" ".join(p for p in (raw, tail) if p))
+        if spec.key in ('3f', '4', '6', '5') and rec and rec.get('error'):
+            tail += "\nRecorded error: " + scrub(str(rec['error']))
+            if spec.key == '3f' and str(rec['error']).startswith(('ApiError:', 'ReplayMiss:')):
+                return Outcome('failed', seconds, cost, 'The image model did not answer.',
+                               'model_unavailable', detail=tail)
         if rec is not None and rec.get("ok") is False and rec.get("error") and not timed_out:
             # The stage could not use its input at all: an error, not a rejection. The record's own error line
             # is shown only when it holds no path (it may name files on the worker).

@@ -67,5 +67,5 @@ class TestDevMode(TempDirCase):
         key = self.tmp / "dev" / "dev-session-key"
         self.assertEqual(oct(key.stat().st_mode & 0o777), "0o600")
         self.assertEqual((self.tmp / "dev" / ".gitignore").read_text(), "*\n")
-        self.assertFalse(svc.store.generation_get()["enabled"])
+        self.assertTrue(svc.store.generation_get()["enabled"])
         svc.store.close()

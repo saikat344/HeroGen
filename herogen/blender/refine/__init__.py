@@ -178,7 +178,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     record_path = run / "stage-3f.json"
     prior = 0.0
     old_budget = None
-    if record_path.exists():
+    if cap_usd is not None and record_path.exists():
         old = json.loads(record_path.read_text())
         prior = float((old.get("budget") or {}).get("spent_usd_total", old.get("cost_usd") or 0.0))
         old_budget = old.get("budget")

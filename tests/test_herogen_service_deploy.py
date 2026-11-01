@@ -127,7 +127,7 @@ class TestModalApp(TempDirCase):
     def test_function_configuration(self):
         mod, fake = self.load()
         f = fake.functions
-        self.assertEqual(set(f), {"StoreService", "sanitize_image", "web", "run_job", "model_stages", "blender_stages",
+        self.assertEqual(set(f), {"StoreService", "sanitize_image", "web", "run_job", "model_stages", "blender_stages", "body_stages",
                                   "export_stages", "sweep", "retention", "admin_command",
                                   "selfcheck_report"})
         for name, kw in f.items():
@@ -149,7 +149,7 @@ class TestModalApp(TempDirCase):
         for n in ("export_stages", "run_job", "sweep", "retention"):
             self.assertEqual(secrets[n], [], f"{n} holds no secret")
         self.assertIn("herogen-service-admin", secrets["web"])
-        for n in ("run_job", "model_stages", "blender_stages", "export_stages"):
+        for n in ("run_job", "model_stages", "blender_stages", "body_stages", "export_stages"):
             self.assertTrue(f[n]["nonpreemptible"], n)
             self.assertTrue(f[n]["single_use_containers"], n)
         self.assertEqual(f["sweep"]["schedule"][0], "period")
@@ -215,11 +215,11 @@ class TestModalApp(TempDirCase):
 
         mod, fake = self.load()
         f = fake.functions
-        for group, fn in (("model", "model_stages"), ("blender", "blender_stages"), ("export", "export_stages")):
-            per = mod.DEPLOY.blender_timeout_s if group == "blender" else mod.DEPLOY.stage_timeout_s
+        for group, fn in (("model", "model_stages"), ("blender", "blender_stages"), ("body", "body_stages"), ("export", "export_stages")):
+            per = mod.DEPLOY.blender_timeout_s if group in ("blender", "body") else mod.DEPLOY.stage_timeout_s
             worst = sum(1 for s in PLAN if s.group == group) * per
             self.assertGreater(f[fn]["timeout"], worst, group)
-        self.assertGreater(f["run_job"]["timeout"], sum(f[n]["timeout"] for n in ("model_stages", "blender_stages",
+        self.assertGreater(f["run_job"]["timeout"], sum(f[n]["timeout"] for n in ("model_stages", "blender_stages", "body_stages",
                                                                                "export_stages")))
         self.assertLessEqual(f["run_job"]["timeout"], 24 * 3600)
         self.assertNotIn("heldout_stages", f)

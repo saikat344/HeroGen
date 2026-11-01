@@ -162,6 +162,7 @@ class FakeRunner:
 
     def _stage_3(self, ctx: StageContext, run: Path) -> None:
         (run / "03-mesh.glb").write_bytes(box_glb())
+        (run / "03-source.glb").write_bytes(box_glb())
         write_record(run, _record(3, "base_mesh", ["03-mesh.glb"]))
 
     def _stage_4(self, ctx: StageContext, run: Path) -> None:
@@ -175,8 +176,9 @@ class FakeRunner:
         write_record(run, rec)
 
     def _stage_3f(self, ctx: StageContext, run: Path) -> None:
-        write_record(run, {**_record("3f", "texture refine", []), "status": "skipped",
-                           "reason": "no SAM source mesh", "profile": ctx.profile})
+        (run / "03-refined.glb").write_bytes(box_glb())
+        write_record(run, {**_record("3f", "texture refine", ["03-refined.glb"]), "status": "complete",
+                           "profile": ctx.profile})
 
     def _stage_6(self, ctx: StageContext, run: Path) -> None:
         out = run / "06-roblox"

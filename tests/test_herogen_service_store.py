@@ -307,7 +307,7 @@ class TestSessions(StoreCase):
 class TestSchema(TempDirCase):
     def old_database(self, version: int) -> Path:
         """A database made with the schema of an older version, holding one job and its reservation."""
-        from herogen.service import store as store_mod
+        from herogen.service import migrations as store_mod
 
         schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '').replace(store_mod.ANALYTICS_SCHEMA, '')
         if version < 8:
@@ -364,7 +364,10 @@ class TestSchema(TempDirCase):
         if version >= 11:
             for stmt in store_mod.MIGRATIONS[10]:
                 con.execute(stmt)
-            con.execute("UPDATE generation_settings SET enabled=1,limit_usd=42,running_estimate_usd=2 WHERE id=1")
+            con.execute("UPDATE generation_settings SET enabled=1,limit_usd=42,running_estimate_usd=2,max_running=3 WHERE id=1")
+        if version >= 12:
+            for stmt in store_mod.MIGRATIONS[11]:
+                con.execute(stmt)
         con.execute(f"PRAGMA user_version={version}")
         con.commit()
         con.close()
@@ -396,6 +399,7 @@ class TestSchema(TempDirCase):
             if version == 11:
                 self.assertTrue(st.generation_get()['enabled'])
                 self.assertEqual(st.generation_get()['limit_usd'], 42)
+                self.assertEqual(st.generation_get()['max_running'], 3)
                 self.assertEqual(st.generation_get()['running_estimate_usd'], 2)
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
             self.assertIsNone(st.job_get("j_x")["parent_job"])
