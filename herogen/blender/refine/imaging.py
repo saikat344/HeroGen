@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from herogen.pipeline.facesource import ncc, sample
+from herogen.pipeline.facesource import ncc, refine_affine, sample
 from . import character as C
 from .cameras import axes, project, px_per_unit
 
@@ -311,15 +311,53 @@ def _refine_similarity(target, source, weight, initial=None):
     return np.array([[p[0], -p[1], p[2]], [p[1], p[0], p[3]]])
 
 
-def register(render_rgb, alpha, edit_rgb):
-    """Map from render pixel edge coordinates to edit pixel edge coordinates: returns (mapx, mapy) over the
-    render grid (pixel centres), the warped edit at render resolution, and measurements."""
-    h, w = alpha.shape
-    eh, ew = edit_rgb.shape[:2]
-    s = WORK / max(h, w)
-    wh, ww = round(h * s), round(w * s)
-    pad = max(wh, ww)
+# Work-space fit limits measured on 973 saved repaint attempts. Singular values
+# measure scale along every direction; determinant also catches two-axis shrinkage.
+# These select a registration method before any outline or hair gate is evaluated.
+AFFINE_SCALE = (0.85, 1.25)
+AFFINE_DETERMINANT_MIN = 0.80
+AFFINE_SHEAR_MAX = 0.15
+AFFINE_ROTATION_MAX = 5.0   # degrees, from the polar rotation of the linear map
+AFFINE_CENTROID_MAX = 0.125  # displacement as a fraction of the longer image side
 
+
+def _affine_degeneracy(matrix, figure):
+    """Diagnose only the primary work-space transform, independent of edit masks/gates."""
+    if matrix is None:
+        return {"reasons": ["fit_failed"]}
+    if not np.isfinite(matrix).all():
+        return {"reasons": ["nonfinite"]}
+    linear = matrix[:, :2]
+    scales = np.linalg.svd(linear, compute_uv=False)
+    determinant = float(np.linalg.det(linear))
+    axes_scale = np.linalg.norm(linear, axis=0)
+    shear = float(abs(np.dot(linear[:, 0], linear[:, 1])) / max(1e-20, np.prod(axes_scale)))
+    rotation = float(np.degrees(np.arctan2(linear[1, 0] - linear[0, 1], linear[0, 0] + linear[1, 1])))
+    reasons = []
+    if abs(rotation) > AFFINE_ROTATION_MAX:
+        reasons.append("rotation")
+    if scales.min() < AFFINE_SCALE[0] or scales.max() > AFFINE_SCALE[1]:
+        reasons.append("scale")
+    if determinant < AFFINE_DETERMINANT_MIN:
+        reasons.append("determinant")
+    if shear > AFFINE_SHEAR_MAX:
+        reasons.append("shear")
+    y, x = np.nonzero(figure)
+    displacement = None
+    if len(x):
+        centroid = np.array([x.mean() + 0.5, y.mean() + 0.5])
+        displacement = float(np.linalg.norm(linear @ centroid + matrix[:, 2] - centroid) / max(figure.shape))
+        if displacement > AFFINE_CENTROID_MAX:
+            reasons.append("centroid")
+    else:
+        reasons.append("empty_figure")
+    return {"reasons": reasons, "singular_scales": scales.tolist(), "determinant": determinant,
+            "shear": shear, "rotation_degrees": rotation, "centroid_displacement": displacement}
+
+
+def _register_similarity(render_rgb, alpha, edit_rgb, wh, ww):
+    """Constrained rescue for a degenerate affine; never selected by a gate result."""
+    pad = max(wh, ww)
     def work_image(img, *, edges=False):
         small = cv2.resize(grey(img), (ww, wh), interpolation=cv2.INTER_AREA)
         smooth = cv2.GaussianBlur(small, (0, 0), 1.5)
@@ -359,6 +397,34 @@ def register(render_rgb, alpha, edit_rgb):
         return ncc(tgt, warped, score_mask)
 
     M = max((matrix for matrix in candidates if matrix is not None), key=edge_score)
+    return M
+
+
+def register(render_rgb, alpha, edit_rgb):
+    """Map render pixel edge coordinates to edit coordinates, retaining a valid affine.
+
+    Only a degenerate primary fit invokes constrained registration. The decision uses
+    transform geometry and the render silhouette, before measuring the repaint outline.
+    """
+    h, w = alpha.shape
+    eh, ew = edit_rgb.shape[:2]
+    s = WORK / max(h, w)
+    wh, ww = round(h * s), round(w * s)
+    pad = max(wh, ww)
+
+    def sq(img):
+        out = np.full((pad, pad), float(np.median(img)), np.float64)
+        out[:img.shape[0], :img.shape[1]] = img
+        return out
+
+    tgt = sq(cv2.GaussianBlur(cv2.resize(grey(render_rgb), (ww, wh), interpolation=cv2.INTER_AREA), (0, 0), 1.5))
+    src = sq(cv2.GaussianBlur(cv2.resize(grey(edit_rgb), (ww, wh), interpolation=cv2.INTER_AREA), (0, 0), 1.5))
+    wt = sq(cv2.resize(ndimage.binary_dilation(alpha > 0.5, iterations=12).astype(np.float64), (ww, wh)) > 0.5)
+    primary = refine_affine(tgt, src, wt, np.array([[1.0, 0, 0], [0, 1.0, 0]]))
+    figure = cv2.resize((alpha > 0.5).astype(np.uint8), (ww, wh), interpolation=cv2.INTER_NEAREST) > 0
+    diagnostics = _affine_degeneracy(primary, figure)
+    fallback = bool(diagnostics["reasons"])
+    M = _register_similarity(render_rgb, alpha, edit_rgb, wh, ww) if fallback else primary
     # work coords are a uniform scaling of render and edit coords
     sx_r, sx_e = ww / w, ww / ew
     A = np.diag([1 / sx_e, 1 / sx_e, 1.0]) @ np.vstack([M, [0, 0, 1]]) @ np.diag([sx_r, sx_r, 1.0])
@@ -366,7 +432,9 @@ def register(render_rgb, alpha, edit_rgb):
     mapx = A[0, 0] * xs + A[0, 1] * ys + A[0, 2]
     mapy = A[1, 0] * xs + A[1, 1] * ys + A[1, 2]
     info = {"affine_render_to_edit": np.round(A[:2], 5).tolist(),
-            "scale": round(math.sqrt(abs(np.linalg.det(A[:2, :2]))) * w / ew, 4)}
+            "scale": round(math.sqrt(abs(np.linalg.det(A[:2, :2]))) * w / ew, 4),
+            "method": "similarity_fallback" if fallback else "affine",
+            "affine_diagnostics": diagnostics}
     warped = warp_grid(edit_rgb, mapx - 0.5, mapy - 0.5)
     return mapx, mapy, warped, info
 
