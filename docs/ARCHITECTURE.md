@@ -147,6 +147,56 @@ A stage that stops before its checks are complete writes its record with `"ok": 
 error) or `"input_rejected"` (an input check rejected the sketch, see below, or stage p refused the prompt). `python3 -m herogen.pipeline run` exits 0
 when every stage passed, 2 when a gate failed, 3 when the input was rejected and 1 on an error.
 
+## Fast lane (speed/demo)
+
+`python3 -m herogen.pipeline run --fast` and `python3 -m herogen.blender run --fast` opt into a
+single-pass demonstration path. `HEROGEN_FAST_LANE=1` selects the same behavior for callers that pass the
+environment through. This mode favors speed; a completed fast run is not a quality approval. Normal mode's
+prompts, thresholds, retries and acceptance rules are unchanged.
+
+- Stage p requests the design and full-body sketch once each. It skips figure and identity model checks.
+- Stage 0 records local input checks as informational. Stage 1 requests the cover once, skipping photo,
+  input-part and cover-mask model checks. Stage 2 requests one sheet and one top view, retaining local
+  diagnostics without gating, ranking alternatives or selecting a replacement top on quality. Required
+  figure masks still use segmentation, with one concept request rather than a second concept fallback.
+  Unusable model output (for example, no four figures to extract) is a recorded error, never a regeneration.
+- Stages 2h (held-out views) and 2f (face close-ups) are skipped, including explicit requests for them.
+- Stage 3 requests the configured shape and joints sources once each (by default SAM 3D Objects and
+  SAM 3D Body). No carve or silhouette fallback is attempted. Structural and silhouette checks are
+  informational; visual acceptance judges are skipped. Construction and model errors remain errors.
+- Stage 3f tries every available repaint camera once, including hair cameras. Outline, face and hair gate
+  measurements are recorded; failure never prevents projection. Fast projection also bypasses the
+  disagreement masks that normally protect hair/face regions. There is no refinement USD cap. A missing
+  head still skips head cameras because those cameras cannot be constructed; body cameras remain available.
+- Stage 4 runs once with cut search disabled and informational acceptance checks. The default fast Blender
+  invocation also runs stages 6 (export) and 5 (results), in that order, once each. An explicit `--stages` selects only
+  the requested stages (with the usual automatic 3f between 3 and 4). Local failures are
+  recorded and printed, and later stages still run. The displayed/downloaded model remains
+  `03-refined.glb`, else `03-source.glb`, else the sectioned high body if available. Completion succeeds when
+  a model is available, even if a local export failed; inspect the stage records for those failures. A stage
+  3 or 3f model/construction error stops that invocation with a nonzero exit and a loud record and log.
+- The image/segmentation client's transport retry policy is limited to at most two attempts; each attempt,
+  including a zero-cost HTTP refusal, is recorded. Transport retries are distinct from quality retries.
+
+For a live text-to-model run, execute these commands in order (credentials and authorized remote compute
+must already be configured):
+
+```bash
+python3 -m herogen.pipeline run --prompt "a blue knight in battered plate armour" \
+  --run-id fast-hero --runs runs --stages p,0-2 --live --fast
+python3 -m herogen.blender run --run runs/fast-hero --stages 3,3f,4,6,5 \
+  --mesh-source sam3d-objects --joints sam3d-body --remote live --refine live --profile best --fast
+python3 -m herogen.pipeline report runs/fast-hero
+```
+
+`report <run-dir>` reads the stage records without calling any model. It prints every model/GPU call in
+start-time order and writes the same data to `fast-report.json`: stage, purpose, model, kind, start time,
+wall seconds, estimated list-price USD, cache flag and outcome. Stage totals include call counts, summed
+call time, elapsed stage time (including local work) and USD, followed by grand totals. Cache hits cost zero;
+unknown transport outcomes retain the client's conservative estimate. Failed API calls and replay misses
+remain visible, including calls that never returned usable output. Local CPU/Blender work contributes to
+elapsed stage time, not to the model-call count or GPU list-price estimate.
+
 ## Input checks (stages 0 and 1)
 
 Before any image is generated, stages 0 and 1 check that the sketch can be used (`herogen/pipeline/inputs.py`).

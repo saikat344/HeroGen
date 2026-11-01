@@ -162,6 +162,11 @@ def collect(run: RunFolder) -> dict[str, Any]:
         "total_seconds": round(total_seconds, 2),
         "stages": stages,
     }
+    if any((run.read_stage(n) or {}).get("fast_lane") for n in (3, "3f", 4)):
+        from herogen.blender.final_model import final_model
+        best = final_model(run.path, "best")
+        out["fast_lane"] = True
+        out["final_model"] = best.relative_to(run.path).as_posix() if best else None
     scores = collect_scores(run)
     if scores is not None:
         out["scores"] = scores
@@ -268,6 +273,8 @@ def render_html(data: dict[str, Any]) -> str:
         f"<p class='meta'>Generated {e(data['generated'])} · total {data['total_seconds']:.1f} s · "
         f"cost ${data['total_cost_usd']:.4f} (estimate from list prices)</p>",
     ]
+    if data.get("fast_lane") and data.get("final_model"):
+        parts.append(f"<p>Fast lane · <a href='{e(data["final_model"])}' download>Download model</a></p>")
     for s in data["stages"]:
         title = f"Stage {s['stage']}: {e(s['name'])}"
         if s["status"] == "not run":

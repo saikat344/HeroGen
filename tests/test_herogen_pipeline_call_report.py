@@ -41,6 +41,28 @@ class CallReportTests(unittest.TestCase):
         self.assertEqual(client.log.cost_usd(), 0)
         self.assertTrue(all(c["wall_seconds"] >= 0 for c in client.log.calls))
 
+    def test_failed_answers_keep_unknown_billing_receipts_for_both_attempts(self):
+        from herogen.pipeline.retry import RetryPolicy
+        limiter = mock.Mock()
+        limiter.acquire.return_value = ("slot", 0)
+        client = ModelClient(self.root / "cache", mode="live", fast=True, limiter=limiter,
+                             policy=RetryPolicy(max_attempts=8, sleep=lambda s: None, base_s=0))
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"status": "failed", "error": {"code": "server_error"}}).encode()
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": "placeholder"}), \
+                mock.patch.object(client_module, "_open", return_value=response) as send:
+            with self.assertRaises(ApiError):
+                client.generate_image("a knight")
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(len(client.log.calls), 2)
+        self.assertEqual(client.log.cost_usd(), 2 * client_module.PRICE_PER_IMAGE_USD[client_module.IMAGE_MODEL])
+        rows = [json.loads(line) for line in (self.root / "cache/calls-ledger.jsonl").read_text().splitlines()]
+        complete = [r for r in rows if r["outcome"] != "sent"]
+        self.assertEqual(len(complete), 2)
+        self.assertTrue(all(r["unknown"] for r in complete))
+
     def test_cached_calls_and_replay_misses_have_receipts(self):
         client = ModelClient(self.root / "cache", fast=True)
         image = Image.new("RGB", (8, 8))
@@ -69,7 +91,7 @@ class CallReportTests(unittest.TestCase):
         output = io.StringIO()
         result = report(run.path, stream=output)
         self.assertEqual([c["stage"] for c in result["calls"]], [1, 3])
-        self.assertEqual(result["total"], {"calls": 2, "seconds": 2.2, "elapsed_seconds": 12,
+        self.assertEqual(result["total"], {"calls": 2, "call_seconds": 2.2, "seconds": 12,
                                           "cost_usd": .05, "unknown_cost_calls": 0})
         self.assertIn("RemoteError", output.getvalue())
         self.assertIn("TOTAL", output.getvalue())
@@ -97,4 +119,6 @@ class CallReportTests(unittest.TestCase):
         self.assertEqual(len(remote.log.calls), 1)
         self.assertEqual(remote.log.calls[0]["outcome"], "RemoteError")
         self.assertEqual(remote.log.calls[0]["kind"], "gpu")
+        self.assertGreaterEqual(remote.log.calls[0]["cost_usd"],
+                                round(remote_module.PRICE_PER_SECOND[remote.objects_gpu] * remote.timeout, 4))
         self.assertGreaterEqual(remote.log.calls[0]["wall_seconds"], 0)

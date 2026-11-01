@@ -22,6 +22,7 @@ from herogen.pipeline.client import (
     COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ClientError, ModelClient, SamInstance, call_cost,
 )
 from herogen.pipeline.runfolder import RunFolder, now_iso
+from herogen.pipeline.fast import enabled, informational
 
 SAM_TEXTS = ("character", "person")  # tried in order; "person" misses armoured heroes on some sheets
 SIDE_VIEWS = ("front", "right", "back", "left")
@@ -87,6 +88,9 @@ class _Stage:
 
     def __init__(self, run: RunFolder, client: ModelClient | None, n: int | str, name: str) -> None:
         self.run, self.client, self.n, self.name = run, client, n, name
+        self.fast = getattr(client, "fast", False) if client else enabled()
+        if self.fast and client:
+            client.stage, client.purpose = n, name.replace("_", " ")
         self.started = now_iso()
         self.t0 = time.monotonic()
         self.calls0 = len(client.log.calls) if client else 0
@@ -100,6 +104,9 @@ class _Stage:
         self.outputs.append(rel)
 
     def _record(self) -> dict[str, Any]:
+        if self.fast:
+            informational(self.checks)
+            self.details["fast_lane"] = True
         calls = self.client.log.calls[self.calls0 :] if self.client else []
         live = [c for c in calls if not c["cached"]]
         return {
@@ -148,10 +155,13 @@ def _stopping_on_client_error(body: Callable[[], dict[str, Any]], st: _Stage) ->
     with no uncached call propagates without replacing a record."""
     try:
         return body()
-    except ClientError as e:
+    except Exception as e:
+        if not isinstance(e, ClientError) and not st.fast:
+            raise
         calls = st.client.log.calls[st.calls0:] if st.client else []
-        if isinstance(e, ApiError) or any(not c["cached"] for c in calls):
-            what = "the Model API failed" if isinstance(e, ApiError) else "the model client failed"
+        if st.fast or isinstance(e, ApiError) or any(not c["cached"] for c in calls):
+            what = ("the Model API failed" if isinstance(e, ApiError) else "the model client failed"
+                    if isinstance(e, ClientError) else f"{type(e).__name__}")
             st.fail(f"{what}: {e}"[:800])
         raise
 
@@ -190,7 +200,7 @@ SAM_NOTHING_FOUND = f"{SAM_MODEL}:none"  # the method of an empty mask: no promp
 def sam_instances(client: ModelClient, img: Image.Image) -> tuple[list[SamInstance], str]:
     """SAM 3.1 instances (non-empty masks only) of the first text prompt in SAM_TEXTS that finds something, and
     that prompt; ([], "") when none does. A Model API failure, a replay miss or a corrupt cache entry raises."""
-    for text in SAM_TEXTS:
+    for text in (SAM_TEXTS[:1] if getattr(client, "fast", False) else SAM_TEXTS):
         inst = [i for i in client.segment(img, text) if i.mask.any()]
         if inst:
             return inst, text
@@ -245,17 +255,21 @@ def degraded_masks(record: dict[str, Any]) -> list[str]:
 def _finish_input_checks(st: _Stage) -> None:
     """Raise `InputRejected` (after writing the record) when an input check rejected the sketch; otherwise
     add each warning's message to the record's notes."""
+    if st.fast:
+        informational(st.checks)
+        return
     if inputs.rejections(st.checks):
         raise st.reject_input(inputs.rejection_error(st.checks))
     st.notes += [f"Warning: {c['message']}." for c in inputs.warnings(st.checks)]
 
 
 def stage0_input(
-    run: RunFolder, sketch_path: Path, label: str = "", origin: dict[str, Any] | None = None
+    run: RunFolder, sketch_path: Path, label: str = "", origin: dict[str, Any] | None = None, *, fast=False
 ) -> dict[str, Any]:
     """Copy the sketch into the run. ``origin`` names where a generated sketch came from (stage p and its prompt
     version), so the run records it."""
     st = _Stage(run, None, 0, "input")
+    st.fast = enabled(fast)
     img = Image.open(sketch_path).convert("RGB")  # re-encoded: drops EXIF and other metadata
     st.save_image("00-sketch.png", img)
     w, h = img.size
@@ -368,6 +382,11 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     if note_for(run, 1):
         prompt_details["prompt_version"] = prompt_registry.selected("cover_redo").ref()
     st.details = dict(prompt_details)
+    if st.fast:
+        reference = _load(run, "redo/parent-cover.png") if run.exists("redo/parent-cover.png") else sketch
+        st.save_image("01-cover.png", client.edit_image(prompt, [reference], size=f"{w}x{h}"))
+        st.notes.append("Fast lane: input judges and model-based cover checks skipped.")
+        return st.finish()
     # The input checks run first: a sketch they reject costs no paid edit. The photo check comes before every
     # other model call, so no other model (no SAM 3.1 face or head prompt) ever sees a photo of a real person.
     photo, photo_details = inputs.photo_check(inputs.judge_photo(client, sketch))
@@ -536,6 +555,8 @@ def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], 
 
 
 def _draw_top_view(client, cover, figure_mask=None, image=None):
+    if getattr(client, "fast", False):
+        client.purpose = "top view"
     img = image if image is not None else client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
     sam, method, _ = (figure_mask or sam_figure_mask)(client, img)
     completion = {"method": "attached_foreground"}
@@ -557,7 +578,7 @@ def scale_top_view(drawn, sq, size, bg):
     crop = img.crop(tb)
     cmask = imaging.to_mask_image(mask[tb[1] : tb[3], tb[0] : tb[2]])
     new = (max(1, round(crop.size[0] * scale)), max(1, round(crop.size[1] * scale)))
-    if max(new) > size:
+    if max(new) > size and not getattr(client, "fast", False):
         return {"raw": img, "mask": None, "mask_method": method, "scale": round(scale, 4)}
     scaled_mask = cmask.resize(new, Image.NEAREST)
     tile = Image.new("RGB", new, bg)
@@ -742,6 +763,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     side_masks = {n: v["mask"] for n, v in sq.items()}
     drawn = (model_top_view(client, cover, sq, size, bg) if requests is None
              else scale_top_view(requests.top(), sq, size, bg))
+    if getattr(client, "fast", False):
+        client.purpose = "turnaround"
     used = None
     final_carve = None
     if drawn.get("mask") is not None:
@@ -750,7 +773,11 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
             note="drawn top view, width scaled to the front width",
         )
         top_checks += drawn_checks
-        if all(c["pass"] for c in drawn_checks):
+        if getattr(client, "fast", False):
+            used = drawn
+            details["top_method"] = IMAGE_MODEL
+            details["top_method_detail"] = "fast lane: drawn top used without quality selection"
+        elif all(c["pass"] for c in drawn_checks):
             # Stage 3 carves with a drawn top view and gates its IoU too: keep it only if that carve still passes.
             with_top, ious = carve_check({**side_masks, "top": drawn["mask"]}, height_units)
             details["carve_ious_with_drawn_top"] = ious
@@ -763,6 +790,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
             else:
                 notes.append(f"Stage 3's carve with the drawn top view fails its IoU gate ({with_top['note']}), "
                                 "so the drawn top view is not used.")
+    if used is None and getattr(client, "fast", False):
+        raise ValueError("fast lane: drawn top has no usable mask or cannot fit the view canvas")
     if used is None:
         used = hull_top_view(sq, size, bg)
         details["top_method"] = "visual_hull"
@@ -779,7 +808,7 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
 
     if final_carve is None:
         final_carve, ious = carve_check(
-            {**side_masks, "top": used["mask"]}, height_units, derived_top=True
+            {**side_masks, "top": used["mask"]}, height_units, derived_top=used["mask_method"] == "visual_hull"
         )
         details["carve_ious_with_saved_top"] = ious
     top_checks.append(final_carve)
@@ -793,7 +822,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     cover = _load(run, "01-cover.png")
     tried = []
     kept: tuple = ()
-    for attempt in range(attempts):
+    for attempt in range(1 if st.fast else attempts):
         sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
                  if requests is None else requests.sheet(attempt))
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
@@ -808,7 +837,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         if split["views"]:
             named, assignment = assign_views(split["views"])
             size, sq = square_views(named, bg)
-            orient, orient_notes, assignment["side_fixes"] = orient_sides(sq)
+            if not st.fast:
+                orient, orient_notes, assignment["side_fixes"] = orient_sides(sq)
         side_checks = C.side_view_checks(
             {n: v["mask"] for n, v in sq.items()}, figures_found=len(split["runs"])
         ) + _coverage_checks(split)
@@ -820,7 +850,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         top_notes: list[str] = []
         # Select and measure the saved top whenever the other side gates pass, even if the preliminary
         # carve fails. The hybrid still needs complete views if no retry produces a passing carve.
-        if sq and C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE]):
+        if sq and (st.fast or C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE])):
             top, top_raw, top_checks, top_details, top_notes = _sheet_top(
                 client, cover, sq, size, bg, height_units, requests
             )
@@ -883,6 +913,9 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         st.save_image("02-top-drawn.png", top_raw)
         sq["top"] = {k: top[k] for k in ("image", "mask", "mask_method", "mask_completion") if k in top}
     if not sq:
+        if st.fast:
+            st.fail("fast lane: cannot extract four views from the single turnaround request")
+            raise ValueError("fast lane: cannot extract four views from the single turnaround request")
         st.notes.append("Could not split the sheet into four figures.")
         return st.finish()
     if top is None:

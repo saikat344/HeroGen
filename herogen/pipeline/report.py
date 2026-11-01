@@ -30,15 +30,15 @@ def report(path: Path, *, stream=None):
             rows.append(row)
         calls.extend(rows)
         stages.append({"stage": rec["stage"], "started": rec.get("started", ""), "calls": len(rows),
-                       "seconds": round(sum(r["wall_seconds"] for r in rows), 6),
-                       "elapsed_seconds": rec.get("seconds") or 0.0,
+                       "call_seconds": round(sum(r["wall_seconds"] for r in rows), 6),
+                       "seconds": rec.get("seconds") or 0.0,
                        "cost_usd": round(sum(r["cost_usd"] for r in rows), 6),
                        "status": rec.get("status", "complete"), "error": rec.get("error"),
                        "unknown_cost_calls": sum(r["cost_unknown"] for r in rows)})
     calls.sort(key=lambda r: r["started"])
     stages.sort(key=lambda r: (r["started"], str(r["stage"])))
     total = {key: round(sum(s[key] for s in stages), 6)
-             for key in ("calls", "seconds", "elapsed_seconds", "cost_usd", "unknown_cost_calls")}
+             for key in ("calls", "seconds", "call_seconds", "cost_usd", "unknown_cost_calls")}
     data = {"calls": calls, "stages": stages, "total": total, "cost_is_estimate": True}
     RunFolder(path.parent, path.name).write_json("fast-report.json", data)
     out = stream or sys.stdout
@@ -48,7 +48,7 @@ def report(path: Path, *, stream=None):
               f"{r['wall_seconds']:.6f}  {r['cost_usd']:.6f}  {r['cached']}  {r['outcome']}", file=out)
     print("\nstage  calls  call seconds  elapsed seconds  USD", file=out)
     for s in [*stages, {"stage": "TOTAL", **total}]:
-        print(f"{s['stage']}  {s['calls']}  {s['seconds']:.6f}  {s['elapsed_seconds']:.2f}  "
+        print(f"{s['stage']}  {s['calls']}  {s['call_seconds']:.6f}  {s['seconds']:.2f}  "
               f"{s['cost_usd']:.6f}", file=out)
     if total["unknown_cost_calls"]:
         print(f"Unknown list price for {total['unknown_cost_calls']} call(s); USD totals include known costs only.",

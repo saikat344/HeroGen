@@ -542,7 +542,8 @@ class ModelClient:
                     self.log.add(model, kind, key, cached=False, outcome=outcome, cost_usd=attempt_cost)
                 for call in self.log.calls[log_start:]:
                     call.update(started=began, wall_seconds=round(seconds, 6), attempt=attempt,
-                                outcome=outcome, cost_usd=round(attempt_cost, 6))
+                                cost_usd=round(attempt_cost, 6))
+                    call.setdefault("outcome", outcome)
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
                 or attempt == policy.max_attempts
             wait, why = (0.0, "") if final else policy.wait(attempt - 1, headers)
