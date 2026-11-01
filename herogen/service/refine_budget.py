@@ -6,6 +6,7 @@ its metadata Volume snapshot was committed. Pipe descriptors are inherited only 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import select
 import socket
@@ -20,6 +21,7 @@ from contextlib import contextmanager
 
 REQUEST_FD = "HEROGEN_REFINE_BUDGET_REQUEST_FD"
 RESPONSE_FD = "HEROGEN_REFINE_BUDGET_RESPONSE_FD"
+log = logging.getLogger("herogen.service")
 _CLIENT_LOCK = threading.Lock()
 _AUTH_TIMEOUT = 5
 
@@ -77,7 +79,9 @@ def budget_bridge(callback, prefix="HEROGEN_REFINE_BUDGET"):
                 try:
                     result = {"state": callback(**json.loads(line))}
                 except Exception:
-                    # A failed durable write must never authorize an HTTP send.
+                    # A failed durable write must never authorize an HTTP send. The stage only learns that the
+                    # budget is unavailable, so the service log keeps the store's actual error.
+                    log.exception("texture-refine budget operation failed")
                     result = {"error": "budget unavailable"}
                 try:
                     responses.write(json.dumps(result).encode() + b"\n")
@@ -209,6 +213,7 @@ def _connection_bridge(callback, prefix):
                                 bounded.check()
                                 result = {'state': callback(**request)}
                             except Exception:
+                                log.exception("refinement budget operation failed")
                                 result = {'error': 'budget unavailable'}
                             bounded.deadline = time.monotonic() + 120
                             try:

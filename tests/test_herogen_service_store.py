@@ -90,9 +90,12 @@ class TestRefineReservations(StoreCase):
             self.store.persist = Mock(side_effect=OSError("commit failed"))
             with patch.dict(os.environ, {"MODEL_API_KEY": "test-placeholder"}), \
                     patch("herogen.pipeline.client._open") as send:
-                with self.assertRaisesRegex(RuntimeError, "could not be acknowledged"):
+                with self.assertRaisesRegex(RuntimeError, "could not be acknowledged"), \
+                        self.assertLogs("herogen.service", "ERROR") as logged:
                     client._post("images/edits", {}, model=IMAGE_MODEL, kind="edit", key="k")
             send.assert_not_called()
+            # The stage sees only "unavailable"; the service log names the store's actual failure.
+            self.assertIn("commit failed", "\n".join(logged.output))
 
     def test_lost_worker_reservations_survive_store_replacement(self):
         job, _ = self.create()
