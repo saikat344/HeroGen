@@ -21,6 +21,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline import facesource, imaging, stages  # noqa: E402
+from herogen import prompts  # noqa: E402
 from herogen.pipeline.__main__ import parse_stages, run_pipeline  # noqa: E402
 from herogen.pipeline.runfolder import RunFolder  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, SamInstance  # noqa: E402
@@ -85,7 +86,7 @@ class FakeAPI:
         elif prompt.startswith(stages.COVER_PROMPT):
             src = _decode_data_url(body["images"][0]["image_url"])
             img = paint(imaging.threshold_mask(src), colour=(30, 80, 160), bg=(235, 235, 235))
-        elif prompt == stages.TURNAROUND_PROMPT:
+        elif prompt.startswith(stages.TURNAROUND_PROMPT):
             img, _ = sheet(order=self.sheet_order)
         elif prompt == stages.TOP_PROMPT:
             img = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))  # not a real top view
@@ -259,6 +260,8 @@ class FlowTest(_RunsTest):
         self.assertEqual(meta["top_method"], "visual_hull")
         s2 = json.loads((run / "stage-2.json").read_text())
         self.assertTrue(s2["ok"])
+        self.assertEqual(s2["details"]["prompt_version"], prompts.load("turnaround-v1").ref())
+        self.assertEqual(s2["details"]["prompt"], stages.TURNAROUND_PROMPT)
         self.assertEqual(len(s2["details"]["attempts"]), 1)
         # sheet and top view; SAM on the sheet, the top view and the front view's face and head
         self.assertAlmostEqual(s2["cost_usd"], 0.01 + 0.0025 + 0.01 + 0.0025 + 2 * 0.0025)
@@ -282,6 +285,19 @@ class FlowTest(_RunsTest):
         self.assertEqual(f_rec["details"]["used_views"], f_rep["details"]["used_views"])
         self.assertEqual(f_rep["cost_usd"], 0.0)
         self.assertEqual(api.prompts.count(facesource.PROMPTS["FC4"]), 1)
+
+    def test_opt_in_turnaround_version_is_sent_recorded_and_replayed(self):
+        version = prompts.load("turnaround-v2")
+        api = FakeAPI()
+        with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": version.name}):
+            self.assertEqual(self._record(api, "gear"), 0)
+            self.assertEqual(self._replay("gear-replay"), 0)
+        self.assertIn(version.step("sheet")["prompt"], api.prompts)
+        for name in ("gear", "gear-replay"):
+            rec = RunFolder(self.root, name).read_stage(2)
+            self.assertEqual(rec["details"]["prompt_version"], version.ref())
+            self.assertEqual(rec["details"]["prompt"], version.step("sheet")["prompt"])
+        self.assertEqual(rec["cost_usd"], 0)
 
     def test_reordered_sheet_with_same_facing_profiles(self):
         api = FakeAPI(sheet_order=("front", "front", "right", "right"))

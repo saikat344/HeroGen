@@ -11,6 +11,7 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
+from herogen import prompts as prompt_registry
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging, inputs
 from herogen.pipeline.client import (
@@ -630,11 +631,15 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
 
 def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int
             ) -> dict[str, Any]:
+    version = prompt_registry.selected("turnaround")
+    step = version.step("sheet")
+    prompt = step["prompt"]
+    st.details = {"prompt_version": version.ref(), "prompt": prompt}
     cover = _load(run, "01-cover.png")
     tried = []
     kept: tuple = ()
     for attempt in range(attempts):
-        sheet = client.edit_image(TURNAROUND_PROMPT, [cover], size=SHEET_SIZE, attempt=attempt)
+        sheet = client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
         fig, fig_method, n_inst = sam_figure_mask(client, sheet)
@@ -692,7 +697,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
      top, top_raw, top_details, top_notes) = kept
     st.save_image("02-turnaround.png", sheet)
     st.details = {
-        "prompt": TURNAROUND_PROMPT,
+        "prompt": prompt,
+        "prompt_version": version.ref(),
         "sheet_size": list(sheet.size),
         "attempts": tried,
         "kept_attempt": kept_attempt,
