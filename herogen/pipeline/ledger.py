@@ -18,8 +18,8 @@ BRIDGE = "HEROGEN_CALL_LEDGER"
 def append(cache_dir: Path, row: dict) -> None:
     row = {"time": datetime.now().astimezone().isoformat(timespec="milliseconds"), **row}
     # The service acknowledgement is durable even when a stage's local working copy is lost.
-    if BRIDGE + "_REQUEST_FD" in os.environ:
-        from herogen.service.refine_budget import remote_budget
+    from herogen.service.refine_budget import bridge_enabled, remote_budget
+    if bridge_enabled(BRIDGE):
         remote_budget("call", row=row, prefix=BRIDGE)
     cache_dir.mkdir(parents=True, exist_ok=True)
     with open(cache_dir / LEDGER, "a") as stream, filelock.exclusive(stream.fileno()):

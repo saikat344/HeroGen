@@ -5,8 +5,6 @@ import secrets
 import threading
 import json
 import sys
-import os
-import unittest
 from unittest import mock
 from test_herogen_service_support import Clock, TempDirCase, settings, png
 from herogen.service.store import Store, StoreError, new_id
@@ -297,7 +295,6 @@ class TestAdmission(TempDirCase):
         self.assertEqual(result.code,'timeout')
         self.assertTrue(self.store._admission_snapshot(job['id'])['processes'][0]['stopped'])
 
-    @unittest.skipIf(os.name == 'nt', 'POSIX process-group reaping')
     def test_timeout_descendant_group_settles_from_another_host(self):
         user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
         self.store.admission_work_begin(job['id'],'timeout','model',self.s.cost_signature,
@@ -328,6 +325,40 @@ class TestAdmission(TempDirCase):
             self.assertTrue(wait_stopped(identity(),group=True))
         with mock.patch('herogen.service.processes.stopped',return_value=False):
             self.assertFalse(wait_stopped(identity(),group=True,timeout=0))
+
+    def test_windows_unproven_group_does_not_abort_later_settlement(self):
+        import types
+        from herogen.service import processes
+        first,_=self.settlement_job()
+        self.store.db.execute('INSERT INTO admission_processes VALUES (?,?,?,0)',
+                              ('work',identity()['host'],123))
+        user,_=self.guest(); second,_=self.job(user)
+        self.store.admission_work_begin(second['id'],'other','model',self.s.cost_signature,process=identity())
+        self.store.admission_work_end(second['id'],'other',True,worker_stopped=True)
+        self.close(second); self.clock.advance(181)
+        with mock.patch.object(processes,'os',types.SimpleNamespace(name='nt')):
+            self.assertEqual(settle_admissions(self.store),[second['id']])
+        self.assertIsNone(next(r for r in self.store.budget_report()['admissions']
+                               if r['job_id']==first['id'])['actual_micro'])
+
+    def test_windows_stage_transport_acknowledges_before_sending(self):
+        import types
+        from herogen.service import refine_budget
+        user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
+        self.store.admission_work_begin(job['id'],'ipc','model',self.s.cost_signature,process=identity())
+        ctx=make_context(self.s,storage,job); ctx.run_dir.mkdir(parents=True)
+        ctx.accounting=lambda action,**kw:self.store.admission_record(job['id'],'ipc',action,**kw)
+        script=("from pathlib import Path; from herogen.pipeline import ledger; import sys; "
+                "ledger.sent(Path(sys.argv[1]),model='synthetic',endpoint='responses',key='hash',timeout=1,price_usd=.01)")
+        runner=CliRunner()
+        with mock.patch.object(refine_budget,'os',types.SimpleNamespace(name='nt',path=refine_budget.os.path)), \
+                mock.patch.object(runner,'available',return_value=None), \
+                mock.patch.object(runner,'command',return_value=([sys.executable,'-c',script,str(ctx.cache_dir)],None)):
+            runner.run(plan_for('sketch','best')[0],ctx)
+        snapshot=self.store._admission_snapshot(job['id'])
+        self.assertEqual(len(snapshot['calls']),1)
+        self.assertEqual(snapshot['calls'][0]['outcome'],'sent')
+        self.assertTrue(snapshot['processes'][0]['stopped'])
 
     def test_parallel_settlers_commit_once(self):
         job,_=self.settlement_job(); self.clock.advance(181)

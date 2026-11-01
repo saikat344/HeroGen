@@ -411,16 +411,17 @@ class CliRunner:
         extra = dict(ctx.env)
         if (spec.group in ("model", "heldout") or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
-        from herogen.service.refine_budget import budget_bridge
+        from herogen.service.refine_budget import budget_bridge, inherited_fds
         from herogen.pipeline.ledger import BRIDGE
-        from herogen.service.processes import identity, wait_stopped
-        import signal
+        from herogen.service.processes import identity, stage_process
         import threading
         registered = threading.Event()
         registration_ok = False
         def acknowledge(action, **kwargs):
             if not registered.wait(120) or not registration_ok:
                 raise RuntimeError('Stage process registration timed out')
+            if action == 'stage_ready':
+                return {}
             return ctx.accounting(action, **kwargs)
         bridge = budget_bridge(ctx.refine_budget) if spec.key == "3f" and ctx.refine_budget else nullcontext({})
         call_bridge = budget_bridge(acknowledge, BRIDGE) if ctx.accounting else nullcontext({})
@@ -438,15 +439,14 @@ class CliRunner:
                 if ctx.accounting is None:
                     proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
                                       timeout=timeout, env=env,
-                                      cwd=home, **({"pass_fds": tuple(map(int, budget_env.values()))}
-                                                   if budget_env else {}))
+                                      cwd=home, **inherited_fds(budget_env))
                     out, err, code = proc.stdout, proc.stderr, proc.returncode
                 else:
-                    # All descendants inherit the group. Even a failed stage must leave no child running.
-                    with subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None else None,
+                    # All descendants inherit the containment. Failed stages must leave no child running.
+                    with stage_process(argv, stdin=subprocess.PIPE if stdin is not None else None,
                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                          encoding="utf-8", env=env, cwd=home, start_new_session=True,
-                                          pass_fds=tuple(map(int, (*budget_env.values(), *call_env.values())))) as proc:
+                                          encoding="utf-8", env=env, cwd=home,
+                                          **inherited_fds({**budget_env, **call_env})) as (proc, stop):
                         process = {**identity(), 'pid': proc.pid}
                         try:
                             ctx.accounting('process_start', **process)
@@ -456,18 +456,15 @@ class CliRunner:
                             code = proc.returncode
                         finally:
                             registered.set()
-                            try:
-                                os.killpg(proc.pid, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
-                            proc.wait()
-                            if wait_stopped(process, group=True):
+                            if stop():
                                 ctx.accounting('process_stopped', **process)
             except subprocess.TimeoutExpired as e:
                 timed_out = True
                 out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
                 err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
                 code = -1
+            finally:
+                registered.set()
             seconds = round(time.monotonic() - t0, 2)
         return self.outcome(spec, ctx, seconds, code, out, err, timed_out)
 

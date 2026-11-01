@@ -167,8 +167,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         old = json.loads(record_path.read_text())
         prior = float((old.get("budget") or {}).get("spent_usd_total", old.get("cost_usd") or 0.0))
         old_budget = old.get("budget")
-    if budget_store is None and os.environ.get("HEROGEN_REFINE_BUDGET_REQUEST_FD"):
-        from herogen.service.refine_budget import remote_budget
+    from herogen.service.refine_budget import bridge_enabled, remote_budget
+    if budget_store is None and bridge_enabled():
         budget_store = remote_budget
     budget = Budget(client, cap_usd, prior, state=old_budget, store=budget_store)
     prior = budget.state["spent_usd_total"]

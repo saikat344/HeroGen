@@ -2518,8 +2518,13 @@ added again. Orchestration, idle containers, storage and egress remain non-job o
 The minute sweep considers terminal jobs with unreconciled admissions, including uncertain or disappeared
 workers and completed work still holding money, after main and expected side work finish. Every worker invocation must have either returned with an
 explicit stopped receipt or be proven absent on its recorded host. Every stage subprocess runs in a registered
-process group; exit/timeout kills descendants and reaps the direct child. Every recorded group must be proven
-gone, including any descendants still waiting to be reaped. Lease expiry is never process-exit evidence. Missing legacy receipts, an uninspectable foreign host,
+POSIX process group or Windows job object. On Windows a wrapper waits for durable registration and job
+assignment before starting the stage; the job forbids breakaway and kills descendants on handle close.
+Exit/timeout kills descendants and reaps the direct child. The owning worker waits up to ten seconds for the
+process group to disappear or the Windows job's active process count to reach zero, then records that proof
+durably for sweeps on other hosts. A Windows PID probe uses process handles without console signals;
+a PID alone cannot prove a whole Windows job stopped. Missing exit proof retains the reservation.
+Lease expiry is never process-exit evidence. Missing legacy receipts, an uninspectable foreign host,
 missing prices or malformed/incomplete ledger evidence retain the reservation for manual reconciliation.
 The sweep also waits strictly past the latest sent call expiry plus 60 seconds (or the work's start plus 60 seconds
 when no call was sent). It sums known completed costs, each unanswered `sent`/`unknown` call at full configured
@@ -2533,6 +2538,11 @@ a manual reconciliation that commits first wins, and concurrent sweep calls cann
 `generation-reconcile` remains available with operator evidence and requires confirmation of stopped work
 for uncertain exits. A cost above its reservation pauses new admissions. Guest generations have no separate
 lifetime allowance.
+
+Subprocess budget acknowledgements use inherited private pipes on POSIX and authenticated named pipes on
+Windows. Each Windows bridge has a fresh random address and 256-bit authentication key passed only in the
+stage environment; messages use bounded JSON byte frames, never pickle. A failed durable write returns no
+authorization to send a paid call. Windows requires no inherited file descriptors or POSIX signals.
 
 This ledger limits admitted reservation bounds; it is not an invoice meter or a provider billing cap. Gallery
 hosting, idle containers, storage and egress are not allocated per generation. A real total-spend ceiling also
