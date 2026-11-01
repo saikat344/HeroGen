@@ -337,20 +337,56 @@ class Stage1FeetTest(_SketchRun):
         self.assertEqual((s1["details"]["input"]["feet_on_figure"], s1["details"]["input"]["legs_on_figure"]),
                          (1, None))
         self.assertNotIn("leg", api.sam_texts)  # legs are asked only when no feet are found
+        self.assertNotIn("boot", api.sam_texts)
+        self.assertNotIn("shoe", api.sam_texts)
+        self.assertEqual(s1["details"]["input"]["feet_prompt"], "foot")
+
+    def test_footwear_counts_as_feet_and_records_the_matching_prompt(self):
+        for matched in ("boot", "shoe"):
+            with self.subTest(matched=matched):
+                parts = {t: lambda fig: [] for t in inputs.FEET_TEXTS}
+                parts[matched] = lambda fig: [bottom(fig, 0.04)]
+                api = PromptAPI(parts)
+                # Each subcase needs its own cache: SAM's answers differ for the same synthetic image.
+                with tempfile.TemporaryDirectory() as d:
+                    old = self.root
+                    self.root = Path(d)
+                    try:
+                        self.assertEqual(self._live(self.img, api), 0)
+                        s1 = self._stage(1)
+                    finally:
+                        self.root = old
+                self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "pass")
+                det = s1["details"]["input"]
+                self.assertEqual(det["feet_prompt"], matched)
+                self.assertEqual(det["feet_counts"], {t: int(t == matched) for t in
+                                 inputs.FEET_TEXTS[:inputs.FEET_TEXTS.index(matched) + 1]})
+                self.assertIsNone(det["legs_on_figure"])
+                self.assertNotIn("leg", api.sam_texts)
+                if matched == "boot":
+                    self.assertNotIn("shoe", api.sam_texts)
+
+    def test_footwear_off_the_figure_does_not_prevent_cropped_rejection(self):
+        api = PromptAPI({"foot": lambda fig: [], "boot": lambda fig: [box_mask(fig.shape, 0, 0, 20, 20)],
+                         "shoe": lambda fig: [], "leg": lambda fig: [bottom(fig, 0.4)]})
+        self.assertEqual(self._live(self.img, api), 3)
+        self.assertEqual(self._verdicts(self._stage(1))["sketch_feet_on_figure"], "reject")
 
     def test_legs_without_feet_are_a_cropped_figure(self):
-        api = PromptAPI({"foot": lambda fig: [], "leg": lambda fig: [bottom(fig, 0.4)]})
+        api = PromptAPI({**{t: lambda fig: [] for t in inputs.FEET_TEXTS},
+                         "leg": lambda fig: [bottom(fig, 0.4)]})
         self.assertEqual(self._live(self.img, api), 3)
         s1 = self._stage(1)
         self.assertEqual(s1["status"], "input_rejected")
         self.assertEqual(self._verdicts(s1)["sketch_feet_on_figure"], "reject")
         self.assertIn("the figure looks cropped", s1["error"])
-        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "leg", "face", "head"])
-        self.assertEqual(api.sam_texts[-4:], ["foot", "leg", "face", "head"])
+        self.assertEqual(s1["details"]["input"]["sam_prompts"], ["foot", "boot", "shoe", "leg", "face", "head"])
+        self.assertEqual(api.sam_texts[-6:], ["foot", "boot", "shoe", "leg", "face", "head"])
+        self.assertIsNone(s1["details"]["input"]["feet_prompt"])
         self.assertNotIn("images/edits", api.calls)
 
     def test_no_feet_or_legs_warn(self):
-        api = PromptAPI({"foot": lambda fig: [], "leg": lambda fig: []})
+        api = PromptAPI({**{t: lambda fig: [] for t in inputs.FEET_TEXTS}, "leg": lambda fig: []})
         self.assertEqual(self._live(self.img, api), 0)
         s1 = self._stage(1)
         self.assertTrue(s1["ok"])
