@@ -1,6 +1,8 @@
+import { stageTiming } from './generation.js';
 // Version actions and owner-scoped lineage share the selected workbench job.
 const STAGE = {'1': 'cover', '2': 'turnaround', '3f': 'texture'};
 export const versionLabel = (v, index = 1) => v.note || (!v.parent_job ? 'Original texture' : `Variation ${Math.max(1, index)}`);
+export const versionAction = (v, parent, known) => known || (v.note && v.note !== parent?.note ? 'Refine' : 'Retry / Refine');
 export function versionMetrics(v) {
   const seconds = Number.isFinite(v.seconds) ? (v.seconds < 90 ? `${v.seconds.toFixed(1)} s` : `${(v.seconds / 60).toFixed(1)} min`) : 'Time pending';
   return `${seconds} · ${Number.isFinite(v.cost_usd) ? `$${v.cost_usd.toFixed(2)}` : 'Cost pending'}`;
@@ -29,7 +31,11 @@ function node(tag, value, cls) {
 }
 export function variationsView($, {api, select, created, changeIdea, key, textureNotes}) {
   let job = null, versions = [], signature = '', request = 0, busy = false, family = '', panel = 'live';
-  let compare = null, compareRequest = 0;
+  let compare = null, compareRequest = 0, rootJob = null;
+  const actionLabels = new Map();
+  $('#inlineRefine').append($('#refineForm'));
+  const restoreRefine = () => { $('#inlineRefine').append($('#refineForm')); };
+  $('#refineDialog').addEventListener('close', () => { if (!$('#refineDialog').open) restoreRefine(); });
   const message = (id, value) => { $(id).textContent = value; $(id).hidden = !value; };
   const terminal = () => job && !['queued', 'running'].includes(job.state) && job.export_state !== 'running';
   const retryStage = () => STAGE[job?.from_stage] || 'cover';
@@ -55,6 +61,9 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     const allowed = terminal() && !job.input_rejected;
     $('#retryVersion').disabled = busy || !allowed || !job.can_redo?.[retryStage()];
     $('#refineVersion').disabled = busy || !allowed || !job.can_redo?.turnaround;
+    $('#submitRefine').disabled = busy || !allowed || !job.can_redo?.turnaround;
+    $('#inlineRefine').hidden = !!job.input_rejected || !terminal();
+    if (!$('#refineDialog').open) $('#refineHeading').textContent = `Refine ${versionLabel(job, versions.findIndex(v => v.id === job.id))}`;
     $('#attemptTime').textContent = job ? expectedTime(job, retryStage()) : '';
     const failed = job?.parent_job && (['failed','rejected','canceled'].includes(job.state) || job.stages?.some(s => s.key === job.from_stage && ['skipped','failed','rejected'].includes(s.state)));
     $('#variationFailure').hidden = !failed;
@@ -73,15 +82,39 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     $('#versionSelect').replaceChildren(...options); $('#versionSelect').value = job.id;
     const rows = versionRows(versions);
     const list = node('ul', null, 'version-list');
+    const production = node('div', null, 'production-lineage');
+    for (const [key, title, imageKey] of [['1','Artwork','cover'], ['3','3D shape',null]]) {
+      const stage = rootJob?.stages?.find(s => s.key === key);
+      if (!stage) continue;
+      const card = node('div', null, `production-node st-${stage.state}`);
+      card.append(node('b', title));
+      if (rootJob.images?.[imageKey]) { const img = node('img'); img.src = rootJob.images[imageKey]; img.alt = ''; card.append(img); }
+      else card.append(node('span', '◇', 'shape-symbol'));
+      card.append(node('span', stage.state === 'passed' ? 'Completed' : stage.state, `version-status st-${stage.state}`), node('small', stageTiming(stage) || 'Time and cost pending'));
+      production.append(card);
+    }
+    const entries = new Map(), childLists = new Map();
     for (const v of rows) {
-      const li = node('li'); li.style.setProperty('--depth', v.depth);
+      const li = node('li'); li.style.setProperty('--depth', v.depth); li.dataset.parent = v.parent_job || '';
+      if (v.parent_job) {
+        const parent = versions.find(p => p.id === v.parent_job);
+        li.append(node('span', versionAction(v, parent, actionLabels.get(v.id)), 'branch-edge'));
+      }
       const b = node('button', null, 'version-node'); b.type = 'button'; b.dataset.version = v.id;
       b.setAttribute('aria-pressed', String(v.id === job.id));
       if (v.cover_thumbnail_url) { const img = node('img'); img.src = v.cover_thumbnail_url; img.alt = ''; img.loading = 'lazy'; b.append(img); }
-      const copy = node('span'); copy.append(node('b', versionLabel(v, versions.findIndex(x => x.id === v.id))), node('small', `${v.state} · ${versionMetrics(v)}`));
-      b.append(copy); b.addEventListener('click', () => select(v.id, true)); li.append(b); list.append(li);
+      const copy = node('span'); copy.append(node('b', versionLabel(v, versions.findIndex(x => x.id === v.id))), node('span', v.state === 'succeeded' ? 'Completed' : v.state, `version-status st-${v.state}`), node('small', versionMetrics(v)));
+      b.append(copy); b.addEventListener('click', () => select(v.id, true)); li.append(b);
+      const parent = entries.get(v.parent_job);
+      if (parent) {
+        if (!childLists.has(v.parent_job)) {
+          const children = node('ul', null, 'version-children'); parent.append(children); childLists.set(v.parent_job, children);
+        }
+        childLists.get(v.parent_job).append(li);
+      } else list.append(li);
+      entries.set(v.id, li);
     }
-    $('#versionTree').replaceChildren(list);
+    $('#versionTree').replaceChildren(production, list);
     $('#compareVersions').disabled = versions.filter(v => v.model_url).length < 2;
   }
   async function loadVersions() {
@@ -90,11 +123,15 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     try {
       const result = await api(`/api/jobs/${encodeURIComponent(id)}/versions`);
       if (token !== request || job?.id !== id) return;
-      versions = result.versions; family = versions.map(v => v.id).join(','); renderVersions();
+      const root = versionRows(result.versions)[0];
+      const original = root?.id === job.id ? job : root ? await api(`/api/jobs/${encodeURIComponent(root.id)}`) : null;
+      if (token !== request || job?.id !== id) return;
+      versions = result.versions; family = versions.map(v => v.id).join(','); rootJob = original;
+      renderVersions(); actions();
       message('#branchesStatus', '');
     } catch (e) { if (token === request) message('#branchesStatus', e.message); }
   }
-  async function attempt(stage, note = '', same = false, input = false) {
+  async function attempt(stage, note = '', same = false, input = false, action = 'Retry') {
     if (busy || !terminal()) return;
     const selected = job;
     busy = true; actions(); $('#submitRefine').disabled = true; message('#variationError', ''); message('#refineError', '');
@@ -103,9 +140,9 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
         method: 'POST', headers: {'Idempotency-Key': key()},
         json: input ? {} : {stage, note, build_all: same ? selected.build_all : true},
       });
-      $('#refineDialog').close(); created(next);
+      actionLabels.set(next.id, action); $('#refineDialog').close(); created(next);
     } catch (e) { message($('#refineDialog').open ? '#refineError' : '#variationError', e.message); }
-    finally { busy = false; actions(); $('#submitRefine').disabled = false; }
+    finally { busy = false; actions(); }
   }
   $('#versionSelect').addEventListener('change', event => select(event.target.value, true));
   $('#retryVersion').addEventListener('click', () => attempt(retryStage()));
@@ -117,14 +154,21 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     $('#refineNoteWrap').hidden = isTexture && !textureNotes();
     $('#submitRefine').textContent = isTexture && !textureNotes() ? 'Retry texture' : 'Create variation';
     $('#refineTime').textContent = expectedTime(job, $('#refineStage').value);
+    for (const chip of document.querySelectorAll('[data-refine-stage]')) {
+      chip.setAttribute('aria-pressed', String(chip.dataset.refineStage === $('#refineStage').value));
+      chip.disabled = chip.dataset.refineStage === 'texture' && !job?.can_texture;
+    }
   }
   $('#refineVersion').addEventListener('click', () => {
     $('#refineStage').options[0].disabled = !job.can_texture;
     $('#refineStage').value = job.can_texture ? 'texture' : 'turnaround';
     $('#refineNote').value = ''; $('#refineCount').textContent = '0 / 300 characters';
-    message('#refineError', ''); refineChoice(); $('#refineDialog').showModal();
+    message('#refineError', ''); refineChoice(); $('#refineDialog').append($('#refineForm')); $('#refineDialog').showModal();
   });
   $('#refineStage').addEventListener('change', refineChoice);
+  for (const chip of document.querySelectorAll('[data-refine-stage]')) chip.addEventListener('click', () => {
+    $('#refineStage').value = chip.dataset.refineStage; refineChoice();
+  });
   $('#refineNote').addEventListener('input', () => {
     const n = Array.from($('#refineNote').value).length;
     $('#refineCount').textContent = `${n} / 300 characters`;
@@ -134,9 +178,13 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     event.preventDefault();
     const stage = $('#refineStage').value, note = stage === 'texture' && !textureNotes() ? '' : $('#refineNote').value;
     if (Array.from(note).length > 300) { message('#refineError', 'Use at most 300 characters.'); return; }
-    attempt(stage, note);
+    attempt(stage, note, false, false, stage === 'texture' && !textureNotes() ? 'Retry' : 'Refine');
   });
   $('#closeRefine').addEventListener('click', () => $('#refineDialog').close());
+  $('#expandTree').addEventListener('click', () => {
+    const on = $('.generation-notes').classList.toggle('expanded-tree');
+    $('#expandTree').setAttribute('aria-pressed', String(on)); $('#expandTree').textContent = on ? 'Close expanded tree' : '⛶ Expand';
+  });
   $('#viewTree').addEventListener('click', () => {
     const on = $('#versionTree').classList.toggle('show-tree');
     $('#viewTree').setAttribute('aria-pressed', String(on)); $('#viewTree').textContent = on ? 'View list' : 'View tree';
@@ -181,12 +229,19 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
   });
   for (const side of ['A','B']) $('#compare' + side).addEventListener('change', compareModels);
   $('#closeCompare').addEventListener('click', () => $('#compareDialog').close());
-  $('#compareDialog').addEventListener('close', closeCompare);
+  $('#compareDialog').addEventListener('close', () => { if (!$('#compareDialog').open) closeCompare(); });
   return {
     update(next) {
       const changed = job?.id !== next.id;
       if (changed) { ++request; $('#refineDialog').close(); if (family && !family.split(',').includes(next.id)) setPanel('live'); }
-      job = next; actions(); recipe();
+      job = next;
+      if (changed) {
+        $('#refineStage').options[0].disabled = !job.can_texture;
+        $('#refineStage').value = job.can_texture ? 'texture' : 'turnaround';
+        $('#refineNote').value = ''; $('#refineCount').textContent = '0 / 300 characters';
+        message('#refineError', ''); refineChoice();
+      }
+      actions(); recipe();
       const nextSignature = JSON.stringify([next.id, next.state, next.stages, next.cost_usd, next.export_state]);
       if (signature !== nextSignature) { signature = nextSignature; loadVersions(); }
       else if (changed) renderVersions();

@@ -2325,9 +2325,30 @@ disabled while submitting. Starter art and gallery models are external deploymen
 from Git. Missing illustrations are hidden; uploads and text remain usable.
 
 `generation.js` renders only reported main stages, available images and downloads. Queued heroes show
-“Waiting for a free worker”. Polling continues while queued, running, or preparing background exports. Succeeded heroes show “Meet your hero.” with a note list for skipped stages. Failed and rejected stages
+“Waiting for a free worker”. Polling continues while queued, running, or preparing background exports.
+Succeeded heroes show “Your hero. Your next idea.”; degraded results retain “Meet your hero.” and
+a note list for skipped stages. Failed and rejected stages
 show their recorded reason; saved outputs remain inspectable. Developer mode remains read-only and
-uses the owner-checked Lab API. No separate quality-review section is present.
+uses the owner-checked Lab API. Its toggle is inside Behind the build. No separate quality-review
+section is present.
+
+The workbench has a compact segmented progress disclosure, with recorded stage status, duration, cost,
+typical time and public source links in its expanded list. Behind the build contains Live, Recipe and
+Branches tabs. Live reads completed stage records through the existing owner-checked run-file route;
+start and finish times use the record’s start timestamp and duration. Active starts use the service’s
+reported elapsed time, and numbered texture publications use their recorded timestamps. Missing
+records are identified rather than assigned timestamps. Follow live controls log scrolling; Copy log
+copies the displayed events with ISO timestamps.
+
+Branches joins the original artwork and shape stages to the immutable job lineage, with status and
+measured time/cost per node. Edge labels use the action submitted in the current page; historical
+notes that differ from the parent identify Refine, while ambiguous historical edges say “Retry / Refine”
+because the service does not persist the action type. At narrow widths it defaults to a version list with a View tree toggle.
+The selected-result dropdown and branch nodes select the same owner-scoped job. Retry and Refine
+remain below the viewer; the refinement form is also available inline once the job and its exports
+stop. The form’s texture-note availability follows the existing session flag. Viewer fullscreen,
+expansion and studio-light controls affect presentation only. Compare variations stays in the saved
+progress bar and retains synchronized cameras. Downloads and export instructions follow this bar.
 
 The job response includes content-versioned `images`, an ordered `models` list (first shape has `n: 0`), and
 `refinement`. `03-source.glb` is available once stage 3 passes, while the job is still running. Numbered

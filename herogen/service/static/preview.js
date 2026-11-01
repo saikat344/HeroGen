@@ -66,7 +66,7 @@ export function createPreview({damping = true} = {}) {
       const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
       const controls = new OrbitControls(camera, canvas); controls.enableDamping = damping;
       controls.minDistance = 0.1; controls.maxDistance = 100;
-      state = {canvas, renderer, scene, camera, controls, grid, model: null};
+      state = {canvas, renderer, scene, camera, controls, grid, sun, model: null};
       controls.addEventListener?.('change', () => { if (!syncing) viewListener?.(view()); });
       const resize = () => {
         if (!state) return;
@@ -120,7 +120,8 @@ export function createPreview({damping = true} = {}) {
     state.camera.zoom = value.zoom; state.camera.updateProjectionMatrix();
     render(); syncing = false;
   }
-  return {show, pause, resume, dispose, shading, snapshot, view, setView,
+  function lighting(on) { if (state) { state.sun.intensity = on ? 3.2 : 1.6; render(); } }
+  return {show, pause, resume, dispose, shading, lighting, snapshot, view, setView,
     onView(callback) { viewListener = callback; }};
 }
 const preview = createPreview();
@@ -129,3 +130,5 @@ export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
 export const view = () => preview.view();
 export const shading = mode => preview.shading(mode);
+
+export const lighting = on => preview.lighting(on);
