@@ -39,7 +39,8 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,6 +48,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.pipeline import ledger, retry
+from herogen.pipeline.fast import enabled, tracked
 
 API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
@@ -211,14 +213,17 @@ class ModelClient:
 
     def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
                  policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None,
-                 before_api_attempt: Callable[[str], None] | None = None) -> None:
+                 before_api_attempt: Callable[[str], None] | None = None, fast: bool = False) -> None:
         """``policy`` and ``limiter`` default to `retry.RetryPolicy()` and the shared limiter of the key in use."""
         if mode not in ("live", "replay"):
             raise ValueError(f"mode must be 'live' or 'replay', got {mode!r}")
         self.cache_dir = Path(cache_dir)
         self.mode = mode
         self.log = log if log is not None else CallLog()
+        self.fast = enabled(fast)
         self.policy = policy or retry.RetryPolicy()
+        if self.fast:
+            self.policy = replace(self.policy, max_attempts=min(2, self.policy.max_attempts))
         self.limiter = limiter
         # Optional caller-owned budget check; cache hits never reach it, retries always do.
         self.before_api_attempt = before_api_attempt
@@ -228,6 +233,7 @@ class ModelClient:
 
     # ---- public calls -------------------------------------------------------------------------------
 
+    @tracked(IMAGE_MODEL, "generate")
     def generate_image(self, prompt: str, *, size: str = "1024x1024", attempt: int = 0) -> Image.Image:
         """Muse Image generation. ``attempt`` > 0 asks again for the same request (a new sample, its own cache key);
         the API takes no seed, so a new sample is the only way to draw again."""
@@ -237,6 +243,7 @@ class ModelClient:
             summary["attempt"] = attempt
         return self._image_call("images/generations", body, summary, kind="generate")
 
+    @tracked(IMAGE_MODEL, "edit")
     def edit_image(
         self, prompt: str, images: list[Image.Image], *, size: str = "1024x1024", attempt: int = 0
     ) -> Image.Image:
@@ -263,6 +270,7 @@ class ModelClient:
             summary["attempt"] = attempt
         return self._image_call("images/edits", body, summary, kind="edit")
 
+    @tracked(SAM_MODEL, "segment")
     def segment(self, image: Image.Image, text: str) -> list[SamInstance]:
         """SAM 3.1 concept segmentation: every instance of ``text`` in ``image``, as full-size masks."""
         rgb = image.convert("RGB")
@@ -312,6 +320,7 @@ class ModelClient:
         self._save_entry(key, entry)
         return self._decode_and_save(key, entry, rgb.size)
 
+    @tracked(TEXT_MODEL, "compare")
     def compare_images(
         self,
         prompt: str,
@@ -466,6 +475,7 @@ class ModelClient:
                 raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "
                                f"(attempt {attempt}; last: {last})", transient=True)
             started = policy.clock()
+            began = datetime.now().astimezone().isoformat(timespec="microseconds")
             status: int | None = None
             headers: dict[str, str] = {}
             outcome = "failed"
@@ -527,6 +537,12 @@ class ModelClient:
                 self.log.add(model, kind, key, cached=False,
                              cost_usd=attempt_cost if usage_cost_usd else None)
             seconds = policy.clock() - started
+            if self.fast:
+                if len(self.log.calls) == log_start:
+                    self.log.add(model, kind, key, cached=False, outcome=outcome, cost_usd=attempt_cost)
+                for call in self.log.calls[log_start:]:
+                    call.update(started=began, wall_seconds=round(seconds, 6), attempt=attempt,
+                                outcome=outcome, cost_usd=round(attempt_cost, 6))
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
                 or attempt == policy.max_attempts
             wait, why = (0.0, "") if final else policy.wait(attempt - 1, headers)

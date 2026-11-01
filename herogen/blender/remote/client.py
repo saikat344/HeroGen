@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from herogen.pipeline import ledger
+from herogen.pipeline.fast import enabled, tracked
 
 HERE = Path(__file__).resolve().parent
 RUNNERS = {"sam3d-objects": HERE / "objects.py", "sam3d-body": HERE / "body.py"}
@@ -181,11 +182,13 @@ def body_summary(image: Path, bbox: list, box_source: str, detector: str | None 
 class RemoteClient:
     def __init__(self, cache_dir: Path | str, mode: str = "replay", timeout: float = DEFAULT_TIMEOUT,
                  log: CallLog | None = None, body_gpu: str = DEFAULT_BODY_GPU,
-                 objects_gpu: str = DEFAULT_OBJECTS_GPU):
+                 objects_gpu: str = DEFAULT_OBJECTS_GPU, fast: bool = False):
         if mode not in ("live", "replay"):
             raise ValueError(f"mode must be 'live' or 'replay', got {mode!r}")
         self.cache_dir = Path(cache_dir)
         self.mode = mode
+        self.fast = enabled(fast)
+        self.stage, self.purpose = 3, "shape and joints"
         self.timeout = timeout
         self.log = log if log is not None else CallLog()
         self.body_gpu = body_gpu
@@ -193,6 +196,7 @@ class RemoteClient:
 
     # ---- public calls ---------------------------------------------------------------------------------
 
+    @tracked("sam-3d-objects", "gpu")
     def objects(self, image: Path, mask: Path, seed: int = 42, gpu: str | None = None) -> RemoteResult:
         """SAM 3D Objects: `mesh.glb` (textured source mesh) and `run.json`. `gpu` defaults to the client's
         `objects_gpu`."""
@@ -203,6 +207,7 @@ class RemoteClient:
                           {"HEROGEN_OBJECTS_GPU": gpu, "HEROGEN_OBJECTS_TIMEOUT": str(int(self.timeout))}, gpu,
                           required=("mesh.glb",))
 
+    @tracked("sam-3d-body", "gpu")
     def body(self, image: Path, bbox: list, box_source: str, gpu: str | None = None,
              detector: str | None = None) -> RemoteResult:
         """SAM 3D Body: `joints.json`, `body.npz` and `run.json`. `bbox` [x0, y0, x1, y1] is the person box and
@@ -276,11 +281,16 @@ class RemoteClient:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout,
                                       env={**os.environ, **env})
             except subprocess.TimeoutExpired as exc:
+                if self.fast:
+                    self.log.add(summary["runner"], key, False,
+                                 None if price is None else round((time.monotonic() - t0) * price, 4))
                 raise RemoteError(f"{runner} timed out after {self.timeout:.0f} s") from exc
             except OSError as exc:              # modal found but not runnable (permissions, broken install)
                 raise RemoteError(f"{runner}: could not start modal ({type(exc).__name__}: {exc.strerror or exc})"
                                   ) from exc
             wall = time.monotonic() - t0
+            if self.fast:
+                self.log.add(summary["runner"], key, False, None if price is None else round(wall * price, 4))
             ledger.complete(self.cache_dir, receipt, outcome="ok" if proc.returncode == 0 else "unknown",
                             cost_usd=0.0 if price is None else wall * price, seconds=wall)
             logtext = _scrub(proc.stdout[-20000:] + "\n--- stderr ---\n" + proc.stderr[-20000:])
@@ -300,5 +310,6 @@ class RemoteClient:
                  "cost_usd_estimate": cost, "cost_basis": COST_BASIS if price is not None else COST_UNKNOWN,
                  "files": sorted(f.name for f in d.iterdir() if f.name != "entry.json")}
         _write_atomic(entry_path, json.dumps(entry, indent=2))   # the entry is what makes the folder a cache hit
-        self.log.add(summary["runner"], key, False, cost)
+        if not self.fast:
+            self.log.add(summary["runner"], key, False, cost)
         return RemoteResult(d, entry, cached=False)
