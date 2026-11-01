@@ -223,7 +223,7 @@ class GuestHTTPTest(WebCase):
         self.assertEqual(sum(sql.startswith('BEGIN') for sql in statements), 1)
 
     def test_session_exposes_only_public_generation_status(self):
-        self.store.generation_update(actor='operator', enabled=True, limit_usd=123.45,
+        self.store.generation_update(actor='operator', enabled=True, spend_limits_enabled=True, limit_usd=123.45,
                                      running_estimate_usd=1.75, max_running=6)
         anonymous = Browser(self.app)
         guest = Browser(self.app)
@@ -238,7 +238,7 @@ class GuestHTTPTest(WebCase):
             self.assertEqual(browser.get('/api/admin/generation').status_code, 403)
         private = admin.get('/api/admin/generation').json()
         self.assertTrue({'spent_usd', 'limit_usd', 'running_usd', 'remaining_usd',
-                         'running_estimate_usd', 'max_running', 'active', 'enabled'} <= private.keys())
+                         'running_estimate_usd', 'max_running', 'active', 'enabled', 'spend_limits_enabled'} <= private.keys())
         self.assertEqual((private['limit_usd'], private['running_estimate_usd'], private['max_running']),
                          (123.45, 1.75, 6))
         for enabled, limit, reason, sentence in (

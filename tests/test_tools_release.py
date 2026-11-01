@@ -563,7 +563,7 @@ class Deploy(RootCase):
             self.assertEqual(denv[k], env[k])
 
     def test_optional_public_guest_and_gallery_settings_are_forwarded(self):
-        env=dict(SETTINGS,HEROGEN_SERVICE_PUBLIC_DEMO='true',HEROGEN_SERVICE_GALLERY='public-pack',HEROGEN_SERVICE_MAX_RUNNING='5',HEROGEN_SERVICE_ADMIN_EMAILS='ops@example.com',HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS='14',HEROGEN_SERVICE_UNREVIEWED='ignored')
+        env=dict(SETTINGS,HEROGEN_SERVICE_PUBLIC_DEMO='true',HEROGEN_SERVICE_GALLERY='public-pack',HEROGEN_SERVICE_MAX_RUNNING='5',HEROGEN_SERVICE_ADMIN_EMAILS='ops@example.com',HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS='14',HEROGEN_SERVICE_SPEND_LIMITS='true',HEROGEN_SERVICE_REFINE_CAP_USD='1.25',HEROGEN_SERVICE_UNREVIEWED='ignored')
         actual=R.deploy_env(env)
         for name in R.OPTIONAL: self.assertEqual(actual[name],env[name])
         self.assertNotIn('HEROGEN_SERVICE_UNREVIEWED',actual)
@@ -571,7 +571,9 @@ class Deploy(RootCase):
     def test_workflow_forwards_private_admins_and_retention_on_check_and_deploy(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
         for name, source in (("HEROGEN_SERVICE_ADMIN_EMAILS", "secrets"),
-                             ("HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS", "vars")):
+                             ("HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS", "vars"),
+                             ("HEROGEN_SERVICE_SPEND_LIMITS", "vars"),
+                             ("HEROGEN_SERVICE_REFINE_CAP_USD", "vars")):
             self.assertEqual(workflow.count(f"{name}: ${{{{ {source}.{name} }}}}"), 2)
 
     def test_entry_point_missing(self):
