@@ -631,7 +631,9 @@ class _TurnaroundRequests:
     def top(self):
         drawn = self.result(self.drawn)
         if self.top_uses:
-            self.client.log.calls.extend({**c, "cached": True} for c in self.branches[self.drawn][1].log.calls)
+            self.client.log.calls.extend(
+                {"model": c["model"], "kind": c["kind"], "key": c["key"], "cached": True}
+                for c in self.branches[self.drawn][1].log.calls if not c.get("outcome"))
         self.top_uses += 1
         return drawn
 

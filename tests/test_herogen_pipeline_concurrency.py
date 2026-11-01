@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.pipeline import stages
-from herogen.pipeline.client import ApiError, IMAGE_MODEL, ModelClient, ReplayMiss
+from herogen.pipeline.client import ApiError, IMAGE_MODEL, SAM_MODEL, ModelClient, ReplayMiss, SamInstance
 from herogen.pipeline.runfolder import RunFolder
 
 
@@ -60,6 +60,63 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
             self.assertEqual([c["key"] for c in client.log.calls],
                              ["0", "top", "1", "top", "2", "top", "3", "top"])
             self.assertEqual(client.log.cost_usd(), .05)
+
+    def test_cached_top_reuse_does_not_replay_the_first_calls_retry_history(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = ConcurrentClient(root)
+            mask = np.ones((32, 32), bool)
+
+            def figure(branch, image):
+                if image.getpixel((0, 0))[1] == 128:
+                    branch.log.add(SAM_MODEL, "segment", "top-mask", cached=False, outcome="unknown")
+                    branch.log.add(SAM_MODEL, "segment", "top-mask", cached=False)
+                return mask, "sam-3.1", 1
+
+            with patch.object(stages, "sam_figure_mask", side_effect=figure), \
+                    patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
+                    stages._TurnaroundRequests(client, Image.new("RGB", (32, 32)), 4, 2) as requests:
+                for i in range(4):
+                    requests.sheet(i)
+                    requests.top()
+            top_masks = [c for c in client.log.calls if c["key"] == "top-mask"]
+            self.assertEqual(len(top_masks), 5)  # unknown + successful first call, then three cache hits
+            self.assertEqual(sum(c.get("outcome") == "unknown" for c in top_masks), 1)
+            self.assertEqual(sum(c["cached"] for c in top_masks), 3)
+            self.assertFalse(any(c.get("outcome") for c in top_masks if c["cached"]))
+            self.assertEqual(client.log.cost_usd(), .055)
+
+    def test_identical_candidate_pixels_send_one_sam_request(self):
+        class SameImageClient(ConcurrentClient):
+            def edit_image(self, *args, **kwargs):
+                super().edit_image(*args, **kwargs)
+                return Image.new("RGB", (32, 32), "white")
+
+        with tempfile.TemporaryDirectory() as root:
+            client = SameImageClient(root)
+            client.mode = "live"
+            mask = np.ones((32, 32), bool)
+            posts = []
+
+            def post(branch, endpoint, body, *, model, kind, key, **kwargs):
+                posts.append(key)
+                threading.Event().wait(.05)  # Other workers reach the same initially absent SAM key.
+                branch.log.add(model, kind, key, cached=False)
+                return {"status": "completed", "output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": "mask"}]}]}
+
+            with patch.object(ModelClient, "_post", post), \
+                    patch("herogen.pipeline.client.decode_sam_output", return_value=[
+                        SamInstance(mask, (0, 0, 32, 32), 1.0)]), \
+                    patch.object(stages.imaging, "complete_attached_foreground", return_value=mask), \
+                    stages._TurnaroundRequests(client, Image.new("RGB", (32, 32)), 4, 4) as requests:
+                for i in range(4):
+                    requests.sheet(i)
+                requests.top()
+            self.assertEqual(len(posts), 1)
+            sam_calls = [c for c in client.log.calls if c["model"] == SAM_MODEL]
+            self.assertEqual(len(sam_calls), 5)
+            self.assertEqual(sum(c["cached"] for c in sam_calls), 4)
+            self.assertEqual(client.log.cost_usd(), .0525)
 
     def test_unused_failed_candidate_is_never_ignored(self):
         for error in (ApiError, ReplayMiss):
