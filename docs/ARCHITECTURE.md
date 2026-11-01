@@ -1501,13 +1501,15 @@ text that tries to close the slot, injected line breaks) leave the text on both 
 The user's text sits in a bounded slot of the design prompt, introduced as describing only the character and
 never how the picture is drawn, and the full-body edit never sees it; no check measures the drawing style yet.
 
-Stage 1 reads `details.user_text` from `stage-p.json` and puts the brief in a `«»` slot introduced as describing
+Stage 1 reads `details.user_text` from a passing `stage-p.json` only when the passing stage-0 record identifies
+its sketch's origin as stage p. It puts the brief in a `«»` slot introduced as describing
 only the character's colours, materials and gear, never how the picture is drawn. The same cleaning and
 300-character limit apply. This restores colour information deliberately absent from the graphite sketch.
 For these runs the cover prompt also excludes halos, glows and rings or symbols around the head, explicitly
 even when present in the sketch: an older sketch can otherwise carry its halo into the cover and turnaround.
-Without a recorded brief, stage 1 sends the original cover prompt byte for byte, preserving upload cache keys
-and replay. `stage-1.json` records `details.brief_slot_used`, `details.prompt` and `details.prompt_sha256`
+Uploads and runs without a passing prompt brief use the original cover prompt byte for byte, preserving upload
+cache keys and replay even when a failed or older stage-p record remains in the run folder. `stage-1.json`
+records `details.brief_slot_used`, `details.prompt` and `details.prompt_sha256`
 (SHA-256 of the exact UTF-8 prompt). Stage 2 uses the cover's colours and receives no brief.
 
 The stage-2 sheet prompt is frozen separately as `turnaround-v1`, preserving the original prompt bytes and

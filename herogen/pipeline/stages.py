@@ -280,6 +280,10 @@ def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
 def cover_prompt(run: RunFolder) -> tuple[str, bool]:
     """Restore the prompt sketch's colour brief; uploads retain the exact original prompt for replay."""
     record = run.read_stage("p") or {}
+    source = run.read_stage(0) or {}
+    origin = (source.get("details") or {}).get("origin") or {}
+    if record.get("ok") is not True or source.get("ok") is not True or origin.get("stage") != "p":
+        return COVER_PROMPT, False
     details = record.get("details") or {}
     if "user_text" not in details:
         return COVER_PROMPT, False
