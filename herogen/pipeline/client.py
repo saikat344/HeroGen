@@ -14,9 +14,12 @@ PNG files next to a JSON entry; SAM masks are stored decoded (one PNG per instan
 decoder. The API key is read from ``MODEL_API_KEY`` at call time, sent only in the Authorization header,
 and never stored, printed or logged.
 
-Live calls follow the retry policy and the shared per-key limiter in `herogen.pipeline.retry`. Every HTTP
-attempt is appended to ``<cache>/calls-ledger.jsonl`` (model, endpoint, request key, status, outcome, time
-taken, wait before the next attempt; never a header or the key). An attempt that may have reached the model
+Live calls follow the retry policy and the shared per-key limiter in `herogen.pipeline.retry`. Before every HTTP
+attempt, ``<cache>/calls-ledger.jsonl`` receives a durable "sent" receipt with its model, endpoint, request hash,
+unique call id, epoch deadline and full configured price. Its completion follows with status, outcome, known
+cost, time taken and retry wait; never a header or API key. A service stage also durably acknowledges these
+receipts in the job's metadata ledger before sending. Settlement counts a sent receipt without completion,
+or an unknown outcome, at full price. An attempt that may have reached the model
 without an answer coming back (it timed out or was cut off on our side) is recorded there and in the call log
 as outcome "unknown": it may be billed, so the cost estimate counts it. A Muse Spark call is priced by the
 token usage it reports, with a count it did not report at its bound (`answer_cost_usd`): so a failed answer
@@ -37,14 +40,13 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
 
-from herogen.pipeline import filelock, retry
+from herogen.pipeline import ledger, retry
 
 API_BASE = "https://api.meta.ai/v1"
 IMAGE_MODEL = "muse-image-1.0"
@@ -55,6 +57,9 @@ TEXT_MODEL = "muse-spark-1.3"
 PRICE_PER_IMAGE_USD = {IMAGE_MODEL: 0.01, SAM_MODEL: 2.50 / 1000.0}
 # Text and vision calls are priced by tokens: (input, output) USD per million tokens; reasoning counts as output.
 PRICE_PER_MTOK_USD = {TEXT_MODEL: (1.25, 4.25)}
+# Meta's documented context limit (dev.meta.ai/docs/cookbook/long-context). An unanswered call has no
+# measured input usage: settlement bounds input at the entire context window, plus the requested output cap.
+CONTEXT_TOKENS = {TEXT_MODEL: 1_048_576}
 COST_BASIS = (
     "estimate: call count x configured list price (muse-image $0.01/image, sam-3.1 $0.0025/image; "
     "muse-spark-1.3 $1.25/$4.25 per million input/output tokens)"
@@ -468,6 +473,10 @@ class ModelClient:
             error_code = None
             network_class = "network error"
             log_start = len(self.log.calls)
+            price = (usage_cost_usd(None) + CONTEXT_TOKENS[model] * PRICE_PER_MTOK_USD[model][0] / 1e6
+                     if usage_cost_usd else PRICE_PER_IMAGE_USD[model])
+            receipt = ledger.sent(self.cache_dir, model=model, endpoint=endpoint, key=key,
+                                  timeout=max(0.0, deadline - policy.clock()), price_usd=price, attempt=attempt)
             try:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
@@ -512,9 +521,11 @@ class ModelClient:
                     unknown_outcome()
                 last = _scrub(f"{type(reason).__name__}: {reason}")[:300]
             # Count an answer before the limiter, reservation settlement or ledger can fail.
+            attempt_cost = self.log.cost_usd(log_start)
             if outcome == "ok":
+                attempt_cost = usage_cost_usd(parsed.get('usage')) if usage_cost_usd else PRICE_PER_IMAGE_USD[model]
                 self.log.add(model, kind, key, cached=False,
-                             cost_usd=usage_cost_usd(parsed.get("usage")) if usage_cost_usd else None)
+                             cost_usd=attempt_cost if usage_cost_usd else None)
             seconds = policy.clock() - started
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
                 or attempt == policy.max_attempts
@@ -526,8 +537,14 @@ class ModelClient:
                             hold_s=0.0 if final or gives_up else wait)
             if self.after_api_attempt is not None:
                 self.after_api_attempt(self.log.cost_usd(log_start))
-            self._ledger({"model": model, "endpoint": endpoint, "key": key, "attempt": attempt, "status": status,
+            usage = parsed.get('usage') if isinstance(parsed, dict) else None
+            missing_usage = outcome == 'ok' and model in PRICE_PER_MTOK_USD and (
+                not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0
+                                                  for k in ('input_tokens', 'output_tokens')))
+            self._ledger({**receipt, "status": status,
                           "outcome": outcome, "seconds": round(seconds, 3), "slot_wait_s": round(slot_wait, 3),
+                          "cost_usd": attempt_cost,
+                          "unknown": missing_usage or any(c.get('outcome') == 'unknown' for c in self.log.calls[log_start:]),
                           "wait_s": None if final or gives_up else round(wait, 3), "wait_reason": why or None,
                           "error": None if outcome == "ok" else
                           (f"HTTP {status}" if status is not None else network_class)})
@@ -553,12 +570,7 @@ class ModelClient:
 
     def _ledger(self, row: dict[str, Any]) -> None:
         """Append one attempt to the cache's ledger (under an exclusive lock, so parallel runs never interleave)."""
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"time": datetime.now().astimezone().isoformat(timespec="milliseconds"), **row},
-                          sort_keys=True) + "\n"
-        with open(self.cache_dir / LEDGER, "a") as f, filelock.exclusive(f.fileno()):
-            f.write(line)
-            f.flush()
+        ledger.append(self.cache_dir, row)
 
     def _load(self, key: str) -> dict[str, Any] | None:
         path = self.cache_dir / f"{key}.json"

@@ -612,7 +612,9 @@ class TestSchema(TempDirCase):
         from herogen.service import store as module
         path=self.tmp/'v4.db'
         schema=module.SCHEMA.replace(module.ADMISSION_SCHEMA,'')
-        old_admission=module.ADMISSION_SCHEMA.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')
+        old_admission=module.ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '')
+        old_admission=';'.join(s for s in old_admission.split(';') if 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)
+        old_admission=old_admission.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')
         con=sqlite3.connect(path)
         for statement in (schema+old_admission).split(';'):
             if statement.strip(): con.execute(statement)
