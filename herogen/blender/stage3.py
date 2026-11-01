@@ -234,12 +234,23 @@ def _prefetch_body(run, vs, remote, rec, detector, *, enabled):
                 return future.result()
 
         proxy = Prefetched()
+        primary_error = None
         try:
             yield proxy
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
             # Objects can fail before joint conversion. Drain and account any paid Body result anyway.
             if not proxy.consumed:
-                _account(rec, "sam-3d-body", future.result())
+                try:
+                    _account(rec, "sam-3d-body", future.result())
+                except Exception as secondary:
+                    if primary_error is None:
+                        raise
+                    rec.note(f"sam3d-body also failed while draining ({error_text(secondary, run)})")
+                    # Preserve the original construction error and retain the second failure as its cause.
+                    raise primary_error from secondary
 
 
 def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, timeout: float = 600.0,
