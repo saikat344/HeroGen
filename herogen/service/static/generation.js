@@ -11,7 +11,7 @@ const COPY = {
   6: ['Roblox rig', 'Preparing the Roblox rig', 'Prepare the Roblox rig when this export is available.'],
   5: ['Results', 'Collecting your results', 'Prepare the results and available downloads.'],
 };
-const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled']);
+const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled', 'stopped']);
 const INTERRUPTED = new Set(['failed', 'rejected', 'canceled']);
 const STATE = { passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   canceled: 'Cancelled', skipped: 'Skipped', unavailable: 'Unavailable' };
@@ -22,8 +22,9 @@ export function generationState(job) {
   const focus = active || main.find((s) => s.key === job.stage) || main.find((s) => s.state === 'pending');
   const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
   const title = { queued: 'Waiting for a free worker', running: 'Your hero is taking shape.',
-    succeeded: 'Meet your hero.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
+    succeeded: 'Meet your hero.', stopped: 'Your version is saved.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
   const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your model is ready. See the notes below.' : 'Explore the result and the available downloads.') :
+    job.state === 'stopped' ? 'Inspect this version, then start a new attempt with Retry or Refine.' :
     job.state === 'queued' ? 'Your job is saved. It will begin when a worker is available.' :
     job.state === 'canceled' ? 'The job has stopped. Any saved images remain available to inspect.' :
     INTERRUPTED.has(job.state) ? 'Review the reported issue below. Saved outputs remain available.' :
@@ -41,8 +42,8 @@ const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
 export function stageTiming(s) {
   const parts = [];
   if (s.state === 'running' && Number.isFinite(s.elapsed_seconds)) parts.push(`${Math.floor(s.elapsed_seconds)} s elapsed`);
-  else if (Number.isFinite(s.seconds)) parts.push(`${s.seconds.toFixed(1)} s recorded`);
-  if (s.state !== 'running' && Number.isFinite(s.cost_usd)) parts.push(`$${s.cost_usd.toFixed(4)} recorded`);
+  else if (Number.isFinite(s.seconds)) parts.push(`${s.seconds.toFixed(1)} s`);
+  if (s.state !== 'running' && Number.isFinite(s.cost_usd)) parts.push(`$${s.cost_usd.toFixed(2)}`);
   if (Number.isFinite(s.typical_seconds)) {
     const seconds = Math.max(1, Math.round(s.typical_seconds));
     parts.push(`usually about ${seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${seconds} s`}`);
@@ -97,6 +98,7 @@ export function generationView($, select3D) {
   function pick(key, chosen = false, retry = false) {
     selected = key; manual = chosen; model = key === 'model';
     $('#previewWrap').hidden = !model;
+    if ($('#workbenchShading')) $('#workbenchShading').hidden = !model;
     $('#artboardImage').hidden = model || !key;
     $('#artboardEmpty').hidden = model || !!key;
     $('#modelTab').setAttribute('aria-pressed', String(model));

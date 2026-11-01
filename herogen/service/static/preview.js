@@ -15,8 +15,8 @@ function release(model) {
   });
   textures.forEach(v => v.dispose()); materials.forEach(v => v.dispose()); geometries.forEach(v => v.dispose());
 }
-export function createPreview() {
-  let state = null, request = 0, mode = 'textured', paused = false;
+export function createPreview({damping = true} = {}) {
+  let state = null, request = 0, mode = 'textured', paused = false, viewListener = null, syncing = false;
   function render() { if (state) { state.controls.update(); state.renderer.render(state.scene, state.camera); } }
   function loop() { state?.renderer.setAnimationLoop(paused ? null : render); }
   function theme() {
@@ -64,9 +64,10 @@ export function createPreview() {
       const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(3, 6, 4); scene.add(sun);
       const grid = new THREE.GridHelper(8, 16, 0x8899aa, 0xccd5de); grid.visible = false; scene.add(grid);
       const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
-      const controls = new OrbitControls(camera, canvas); controls.enableDamping = true;
+      const controls = new OrbitControls(camera, canvas); controls.enableDamping = damping;
       controls.minDistance = 0.1; controls.maxDistance = 100;
       state = {canvas, renderer, scene, camera, controls, grid, model: null};
+      controls.addEventListener?.('change', () => { if (!syncing) viewListener?.(view()); });
       const resize = () => {
         if (!state) return;
         const w = Math.max(1, canvas.clientWidth), h = Math.max(1, canvas.clientHeight);
@@ -112,10 +113,19 @@ export function createPreview() {
   function view() {
     return state ? {position: state.camera.position.toArray(), target: state.controls.target.toArray(), zoom: state.camera.zoom} : null;
   }
-  return {show, pause, resume, dispose, shading, snapshot, view};
+  function setView(value) {
+    if (!state || !value) return;
+    syncing = true;
+    state.camera.position.set(...value.position); state.controls.target.set(...value.target);
+    state.camera.zoom = value.zoom; state.camera.updateProjectionMatrix();
+    render(); syncing = false;
+  }
+  return {show, pause, resume, dispose, shading, snapshot, view, setView,
+    onView(callback) { viewListener = callback; }};
 }
 const preview = createPreview();
 export const show = (canvas, url, options) => preview.show(canvas, url, options);
 export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
 export const view = () => preview.view();
+export const shading = mode => preview.shading(mode);

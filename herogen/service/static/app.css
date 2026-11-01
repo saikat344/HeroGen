@@ -327,6 +327,7 @@ h1#entryH { font-size:clamp(43px,4.4vw,73px); letter-spacing:-.055em; line-heigh
   .journey { gap:12px; }.landing-how { grid-template-columns:1fr 1.5fr; }
 }
 @media(max-width:767px) {
+  .top #who { display:block; max-width:150px; font-size:11px; }
   .top,main,.foot { width:calc(100% - 32px); }.top { gap:10px; }.top nav { display:none; }.theme-control { margin-left:auto; }.theme-control select { font-size:12px; }.brand { font-size:27px; gap:12px; }
   .hero-layout { display:flex; flex-direction:column; gap:22px; padding-top:10px; }.hero-copy { width:100%; padding-top:24px; }
   h1#entryH { font-size:clamp(44px,9vw,68px); }.intro { font-size:16px; }
@@ -466,4 +467,53 @@ h1#entryH { font-size:clamp(43px,4.4vw,73px); letter-spacing:-.055em; line-heigh
   .daily-nums { font-size:11px; }
   .admin-window-controls { width:100%; flex-wrap:wrap; }
   .admin-window-controls select { flex:1; min-width:120px; }
+}
+
+/* Selected versions and the build's read-only provenance. */
+.selected-result { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 22px; border-bottom:1px solid var(--line); }
+.selected-result label { font-size:12px; text-transform:uppercase; letter-spacing:1.4px; white-space:nowrap; }
+.selected-result select { max-width:65%; margin:0; }
+.variation-actions { padding:18px 0 24px; border-bottom:1px solid var(--line); }
+.variation-actions .row { gap:10px; }
+.variation-actions button { flex:1; }
+.variation-actions p { margin:10px 0 0; }
+.behind-heading { font-size:20px; margin:26px 0 16px; }
+.behind-tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin-bottom:18px; }
+.behind-tabs button { flex:1; border:0; border-radius:0; background:transparent; padding:12px 4px; color:var(--muted); }
+.behind-tabs button[aria-selected=true] { color:var(--ink); border-bottom:2px solid var(--ink); }
+.recipe-facts { display:grid; grid-template-columns:auto 1fr; gap:10px 16px; margin:0 0 24px; }
+.recipe-facts dt { color:var(--muted); font-size:12px; }
+.recipe-facts dd { margin:0; overflow-wrap:anywhere; }
+#recipePanel p { overflow-wrap:anywhere; }
+#recipePanel h3 { font-size:13px; margin-bottom:5px; }
+#versionTree { overflow-x:auto; }
+.version-list { list-style:none; padding:0; margin:12px 0 20px; }
+.version-list li { margin:10px 0 10px calc(var(--depth) * 20px); border-left:1px solid var(--line); padding-left:10px; }
+.version-node { width:100%; display:flex; align-items:center; gap:10px; text-align:left; padding:9px; min-width:180px; }
+.version-node[aria-pressed=true] { border-color:var(--ink); background:var(--bg); }
+.version-node img { width:42px; height:54px; object-fit:contain; border-radius:5px; background:#fff; }
+.version-node span { min-width:0; }
+.version-node b,.version-node small { display:block; overflow-wrap:anywhere; }
+.version-node b { font-size:13px; line-height:1.4; }
+.version-node small { font-size:11px; color:var(--muted); margin-top:5px; }
+#viewTree { display:none; }
+#refineDialog { width:min(480px,calc(100vw - 32px)); }
+#refineDialog .row,#compareDialog>.row { justify-content:space-between; gap:20px; }
+#refineDialog h2,#compareDialog h2 { margin:0 0 18px; }
+#refineDialog textarea { resize:vertical; min-height:110px; }
+#refineNoteWrap { margin-top:20px; }
+#compareDialog { width:min(1120px,calc(100vw - 32px)); max-width:1120px; }
+.compare-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.compare-grid section { min-width:0; }
+.compare-grid p { min-height:48px; font-size:13px; overflow-wrap:anywhere; }
+.compare-grid canvas { display:block; width:100%; height:min(55vh,480px); background:var(--bg); border:1px solid var(--line); border-radius:12px; touch-action:none; }
+@media(max-width:767px) {
+  .selected-result { padding:12px; gap:8px; }
+  .selected-result label { font-size:10px; }
+  #viewTree { display:block; padding:6px 10px; font-size:12px; }
+  #versionTree:not(.show-tree) .version-list li { margin-left:0; border-left:0; padding-left:0; }
+  .compare-grid { gap:10px; }
+  .compare-grid canvas { height:38vh; }
+  #compareDialog { padding:18px 12px; }
+  .compare-grid select { font-size:12px; }
 }
