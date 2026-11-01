@@ -127,6 +127,27 @@ class RedoModelErrorsTest(JobCase):
 
 
 class RedoExitRecordsTest(JobCase):
+    def test_input_measurements_preserve_diagnostics_without_echoing_notes(self):
+        job = self.new_job()
+        ctx = make_context(self.s, self.storage, job)
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        spec = next(s for s in PLAN if s.key == '1')
+        note = 'private crimson coat'
+        checks = [
+            {'name': 'sketch_characters_found', 'value': 2, 'threshold': 1, 'op': '==',
+             'pass': False, 'message': note},
+            {'name': note, 'value': 2, 'threshold': 1, 'op': '==', 'pass': False},
+            {'name': 'sketch_characters_found', 'value': note, 'threshold': 1, 'op': '==', 'pass': False},
+            {'name': 'sketch_characters_found', 'value': 2, 'threshold': 1, 'op': note, 'pass': False},
+        ]
+        (ctx.run_dir / spec.record).write_text(json.dumps(
+            {'ok': False, 'status': 'input_rejected', 'error': note, 'checks': checks}))
+        outcome = CliRunner.outcome(spec, ctx, 0, 3, note, note, False)
+        self.assertEqual(outcome.state, 'rejected')
+        self.assertIn('more than one character', outcome.message)
+        self.assertIn('sketch_characters_found measured 2, needs == 1', outcome.detail)
+        self.assertNotIn(note, outcome.message + outcome.detail)
+
     def test_note_stages_require_matching_terminal_records_and_suppress_all_output(self):
         job = self.new_job()
         ctx = make_context(self.s, self.storage, job)
