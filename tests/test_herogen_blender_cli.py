@@ -172,11 +172,17 @@ class UpstreamGateTest(unittest.TestCase):
         broken.write_text("not a program")          # exists, but cannot be executed
         broken.chmod(0o644)
         old = os.environ.get("HEROGEN_MODAL")
+        deployed = os.environ.get("HEROGEN_REMOTE_DEPLOYED")
+        os.environ["HEROGEN_REMOTE_DEPLOYED"] = "0"
         os.environ["HEROGEN_MODAL"] = str(broken)
         try:
             code, err = self._main("--stages", "3", "--mesh-source", "sam3d-objects", "--no-fallback",
                                    "--remote", "live", "--remote-cache", str(Path(self.tmp.name) / "cache"))
         finally:
+            if deployed is None:
+                os.environ.pop("HEROGEN_REMOTE_DEPLOYED", None)
+            else:
+                os.environ["HEROGEN_REMOTE_DEPLOYED"] = deployed
             if old is None:
                 os.environ.pop("HEROGEN_MODAL", None)
             else:
