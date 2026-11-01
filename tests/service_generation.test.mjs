@@ -14,8 +14,8 @@ test('a side review cannot block completion or count as a main stage', () => {
   assert.equal(v.title,'Meet your hero.'); assert.equal(v.main.length,1); assert.equal(v.passed,1); assert.equal(v.reviewRunning,true);
 });
 test('a failed review remains visible without relabelling the successful job', () => {
-  const v=generationState({state:'succeeded',stages:[stage('3','passed'),stage('2h','rejected',true)]});
-  assert.equal(v.title,'Meet your hero.'); assert.match(v.subtitle,/attention/); assert.equal(v.side[0].state,'rejected');
+  const v=generationState({state:'succeeded',stages:[stage('3','passed'),stage('2h','unavailable',true)]});
+  assert.equal(v.title,'Meet your hero.'); assert.match(v.subtitle,/attention/); assert.equal(v.side[0].state,'unavailable');
 });
 test('optional unavailable export is never passed or hidden', () => {
   const v=generationState({state:'succeeded',stages:[stage('4','passed'),stage('6','unavailable'),stage('5','passed')]});

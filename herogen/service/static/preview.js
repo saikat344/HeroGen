@@ -52,5 +52,5 @@ export async function show(canvas, url) {
     const d = Math.max(size.x, size.y, size.z) * 2.2;
     state.camera.position.set(centre.x + d * 0.6, centre.y + d * 0.25, centre.z + d);
     state.controls.target.copy(centre); resolve();
-  }, undefined, (error) => { if (token === request) reject(error); else resolve(); }));
+  }, undefined, (error) => { if (token === request) { state.renderer.setAnimationLoop(null); reject(error); } else resolve(); }));
 }

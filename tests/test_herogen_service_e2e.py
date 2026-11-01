@@ -432,6 +432,59 @@ class TestServicePage(TempDirCase):
         self.assertEqual(t.eval('window.submittedJobs'),1)
         self.assertIsNone(t.eval("sessionStorage.getItem('hg-pending-job')"))
 
+    def test_failed_image_retries_and_cannot_overlay_the_model(self):
+        from starlette.responses import Response
+        from starlette.routing import Route
+        available = threading.Event()
+        reads = []
+        async def image(request):
+            reads.append(request.url.path)
+            return Response(png(400, 600), media_type='image/png') if available.is_set() else Response(status_code=503)
+        app = self.server.config.app
+        while not hasattr(app, 'routes'):
+            app = app.app
+        app.routes.insert(0, Route('/ui-test-image', image))
+        self.signin()
+        t = self.tab
+        t.eval(r"""(() => {
+            window.imageVersion=0; const original=window.fetch;
+            window.fetch=async (url,options)=>{
+                const response=await original(url,options);
+                if((url === '/api/jobs' && options?.method === 'POST') || /^\/api\/jobs\/[^/]+$/.test(String(url))) {
+                    const job=await response.json();
+                    job.images.sketch='/ui-test-image?v='+window.imageVersion;
+                    return new Response(JSON.stringify(job),{status:response.status});
+                }
+                return response;
+            };
+        })()""")
+        self.make_hero('Image recovery')
+        t.wait("!document.querySelector('#imageError').hidden")
+        available.set()
+        t.eval("document.querySelector('#images button[data-image=sketch]').click()")
+        t.wait("document.querySelector('#artboardImage').naturalWidth > 0 && document.querySelector('#imageError').hidden")
+        self.assertGreaterEqual(len(reads),2)
+        available.clear()
+        t.eval('window.imageVersion++')
+        t.wait("!document.querySelector('#imageError').hidden",timeout=15)
+        self.runner.gate.set()
+        t.wait("!document.querySelector('#modelTab').hidden",timeout=60)
+        t.eval("document.querySelector('#modelTab').click(); document.querySelector('#artboardImage').dispatchEvent(new Event('error'))")
+        self.assertTrue(t.eval("document.querySelector('#imageError').hidden"))
+        self.assertIsNone(t.eval("document.querySelector('#artboardImage').getAttribute('src')"))
+
+    def test_unavailable_quality_review_is_flagged_beside_successful_job(self):
+        self.runner.fail['2h']='reject'
+        self.runner.gate.set()
+        self.signin()
+        self.make_hero('Review warning')
+        t = self.tab
+        t.wait("document.querySelector('#state').textContent === 'succeeded'",timeout=60)
+        t.wait("/Unavailable/.test(document.querySelector('#qualityStatus').textContent)",timeout=60)
+        self.assertTrue(t.eval("document.querySelector('#qualityReview').classList.contains('review-attention')"))
+        self.assertIn('attention',t.eval("document.querySelector('#generationSubtitle').textContent"))
+        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"),'Meet your hero.')
+
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""
         self.tab.eval("""(() => {

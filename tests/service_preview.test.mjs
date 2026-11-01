@@ -40,7 +40,7 @@ test('hiding the preview pauses rendering and discards an in-flight result',asyn
 });
 test('load failures reject explicitly and a loaded model resumes without downloading again',async()=>{
   const s=await setup(),bad=s.api.show(s.canvas,'bad.glb');
-  s.loads[0].fail(new Error('offline')); await assert.rejects(bad,/offline/);
+  s.loads[0].fail(new Error('offline')); await assert.rejects(bad,/offline/); assert.equal(s.renderers[0].loop,null);
   const good=s.api.show(s.canvas,'good.glb'); s.loads[1].done({scene:s.model()}); await good;
   s.api.hide(); await s.api.show(s.canvas,'good.glb');
   assert.equal(s.loads.length,2); assert.equal(typeof s.renderers[0].loop,'function');
