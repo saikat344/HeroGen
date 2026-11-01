@@ -49,7 +49,6 @@ MIGRATIONS = {
         "ALTER TABLE jobs ADD COLUMN note TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE jobs ADD COLUMN stop_after TEXT",
         "ALTER TABLE jobs ADD COLUMN continued_after INTEGER NOT NULL DEFAULT 0"),
-
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -539,7 +538,7 @@ class Store(AdmissionStore):
             jobs = [r["id"] for r in c.execute("SELECT id FROM jobs WHERE user_id=?", (user_id,))]
             for r in c.execute("SELECT id FROM jobs WHERE user_id=? AND state='running'", (user_id,)).fetchall():
                 self._end_stages(c, r["id"], "canceled")
-            c.execute("UPDATE jobs SET deleted_at=COALESCE(deleted_at, ?), state=CASE WHEN state IN "
+            c.execute("UPDATE jobs SET note='', deleted_at=COALESCE(deleted_at, ?), state=CASE WHEN state IN "
                       "('queued','running') THEN 'canceled' ELSE state END WHERE user_id=?", (now, user_id))
             c.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, user_id))
             c.execute("UPDATE users SET email=?, deleted_at=?, status='disabled' WHERE id=?",
@@ -1045,7 +1044,7 @@ class Store(AdmissionStore):
         """Cancel the job if it is still active and mark it deleted; the caller removes its files."""
         self.job_cancel(job_id, user_id)
         with self._tx() as c:
-            c.execute("UPDATE jobs SET deleted_at=? WHERE id=? AND user_id=?", (self.clock(), job_id, user_id))
+            c.execute("UPDATE jobs SET note='', deleted_at=? WHERE id=? AND user_id=?", (self.clock(), job_id, user_id))
             self._terminal_admission(c, job_id)
             self._audit(c, user_id, "job_deleted", job_id)
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -1063,7 +1062,7 @@ class Store(AdmissionStore):
     def job_mark_purged(self, job_id: str) -> None:
         """The job's files are gone: keep the row (quota, cost and audit need it) but drop its inputs."""
         with self._tx() as c:
-            c.execute("UPDATE jobs SET bytes=-1, prompt='', name='', deleted_at=COALESCE(deleted_at, ?) WHERE id=?",
+            c.execute("UPDATE jobs SET bytes=-1, prompt='', name='', note='', deleted_at=COALESCE(deleted_at, ?) WHERE id=?",
                       (self.clock(), job_id))
             self._terminal_admission(c, job_id)
             self._audit(c, "system", "job_purged", job_id)
