@@ -176,9 +176,33 @@ class FakeRunner:
         write_record(run, rec)
 
     def _stage_3f(self, ctx: StageContext, run: Path) -> None:
-        (run / "03-refined.glb").write_bytes(box_glb())
+        versions = []
+        for n, accepted in ((1, ['front', 'right']), (2, ['front', 'right', 'back', 'left'])):
+            self.publish_version(run, versions, n, accepted)
+            if self.delay_s:
+                time.sleep(self.delay_s)
+        (run / "03-refined.glb").write_bytes((run / versions[-1]['glb']).read_bytes())
+        self.publish_progress(run, versions, done=True)
         write_record(run, {**_record("3f", "texture refine", ["03-refined.glb"]), "status": "complete",
                            "profile": ctx.profile})
+
+    def publish_version(self, run: Path, versions: list[dict], n: int, accepted: list[str]) -> None:
+        """Publish a synthetic version; browser fixtures may pause at each atomic publication."""
+        from datetime import datetime, timezone
+
+        name = f'03-refined-v{n}.glb'
+        temporary = run / f'{name}.tmp'
+        temporary.write_bytes(box_glb())
+        temporary.replace(run / name)
+        versions.append({'n': n, 'glb': name, 'accepted': accepted, 'rejected': [],
+                         'pending': [v for v in ('front', 'right', 'back', 'left') if v not in accepted],
+                         'time': datetime.now(timezone.utc).isoformat()})
+        self.publish_progress(run, versions)
+
+    def publish_progress(self, run: Path, versions: list[dict], done: bool = False) -> None:
+        temporary = run / 'stage-3f-progress.json.tmp'
+        temporary.write_text(json.dumps({'versions': versions, 'done': done}))
+        temporary.replace(run / 'stage-3f-progress.json')
 
     def _stage_6(self, ctx: StageContext, run: Path) -> None:
         out = run / "06-roblox"
