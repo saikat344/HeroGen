@@ -8,16 +8,20 @@ from __future__ import annotations
 import json
 import os
 import select
+import socket
+import struct
+import time
 import threading
 import secrets
 import sys
 import tempfile
-from multiprocessing.connection import Client, Listener
+from multiprocessing.connection import Client, Listener, answer_challenge, deliver_challenge
 from contextlib import contextmanager
 
 REQUEST_FD = "HEROGEN_REFINE_BUDGET_REQUEST_FD"
 RESPONSE_FD = "HEROGEN_REFINE_BUDGET_RESPONSE_FD"
 _CLIENT_LOCK = threading.Lock()
+_AUTH_TIMEOUT = 5
 
 
 def bridge_enabled(prefix="HEROGEN_REFINE_BUDGET"):
@@ -91,9 +95,85 @@ def budget_bridge(callback, prefix="HEROGEN_REFINE_BUDGET"):
         thread.join(timeout=5)
 
 
+class _BoundedConnection:
+    """Cancellable framed I/O for authentication as well as JSON requests and replies."""
+
+    def __init__(self, conn, done):
+        self.conn, self.done = conn, done
+        self.deadline = time.monotonic() + _AUTH_TIMEOUT
+        # AF_PIPE messages are atomic. AF_UNIX is a byte stream: poll() alone cannot bound a
+        # recv_bytes() after only part of a frame arrives, so read its framing with socket timeouts.
+        self.socket = None if sys.platform == 'win32' else socket.socket(fileno=conn.fileno())
+        if self.socket is not None:
+            self.socket.settimeout(.05)
+
+    def close(self):
+        if self.socket is not None:
+            self.socket.detach()  # the Connection retains ownership of the descriptor
+
+    def check(self):
+        if self.done.is_set() or time.monotonic() >= self.deadline:
+            raise TimeoutError('Budget bridge I/O stopped or timed out')
+
+    def _read(self, size):
+        data = bytearray()
+        while len(data) < size:
+            self.check()
+            try:
+                part = self.socket.recv(size - len(data))
+            except TimeoutError:
+                continue
+            if not part:
+                raise EOFError
+            data.extend(part)
+        return bytes(data)
+
+    def recv_bytes(self, maxlength):
+        if self.socket is not None:
+            size, = struct.unpack('!i', self._read(4))
+            if size == -1:
+                size, = struct.unpack('!Q', self._read(8))
+            if not 0 <= size <= maxlength:
+                raise OSError('Budget bridge message too large')
+            return self._read(size)
+        while True:
+            self.check()
+            if self.conn.poll(.05):
+                return self.conn.recv_bytes(maxlength)
+
+    def send_bytes(self, data):
+        if self.socket is not None:
+            pending = memoryview(struct.pack('!i', len(data)) + data)
+            while pending:
+                self.check()
+                try:
+                    sent = self.socket.send(pending)
+                except TimeoutError:
+                    continue
+                if not sent:
+                    raise EOFError
+                pending = pending[sent:]
+            return
+        # Connection.send_bytes() waits forever on an overlapped pipe write. Keep ownership
+        # of the operation so shutdown can cancel it even if an authenticated peer stops reading.
+        import _winapi
+        self.check()
+        operation, error = _winapi.WriteFile(self.conn.fileno(), data, overlapped=True)
+        try:
+            if error == _winapi.ERROR_IO_PENDING:
+                while _winapi.WaitForMultipleObjects([operation.event], False, 50) == _winapi.WAIT_TIMEOUT:
+                    self.check()
+            written, error = operation.GetOverlappedResult(True)
+            if error or written != len(data):
+                raise OSError('Budget bridge pipe write failed')
+        finally:
+            operation.cancel()
+            operation.GetOverlappedResult(True)
+
+
 @contextmanager
 def _connection_bridge(callback, prefix):
-    """Authenticated Windows named pipe; JSON only, with no inherited descriptor assumptions."""
+    """Authenticated Windows named pipe; JSON only, with bounded, cancellable peer I/O."""
     from multiprocessing import AuthenticationError
     key = secrets.token_bytes(32)
     done = threading.Event()
@@ -102,32 +182,50 @@ def _connection_bridge(callback, prefix):
         address = (r'\\.\pipe\herogen-' + secrets.token_hex(16) if sys.platform == 'win32'
                    else os.path.join(folder, 'bridge'))
         family = 'AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX'
-        with Listener(address, family=family, authkey=key) as listener:
+        # Listener's built-in authentication blocks inside accept(), before we own the connection.
+        # Accept raw handles, then authenticate with deadlines before exposing any callback.
+        with Listener(address, family=family) as listener:
             def serve():
                 while True:
                     try:
                         conn = listener.accept()
-                    except (AuthenticationError, OSError):
+                    except OSError:
+                        if done.is_set():
+                            return
                         continue
                     with conn:
                         if done.is_set():
                             return
+                        bounded = _BoundedConnection(conn, done)
                         try:
-                            if not conn.poll(120):
+                            try:
+                                deliver_challenge(bounded, key)
+                                answer_challenge(bounded, key)
+                            except (AuthenticationError, EOFError, OSError, ValueError, AssertionError):
                                 continue
-                            result = {'state': callback(**json.loads(conn.recv_bytes(1024 * 1024)))}
-                        except Exception:
-                            result = {'error': 'budget unavailable'}
-                        try:
-                            conn.send_bytes(json.dumps(result).encode())
-                        except (BrokenPipeError, OSError):
-                            pass
+                            bounded.deadline = time.monotonic() + 120
+                            try:
+                                request = json.loads(bounded.recv_bytes(1024 * 1024))
+                                bounded.check()
+                                result = {'state': callback(**request)}
+                            except Exception:
+                                result = {'error': 'budget unavailable'}
+                            bounded.deadline = time.monotonic() + 120
+                            try:
+                                bounded.send_bytes(json.dumps(result).encode())
+                            except (EOFError, OSError):
+                                pass
+                        finally:
+                            bounded.close()
+                    if done.is_set():
+                        return
             thread = threading.Thread(target=serve, daemon=True)
             thread.start()
             try:
                 yield {prefix + '_ADDRESS': json.dumps(address), prefix + '_AUTHKEY': key.hex()}
             finally:
                 done.set()
-                with Client(address, family=family, authkey=key):
+                # Wake a raw accept; never wait for authentication from a stopped or failed peer.
+                with Client(address, family=family):
                     pass
-                thread.join(timeout=5)
+                thread.join()
