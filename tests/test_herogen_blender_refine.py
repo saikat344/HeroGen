@@ -841,6 +841,21 @@ class StageTests(unittest.TestCase):
 
         self.client.segment = mock.Mock(side_effect=segment)
 
+    def test_no_cap_installs_no_budget_or_hooks_and_costs_come_from_log(self):
+        def check_setup(*args, **kwargs):
+            self.assertIsNone(self.client.before_api_attempt)
+            self.assertIsNone(self.client.after_api_attempt)
+            return self.info
+        with mock.patch.object(stage, 'Budget', side_effect=AssertionError('budget installed')), \
+                mock.patch.object(character, 'setup', side_effect=check_setup):
+            rec = stage.run_stage3f(self.run, self.client, cap_usd=None)
+        self.assertTrue(rec['ok'])
+        self.assertNotIn('budget', rec)
+        self.assertEqual(rec['cost_usd'], self.client.log.cost_usd())
+        self.assertGreater(rec['cost_usd'], 0)
+        self.assertIsNone(self.client.before_api_attempt)
+        self.assertIsNone(self.client.after_api_attempt)
+
     def test_no_head_completes_body_refinement_with_hair_protection(self):
         self.use_character_setup(hair=True)
         with mock.patch.object(refine, "hair_weight", wraps=refine.hair_weight) as hair_weight:

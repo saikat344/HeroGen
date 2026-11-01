@@ -52,7 +52,8 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
                         meta_path=data / "meta.db", outbox_path=data / "outbox.jsonl", signing_key=_dev_key(data),
                         email_provider="file", terms_version=os.environ.get("HEROGEN_SERVICE_TERMS_VERSION", "dev"),
                         allowed_hosts=("127.0.0.1", "localhost"))
-    store = Store(settings.meta_path, max_running=settings.max_running_jobs)
+    store = Store(settings.meta_path, max_running=settings.max_running_jobs,
+                  spend_limits_enabled=settings.spend_limits_enabled)
     storage = Storage(settings.data_dir)
     if runner_kind == "fake":
         runner = FakeRunner(delay_s=delay)

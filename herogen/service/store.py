@@ -30,9 +30,10 @@ from herogen.service.migrations import SCHEMA as ADMISSION_SCHEMA, LEGACY_SCHEMA
 from herogen.service.generation import GenerationStore, SCHEMA as GENERATION_SCHEMA
 from herogen.service.analytics import AnalyticsStore, SCHEMA as ANALYTICS_SCHEMA, PUBLIC as ANALYTICS_PUBLIC
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
+    11: ("ALTER TABLE generation_settings ADD COLUMN spend_limits_enabled INTEGER NOT NULL DEFAULT 0",),
     6: ("ALTER TABLE admission_work ADD COLUMN process TEXT NOT NULL DEFAULT ''",
         next(s.strip() for s in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_calls' in s),
         next(s.strip() for s in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_processes' in s)),
@@ -217,8 +218,10 @@ class Store(GenerationStore, AnalyticsStore):
 
     def __init__(self, path: Path | str, clock: Callable[[], float] = time.time,
                  persist: Callable[[sqlite3.Connection], None] | None = None,
-                 max_running: int | None = None) -> None:
+                 max_running: int | None = None, spend_limits_enabled: bool | None = None) -> None:
         self.default_max_running = max_running if max_running is not None else int(os.environ.get("HEROGEN_SERVICE_MAX_RUNNING", "5"))
+        self.default_spend_limits = (spend_limits_enabled if spend_limits_enabled is not None else
+                                     os.environ.get("HEROGEN_SERVICE_SPEND_LIMITS", "false").lower() in ("true", "1", "yes"))
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock
@@ -261,8 +264,13 @@ class Store(GenerationStore, AnalyticsStore):
                         for stmt in MIGRATIONS[v]:
                             self.db.execute(stmt)
                 if version == 0:
-                    for stmt in MIGRATIONS[10]:
-                        self.db.execute(stmt)
+                    for v in (10, 11):
+                        for stmt in MIGRATIONS[v]:
+                            self.db.execute(stmt)
+                    self.db.execute("UPDATE generation_settings SET enabled=1 WHERE id=1")
+                if version <= 11:
+                    self.db.execute("UPDATE generation_settings SET spend_limits_enabled=? WHERE id=1",
+                                    (int(self.default_spend_limits),))
                 self.db.execute('UPDATE generation_settings SET max_running=? WHERE id=1', (self.default_max_running,))
                 self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 self.db.execute("COMMIT")

@@ -885,7 +885,7 @@ class App:
     async def admin_generation_post(self, request: Request) -> Response:
         u = await self.require_admin(request)
         body = await self.json_body(request)
-        if not body or any(value is None for value in body.values()) or set(body) - {'enabled', 'limit_usd', 'running_estimate_usd', 'max_running'}:
+        if not body or any(value is None for value in body.values()) or set(body) - {'enabled', 'spend_limits_enabled', 'limit_usd', 'running_estimate_usd', 'max_running'}:
             return error(400, 'invalid_settings', 'Choose generation settings to update.')
         try:
             updated = await self.call(self.svc.store.generation_update, actor=u['id'], **body)

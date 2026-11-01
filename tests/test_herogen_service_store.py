@@ -361,6 +361,10 @@ class TestSchema(TempDirCase):
         if version >= 7:
             con.execute("INSERT INTO admission_calls(job_id,token,receipt) VALUES ('j_x','w1','{}')")
             con.execute("INSERT INTO admission_processes(token,host,pid) VALUES ('w1','fixture',12)")
+        if version >= 11:
+            for stmt in store_mod.MIGRATIONS[10]:
+                con.execute(stmt)
+            con.execute("UPDATE generation_settings SET enabled=1,limit_usd=42,running_estimate_usd=2 WHERE id=1")
         con.execute(f"PRAGMA user_version={version}")
         con.commit()
         con.close()
@@ -388,7 +392,11 @@ class TestSchema(TempDirCase):
                 if table in snapshots:
                     cols, rows = snapshots[table]
                     self.assertEqual([tuple(r) for r in st.db.execute('SELECT '+','.join(cols)+' FROM legacy_'+table)], rows)
-            self.assertFalse(st.generation_get()['enabled'])
+            self.assertFalse(st.generation_get()['spend_limits_enabled'])
+            if version == 11:
+                self.assertTrue(st.generation_get()['enabled'])
+                self.assertEqual(st.generation_get()['limit_usd'], 42)
+                self.assertEqual(st.generation_get()['running_estimate_usd'], 2)
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
             self.assertIsNone(st.job_get("j_x")["parent_job"])
             self.assertEqual(st.job_get("j_x")["note"], "")

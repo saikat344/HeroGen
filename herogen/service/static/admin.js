@@ -180,10 +180,17 @@ function bootAdmin() {
 
   function populateBudgetForm(b) {
     $(b.enabled ? '#modeAccepting' : '#modePaused').checked = true;
+    $('#spendLimitsEnabled').checked = b.spend_limits_enabled;
+    showSpendFields(b.spend_limits_enabled);
     $('#limitUsd').value = String(b.limit_usd);
     $('#runningEstimateUsd').value = String(b.running_estimate_usd);
     $('#maxRunning').value = String(b.max_running);
     state.formDirty = false;
+  }
+
+  function showSpendFields(enabled) {
+    $('#spendLimitFields').hidden = !enabled;
+    $('#spendLimitsStatus').textContent = enabled ? 'Spend limits: on' : 'Spend limits: off (no spending checks)';
   }
 
   function renderSettings(b) {
@@ -194,7 +201,8 @@ function bootAdmin() {
       kpiCard('Spent', formatUsd(b.spent_usd)),
       kpiCard('Running', formatUsd(b.running_usd), `${b.active} queued or running`),
       kpiCard('Remaining', formatUsd(b.remaining_usd)));
-    renderBudgetMeterInto($('#budgetBarWrap'), b);
+    $('#budgetBarWrap').hidden = !b.spend_limits_enabled;
+    if (b.spend_limits_enabled) renderBudgetMeterInto($('#budgetBarWrap'), b);
     if (!state.formDirty) populateBudgetForm(b);
   }
 
@@ -514,10 +522,13 @@ function bootAdmin() {
       input.addEventListener('change', () => { state.formDirty = true; });
     }
 
+    $('#spendLimitsEnabled').addEventListener('change', () => showSpendFields($('#spendLimitsEnabled').checked));
+
     $('#budgetForm').addEventListener('submit', async (ev) => {
       ev.preventDefault();
       await saveBudgetPayload({
         enabled: $('#modeAccepting').checked,
+        spend_limits_enabled: $('#spendLimitsEnabled').checked,
         limit_usd: $('#limitUsd').value.trim(),
         running_estimate_usd: $('#runningEstimateUsd').value.trim(),
         max_running: Number($('#maxRunning').value),
