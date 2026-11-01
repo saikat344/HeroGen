@@ -2219,6 +2219,9 @@ are the actuals.
 | `POST /api/jobs/<id>/cancel`, `DELETE /api/jobs/<id>` | Cancel; delete with its files |
 | `GET /api/jobs/<id>/download/glb`, `.../download/roblox` | Downloads |
 | `GET /api/workspace`, `GET /api/runs/r1/<id>`, `GET /runs/r1/<id>/<path>` | The Lab API over the user's own runs |
+| `POST /api/events` `{visitor_id, device, events}` | Batched first-party UI events (4 KiB body cap, strict allow-list) |
+| `GET /api/admin/analytics?days=N` | Aggregate first-party analytics and pipeline report (`days` 1..90, default 7; admin only) |
+| `GET /api/admin/generation-budget`, `POST /api/admin/generation-budget` | Live-generation admission status and configuration bound to the running commit and cost signature (admin only) |
 
 Errors are `{"error": {"code", "message"}}`, with the message written for the user. When the metadata store is
 restarting or cannot confirm a write, any call answers 503 with `"code": "busy"` and `Retry-After: 5`. For a new job
@@ -2269,6 +2272,7 @@ worker image installs SciPy 1.18.1 (BSD-3-Clause), required by hybrid orientatio
 | Model caches (per user: recorded model and remote-model outputs) | `retention_days` after each entry was written; at once when the account is deleted |
 | Sign-in links | Deleted a day after they expire or are used |
 | Sessions | Deleted when they expire, or a day after they are revoked |
+| First-party analytics events (`analytics_events`) | `analytics_retention_days` (default 30), then deleted by retention |
 | Audit log | `audit_retention_days` (default 365) |
 | Account | Until the user deletes it. The address is then replaced by `deleted:<user-id>` and removed everywhere else: sign-in links, the allowlist, invites bound to it (which are revoked) and any audit entry |
 
@@ -2290,6 +2294,8 @@ deploying shell). The main ones:
 | `HEROGEN_SERVICE_MAX_RUNNING`, `HEROGEN_SERVICE_MAX_ATTEMPTS` | 4, 2 | Jobs running at once; attempts per job |
 | `HEROGEN_SERVICE_HELDOUT_MAX` | 2 | Held-out view runs at once, service-wide |
 | `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
+| `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` | 30 | Retention in days for `analytics_events` |
+| `HEROGEN_SERVICE_ADMIN_EMAILS` | (empty) | Comma-separated email allowlist for `/admin` and `/api/admin/*` (empty grants nobody) |
 | `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
 | `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `best` | Profiles offered, and the default |
 | `HEROGEN_SERVICE_STAGE3_ARGS` | `--mesh-source sam3d-objects --joints sam3d-body --remote live` | Extra `herogen.blender run` options for stage 3 |
@@ -2708,3 +2714,42 @@ an unavailable check. Active or uncertain work still retains its reservation. Ac
 use the same terminal accounting. Deploys forward the optional public-guest/gallery/dispatcher settings through
 the release CLI; gallery environment build steps precede lazy Modal mounts, and host gallery paths are not
 baked into worker environments.
+
+
+### First-party analytics and admin panel
+
+Client telemetry is first-party only, with no external scripts, trackers, CDNs or cookies. `analytics.js`
+batches allow-listed UI events (`page_view`, `suggestion_click`, `starter_select`, `upload_selected`,
+`idea_typed`, `create_clicked`, `create_result`, `shade_toggle`, `picker_select`, `inspect_saved_run`,
+`viewer_drag`, `result_viewed`, `download_click` and `theme_change`) to same-origin `POST /api/events` with
+`X-CSRF-Token`, IP rate limiting and a 4 KiB body limit. Each batch carries only a tab-scoped 32-hex visitor
+identifier held in `sessionStorage`, a coarse device class (`mobile` or `desktop`), event names and short
+allow-listed enum or slug properties. Client errors are swallowed so telemetry never delays or interrupts the
+page; invalid payloads are rejected with HTTP 400 and counted in structured server logs.
+
+The service never records IP addresses, raw `User-Agent` strings, email addresses, prompt text, character
+names, file names or image bytes in `analytics_events`. When Global Privacy Control is active
+(`navigator.globalPrivacyControl` in the browser or `Sec-GPC: 1` on the request), no client events are sent or
+stored. Schema v7 adds `analytics_events` via numbered store migration, and the daily retention worker deletes
+rows older than `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` (default 30). Job outcomes, user kind (`account` vs
+`guest`), per-stage durations and costs (`p`, `0`, `1`, `2`, `3`, `3f`, `4`, `6`, `5`, plus side stage `2h`
+reported separately) and admission budget figures are computed directly from `jobs`, `job_stages`,
+`admissions`, `budget_overhead` and `users`.
+
+Admin access is controlled by `HEROGEN_SERVICE_ADMIN_EMAILS` (comma-separated, default empty). Only a
+signed-in email account (`kind = 'account'`) on that list is authorised; signed-out visitors, guest workspaces
+and non-listed accounts receive HTTP 403 on `GET /admin`, `GET /api/admin/analytics` and
+`GET`/`POST /api/admin/generation-budget`. Administrators sign in through `/admin/signin`. `/admin` serves two
+accessible tabs (`#settings` and `#analytics`) styled with the shared light/dark theme tokens and inline SVG
+bars:
+
+- **Settings (`#settings`)** displays the plain-English admission status sentence, configured bounds, local
+  expiry time, used/reserved/remaining USD, commit and cost-signature match status, and a read-only table of
+  open reservations (reconciliation remains CLI-only via `generation-reconcile`). Saving posts to
+  `POST /api/admin/generation-budget`, which binds the running service's `code_commit` and `cost_signature`
+  from server configuration, enforces provider-cap confirmation when enabling, and audit-logs the change under
+  the administrator's user id.
+- **Analytics (`#analytics`)** renders daily visitors and page views, the seven-step creation funnel, refusal
+  counts, final job states, per-stage and per-job timing/cost statistics, live-generation budget usage, gallery
+  engagement and device split over 1–90 days (`?days=N`, default 7). `python3 -m herogen.service admin
+  analytics-report [--days N]` prints the identical JSON report from the CLI.
