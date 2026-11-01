@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -40,6 +41,45 @@ class TestCutMeasurements(unittest.TestCase):
                                    {"gate": {"rest": {}} if poses is None else poses},
                                    (self.verts, self.faces),
                                    {"owner": "UpperTorso", "radius": 2.5, "outset": 0.0}, (1, 8), requested)
+
+    def test_worker_counts_preserve_trials_ties_and_unknown_joints(self):
+        zero = dict.fromkeys(self.expected, .3)
+
+        def measure(verts, faces, sk, offsets, *args):
+            if not offsets:
+                return {"gate": zero}
+            neck, waist = offsets.get("Neck", 0), offsets.get("Waist", 0)
+            # Finish later product entries first, and include both rejection paths.
+            time.sleep(.003 if neck < 0 else .001)
+            if neck < 0 and waist < 0:
+                raise cuts.UnmeasurableJoints({"Neck": "no shared rim"})
+            row = dict(zero, Neck=.1, Waist=.1)
+            if neck > 0 and waist > 0:
+                row["LeftShoulder"] = .4
+            return {"gate": row}
+
+        reference = None
+        with patch.object(cuts, "GROUPS", {"torso": ("Neck", "Waist")}), \
+                patch.object(cuts, "FRACTIONS", (-.5, 0., .5)), \
+                patch.object(cuts, "worst_by_joint", side_effect=measure):
+            for workers in range(1, 13):
+                with self.subTest(workers=workers):
+                    offsets, record = cuts.choose(self.verts, self.faces, self.sk, {"rest": {}},
+                                                  (self.verts, self.faces), {}, (1, 8), .15, workers=workers)
+                    record.pop("seconds")
+                    if reference is None:
+                        reference = offsets, record
+                    self.assertEqual((offsets, record), reference)
+                    self.assertEqual(record["chosen_fraction"], {"Neck": -.5, "Waist": 0.})
+                    trials = record["trials"]["torso"]["tried"]
+                    self.assertEqual(trials[1]["unmeasurable_joints"], {"Neck": "no shared rim"})
+                    self.assertEqual(trials[-1]["neighbours_opened"], ["LeftShoulder"])
+
+    def test_worker_count_is_bounded(self):
+        for workers in (0, 13, 1.5, True):
+            with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, "cut workers"):
+                cuts.choose(self.verts, self.faces, self.sk, {}, (self.verts, self.faces), {}, (1, 8), .15,
+                            workers=workers)
 
     def test_named_joint_with_no_section_has_no_measurable_gap(self):
         # Remove the upper arm's geometry, keeping the complete skeleton and the rest of the body.

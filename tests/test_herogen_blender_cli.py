@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
@@ -61,6 +62,22 @@ class UpstreamGateTest(unittest.TestCase):
         code, err = self._main("--stages", "4")
         self.assertEqual(code, 2)
         self.assertIn("stage-3.json", err)
+
+    def test_cut_worker_count_reaches_stage4(self):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        for args, expected in (([], 3), (["--cut-workers", "1"], 1), (["--cut-workers", "12"], 12)):
+            with self.subTest(workers=expected), contextlib.redirect_stdout(io.StringIO()), \
+                    patch("herogen.blender.stage4.run_stage4", return_value={"ok": True, "seconds": 0,
+                                                                           "checks": []}) as run:
+                code, _ = self._main("--stages", "4", *args)
+                self.assertEqual(code, 0)
+                self.assertEqual(run.call_args.kwargs["cut_workers"], expected)
+
+    def test_cut_worker_count_usage_errors(self):
+        for workers in ("0", "13", "1.5"):
+            with self.subTest(workers=workers), self.assertRaises(SystemExit) as exc:
+                self._main("--stages", "4", "--cut-workers", workers)
+            self.assertEqual(exc.exception.code, 2)
 
     def test_missing_remote_result_without_fallback_is_a_clear_error(self):
         from herogen.blender import synth

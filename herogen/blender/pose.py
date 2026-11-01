@@ -208,6 +208,7 @@ def _directions() -> np.ndarray:
 VIEW_DIRS = _directions()     # 26 directions a gap is looked for from (cube faces, edges and corners)
 VIS_RADIUS = 1.0              # studs: posed geometry within this distance of the joint can hide a gap
 VIS_MIN_GAP = 0.01            # studs: smaller exposures are not ray-tested
+REST_CACHE_BYTES = 64 * 1024 * 1024
 
 
 class _Brute:
@@ -227,6 +228,40 @@ class _Brute:
         return ray_hits(o, d, self.tri)
 
 
+def _visible(near, world: np.ndarray, batch: int = 4) -> np.ndarray:
+    """Visibility in VIEW_DIRS, stopping a point's tests once one ray escapes."""
+    seen = np.zeros(len(world), dtype=bool)
+    for start in range(0, len(VIEW_DIRS), batch):
+        todo = np.flatnonzero(~seen)
+        if not len(todo):
+            break
+        directions = VIEW_DIRS[start:start + batch]
+        o = np.repeat(world[todo], len(directions), axis=0)
+        d = np.tile(directions, (len(todo), 1))
+        blocked = near.ray_hits(o + d * 2e-3, d).reshape(len(todo), len(directions))
+        # Visibility is an OR over escaping rays; later rays cannot reverse a True result.
+        seen[todo] = ~blocked.all(axis=1)
+    return seen
+
+
+def _visible_max(near, world: np.ndarray, dist: np.ndarray, worst: float, frontier: int = 32) -> float:
+    """Exact visible maximum, first testing the points with the largest possible contribution."""
+    order = np.flatnonzero(dist > worst)
+    order = order[np.argsort(-dist[order], kind="stable")]
+    for start, stop in ((0, min(frontier, len(order))), (frontier, len(order))):
+        if start >= stop:
+            continue
+        idx = order[start:stop]
+        seen = _visible(near, world[idx])
+        if seen.any():
+            worst = max(worst, float(dist[idx][seen].max()))
+        # Unvisited points have distance <= the smallest distance in this sorted batch. Even if all
+        # are visible, none can increase this maximum. The bound uses the original, unrounded distances.
+        if worst >= dist[order[stop - 1]]:
+            break
+    return worst
+
+
 def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = True,
                joints: set | None = None) -> dict:
     """Largest gap (studs) per joint per pose, using the rim shared by each child and its parent.
@@ -242,11 +277,29 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
     """
     query = MeshIndex if fast else _Brute
     index: dict[str, object] = {}
+    rest_queries = {}
+    cache_bytes = 0
 
     def rest_index(name: str):
         if name not in index:
             index[name] = query(sections[name].verts, sections[name].faces)
         return index[name]
+
+    def rest_query(name: str, pts: np.ndarray):
+        nonlocal cache_bytes
+        # A section's geometry is fixed throughout this call. Byte keys retain signed zeroes and every
+        # last bit of the transformed rim; mathematically equal transforms are never rounded to match.
+        key = (name, pts.dtype.str, pts.shape, pts.tobytes())
+        if key in rest_queries:
+            return rest_queries[key]
+        so = rest_index(name)
+        out = ~so.inside(pts)
+        dist = so.distance(pts[out]) if out.any() else np.empty(0)
+        size = len(key[-1]) + out.nbytes + dist.nbytes
+        if cache_bytes + size <= REST_CACHE_BYTES:
+            rest_queries[key] = out, dist
+            cache_bytes += size
+        return out, dist
 
     pivots = {n: s.pivot for n, s in sections.items()}
     rims = {}
@@ -272,11 +325,9 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
             for carrier, other, mo in ((mp, child, mc), (mc, parent, mp)):
                 # rim carried by one section, tested against the other's rest-frame surface
                 pts = _apply(np.linalg.inv(mo) @ carrier, rim)
-                so = rest_index(other)
-                out = ~so.inside(pts)
+                out, dist = rest_query(other, pts)
                 if not out.any():
                     continue
-                dist = so.distance(pts[out])
                 if visible:
                     keep = dist > VIS_MIN_GAP
                     if not keep.any():
@@ -294,15 +345,10 @@ def joint_gaps(sections: dict, poses: dict, visible: bool = False, fast: bool = 
                             fs.append(f + base)
                             base += len(pv)
                         near = query(np.concatenate(vs), np.concatenate(fs))
-                    k, nd = len(world), len(VIEW_DIRS)
-                    o = np.repeat(world, nd, axis=0)
-                    d = np.tile(VIEW_DIRS, (k, 1))
-                    blocked = near.ray_hits(o + d * 2e-3, d).reshape(k, nd)
-                    seen = ~blocked.all(axis=1)
                     small = dist[~keep]
-                    cand = list(dist[keep][seen]) + list(small)
-                    if cand:
-                        worst = max(worst, float(max(cand)))
+                    if len(small):
+                        worst = max(worst, float(small.max()))
+                    worst = _visible_max(near, world, dist[keep], worst)
                 else:
                     worst = max(worst, float(dist.max()))
             row[PIVOT_JOINT[child]] = round(worst, 4)
