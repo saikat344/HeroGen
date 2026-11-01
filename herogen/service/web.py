@@ -203,7 +203,10 @@ class App:
         raw = request.cookies.get(self.session_cookie)
         if not raw or not TOKEN_RE.match(raw):
             return None
-        return await self.call(self.svc.store.session_get, self.svc.signer.hash("session", raw), self.s.session_idle_s)
+        user = await self.call(self.svc.store.session_get, self.svc.signer.hash("session", raw), self.s.session_idle_s)
+        if user is not None and user.get('kind') != 'guest' and not self.s.is_admin(user):
+            return None
+        return user
 
     async def require_user(self, request: Request) -> dict[str, Any]:
         u = await self.user(request)
