@@ -142,7 +142,7 @@ class PoseClientTest(unittest.TestCase):
         with mock.patch.object(sapiens.PoseClient, "_open", no_modal), self.assertRaises(sapiens.PoseError):
             c.keypoints(self.img, [0, 0, 64, 64])
 
-    def _open_with(self, deployed_sha, lookup_error=None):
+    def _open_with(self, deployed_sha, lookup_error=None, *, lazy=False):
         """`PoseClient._open` against a fake modal: a deployment answering ``deployed_sha`` (None: none, Modal's
         NotFoundError), or ``lookup_error`` raised by the lookup. Returns the client, the ephemeral app's
         events and what was written to stderr."""
@@ -159,12 +159,16 @@ class PoseClientTest(unittest.TestCase):
             class app_sha256:  # noqa: N801
                 @staticmethod
                 def remote():
+                    if lazy and lookup_error is not None:
+                        raise lookup_error
+                    if deployed_sha is None:
+                        raise NotFoundError("App 'herogen-sapiens-pose' not found")
                     return deployed_sha
 
         def from_name(app, cls):
-            if lookup_error is not None:
+            if not lazy and lookup_error is not None:
                 raise lookup_error
-            if deployed_sha is None:
+            if not lazy and deployed_sha is None:
                 raise NotFoundError("App 'herogen-sapiens-pose' not found")
             self.assertEqual((app, cls), ("herogen-sapiens-pose", "Pose"))
             return lambda: Deployed()
@@ -205,6 +209,47 @@ class PoseClientTest(unittest.TestCase):
     def test_other_lookup_errors_are_raised_not_swallowed(self):
         with self.assertRaises(PermissionError):
             self._open_with(None, lookup_error=PermissionError("token rejected"))
+
+    def test_lazy_missing_deployment_completes_at_zero_on_every_retry(self):
+        for _ in range(3):
+            c,_,_=self._open_with(None,lazy=True)
+            self.assertEqual(c.route,'ephemeral')
+            c.close()
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual([r['outcome'] for r in rows],['sent','failed']*3)
+        self.assertEqual(ledger.bound(rows)[:3],(0,3,0))
+
+    def test_lazy_lookup_errors_keep_full_price_and_stay_loud(self):
+        with self.assertRaises(TimeoutError):
+            self._open_with(None,lookup_error=TimeoutError('uncertain call'),lazy=True)
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual(ledger.bound(rows)[:3],(400_000,1,1))
+
+    def test_lazy_fallback_retry_charges_only_real_compute(self):
+        import contextlib
+        import io
+        import types
+        class NotFoundError(Exception):
+            pass
+        def missing():
+            raise NotFoundError('Deployment not found')
+        deployed=types.SimpleNamespace(app_sha256=types.SimpleNamespace(remote=missing))
+        modal=types.SimpleNamespace(Cls=types.SimpleNamespace(from_name=lambda *a:lambda:deployed),
+                                    exception=types.SimpleNamespace(NotFoundError=NotFoundError))
+        pose=_Pose([TimeoutError('uncertain compute'),ANSWER])
+        app=types.SimpleNamespace(APP_NAME='herogen-sapiens-pose',CLASS_NAME='Pose',
+                                  app=types.SimpleNamespace(run=contextlib.nullcontext),Pose=lambda:pose)
+        client=sapiens.PoseClient(self.cache,mode='live')
+        with mock.patch.dict(sys.modules,{'modal':modal,'herogen.pipeline.sapiens_app':app}), \
+                mock.patch.object(sapiens.time,'sleep'),contextlib.redirect_stderr(io.StringIO()):
+            try:
+                client.keypoints(self.img,[0,0,64,64])
+            finally:
+                client.close()
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual(ledger.bound(rows)[:3],(400_445,4,1))
+        self.assertEqual([r['cost_usd'] for r in rows if r['endpoint']=='modal/app_sha256'
+                          and r['outcome']=='failed'],[0,0])
 
     def test_a_fallback_is_recorded_on_every_call(self):
         c = sapiens.PoseClient(self.cache, mode="live")
