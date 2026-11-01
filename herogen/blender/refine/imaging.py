@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from herogen.pipeline.facesource import refine_affine, sample
+from herogen.pipeline.facesource import ncc, sample
 from . import character as C
 from .cameras import axes, project, px_per_unit
 
@@ -73,8 +73,27 @@ def border_touch(m):
     return np.asarray(m, bool) & frame
 
 
+def _background_colour(rgb, render_figure):
+    """Measure a uniform neutral backdrop only in the render's known exterior.
+
+    The render selects colour samples, never the edit silhouette. Coloured or nonuniform
+    exterior content cannot calibrate the background and keeps the configured grey.
+    """
+    exterior = ~ndimage.binary_dilation(render_figure, iterations=EXTERIOR_DILATE)
+    if exterior.any():
+        samples = rgb[exterior]
+        candidate = np.median(samples, axis=0)
+        uniform = (np.abs(samples - candidate) <= BG_TOL).all(-1).mean()
+        # Keep the established tolerance band when it already recognises the backdrop.
+        # Recentring it for tiny drift can erase near-grey surface instead of fixing a flood.
+        if (np.abs(candidate - C.BG) > BG_TOL).any() and np.ptp(candidate) <= BG_TOL / 2 and uniform >= 0.90:
+            return candidate
+    return C.BG
+
+
 def figure_mask(rgb, *, render_figure=None):
-    m = (np.abs(rgb - C.BG) > BG_TOL).any(-1)
+    bg = C.BG if render_figure is None else _background_colour(rgb, render_figure)
+    m = (np.abs(rgb - bg) > BG_TOL).any(-1)
     if render_figure is None:
         m = ndimage.binary_opening(m, iterations=2)
         m = ndimage.binary_closing(m, iterations=3)
@@ -247,6 +266,51 @@ def warp_grid(img, mapx, mapy):
                      cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
+def _refine_similarity(target, source, weight, initial=None):
+    """Fit uniform scale, rotation and translation, with photometric gain/bias.
+
+    A repaint of the same orthographic camera can change framing, but cannot shear or
+    scale just one axis. An unrestricted affine fit can squeeze a narrow side view
+    into background to explain changed paint colours instead of registering it.
+    """
+    # scale*cos(angle), scale*sin(angle), tx, ty
+    p = (np.array([1.0, 0, 0, 0]) if initial is None else
+         np.array([initial[0, 0], initial[1, 0], initial[0, 2], initial[1, 2]]))
+    for factor in (4, 2, 1):
+        size = target.shape[0] // factor
+        t = cv2.resize(target, (size, size), interpolation=cv2.INTER_AREA)
+        s = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
+        w = cv2.resize(weight, (size, size), interpolation=cv2.INTER_AREA) > 0.5
+        if w.sum() < 64:
+            return None
+        yy, xx = np.indices((size, size))
+        x, y, tv = xx[w] + 0.5, yy[w] + 0.5, t[w]
+        gy, gx = np.gradient(s)
+        p[2:] /= factor
+        for _ in range(30):
+            u, v = p[0] * x - p[1] * y + p[2], p[1] * x + p[0] * y + p[3]
+            iv = sample(s, u, v)
+            ix, iy = sample(gx, u, v), sample(gy, u, v)
+            var = float(iv.var())
+            gain = float(((iv - iv.mean()) * (tv - tv.mean())).mean() / var) if var > 1e-9 else 1.0
+            bias = float(tv.mean() - gain * iv.mean())
+            residual = tv - gain * iv - bias
+            jac = np.stack([gain * (ix * x + iy * y), gain * (-ix * y + iy * x),
+                            gain * ix, gain * iy, iv, np.ones_like(iv)], axis=1)
+            hessian = jac.T @ jac
+            try:
+                delta = np.linalg.solve(hessian + 1e-6 * np.eye(6) * np.trace(hessian) / 6, jac.T @ residual)
+            except np.linalg.LinAlgError:
+                return None
+            p += delta[:4]
+            if not np.isfinite(p).all() or p[0] ** 2 + p[1] ** 2 < 1e-6:
+                return None
+            if np.abs(delta[:4]).max() < 1e-4 * max(1.0, size / 64):
+                break
+        p[2:] *= factor
+    return np.array([[p[0], -p[1], p[2]], [p[1], p[0], p[3]]])
+
+
 def register(render_rgb, alpha, edit_rgb):
     """Map from render pixel edge coordinates to edit pixel edge coordinates: returns (mapx, mapy) over the
     render grid (pixel centres), the warped edit at render resolution, and measurements."""
@@ -256,18 +320,45 @@ def register(render_rgb, alpha, edit_rgb):
     wh, ww = round(h * s), round(w * s)
     pad = max(wh, ww)
 
-    def sq(img):  # top-left into a square work canvas (refine_affine works on squares)
-        out = np.full((pad, pad), float(np.median(img)), np.float64)
-        out[: img.shape[0], : img.shape[1]] = img
+    def work_image(img, *, edges=False):
+        small = cv2.resize(grey(img), (ww, wh), interpolation=cv2.INTER_AREA)
+        smooth = cv2.GaussianBlur(small, (0, 0), 1.5)
+        if edges:
+            gy, gx = np.gradient(smooth)
+            smooth = np.hypot(gx, gy)
+        out = np.zeros((pad, pad), np.float64)
+        out[:wh, :ww] = smooth
         return out
 
-    tgt = sq(cv2.GaussianBlur(cv2.resize(grey(render_rgb), (ww, wh), interpolation=cv2.INTER_AREA), (0, 0), 1.5))
-    src = sq(cv2.GaussianBlur(cv2.resize(grey(edit_rgb), (ww, wh), interpolation=cv2.INTER_AREA), (0, 0), 1.5))
-    wt = sq(cv2.resize(ndimage.binary_dilation(alpha > 0.5, iterations=12).astype(np.float64), (ww, wh)) > 0.5)
+    # Edge magnitude retains geometry when paint reverses luminance contrast.
+    tgt, src = work_image(render_rgb, edges=True), work_image(edit_rgb, edges=True)
+    # Include real exterior pixels in the fit; exclude the square canvas padding.
+    wt = np.zeros((pad, pad), np.float64)
+    wt[:wh, :ww] = 1
     M0 = np.array([[1.0, 0, 0], [0, 1.0, 0]])
-    M = refine_affine(tgt, src, wt, M0)
-    if M is None:
-        M = M0
+    # Edge matching has local optima when a repaint changes scale. Use a brightness
+    # fit as a second start, then select by edge correlation, never by a gate result.
+    brightness = _refine_similarity(work_image(render_rgb), work_image(edit_rgb), wt)
+    candidates = [M0, brightness, _refine_similarity(tgt, src, wt)]
+    if brightness is not None:
+        candidates.append(_refine_similarity(tgt, src, wt, initial=brightness))
+    wy, wx = np.indices((pad, pad), dtype=np.float64)
+    wx, wy = wx + 0.5, wy + 0.5
+
+    work_figure = cv2.resize((alpha > 0.5).astype(np.uint8), (ww, wh), interpolation=cv2.INTER_NEAREST) > 0
+    contour = work_figure & ~ndimage.binary_erosion(work_figure, border_value=1)
+    band = np.zeros((pad, pad), bool)
+    band[:wh, :ww] = ndimage.binary_dilation(contour, iterations=5)
+    # The contour band includes three blur sigmas on either side. Repaint detail
+    # inside the figure must not choose a different framing from matching outlines.
+    score_mask = band if band.sum() >= 64 else wt > 0
+
+    def edge_score(matrix):
+        warped = sample(src, matrix[0, 0] * wx + matrix[0, 1] * wy + matrix[0, 2],
+                        matrix[1, 0] * wx + matrix[1, 1] * wy + matrix[1, 2])
+        return ncc(tgt, warped, score_mask)
+
+    M = max((matrix for matrix in candidates if matrix is not None), key=edge_score)
     # work coords are a uniform scaling of render and edit coords
     sx_r, sx_e = ww / w, ww / ew
     A = np.diag([1 / sx_e, 1 / sx_e, 1.0]) @ np.vstack([M, [0, 0, 1]]) @ np.diag([sx_r, sx_r, 1.0])
