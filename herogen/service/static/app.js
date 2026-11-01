@@ -394,11 +394,13 @@ async function signedIn() {
 }
 function updateAccessSummary() {
   const guest = S.session?.user?.kind === 'guest';
-  show('#guestAccessSummary', guest);
-  if (!guest) return;
+  // Limit and recovery copy is a refusal notice: it appears only while this workspace cannot start generation.
+  const refused = guest && S.session.generation?.accepting === false;
+  show('#guestAccessSummary', refused);
+  if (!refused) return;
   const reasons = { generation_paused: 'Live generation is temporarily paused.', cost_bound_unverified: 'Live generation is paused while its cost bound is verified.',
     generation_budget_exhausted: 'The live-generation budget is currently allocated.', generation_capacity: 'All live-generation slots are occupied. Try again shortly.' };
-  $('#guestAccessText').textContent = `${reasons[S.session.generation?.reason] || 'Your private workspace is ready.'} One active generation per workspace. Existing results remain available.`;
+  $('#guestAccessText').textContent = `${reasons[S.session.generation.reason] || reasons.generation_paused} One active generation per workspace. Existing results remain available.`;
 }
 function expireAccess() {
   if (S.session) S.session.signed_in = false;

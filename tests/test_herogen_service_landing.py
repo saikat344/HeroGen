@@ -1,4 +1,5 @@
 """Landing page presentation in a real browser, with no model or GPU calls."""
+import time
 import unittest
 from tests.test_herogen_service_e2e import ServiceBrowserCase, CDP_PORT, HAVE_WEB, uvicorn
 
@@ -201,4 +202,60 @@ class TestLandingModels(ServiceBrowserCase):
         })()""")
         t.wait("document.querySelector('#headerSignIn').hidden && /expired/i.test(document.querySelector('#jobMsg').textContent)")
         self.assertEqual(t.eval('window.__unhandled'), [])
+        self.assertEqual(t.errors, [])
+
+
+@unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, 'set E2E_CDP_PORT')
+class TestGuestAccessSummary(ServiceBrowserCase):
+    """The guest access summary is a refusal notice: present only while generation is not accepting."""
+    service_settings = {'public_demo': True, 'code_commit': 'a' * 40}
+
+    def open_guest_workspace(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#headerSignIn').disabled")
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("document.querySelector('#guestDialog').open")
+        t.eval("document.querySelector('#guestGo').click()")
+        t.wait("document.querySelector('#who').textContent === 'Private guest workspace'")
+
+    def apply_refusal(self, *statements):
+        """Return the synthetic policy to accepting, then apply this scenario's refusal rows."""
+        db = self.store.db
+        db.execute('UPDATE admission_policy SET enabled=1, code_commit=?, max_active=5', (self.s.code_commit,))
+        db.execute('DELETE FROM budget_overhead')
+        db.execute("DELETE FROM admissions WHERE user_id='fixture-refusal'")
+        for sql, args in statements:
+            db.execute(sql, args)
+
+    def test_summary_appears_only_while_generation_is_refused(self):
+        t = self.tab
+        self.open_guest_workspace()
+        self.assertTrue(t.eval("document.querySelector('#guestAccessSummary').hidden"))
+        policy = self.store.db.execute('SELECT limit_micro, reserve_micro FROM admission_policy WHERE id=1').fetchone()
+        suffix = ' One active generation per workspace. Existing results remain available.'
+        refusals = [
+            ('generation_paused', 'Live generation is temporarily paused.',
+             [('UPDATE admission_policy SET enabled=0', ())]),
+            ('cost_bound_unverified', 'Live generation is paused while its cost bound is verified.',
+             [('UPDATE admission_policy SET code_commit=?', ('b' * 40,))]),
+            ('generation_budget_exhausted', 'The live-generation budget is currently allocated.',
+             [('INSERT INTO budget_overhead(id, amount_micro, evidence, updated_at) VALUES (1, ?, ?, ?)',
+               (policy['limit_micro'] - policy['reserve_micro'] + 1, 'synthetic browser fixture', time.time()))]),
+            ('generation_capacity', 'All live-generation slots are occupied. Try again shortly.',
+             [('UPDATE admission_policy SET max_active=1', ()),
+              ('INSERT INTO admissions(job_id, user_id, client_key, amount_micro, cost_signature, created_at) '
+               "VALUES ('fixture-capacity', 'fixture-refusal', 'fixture', ?, 'fixture', ?)",
+               (policy['reserve_micro'], time.time()))]),
+        ]
+        for reason, text, statements in refusals:
+            with self.subTest(reason):
+                self.apply_refusal(*statements)
+                t.goto(self.url + '/')
+                t.wait("document.querySelector('#who').textContent === 'Private guest workspace'")
+                t.wait("!document.querySelector('#guestAccessSummary').hidden")
+                self.assertEqual(t.eval("document.querySelector('#guestAccessText').textContent"), text + suffix)
+        self.apply_refusal()
+        t.eval("document.querySelector('#checkAvailability').click()")
+        t.wait("document.querySelector('#guestAccessSummary').hidden")
         self.assertEqual(t.errors, [])
