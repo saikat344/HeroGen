@@ -31,6 +31,7 @@
       preference = select.value;
       try { localStorage.setItem(key, preference); } catch { /* Keep this tab usable without storage. */ }
       apply();
+      document.dispatchEvent(new CustomEvent('hg:theme-change', {detail: preference}));
     });
     label.append(select); header.append(label);
   });

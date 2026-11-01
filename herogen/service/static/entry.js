@@ -1,3 +1,5 @@
+import { track, trackOnce } from './analytics.js';
+
 const IDEAS = {
   forest: 'A brave forest courier in an orange coat and a teal scarf, worn leather satchel, sturdy boots, warm expressive face. Full body, standing, plain background.',
   clockwork: 'A friendly clockwork gardener robot, round brass head, expressive eyes, moss-green overalls, tiny seedlings in a backpack and a watering can. Full body, standing, plain background.',
@@ -30,14 +32,17 @@ export function entryPage($, onChange) {
       $('#jobMsg').textContent = 'Choose a PNG, JPEG or WebP image.'; $('#sketch').value = ''; return;
     }
     setFile(f || null);
+    if (f) track('upload_selected');
   });
   $('#removeUpload').addEventListener('click', () => { setFile(null); $('#prompt').focus(); });
   for (const b of document.querySelectorAll('[data-idea]')) b.addEventListener('click', () => {
     setFile(null); $('#prompt').value = IDEAS[b.dataset.idea]; onChange();
     b.setAttribute('aria-pressed', 'true'); $('#prompt').focus();
+    track('suggestion_click', { id: b.dataset.idea });
   });
   $('#prompt').addEventListener('input', () => {
     for (const b of document.querySelectorAll('[data-idea]')) b.setAttribute('aria-pressed', 'false');
+    if (!$('#entry')?.hidden && $('#prompt').value.trim()) trackOnce('idea_typed', 'idea_typed');
   });
   $('#heroArtwork').addEventListener('error', () => { $('#heroArtwork').hidden = true; });
   for (const [id, name, kind] of TEMPLATES) {
@@ -50,6 +55,7 @@ export function entryPage($, onChange) {
     button.append(image, title, tag, arrow); button.hidden = true;
     image.addEventListener('load', () => { button.hidden = false; $('#starterGallery').hidden = false; });
     button.addEventListener('click', async () => {
+      track('starter_select', { id });
       const current = ++selection;
       button.disabled = true; $('#templateMsg').textContent = `Selecting ${name}…`;
       try {

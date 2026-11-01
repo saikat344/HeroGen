@@ -278,7 +278,8 @@ class TestCsrf(WebCase):
         job = self.make_job(b).json()
         for method, path in (("POST", "/api/auth/logout"), ("DELETE", "/api/account"), ("POST", "/api/jobs"),
                              ("DELETE", f"/api/jobs/{job['id']}"), ("POST", f"/api/jobs/{job['id']}/cancel"),
-                             ("POST", "/api/auth/verify"), ("POST", "/api/auth/link"), ("PUT", "/api/jobs")):
+                             ("POST", "/api/auth/verify"), ("POST", "/api/auth/link"), ("PUT", "/api/jobs"),
+                             ("POST", "/api/events"), ("POST", "/api/admin/generation-budget")):
             r = b.send(method, path, csrf=False, json={})
             self.assertEqual(r.status_code, 403, (method, path))
         self.assertIsNotNone(self.store.job_get(job["id"], self.store.users_list()[0]["id"]))
