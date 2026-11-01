@@ -582,17 +582,16 @@ class _TurnaroundRequests:
     Unused samples still count as spend, and a failure in any launched sample fails the stage.
     """
 
-    def __init__(self, client, cover, attempts, concurrency):
+    def __init__(self, client, cover, attempts, concurrency, *, prompt, size):
         self.client, self.cover = client, cover
         self.pool = ThreadPoolExecutor(max_workers=min(concurrency, attempts + 1))
         self.branches = []
         self.merged = set()
         self.mask_locks = {}
         self.mask_lock = threading.Lock()
-        step = prompt_registry.selected("turnaround").step("sheet")
 
         def sheet(branch, attempt):
-            image = branch.edit_image(step["prompt"], [cover.copy()], size=step["params"]["size"], attempt=attempt)
+            image = branch.edit_image(prompt, [cover.copy()], size=size, attempt=attempt)
             return image, self.figure(branch, image)
 
         # Queue the independent top beside the first candidate, even at width two.
@@ -668,10 +667,12 @@ def stage2_turnaround(
     st = _Stage(run, client, 2, "turnaround")
 
     def execute():
+        prompt, version = turnaround_prompt(run)
         if concurrency == 1:
-            return _stage2(st, run, client, height_units, attempts)
-        with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency) as requests:
-            return _stage2(st, run, client, height_units, attempts, requests)
+            return _stage2(st, run, client, height_units, attempts, prompt, version)
+        with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency,
+                                 prompt=prompt, size=version.step("sheet")["params"]["size"]) as requests:
+            return _stage2(st, run, client, height_units, attempts, prompt, version, requests)
 
     return _stopping_on_client_error(execute, st)
 
@@ -770,9 +771,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     return used, drawn["raw"], top_checks, details, notes
 
 
-def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int, requests=None
-            ) -> dict[str, Any]:
-    prompt, version = turnaround_prompt(run)
+def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int,
+            prompt: str, version, requests=None) -> dict[str, Any]:
     step = version.step("sheet")
     st.details = {"prompt_version": version.ref(), "prompt": prompt}
     cover = _load(run, "01-cover.png")
