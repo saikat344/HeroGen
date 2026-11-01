@@ -75,6 +75,7 @@ class FastStageTests(unittest.TestCase):
         if mode == 'render':
             for cam in args['cams']:
                 self.blender(mode, {**args, 'cams': [cam]}, log, **kw)
+                (Path(args['out']) / (cam['name'] + '.pos.exr')).write_bytes(b'position fixture')
         else:
             self.blender(mode, args, log, **kw)
 
@@ -145,6 +146,24 @@ class FastStageTests(unittest.TestCase):
             np.testing.assert_array_equal(feather, expected)
         self.assertEqual(rec['thresholds']['closeup_feather_px'], imaging.CLOSEUP_FEATHER_PX)
         self.assertEqual(rec['thresholds']['exposure_mode'], 'off')
+
+    def test_frozen_renders_support_final_feather_rebake(self):
+        from herogen.blender.refine import imaging
+        import numpy as np
+
+        self.tex.U = np.ones(1)
+        self.tex.render_view.return_value = (np.zeros((64, 64, 3)), np.zeros((64, 64), bool))
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(imaging, 'load_accepted_views', wraps=imaging.load_accepted_views) as load:
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(rec['status'], 'complete')
+        load.assert_called_once()
+        self.tex.reset.assert_called_once()
+        self.assertEqual(self.tex.apply.call_count, 12)  # six projections, then six final rebake projections
+        for key, view in rec['views'].items():
+            folder = self.run / 'blender-work' / 'texture-refine' / key
+            self.assertTrue((folder / (view['camera']['name'] + '.png')).is_file())
+            self.assertEqual((folder / (view['camera']['name'] + '.pos.exr')).read_bytes(), b'position fixture')
 
     def test_missing_head_retains_body_and_upper_back_passes(self):
         self.info['head_centre'] = None
