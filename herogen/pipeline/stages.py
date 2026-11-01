@@ -298,8 +298,17 @@ def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
                         figure: np.ndarray) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """The input checks on the main figure's body parts, each found with its own SAM 3.1 prompt (recorded in
     ``sam_prompts``)."""
-    prompts = [inputs.FOOT_TEXT]
-    feet = inputs.parts_on(client.segment(sketch, inputs.FOOT_TEXT), figure)
+    prompts = []
+    feet_counts = {}
+    feet_prompt = None
+    feet = 0
+    for text in inputs.FEET_TEXTS:
+        prompts.append(text)
+        feet = inputs.parts_on(client.segment(sketch, text), figure)
+        feet_counts[text] = feet
+        if feet:
+            feet_prompt = text
+            break
     legs = None
     if not feet:
         prompts.append(inputs.LEG_TEXT)
@@ -311,7 +320,8 @@ def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
     head = inputs.best_instance(client.segment(sketch, inputs.HEAD_TEXT), near)
     facing, facing_details = inputs.facing_check(face, head)
     checks.append(facing)
-    return checks, {"sam_prompts": prompts, "feet_on_figure": feet, "legs_on_figure": legs, **facing_details}
+    return checks, {"sam_prompts": prompts, "feet_on_figure": feet, "feet_prompt": feet_prompt,
+                    "feet_counts": feet_counts, "legs_on_figure": legs, **facing_details}
 
 
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:

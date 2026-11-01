@@ -86,6 +86,7 @@ OTHER_CHARACTER_MIN_FRAC = 0.25
 # least ON_FIGURE_MIN of their area lies on its mask (on the tuning sketches a part on the figure measures
 # 0.93-1.0 and one on another character 0.0).
 FOOT_TEXT, LEG_TEXT, FACE_TEXT, HEAD_TEXT = "foot", "leg", "face", "head"
+FEET_TEXTS = (FOOT_TEXT, "boot", "shoe")
 ON_FIGURE_MIN = 0.5
 # Facing: the SAM 3.1 `face` centroid's offset from the `head` centroid, over the head's box width (`face_offset`,
 # the held-out views' face cue), on the main figure. On the tuning sketches the two side-view sketches measure
@@ -204,9 +205,11 @@ def parts_on(instances: list[SamInstance], figure: np.ndarray) -> int:
 
 
 def feet_check(feet: int, legs: int | None) -> Check:
-    """Feet found on the main figure, at least 1. ``legs`` (on the figure, asked only when there are no feet)
+    """Feet or footwear found on the main figure, at least 1. ``legs`` (asked only when none are found)
     decides what a failure means: legs without feet are a cropped figure (reject), no legs either is a lower
     body hidden, by a long robe say (warn)."""
+    # Tuning-set facts: s008/s041 are cropped (0 feet, 2 legs); s016/s031 are robes (0 feet, 0 legs);
+    # s045 is a side view (0 feet, 0 legs). Footwear counts as feet; the leg and facing policies still hold.
     cropped = bool(legs)
     msg = ("the figure looks cropped: SAM 3.1 found its legs but no feet. HeroGen needs the whole body from the top "
            "of the head to the feet; draw or scan the full figure" if cropped else

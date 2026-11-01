@@ -75,14 +75,16 @@ Each input check is an ordinary check (name, value, threshold, op, pass, gate) p
 | `upload_real_person_photo_probability` | 1, before every other model call | Muse Spark's probability that the upload is a photograph of a real person, `< 0.5`, from the frozen question `real-person-photo-v1` (`inputs.PHOTO_JUDGE`: prompt, model, settings and strict schema, pinned by SHA-256 in `PHOTO_JUDGE_SHA256`; a changed question is refused until it gets a new name and hash). `details.input.photo` records the question's name and hash, the probability, the `image_kind` and the reason | reject |
 | `sketch_characters_found` | 1 | SAM 3.1 figure instances (the prompt that found the figure, see Mask method) at least 25% of the largest one's area, `== 1`. None is "no character found in the sketch"; two or more are several characters | reject |
 | `sketch_small_extra_figures` | 1 | the other, smaller figure instances (insets, detail drawings), `<= 0` | warn |
-| `sketch_feet_on_figure` | 1 | SAM 3.1 `foot` instances on the main figure (at least half their area on its mask), `>= 1`. With none, SAM 3.1 `leg` is asked too | reject when legs are found on the figure (it is cropped); warn when none are (a long robe hides the lower body) |
+| `sketch_feet_on_figure` | 1 | SAM 3.1 `foot`, then `boot`, then `shoe`, stopping at the first prompt with an instance on the main figure (at least half its area on the mask), `>= 1`. With none, SAM 3.1 `leg` is asked too | reject when legs are found on the figure (it is cropped); warn when none are (a long robe hides the lower body) |
 | `sketch_face_offset_in_head` | 1 | how far the face is turned: the SAM 3.1 `face` centroid's offset from the `head` centroid over the head's box width (the held-out views' face cue), on the most confident face and head mostly on the main figure, `abs <= 0.23` (`details.input.face_offset` keeps the sign, + is image right). With no head or face on the figure, or a face mostly outside the head, the value is null and the verdict `"not_measured"`, which neither warns nor stops | warn |
 
 Stage 1 asks the photo question before any other model call, so a photo of a real person is rejected before SAM 3.1
 (or anything else) sees it: no face or head prompt runs on it. Stage 1 runs its input checks on the sketch before
 it asks for the cover, so a rejected sketch costs no edit. The body-part checks are measured only on a sketch with
-exactly one character, and their prompts are listed in `details.input.sam_prompts` (`foot`, `leg` only when no foot
-is found, `face`, `head`), with the counts behind them (`feet_on_figure`, `legs_on_figure`: null when not asked).
+exactly one character, and their prompts are listed in `details.input.sam_prompts` (`foot`, then `boot` and `shoe`
+as needed, `leg` only when no feet or footwear are found, `face`, `head`). `feet_prompt` records the matching
+prompt or null, `feet_counts` the on-figure count for every tried foot/footwear prompt, `feet_on_figure` the
+matching count (zero if none matched), and `legs_on_figure` the leg count (null when not asked).
 The sketch's figure mask (`01-masks/sketch.png`, compared with the cover) is the largest instance alone, never a
 union with the smaller figures. `details.input` holds the measurements behind the checks (`figure_area_fracs`: each
 instance's area over the largest one's).
