@@ -13,14 +13,15 @@ async function setup() {
   class Light { constructor(){this.position=new Vector3();this.scale=new Vector3();this.geometry={dispose(){}};this.material={color:{set(){}},dispose(){}};} }
   class Controls { constructor(){this.target=new Vector3();this.listeners={};controls.push(this);} addEventListener(name,callback){this.listeners[name]=callback;} update(){} dispose(){} }
   class Loader { load(url,done,progress,fail){loads.push({url,done,fail});} }
-  const three={WebGLRenderer:Renderer,Scene,HemisphereLight:Light,DirectionalLight:Light,GridHelper:Light,
+  class PMREMGenerator { fromScene(){return {texture:{dispose(){}}};} dispose(){} }
+  const three={WebGLRenderer:Renderer,Scene,HemisphereLight:Light,DirectionalLight:Light,GridHelper:Light,PMREMGenerator,SRGBColorSpace:'srgb',ACESFilmicToneMapping:4,
     PerspectiveCamera:Camera,Vector3,Box3,MeshStandardMaterial:class { constructor(options){Object.assign(this,options);} dispose(){this.disposed=true;} }};
   const stub=(exports)=>new SyntheticModule(Object.keys(exports),function(){for(const [k,v] of Object.entries(exports))this.setExport(k,v);});
   const source=await readFile(new URL('../herogen/service/static/preview.js',import.meta.url),'utf8');
   globalThis.devicePixelRatio=1; globalThis.ResizeObserver=class {observe(){} disconnect(){}};
   globalThis.document={documentElement:{dataset:{theme:'light'}},addEventListener(){},removeEventListener(){}};
   const module=new SourceTextModule(source);
-  await module.link((id)=>stub(id==='three'?three:id.includes('OrbitControls')?{OrbitControls:Controls}:{GLTFLoader:Loader}));
+  await module.link((id)=>stub(id==='three'?three:id.includes('OrbitControls')?{OrbitControls:Controls}:id.includes('RoomEnvironment')?{RoomEnvironment:class {}}:{GLTFLoader:Loader}));
   await module.evaluate();
   const model=()=>({disposed:0,traverse(fn){fn({geometry:{dispose:()=>this.disposed++}});}});
   return {api:module.namespace,loads,scenes,renderers,cameras,controls,model,canvas:{clientWidth:800,clientHeight:500}};
@@ -129,8 +130,8 @@ test('studio lighting changes illumination while preserving the loaded camera an
   const s=await setup(),v=s.api.createPreview(),model=s.model();
   const load=v.show(s.canvas,'hero.glb');s.loads[0].done({scene:model});await load;
   const before=v.view(),sun=s.scenes[0].models[1];
-  v.lighting(true);assert.equal(sun.intensity,3.2);
+  v.lighting(true);assert.equal(sun.intensity,2.4);
   assert.deepEqual(v.view(),before);assert.equal(s.scenes[0].models.includes(model),true);
-  v.lighting(false);assert.equal(sun.intensity,1.6);
+  v.lighting(false);assert.equal(sun.intensity,1.2);
   v.dispose();
 });
