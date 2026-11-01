@@ -149,3 +149,55 @@ class TestLandingModels(ServiceBrowserCase):
         t.eval("window.allowSecondModel = true; document.querySelector('#retryLanding').click()")
         t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
         self.assertEqual(t.errors, [])
+
+    def test_header_navigation_recovers_across_signin_routes_and_library_errors(self):
+        self.runner.gate.set()
+        t = self.tab
+        t.call('Emulation.setDeviceMetricsOverride', width=1440, height=960, deviceScaleFactor=1, mobile=False)
+        t.call(
+            'Page.addScriptToEvaluateOnNewDocument',
+            source="window.__unhandled=[]; window.addEventListener('unhandledrejection', e => window.__unhandled.push(String(e.reason)));",
+        )
+        t.goto(self.url + '/signin')
+        t.wait("/incomplete/.test(document.querySelector('#verifyWho').textContent)")
+        t.eval('document.querySelector(\'nav a[href="/#gallery"]\').click()')
+        t.wait(
+            "location.pathname === '/' && document.querySelector('#verify').hidden "
+            "&& document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' "
+            "&& document.querySelector('#modelPicker').children.length === 2"
+        )
+        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("!document.querySelector('#detail').hidden")
+        t.eval("""(() => {
+            const orig = window.fetch;
+            window.jobsStatus = 503;
+            window.fetch = (u, o) => u === '/api/jobs' && (!o || !o.method || o.method === 'GET') && window.jobsStatus
+                ? Promise.resolve(new Response(JSON.stringify({error:{code:'busy', message:'The service is busy; please try again in a moment.'}}), {status:window.jobsStatus}))
+                : orig(u, o);
+        })()""")
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("!document.querySelector('#banner').hidden && /busy/i.test(document.querySelector('#banner').textContent)")
+        self.assertEqual(t.eval('window.__unhandled'), [])
+        self.assertEqual(t.errors, [])
+
+        t.goto(self.url + '/admin/signin')
+        t.wait("document.querySelector('#signinDialog').open")
+        t.eval("document.querySelector('#closeSignin').click()")
+        t.wait("!document.querySelector('#signinDialog').open")
+        self.assertEqual(t.eval("document.querySelector('#headerSignIn').textContent"), 'Sign in')
+        t.eval("document.querySelector('#headerSignIn').click()")
+        t.wait("document.querySelector('#signinDialog').open")
+        self.assertTrue(t.eval("document.querySelector('#heroLibrary').hidden"))
+
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#headerSignIn').hidden && !document.querySelector('#headerSignIn').disabled")
+        t.eval("""(() => {
+            const orig = window.fetch;
+            window.fetch = (u, o) => u === '/api/jobs' && (!o || !o.method || o.method === 'GET')
+                ? Promise.resolve(new Response(JSON.stringify({error:{code:'unauthorized', message:'Please sign in.'}}), {status:401}))
+                : orig(u, o);
+            document.querySelector('#headerSignIn').click();
+        })()""")
+        t.wait("document.querySelector('#headerSignIn').hidden && /expired/i.test(document.querySelector('#jobMsg').textContent)")
+        self.assertEqual(t.eval('window.__unhandled'), [])
+        self.assertEqual(t.errors, [])
