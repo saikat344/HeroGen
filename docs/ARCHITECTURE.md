@@ -607,25 +607,41 @@ Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast use
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
 Fast renders five cameras from one frozen atlas: `head+0`, `body+0`, `body+90`, `body-90`, `body+180`.
-At most five passes run concurrently. Each pass launches its three normal attempts (two for hair)
-concurrently against the frozen render and takes the lowest-index passing attempt. Higher attempts
-are cancelled before additional calls where possible; active requests drain and retain their caches.
-Each worker uses the existing registration,
-outline, face containment and hair exclusion logic, including its unchanged thresholds. Accepted results
-are projected through `Texture.apply` in the listed order, never in completion order. A second wave,
-`hair-upper+180`, sees the first wave's paint and uses the existing hair gates and weight map. A missing
-head skips the head close-up. Fast retains the normal three-sample and hair two-sample retry limits;
-it cannot be combined with close-up texture upscaling. This schedule changes repaint inputs and is a
-quality/latency tradeoff, not an output-equivalent execution of `best`.
+Each pass launches three attempts concurrently (two for hair), using the existing registration, outline,
+face containment and hair exclusion logic with unchanged thresholds. The lowest-index passing attempt
+wins after all lower indices have failed; scores never choose between passing attempts. Higher attempts
+are cancelled before further calls where possible; active requests drain and retain their caches.
+A missing head skips the head close-up. Fast cannot be combined with close-up texture upscaling.
+This schedule changes repaint inputs and is a quality/latency tradeoff, not an output-equivalent execution of `best`.
 
-Every worker has its own call log and cache directory beneath `cache/fast/<pass>/fast/attempt-<index>`. It copies matching
-root cache families on demand; after draining, complete families and call logs are published in pass
-order. Transport retry reservations share a lock, while active reservation tokens are local to each
-thread. The lock spans local budget updates and stage-record persistence before an HTTP
-attempt is authorized. An unresolved request remains reserved.
-Cap stops drain submitted work and prohibit another wave. Model errors drain workers, preserve their
-cache/log evidence, record the failure, and propagate it; no refined output is exported after an error.
-Blender renders remain serial, with all cameras of a wave batched into one process.
+Once wave 1's first attempts finish, accepted paint is re-projected from the base atlas in the listed
+pass order and exported as `03-refined-v1.glb`. Failed paint is never applied. Wave 2, `hair-upper+180`,
+renders from that first publication's atlas; later wave-1 retries cannot change its inputs. If wave 1
+accepts nothing, wave 2 renders from the base. Retries keep using their own wave's frozen render.
+Each wave publishes when its first attempts finish and later whenever another view passes, provided
+the accepted set strictly contains the preceding version's. Each version resets to the frozen base
+and re-projects saved accepted paint in fixed pass order, with hair last, retaining feather and hair
+agreement weights. Versions never accumulate previously blended atlas pixels.
+
+`03-refined-v<n>.glb` is written to a temporary file and renamed before the atomic update of
+`stage-3f-progress.json`. Its schema is `{"profile":"fast","versions":[...],"done":false,"final_n":null}`.
+Each version has `n`, `glb`, ordered `accepted`, `rejected` and `pending` pass keys, UTC ISO `time`,
+`atlas_sha256` (saved PNG bytes), `code_sha` and 1-based `wave`. Pending includes unresolved retries
+and unstarted waves; rejected includes exhausted or skipped passes. Immutable
+`stage-3f-progress-v<n>.json` snapshots retain each publication. On completion, an atomic copy of the
+last GLB becomes `03-refined.glb`, then progress sets `done:true` and `final_n` to its version number.
+With no accepted views, no version is published, `versions` stays empty, `final_n` stays null and the
+existing source-texture fallback applies. Errors leave progress unfinished and remain loud.
+
+Every attempt has its own call log and cache directory beneath `cache/fast/<pass>/attempt-<index>`.
+It copies matching root cache families on demand; after draining, complete families and call logs are
+published in pass/attempt order. Copies retain the parent's shared HTTP limiter and hooks, including
+per-model RPM limits when configured. Transport retry reservations share a lock, while active tokens
+are local to each thread. The lock spans local budget updates and stage-record persistence
+before an HTTP attempt is authorized. An unresolved request stays
+reserved. Cap stops drain submitted work and prohibit another wave. Model errors drain workers,
+preserve cache/log evidence, record the failure, and propagate it. Blender renders and exports remain
+serial, with all cameras of a wave batched into one process.
 
 ## Stage 4 texture: refined colour and view projection
 
