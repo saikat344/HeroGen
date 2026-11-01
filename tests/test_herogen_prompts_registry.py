@@ -43,6 +43,7 @@ FROZEN = {
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
     "turnaround-v1": "e91c9ed957eadec81d24a0bee2c3bbd0c94eaac97dd1afd09b36ec54d6b3f7d1",
     "turnaround-v2": "8b9bb3ebf0d533efe7a80036e266e92bfd996dc3f916cff9361d8de1166fc44b",
+    "cover-complete-figure-v1": "7833b23d14ee1cf1ad9a6286211b1c93c724ed36854bdc905421981f9a9e789f",
     "cover-redo-v1": "75a790168a42d41ec46216be0193efb3af6f60966a0a87381484d378264be570",
     "turnaround-redo-v1": "b9f6a99f4ea46a88e7e1957beebb538c9305a28ae2bb09bd4fe5a643744c6ebd",
 }
@@ -150,6 +151,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v2")
         self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
         self.assertEqual(prompts.selected("turnaround").name, "turnaround-v1")
+        self.assertEqual(prompts.selected("cover_complete_figure").name, "cover-complete-figure-v1")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v2"}):
             self.assertEqual(prompts.selected("turnaround").name, "turnaround-v2")
 

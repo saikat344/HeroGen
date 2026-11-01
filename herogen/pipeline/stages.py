@@ -436,7 +436,7 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
 
 def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.Image, prompt: str
                 ) -> dict[str, Any]:
-    """Check the full-body input once; only generated sketches allow a speculative cover edit."""
+    """Complete cropped uploads and check the cover; generated sketches keep their input gates."""
     source = run.read_stage(0) or {}
     origin = (source.get("details") or {}).get("origin") or {}
     generated = (source.get("ok") is True and origin.get("stage") == "p"
@@ -458,16 +458,51 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         st.checks.append(check)
         st.details["input"]["photo"] = details
     checks, details = inputs.fast_figure_checks(characters.result(), feet.result(), sketch.height)
+    incomplete = not generated and any(c["name"] == "sketch_feet_on_figure" and not c["pass"]
+                                       for c in checks)
+    if not generated:
+        st.details["upload_failed_checks"] = [c["name"] for c in checks[1:] if not c["pass"]]
+        # Keep upload measurements distinct from the necessary checks on the generated cover.
+        for check in checks[1:]:
+            check["name"] = "upload_" + check["name"].removeprefix("sketch_")
     st.checks += checks
-    st.necessary_checks.update(c["name"] for c in st.checks)
+    st.necessary_checks.update(c["name"] for c in st.checks if generated or c["name"] in {
+        "sketch_characters_found", "upload_real_person_photo_probability"})
     st.details["input"].update(details)
     # Read the speculative result even on rejection, so a model failure is never swallowed.
     image = cover.result() if cover is not None else None
     _finish_input_checks(st)
+    if incomplete:
+        version = prompt_registry.selected("cover_complete_figure")
+        # Retain the existing bounded appearance note, when this is a cover redo.
+        prompt = version.step("cover")["prompt"] + prompt.removeprefix(COVER_PROMPT)
+        st.details.update(prompt=prompt, prompt_version=version.ref(),
+                          prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest())
     if image is None:
         image = client.edit_image(prompt, [reference], size=f"{sketch.width}x{sketch.height}")
     st.save_image("01-cover.png", image)
-    st.notes.append("Fast lane: necessary input checks enforced; model-based cover checks skipped.")
+    if not generated:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cover_characters = pool.submit(client.segment, image, "character")
+            cover_feet = pool.submit(client.segment, image, "feet")
+        cover_checks, cover_details = inputs.fast_figure_checks(
+            cover_characters.result(), cover_feet.result(), image.height)
+        if not any(c["name"] == "sketch_feet_on_figure" for c in cover_checks):
+            cover_checks.append(inputs.input_check(
+                "sketch_feet_on_figure", 0, 1, "==", "reject",
+                "Show the whole character from head to feet; we couldn't see both feet."))
+        for check in cover_checks:
+            if check["name"] != "sketch_feet_on_figure":
+                check["name"] = "cover_" + check["name"].removeprefix("sketch_")
+        st.checks += cover_checks
+        st.necessary_checks.add("sketch_feet_on_figure")
+        st.details["cover"] = cover_details
+        _finish_input_checks(st)
+        if incomplete:
+            st.details["completed_figure"] = True
+        st.notes.append("Fast lane: necessary upload and cover full-body checks enforced.")
+    else:
+        st.notes.append("Fast lane: necessary input checks enforced; model-based cover checks skipped.")
     return st.finish()
 
 
