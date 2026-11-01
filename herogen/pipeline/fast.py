@@ -1,4 +1,5 @@
 """Explicit speed/demo mode and per-request timing for its stage records."""
+from copy import copy
 from datetime import datetime
 from functools import wraps
 import os
@@ -15,13 +16,19 @@ def informational(checks):
     return checks
 
 
-def tracked(model, kind):
+def tracked(model, kind, *, isolate=False):
     """Keep cache hits, transport attempts and failures in the caller's existing call log."""
     def decorate(fn):
         @wraps(fn)
         def call(self, *args, **kwargs):
             if not getattr(self, "fast", False):
                 return fn(self, *args, **kwargs)
+            # Each request owns its receipts, including retries. Concurrent requests share the caller's
+            # cache and policy but never annotate or settle one another's log slices.
+            caller_log = self.log
+            if isolate:
+                self = copy(self)
+                self.log = type(caller_log)()
             start = len(self.log.calls)
             began = datetime.now().astimezone().isoformat(timespec="microseconds")
             t0 = time.monotonic()
@@ -55,5 +62,7 @@ def tracked(model, kind):
                     row.setdefault("outcome", "ok")
                 if error:
                     rows[-1]["outcome"] = error
+                if isolate:
+                    caller_log.calls.extend(rows)
         return call
     return decorate

@@ -92,10 +92,44 @@ class CallReportTests(unittest.TestCase):
         result = report(run.path, stream=output)
         self.assertEqual([c["stage"] for c in result["calls"]], [1, 3])
         self.assertEqual(result["total"], {"calls": 2, "call_seconds": 2.2, "seconds": 12,
+                                          "wall_seconds": 12, "peak_concurrent_calls": 1,
                                           "cost_usd": .05, "unknown_cost_calls": 0})
         self.assertIn("RemoteError", output.getvalue())
         self.assertIn("TOTAL", output.getvalue())
         self.assertEqual(result, json.loads((run.path / "fast-report.json").read_text()))
+
+    def test_parallel_calls_show_critical_path_sum_and_peak_without_endpoint_overlap(self):
+        run = RunFolder(self.root, "parallel")
+        run.write_stage({"stage": 2, "name": "parts", "seconds": 7, "calls": [
+            {"model": "sam-3.1", "started": f"2026-11-01T01:00:0{start}+00:00",
+             "wall_seconds": seconds, "cached": False}
+            for start, seconds in ((0, 4), (1, 4), (4, 2))]})
+        output = io.StringIO()
+        data = report(run.path, stream=output)
+        stage = data["stages"][0]
+        self.assertEqual(stage["wall_seconds"], 7)
+        self.assertEqual(stage["call_seconds"], 10)
+        self.assertEqual(stage["peak_concurrent_calls"], 2)
+        self.assertEqual(data["total"]["peak_concurrent_calls"], 2)
+        self.assertIn("wall seconds  sum call seconds  peak concurrent calls", output.getvalue())
+        self.assertIn("2  3  7.00  10.000000  2", output.getvalue())
+
+    def test_sequential_retries_cache_hits_and_legacy_missing_timings(self):
+        run = RunFolder(self.root, "sequential")
+        run.write_stage({"stage": 1, "name": "cover", "seconds": 4, "calls": [
+            {"model": "sam-3.1", "started": "2026-11-01T01:00:00+00:00", "wall_seconds": 1,
+             "outcome": "failed", "cost_usd": 0},
+            {"model": "sam-3.1", "started": "2026-11-01T01:00:02+00:00", "wall_seconds": 1},
+            {"model": "sam-3.1", "started": "2026-11-01T01:00:03+00:00", "wall_seconds": .1,
+             "cached": True}]})
+        run.write_stage({"stage": 0, "name": "legacy", "calls": [
+            {"model": "sam-3.1"},
+            {"model": "sam-3.1", "started": "unavailable", "wall_seconds": 0}]})
+        data = report(run.path, stream=io.StringIO())
+        by_stage = {s["stage"]: s for s in data["stages"]}
+        self.assertEqual(by_stage[1]["peak_concurrent_calls"], 1)
+        self.assertEqual(by_stage[0]["peak_concurrent_calls"], 0)
+        self.assertEqual(data["total"]["peak_concurrent_calls"], 1)
 
     def test_report_labels_unknown_gpu_prices(self):
         run = RunFolder(self.root, "unknown")
