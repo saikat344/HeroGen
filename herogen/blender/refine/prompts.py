@@ -24,7 +24,38 @@ RF3H = (
     "shadowless lighting: do not add shadows, highlights or shading."
 )
 
-PROMPTS = {"RF2R": RF2R, "RF3H": RF3H}
+RF4U = (
+    "Repaint the first image, a close-up render of a 3D character, with fine surface detail. Keep the exact "
+    "outline, geometry, pose, viewpoint, framing and colours of the first image: do not zoom, crop, recentre, "
+    "rotate, add objects or change the shape. The body continues outside the frame; do not complete it. "
+    "The second image is a matching crop of the character's turnaround artwork. Reproduce its specific "
+    "buckle and medallion designs, rivet rows, stitching, chainmail rings, scratches, rust, grime and edge "
+    "wear wherever those materials and details occur on the first image. Keep their distinctive colours "
+    "and material contrast. The third image is the full character cover for design context only, never "
+    "for framing or pose. Skin stays skin and hair stays hair; never add a face where none is visible. "
+    "Use flat, even lighting with no cast shadows and no directional lighting."
+)
+
+RF5U = (
+    "Repaint the first image, a close-up render of a 3D character, with fine surface detail. The first image "
+    "is authoritative for the exact geometry, outline, pose, viewpoint, framing, material regions and "
+    "colours. Keep every surface and object exactly where it is; do not zoom, crop, recentre, rotate, add "
+    "objects or change shapes. A surface cut by the frame continues outside it: never add a hem, border, "
+    "panel edge or material transition at a crop edge. Preserve material identity and garment construction: "
+    "cloth stays unbroken cloth with the same folds; existing metal, leather, skin and hair keep their "
+    "existing regions. Never paint armor plates, buckles, belts, chainmail, openings or patches onto plain "
+    "fabric. The second image is a matching crop of the turnaround artwork. Transfer only its specific "
+    "details onto the corresponding materials already present in the first image. On existing armor and "
+    "leather, reproduce the matching buckle and medallion designs, rivet rows, scratches, rust, grime and "
+    "edge wear. On fabric, add fine weave and reproduce only the embroidery and stitching actually shown in "
+    "the reference, in their existing positions; do not invent decorative rows, tears, new seams or borders. "
+    "Do not copy the second image's object layout, proportions or folds over the first image. The third image "
+    "is the full cover for character identity only; never copy objects, materials, pose or framing from it "
+    "into this close-up. Never add a face where none is visible. Keep the same background. Use flat, even "
+    "illumination with no cast shadows or directional lighting."
+)
+
+PROMPTS = {"RF2R": RF2R, "RF3H": RF3H, "RF4U": RF4U, "RF5U": RF5U}
 
 VIEWS = {
     0: "seen from the front",

@@ -68,15 +68,19 @@ class Budget:
             raise BudgetStop(f"API cap: projected ${projected:.4f} exceeds ${self.cap:.4f}")
 
 
-def cost_estimate(maximum=False):
+def cost_estimate(maximum=False, upscale_texture=False):
     """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
     normal, hair = (3, 2) if maximum else (1, 1)
     images = len(REFINE_ORDER) * normal + len(HAIR_ORDER) * hair
     segments = 2 + len(REFINE_ORDER) * (1 + normal + 2) + len(HAIR_ORDER) * (1 + hair + 3)
+    if upscale_texture:
+        images += 16 * normal
+        segments += 16 * (3 + normal)
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
 
 
-def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None):
+def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
+          closeup_reference=None, closeup_recipe="RF5U"):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -95,22 +99,33 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     _, _, depth = project(cam, positions)
     figure = alpha > 0.5
     parts = None
-    recipe = "RF3H" if hair else "RF2R"
+    recipe = closeup_recipe if closeup_reference is not None else "RF3H" if hair else "RF2R"
     record.update(prompt=recipe, camera=cam)
+    if closeup_reference is not None:
+        measurable, source_checks = I.closeup_outline(figure, I.closeup_figure_mask(render_rgb, figure), cam["zoom"])
+        record["source_outline_checks"] = source_checks
+        if not measurable:
+            record.update(accepted=False, reason="render outline not measurable")
+            return current
     for attempt in range(I.HAIR_ATTEMPTS if hair else I.ATTEMPTS):
         trial = {"try": attempt + 1, "accepted": False, "reason": "incomplete"}
         record["attempts"].append(trial)
         record["tries"] = attempt + 1
-        edit = client.edit_image(prompt(recipe, cam["angle"]), [inp, cover],
+        references = [inp, cover] if closeup_reference is None else [inp, closeup_reference, cover]
+        edit = client.edit_image(prompt(recipe, cam["angle"]), references,
                                  size=f"{cam['res'][0]}x{cam['res'][1]}", attempt=attempt)
         edit = edit.convert("RGB")
         edit.save(folder / f"edit-{attempt}.png")
         mapx, mapy, warped, reg = I.register(render_rgb, alpha, np.asarray(edit, dtype=np.float32) / 255)
-        fig_e = I.figure_mask(warped, render_figure=figure)
+        fig_e = (I.closeup_figure_mask(warped, figure) if closeup_reference is not None
+                 else I.figure_mask(warped, render_figure=figure))
         overlap = float((figure & fig_e).sum() / max(1, (figure | fig_e).sum()))
         med, p90 = (v * 1024 / max(alpha.shape) for v in I.chamfer(figure, fig_e))
         measures = {"iou": overlap, "median_px": med, "p90_px": p90}
-        if hair:
+        if closeup_reference is not None:
+            passed, measures = I.closeup_outline(figure, fig_e, cam["zoom"])
+            reason = "outline moved"
+        elif hair:
             agreement, _, _ = I.interior_agreement(render_rgb, warped, figure, fig_e)
             measures["agreement"] = agreement
             passed = (overlap >= I.HAIR_GATE["iou_min"] and agreement >= I.HAIR_GATE["agree_min"]
@@ -138,6 +153,8 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             weight = (~ndimage.binary_dilation(figure ^ fig_e, iterations=4)).astype(np.float32)
             weight *= I.hair_allowed(client, inp, edit, mapx, mapy, figure.shape, hair_only=False)
         feather = I.feather_map(alpha, depth, valid, px_per_unit(cam), tex.height)
+        if closeup_reference is not None:
+            feather *= I.frame_feather(alpha.shape, cam["frame_border_px"])
         record["texels"] = tex.apply(cam, refined, feather, depth, valid, weight, I.HAIR_BONUS if hair else 1.0)
         for name, arr in (("refined", refined), ("weight", weight)):
             Image.fromarray((np.clip(arr, 0, 1) * 255).round().astype(np.uint8)).save(folder / f"{name}.png")
@@ -148,7 +165,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                budget_store=None):
+                budget_store=None, upscale_texture=False):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -173,8 +190,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     budget = Budget(client, cap_usd, prior, state=old_budget, store=budget_store)
     prior = budget.state["spent_usd_total"]
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
-                    estimate_usd=cost_estimate(), estimate_max_samples_usd=cost_estimate(True),
-                    recipes=["RF2R", "RF3H"], texture_size=4096, final_model="03-source.glb",
+                    estimate_usd=cost_estimate(upscale_texture=upscale_texture),
+                    estimate_max_samples_usd=cost_estimate(True, upscale_texture),
+                    recipes=["RF2R", "RF3H"] + (["RF5U"] if upscale_texture else []),
+                    upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
@@ -223,6 +242,15 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         cover = Image.open(run / "01-cover.png").convert("RGB")
         # All preparation is rebuilt from this invocation's source, never an earlier run's geometry or UVs.
         info = C.setup(source, work, client, timeout=timeout)
+        closeup_cams = []
+        if upscale_texture:
+            from . import closeups
+            joint_path = run / "03-joints.json"
+            joints = json.loads(joint_path.read_text()) if joint_path.exists() else None
+            meta = json.loads((run / "views/meta.json").read_text())
+            closeup_cams = closeups.cameras_for(info, joints, meta)
+            for view in {closeups.nearest_view(cam["angle"]) for cam in closeup_cams}:
+                closeups.artwork_camera(run, info, view)
         head_found = info["head_centre"] is not None
         head_note = "head on the front render" if head_found else "no head on the front render; head views skipped"
         rec.add(check("head_found", head_found, gate=False, note=head_note))
@@ -256,6 +284,30 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 rec.note(str(exc))
                 stopped = True
             save(ok=False, status="running")
+        if upscale_texture:
+            # Close-ups render and gate against the refined atlas after all twenty original views.
+            current = tex.save(work / "texture.png")
+            for cam in closeup_cams:
+                key = cam["name"]
+                current_record = {"accepted": False, "reason": "not attempted: API cap" if stopped else "incomplete",
+                                  "tries": 0, "attempts": [], "camera": cam}
+                rec.data["views"][key] = current_record
+                if stopped:
+                    continue
+                folder = work / key
+                folder.mkdir(parents=True, exist_ok=True)
+                crop, references = closeups.reference(run, cam, info, folder)
+                current_record["references"] = references
+                save(ok=False, status="running")
+                try:
+                    current = _view(client, prep, current, tex, cam, False, folder, current_record,
+                                    timeout, cover, face_exclusion=head_found, closeup_reference=crop)
+                except BudgetStop as exc:
+                    current_record.update(accepted=False, reason=str(exc))
+                    rec.data["stop_reason"] = str(exc)
+                    rec.note(str(exc))
+                    stopped = True
+                save(ok=False, status="running")
         accepted = sum(v["accepted"] for v in rec.data["views"].values())
         rec.add(check("accepted_views", accepted, 1, gate=False))
         if accepted:

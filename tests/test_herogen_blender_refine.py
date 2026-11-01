@@ -226,6 +226,8 @@ class RegistrationTests(unittest.TestCase):
 
         self.assertEqual({k: hashlib.sha256(v.encode()).hexdigest() for k, v in prompts.PROMPTS.items()}, {
             "RF2R": "794b08622f4ff650261513c39aee5f8ac9b92e6c9bfaf65a1334c96b86d4b224",
+            "RF4U": "8bdcf59595af8968867cbd4c096d29d9dced84a96382a21fa3d4f025e088265e",
+            "RF5U": "950c00c50c62bc9d35035a303de4c14622323b2fac5204ff029d87b0a2034791",
             "RF3H": "f4f45c11280cac98d8234ee729650cffe1bcc73c8f6fc844df9b407248936f2f",
         })
         info = {"height": 2, "body_centre": [0, 0, 1], "hi": [1, 1, 2],
@@ -788,6 +790,107 @@ class StageTests(unittest.TestCase):
                     body_cam=cams["body+0"])
         self.assertFalse(back_rec.get("accepted", False))
         self.assertEqual(back_rec["reason"], "new face outside the render face")
+
+    def closeup_artwork(self):
+        self.info["lo"] = [-1, -1, 0]
+        (self.run / "views").mkdir()
+        (self.run / "masks").mkdir()
+        (self.run / "views/meta.json").write_text(json.dumps({"height_units": 5.5, "pixels_per_unit": 10}))
+        for v in ("front", "back"):
+            Image.new("RGB", (64, 64), "red").save(self.run / f"views/{v}.png")
+            m = np.zeros((64, 64), np.uint8)
+            m[5:60, 10:54] = 255
+            Image.fromarray(m).save(self.run / f"masks/{v}.png")
+
+    def test_closeups_follow_twenty_views_with_crop_and_cover(self):
+        from herogen.blender.refine import closeups
+        self.closeup_artwork()
+        with mock.patch.object(closeups, "RES", (64, 64)), \
+                mock.patch.object(closeups, "BORDER_PX", 4):
+            rec = stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=5)
+        self.assertEqual(len(rec["views"]), 36)
+        self.assertEqual(len(self.client.inputs), 36)
+        self.assertTrue(all(len(images) == 2 for _, images, _ in self.client.inputs[:20]))
+        for text, images, _ in self.client.inputs[20:]:
+            self.assertEqual(text, prompts.RF5U)
+            self.assertEqual(len(images), 3)
+            self.assertEqual(images[1].getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(images[2].getpixel((0, 0)), (0, 0, 255))
+        for name, view in list(rec["views"].items())[20:]:
+            self.assertTrue(view["accepted"])
+            self.assertEqual(view["prompt"], "RF5U")
+            self.assertIn("crop_box_px", view["references"])
+            self.assertEqual(view["camera"]["zoom"], 3)
+        self.assertTrue(rec["upscale_texture"])
+        # The frame feather must reach the projection, not just the diagnostic image.
+        for call in self.tex.apply.call_args_list[20:]:
+            feather = call.args[2]
+            self.assertEqual(feather[0].max(), 0)
+            self.assertEqual(feather[:, -1].max(), 0)
+        self.assertIn("texture.png", self.renders[20])
+
+    def test_cap_during_closeups_keeps_completed_views_and_records_pending(self):
+        from herogen.blender.refine import closeups
+        self.closeup_artwork()
+        with mock.patch.object(closeups, "RES", (64, 64)), \
+                mock.patch.object(closeups, "BORDER_PX", 4):
+            rec = stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=.445)
+        self.assertEqual(rec["status"], "cap_reached")
+        self.assertTrue(rec["views"]["close-chest+0"]["accepted"])
+        self.assertFalse(rec["views"]["close-chest+45"]["accepted"])
+        self.assertEqual(rec["views"]["close-waist+0"]["tries"], 0)
+        self.assertEqual(rec["outputs"], ["03-refined.glb"])
+        self.assertLessEqual(rec["cost_usd"], .445)
+
+    def test_unmeasurable_source_outline_skips_paid_closeup_requests(self):
+        cam = cameras.camera("close-test", [0, 0, 1], 0, 1, (64, 64))
+        cam.update(zoom=3, frame_border_px=4)
+        record = {"accepted": False, "tries": 0, "attempts": []}
+        current = self.run / "current.png"
+
+        def render(mode, args, *unused, **kwargs):
+            folder = Path(args["out"])
+            folder.mkdir(parents=True, exist_ok=True)
+            # No contrast with the background: outline measurements cannot be verified.
+            Image.new("RGBA", (64, 64), (115, 115, 115, 255)).save(folder / "close-test.png")
+
+        with mock.patch("herogen.blender.refine.backend.blender", side_effect=render):
+            result = stage._view(self.client, self.run / "prep", current, self.tex, cam, False,
+                                 self.run / "close-test", record, 30, Image.new("RGB", (64, 64)),
+                                 closeup_reference=Image.new("RGB", (64, 64)))
+        self.assertEqual(result, current)
+        self.assertEqual(self.client.inputs, [])
+        self.assertEqual(record["tries"], 0)
+        self.assertEqual(record["reason"], "render outline not measurable")
+        self.assertIn("source_outline_checks", record)
+        self.tex.apply.assert_not_called()
+
+    def test_missing_closeup_calibration_fails_before_repaint_calls(self):
+        with self.assertRaises(FileNotFoundError):
+            stage.run_stage3f(self.run, self.client, upscale_texture=True)
+        self.assertEqual(self.client.inputs, [])
+        self.assert_error_record()
+
+    def test_closeup_model_failure_is_recorded_and_propagates(self):
+        from herogen.blender.refine import closeups
+        self.closeup_artwork()
+        original = self.client.edit_image
+
+        def edit(text, images, **kwargs):
+            if text == prompts.RF5U:
+                raise ApiError("model failed")
+            return original(text, images, **kwargs)
+
+        self.client.edit_image = edit
+        with mock.patch.object(closeups, "RES", (64, 64)), \
+                mock.patch.object(closeups, "BORDER_PX", 4):
+            with self.assertRaises(ApiError):
+                stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=5)
+        rec = json.loads((self.run / "stage-3f.json").read_text())
+        self.assertEqual(rec["status"], "error")
+        self.assertEqual(rec["views"]["close-chest+0"]["reason"], "ApiError")
+        self.assertEqual(rec["views"]["close-chest+0"]["tries"], 1)
+        self.assert_error_record()
 
     def test_no_source_is_skipped(self):
         (self.run / "03-source.glb").unlink()

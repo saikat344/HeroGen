@@ -2428,6 +2428,42 @@ ramp against the best quality already written. Outline and depth-jump feathers s
 quality bonus to replace softer earlier passes. Every later camera renders the updated texture. Texels no
 accepted camera sees retain SAM's colour. No geometry generation or geometry replacement occurs in 3f.
 
+`--upscale-texture` (Python: `upscale_texture=True`) optionally adds sixteen RF5U close-up repaints after
+those twenty views. It is off by default. Four 1920-by-1280-pixel bands cover the chest, waist/belt, thighs
+and shins/boots, at yaw 0, +45, -45 and 180. Their pixel density is exactly three times the body camera's.
+Band heights use `03-joints.json` when available, mapped from contract units to the imported source bounds;
+otherwise they use mesh-height fractions. Adjacent bands overlap by at least twice the 96-pixel border
+feather width. Forearms within a band are included; there are no dedicated forearm cameras.
+
+RF5U receives the refined render, a matching turnaround crop, and the full cover, in that order.
+It asks to preserve existing material regions and garment construction and forbids armor or new seams on plain
+fabric. Outline and part gates do not verify semantic ornament placement; this pass remains optional. It requests reference-specific buckles, medallions, rivets, stitching, chainmail and wear while preserving
+geometry and colours, with no cast shadows or directional lighting. The closest cardinal artwork view is
+chosen by circular yaw distance (diagonal ties use front). The camera's 3D box is projected into that view
+and clipped to the artwork bounds. `views/meta.json` supplies pixels per unit and contract height; its
+legacy implicit image centre is recovered from the saved view mask's bounding-box centre and feet row,
+using the same convention as stage 3. Invalid or missing calibration fails before repaint requests.
+
+Close-up outline distances use the existing 6/16-pixel limits multiplied by the camera zoom. Figure IoU
+still requires 0.90. Grey components in a close-up are background only when they touch known background in the render. This
+preserves grey metal or fabric cut by a foreground frame edge; it does not clamp the edited silhouette.
+Morphology extends the frame pixels before filtering, avoiding an invented empty or filled frame; real
+background gaps remain holes in the figure. Before a paid repaint, the render must pass the same outline
+check against its own extracted figure. An unverifiable source outline skips that camera with reason
+`render outline not measurable` and records the measurements.
+Both measurements exclude a border of 8 body-equivalent pixels scaled by zoom and
+render size; frame-cut edges are not silhouettes. Fully covered surface frames with no interior contours
+can pass when both figures agree. Face containment and hair disagreement protections remain unchanged.
+The projection multiplies the existing outline/depth feather by a 96-pixel raised cosine at all four frame
+edges, reaching zero at the edge. The same visibility, facing and pixel-density quality map chooses where
+close-ups replace earlier views. Each close-up records its camera, reference paths, artwork camera,
+projected box, crop pixel bounds, attempts, gate measurements and acceptance reason.
+
+At configured prices, close-ups add $0.32 for one accepted sample each, or $0.72 at the sample limit,
+before transport retries. They share the existing per-run API cap; the default cap is unchanged. For a
+full original-plus-close-up run, choose an explicit cap such as `--refine-cap-usd 1.60`. A cap stop retains
+completed work and records subsequent views as unattempted.
+
 `stage-3f.json` records the source hash, recipes, models actually called, call log, outputs, thresholds, cost
 basis and per-view camera, accepted flag, reason, tries, attempts, registration, measured gates and texel count.
 Each view's rejection is diagnostic and does not fail the run. If every view is rejected, no refined GLB is

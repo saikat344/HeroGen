@@ -98,6 +98,27 @@ def figure_mask(rgb, *, render_figure=None):
     return m
 
 
+def closeup_figure_mask(rgb, render_figure):
+    """Separate grey background from grey surface cut by the frame.
+
+    Only grey components touching known render background can be background. A grey metal/fabric patch
+    touching a foreground frame edge remains surface. The prior seeds components, not the silhouette:
+    new non-grey geometry and connected grey gaps can still move the contour and fail the same gate.
+    """
+    near_bg = (np.abs(rgb - C.BG) <= BG_TOL).all(-1)
+    if near_bg.all():
+        return np.zeros_like(render_figure)
+    labels, _ = ndimage.label(near_bg)
+    seeds = np.unique(labels[near_bg & ~render_figure])
+    background = np.isin(labels, seeds) & near_bg
+    # Extend the cut surface/background through the frame before morphology, rather than introducing
+    # a false empty frame or closing real background gaps with a false foreground frame.
+    figure = np.pad(~background, 10, mode="edge")
+    figure = ndimage.binary_opening(figure, iterations=2)
+    figure = ndimage.binary_closing(figure, iterations=3)
+    return figure[10:-10, 10:-10]
+
+
 def boundary(m):
     return m & ~ndimage.binary_erosion(m)
 
@@ -153,6 +174,45 @@ def outline_gate(a, b, *, unclipped=True, closeup=False):
         and med <= limits["median_px"]
         and p90 <= limits["p90_px"]
     )
+    return passed, measures
+
+
+def frame_feather(shape, width=96):
+    """Raised cosine from zero at every frame edge to one `width` pixels inside."""
+    if width <= 0:
+        raise ValueError("frame feather width must be positive")
+    h, w = shape
+    y, x = np.ogrid[:h, :w]
+    distance = np.minimum(np.minimum(y, h - 1 - y), np.minimum(x, w - 1 - x))
+    return (0.5 - 0.5 * np.cos(np.pi * np.clip(distance / width, 0, 1))).astype(np.float32)
+
+
+def closeup_outline(a, b, zoom):
+    """Keep the measured body limits in world units; ignore frame-cut contours and border IoU.
+
+    A close-up filled entirely by the surface has no silhouette to move. This is accepted only when both
+    images have no interior contours and their interior figure overlap passes the unchanged IoU limit.
+    """
+    if not math.isfinite(zoom) or zoom <= 0:
+        raise ValueError("close-up zoom must be positive")
+    size = max(a.shape)
+    border = max(4, round(8 * zoom * size / 1024))
+    inner = frame_feather(a.shape, border) >= 1
+    overlap = float((a & b & inner).sum() / max(1, ((a | b) & inner).sum()))
+    ba = (a & ~ndimage.binary_erosion(a, border_value=1)) & inner
+    bb = (b & ~ndimage.binary_erosion(b, border_value=1)) & inner
+    if ba.any() and bb.any():
+        d = np.concatenate([ndimage.distance_transform_edt(~bb)[ba], ndimage.distance_transform_edt(~ba)[bb]])
+        med, p90 = np.quantile(d, [.5, .9]) * 1024 / size
+    elif not ba.any() and not bb.any() and (a & b & inner).any():
+        med, p90 = 0.0, 0.0
+    else:
+        med, p90 = 1e9, 1e9
+    measures = {"iou": overlap, "median_px": float(med), "p90_px": float(p90), "zoom": zoom,
+                "border_excluded_px": border, "median_limit_px": GATE["median_px"] * zoom,
+                "p90_limit_px": GATE["p90_px"] * zoom}
+    passed = (overlap >= GATE["iou_min"] and med <= measures["median_limit_px"]
+              and p90 <= measures["p90_limit_px"])
     return passed, measures
 
 

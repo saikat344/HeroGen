@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
     r.add_argument("--refine-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
     r.add_argument("--refine-cap-usd", type=float, default=0.80, help="per-run texture-refine API cap")
+    r.add_argument("--upscale-texture", action="store_true", help="add close-up texture passes after the 20 refine views")
     r.add_argument("--height", type=float, default=HEIGHT_STUDS, help="body height in studs")
     r.add_argument("--voxels", type=int, default=None, help="voxel grid resolution along the height")
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
@@ -147,7 +148,8 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
-                              profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout)
+                              profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout,
+                              upscale_texture=a.upscale_texture)
         except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
