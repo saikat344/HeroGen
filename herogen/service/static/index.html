@@ -27,7 +27,7 @@
   <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
   <div class="spacer"></div>
   <nav aria-label="Main"><button type="button" class="link" id="howButton">How it works</button><a href="/#gallery">Gallery</a><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
-  <button type="button" id="headerSignIn" disabled>Sign in</button>
+  <button type="button" id="headerSignIn" disabled>Judge access</button>
   <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
@@ -36,6 +36,8 @@
 <main>
   <p id="loading" class="muted">Loading…</p>
 
+  <dialog id="judgeDialog" aria-labelledby="judgeH"><button type="button" id="closeJudge" class="dialog-close" aria-label="Close judge access">×</button><p class="eyebrow">A private place to create</p><h2 id="judgeH">Judge access</h2><p id="accessIntro">Enter your invitation code to try live generation.</p><form id="judgeForm"><span id="judgeCodeFields"><label for="judgeCode">Access code</label><input id="judgeCode" type="password" autocomplete="one-time-code" maxlength="64" required></span><button id="judgeGo" class="primary" type="submit">Open private workspace →</button></form><p id="judgeMsg" role="status" class="small msg"></p><p id="accessPrivacy" class="small muted">Your history belongs to this browser workspace. Your allowance belongs to the code, including across browsers.</p></dialog>
+  <div id="judgeAccessSummary" class="access-summary" hidden><span id="judgeAccessText"></span><button type="button" id="checkAvailability" class="link">Check availability</button></div>
   <dialog id="signinDialog"><button type="button" class="dialog-close" id="closeSignin" aria-label="Close sign in">×</button><section id="signin" class="card narrow" hidden aria-labelledby="signinH">
     <h1 id="signinH">Sign in</h1>
     <p class="muted">HeroGen is invite-only during the beta. We email you a link; there is no password.</p>
@@ -89,7 +91,8 @@
       </div>
       <div class="hero-art"><img src="/assets/art/hero-collage.png" alt="Character design sheets: an adventurous courier, a clockwork gardener, and a moonlit mage" id="heroArtwork" fetchpriority="high"></div>
     </div>
-    <section class="gallery" id="gallery" aria-labelledby="galleryH" hidden><div class="row"><h2 id="galleryH">Start from a character</h2><div class="spacer"></div><span class="small muted">Choose an image to make it yours</span></div><div id="templates" class="template-grid"></div><p id="templateMsg" class="small msg" role="status"></p></section>
+    <section class="gallery" id="starterGallery" aria-labelledby="galleryH" hidden><div class="row"><h2 id="galleryH">Start from a character</h2><div class="spacer"></div><span class="small muted">Choose an image to make it yours</span></div><div id="templates" class="template-grid"></div><p id="templateMsg" class="small msg" role="status"></p></section>
+    <section id="gallery" class="public-gallery" aria-labelledby="publicGalleryH"><div class="row"><div><p class="eyebrow">Previously generated with HeroGen</p><h2 id="publicGalleryH">From an idea to another dimension.</h2></div></div><p class="muted">Explore real saved results. These examples do not start a new generation.</p><div id="publicGalleryCards" class="public-gallery-grid"></div><p id="publicGalleryStatus" class="small muted" role="status">Loading the public gallery…</p></section>
   </section>
   <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>
 
@@ -131,7 +134,7 @@
 
     <section id="developerPanel" class="card developer" aria-labelledby="developerH" hidden></section>
 
-    <details class="card account"><summary>Account</summary>
+    <details id="accountSettings" class="card account"><summary>Account</summary>
       <p class="muted small">Heroes and their files are deleted <span id="retention"></span> days after they finish. Deleting your account removes them all now.</p>
       <label for="confirmDelete">Type <code>delete my account</code> to confirm</label>
       <input id="confirmDelete" type="text" autocomplete="off">

@@ -118,7 +118,8 @@ made it.
 With no `--body` it scores every stage 4 body in the run. It applies no triangle budget by default; add
 `--profile roblox-ingame` or `--profile roblox-avatar` to check a Roblox profile's limits.
 
-The hosted, invite-only service (sign-in by emailed link, per-user quotas, GLB and Roblox downloads) is `herogen/service`; `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
+The hosted service (public saved-result inspection, optional capped public live access, email/invite access,
+private workspaces, GLB and Roblox downloads) is `herogen/service`; `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
 
 Starting from a text prompt instead of a sketch:
 

@@ -2368,7 +2368,8 @@ No live quality score is inferred from these unit tests; held-out mesh scoring r
 
 The public entry page accepts a text idea or an image before sign-in. Suggestion buttons fill the text field;
 image cards select a PNG and submit it through the existing multipart `POST /api/jobs` image contract.
-Creating a hero requires the existing authenticated session, CSRF token, quota checks and idempotency key.
+Creating a hero requires a private session, CSRF token, quota checks and idempotency key.
+Public-demo access can create that session without an email account; email access remains at `/admin/signin`.
 A draft, including its image Blob and any uncertain request key, is saved in browser IndexedDB before the
 email sign-in flow and before every submission. Each submission saves the exact input sent to the server.
 Conflicts retire the saved key in both browser stores; an older draft is not restored over a newer pending key. Drafts expire after 24 hours when next read and are removed after a confirmed creation or explicit sign-out.
@@ -2414,3 +2415,66 @@ Developer mode remains opt-in and read-only. It loads the selected job's saved L
 model provenance, recorded costs, checks and thresholds without replacing missing values with invented data.
 It has a visible close control and Escape support; background polling does not steal artifact selection or
 focus. The held-out review's result remains distinct from the main job's status.
+
+
+### Public results and controlled live access
+
+`HEROGEN_SERVICE_GALLERY` points to an external, curated version-1 `catalog.json` bundle, separate from private
+job storage. Each entry has a slug, title, description, refinement-record commit and SHA-256 hashes for
+`<slug>/sketch.png`, `artwork.png` and `model.glb`. Optional `refinement` measurements contain model names,
+seconds, estimated stage cost and accepted/attempted refinement-view counts. `gallery.py` validates these
+fields, confines file paths, rejects symlinks and verifies artifact bytes before serving them. The Modal web
+image packages the configured bundle under `/public-gallery`, plus the service's static directory. No
+private run directory is published. Generated binaries remain external deployment inputs, excluded from Git.
+
+`GET /api/gallery`, `GET /api/gallery/{slug}`, `/gallery/{slug}` and `/gallery-assets/{slug}/{kind}` are
+read-only and need no session. Public pages explicitly identify previously generated results, show their
+starting sketch/artwork beside the actual orbitable GLB, and distinguish refinement records from held-out
+quality or game-readiness. Gallery access never dispatches work or grants private-job access. Reference/model
+load failures have retry controls. Saved refinement evidence is available through an optional details panel.
+
+With `HEROGEN_SERVICE_PUBLIC_DEMO=true`, `POST /api/demo/access` opens a private browser workspace without
+an account or published credential. `HEROGEN_SERVICE_PUBLIC_DEMO_JOBS` defaults to one lifetime generation
+per workspace. Re-entry with the same valid session preserves history and allowance. Clearing cookies or using
+another browser can obtain a new workspace: this is explicitly not identity or Sybil protection. Shared spending
+and capacity protection comes from the durable admission ledger, not browser identity. Access creation is
+CSRF/origin protected and IP rate-limited. A workspace's saved results cannot be read or canceled from another
+workspace. Public access has no admin privileges.
+
+Optional `HEROGEN_SERVICE_JUDGE_ACCESS=true` enables `POST /api/judge/access` with individual invitation codes.
+The code's allowance is shared across its private browser workspaces and cannot be reset by another browser.
+Codes are purpose-separated HMAC hashes in storage, printed once by the admin CLI and never listed raw.
+This optional invitation path does not presume a private submission field or require publishing a funded code.
+The separate email/invite path at `/admin/signin` preserves operator access; it shares global admission limits
+when either controlled live-access mode is enabled.
+
+The metadata schema v4 migrates v1–v3 stores and adds judge workspaces, allowances, a generation policy,
+reservations and worker receipts. Admission and job insertion run in one SQLite write transaction. A repeated
+Idempotency-Key returns the original workspace's job without consuming another allowance or reservation.
+Capacity, exhausted allowance, expired/revoked access, expired policy, changed version/configuration and
+insufficient unallocated budget refuse a new job before dispatch. Capacity returns 503 with Retry-After;
+no request is silently queued. The UI retains the draft and reports the reason.
+
+The operator configures `generation-budget` through the existing admin CLI, supplying USD limit and per-job
+reservation, maximum active generations, expiry, exact clean commit, cost-configuration fingerprint and a
+cost-bound evidence note. `generation-policy-signature` reports the running version and fingerprint. Enabling
+requires an explicit confirmation that provider caps were verified. New installations are paused until configured.
+The fingerprint binds profiles, stage arguments, upload dimensions, prompt selectors, retry limits and timeouts;
+worker receipts reject a changed fingerprint. The bound must include main work, retries, held-out checks and
+remote work. Changes to external resource deployments or prices also require operator re-verification.
+
+Reservations use integer micro-USD and persist across restarts and policy changes. A job's completion releases
+its capacity slot only when main and expected held-out work have finished and all worker receipts are certain.
+Cancellation, deletion, failure and timeout never automatically release reserved money. Uncertain workers keep
+capacity occupied, preventing overlapping replacements. A failed job can still incur provider charges.
+`generation-budget-report` exposes reservations and unresolved work to the operator; `generation-reconcile`
+records a measured cost with provider evidence and requires confirmation of stopped work for uncertain exits.
+An actual cost above its reservation pauses new admissions. Reconciliation never replenishes a generation
+allowance; that is a separate explicit operator action.
+
+This ledger limits admitted reservation bounds; it is not an invoice meter or a provider billing cap. Gallery
+hosting, idle containers, storage and egress are not allocated per generation. A real total-spend ceiling also
+requires provider-side limits and funding for all relevant services. The CLI neither purchases credits nor
+changes provider billing. Do not enable a policy on an unverified estimate or claim that its reservation total
+alone guarantees a cross-provider invoice ceiling. A capacity limit counts generation jobs, including their
+pending side work, not individual parallel stage calls. No Facebook identity provider is implemented.

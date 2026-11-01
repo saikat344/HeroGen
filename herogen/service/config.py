@@ -34,6 +34,10 @@ class Settings:
     data_dir: Path = Path("service-data/data")
     meta_path: Path = Path("service-data/meta.db")
     signing_key: bytes = field(default=b"", repr=False)
+    gallery_dir: Path | None = None
+    judge_access: bool = False
+    public_demo: bool = False
+    public_demo_jobs: int = 1
     # Email
     email_provider: str = "file"
     email_from: str = "HeroGen <signin@example.com>"
@@ -80,6 +84,18 @@ class Settings:
     code_commit: str = ""
 
     @property
+    def cost_signature(self) -> str:
+        """Bind the reservation bound to deployment selectors and cost-affecting limits."""
+        import hashlib
+        import json
+        payload = {name: getattr(self, name) for name in (
+            'profiles', 'stage3_args', 'stage_timeout_s', 'blender_timeout_s', 'max_attempts',
+            'upload_max_side', 'prompt_max_chars', 'heldout_concurrency')}
+        payload['prompt_selectors'] = {key: os.environ.get(key, '') for key in (
+            'HEROGEN_PROMPT_SKETCH_VERSION', 'HEROGEN_SAME_CHARACTER_VERSION')}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    @property
     def secure_cookies(self) -> bool:
         return self.base_url.startswith("https://")
 
@@ -111,6 +127,10 @@ class Settings:
 
 ENV = {
     "mode": "HEROGEN_SERVICE_MODE",
+    "gallery_dir": "HEROGEN_SERVICE_GALLERY",
+    "judge_access": "HEROGEN_SERVICE_JUDGE_ACCESS",
+    "public_demo": "HEROGEN_SERVICE_PUBLIC_DEMO",
+    "public_demo_jobs": "HEROGEN_SERVICE_PUBLIC_DEMO_JOBS",
     "base_url": "HEROGEN_SERVICE_BASE_URL",
     "data_dir": "HEROGEN_SERVICE_DATA",
     "meta_path": "HEROGEN_SERVICE_META",
@@ -162,6 +182,8 @@ def _parse(name: str, raw: str, default: Any) -> Any:
         if name == "signing_key":
             return raw.encode()
         if isinstance(default, bool):
+            if raw.strip().lower() not in ('1','true','yes','0','false','no'):
+                raise ValueError
             return raw.strip().lower() in ("1", "true", "yes")
         if isinstance(default, int):
             return int(raw)
@@ -172,7 +194,7 @@ def _parse(name: str, raw: str, default: Any) -> Any:
             return (int(a), int(b))
         if isinstance(default, tuple) or name == "allowed_hosts":
             return tuple(x.strip() for x in raw.split(",") if x.strip())
-        if name in ("data_dir", "meta_path", "outbox_path", "legal_dir"):
+        if name in ("data_dir", "meta_path", "outbox_path", "legal_dir", "gallery_dir"):
             return Path(raw)
         return raw.strip()
     except ValueError:
@@ -211,7 +233,7 @@ def validate(s: Settings, require_key: bool = True) -> None:
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
     if not math.isfinite(s.refine_cap_usd) or s.refine_cap_usd < 0:
         raise ConfigError(f"{ENV['refine_cap_usd']} must be finite and nonnegative")
-    for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
+    for name in ("public_demo_jobs", "link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
                  "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
                  "upload_min_side",
                  "prompt_max_chars", "retention_days", "audit_retention_days", "stage_timeout_s",

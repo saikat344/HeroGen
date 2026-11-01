@@ -115,7 +115,17 @@ base = (modal.Image.debian_slim(python_version=PYTHON)
         .pip_install_from_requirements(str(HERE / "requirements.txt"))
         .pip_install(SAM_PARSER)
         .env(IMAGE_ENV))
-web_image = base.add_local_python_source("herogen")
+web_image = base.add_local_python_source("herogen").add_local_dir(
+    str(HERE / "static"), "/root/herogen/service/static")
+if DEPLOY.gallery_dir is not None:
+    # Validate the separately curated public pack before packaging it; never mount private run storage.
+    from herogen.service.gallery import catalog, artifact
+    if modal.is_local():
+        for character in catalog(DEPLOY.gallery_dir):
+            for kind in ('sketch', 'artwork', 'model'):
+                artifact(DEPLOY.gallery_dir, character['id'], kind)
+    web_image = web_image.add_local_dir(str(DEPLOY.gallery_dir), "/public-gallery").env(
+        {"HEROGEN_SERVICE_GALLERY": "/public-gallery"})
 blender_image = (
     base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93")  # BSD-3-Clause; Apache-2.0
     .apt_install(*BLENDER_APT)

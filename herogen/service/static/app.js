@@ -3,6 +3,7 @@
 import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { draftStore } from '/assets/draft.js';
+import { publicGallery } from '/assets/public-gallery.js';
 import { generationView } from '/assets/generation.js';
 
 const $ = (s) => document.querySelector(s);
@@ -19,7 +20,17 @@ function returnToEntry() {
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
   developer.update(null); generation.reset(); setScreen('entry'); show('#jobLoading', false);
 }
-function signIn() { show('#signin'); $('#signinDialog').showModal(); }
+function signIn() {
+  if (location.pathname === '/signin' || location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
+  else {
+    const publicDemo = S.session?.public_demo;
+    $('#judgeH').textContent = publicDemo ? 'Try live generation' : 'Judge access';
+    $('#accessIntro').textContent = publicDemo ? `${S.session.public_demo_jobs} generation per browser workspace. Capacity and a shared project budget limit availability. No account needed.` : 'Enter your invitation code to try live generation.';
+    show('#judgeCodeFields', !publicDemo); $('#judgeCode').required = !publicDemo;
+    $('#accessPrivacy').textContent = publicDemo ? 'Your history is private to this browser. Keep this browser’s cookies to return to your workspace. Browser allowances do not identify judges.' : 'Your history belongs to this browser workspace. Your allowance belongs to the code, including across browsers.';
+    $('#judgeDialog').showModal();
+  }
+}
 async function keepDraft(values = null) {
   const fields = values || { prompt: $('#prompt').value, name: $('#name').value,
     profile: $('#profile').value, file: entry.file() };
@@ -90,6 +101,7 @@ async function api(path, { method = 'GET', json, form, headers = {} } = {}) {
   let data = null;
   try { data = await r.json(); } catch { data = null; }
   if (!r.ok) {
+    if (r.status === 401 && S.session?.signed_in) expireAccess();
     const msg = (data && data.error && data.error.message) || `Request failed (${r.status}).`;
     const err = new Error(msg); err.status = r.status; err.code = data && data.error && data.error.code; throw err;
   }
@@ -143,6 +155,11 @@ async function initVerify() {
 // ---- jobs ----------------------------------------------------------------------------------------------
 
 function renderQuota(u) {
+  if (S.session?.user?.kind === 'judge') {
+    const remaining = S.session.judge?.remaining;
+    $('#quota').textContent = Number.isInteger(remaining) ? `${remaining} generations remaining for this judge code, across all its browsers.` : '';
+    return;
+  }
   if (!u) return;
   $('#quota').textContent = `${u.jobs_today} of ${u.jobs_per_day} heroes in the last 24 hours, ${u.jobs_total} of ${u.jobs_total_limit} in total.`;
 }
@@ -295,7 +312,7 @@ function initJobs() {
     }
     const values = { prompt: prompt.value, name: $('#name').value, profile: sel.value, file };
     if (!S.session.signed_in) {
-      try { await keepDraft(values); msg.textContent = 'Your draft is saved. Sign in to create your hero.'; }
+      try { await keepDraft(values); msg.textContent = S.session.public_demo ? 'Your draft is saved. Open your live-demo workspace to create your hero.' : 'Your draft is saved. Open access to create your hero.'; }
       catch { msg.textContent = 'Browser storage is unavailable. Keep this tab open and return here after signing in to keep your draft.'; }
       signIn(); return;
     }
@@ -310,17 +327,17 @@ function initJobs() {
       clearPending(); ++S.revision; followJob(j, true);
       await draftStore('delete').catch(() => {});
       msg.textContent = '';
-      await Promise.all([refreshList(), loadSession().then((session) => renderQuota(session.usage))])
+      await Promise.all([refreshList(), loadSession().then((session) => { renderQuota(session.usage); updateAccessSummary(); })])
         .catch((e) => banner(`Your hero is saved. Could not refresh account or library details: ${e.message}`));
     } catch (e) {
-      if (e.status === 409) {
+      if (e.status === 409 && (!e.code || e.code === 'conflict')) {
         clearPending();
         await keepDraft(values).catch(() => draftStore('delete').catch(() => {}));
         msg.textContent = earlier && earlier.hash !== hash
           ? 'Your earlier, unconfirmed hero from this tab was saved, so this different one was not started: check Your heroes, then make it again.'
           : `${e.message} Check Your heroes.`;
         refreshList().catch(() => {});
-      } else if (e.status === 503) {
+      } else if (e.status === 503 && (!e.code || e.code === 'busy')) {
         msg.textContent = 'The service is busy and could not confirm your hero. Make it again in a moment from this tab: if it was saved, you get that hero, not a second one.';
       } else {
         msg.textContent = e.message;
@@ -362,17 +379,60 @@ function initJobs() {
 }
 
 async function signedIn() {
-  $('#who').textContent = S.session.user.email; show('#who'); show('#signOut');
+  const judge = S.session.user.kind === 'judge';
+  $('#who').textContent = judge ? 'Private judge workspace' : S.session.user.email; show('#who'); show('#signOut', !judge);
+  show('#accountSettings', !judge);
+  updateAccessSummary();
   show('#headerSignIn', false); show('#developerMode'); show('#app');
   renderQuota(S.session.usage);
   const jobs = await refreshList();
   const want = new URLSearchParams(location.hash.slice(1)).get('job');
   if (want) await openJob(want, true);
 }
+function updateAccessSummary() {
+  const judge = S.session?.user?.kind === 'judge';
+  show('#judgeAccessSummary', judge);
+  if (!judge) return;
+  const reasons = { generation_paused: 'Live generation is temporarily paused.', cost_bound_unverified: 'Live generation is paused while its cost bound is verified.',
+    generation_budget_exhausted: 'The live-generation budget is currently allocated.', generation_capacity: 'All live-generation slots are occupied. Try again shortly.' };
+  const remaining = S.session.judge?.remaining;
+  $('#judgeAccessText').textContent = `${Number.isInteger(remaining) ? remaining + (S.session.public_demo ? ' generations left in this workspace. ' : ' generations left for this code. ') : ''}${reasons[S.session.generation?.reason] || 'Your private workspace is ready.'} Existing results remain available.`;
+}
+function expireAccess() {
+  if (S.session) S.session.signed_in = false;
+  returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
+  $('#heroLibrary').hidden = true; $('#jobs').replaceChildren();
+  show('#judgeAccessSummary', false); show('#headerSignIn');
+  $('#jobMsg').textContent = 'Your access has expired. Your draft is kept in this browser. Open Judge access to continue.';
+}
+async function refreshAccess() {
+  await loadSession();
+  if (S.session.signed_in) { updateAccessSummary(); renderQuota(S.session.usage); return; }
+  expireAccess();
+}
+function initJudgeAccess() {
+  $('#closeJudge').addEventListener('click', () => $('#judgeDialog').close());
+  $('#checkAvailability').addEventListener('click', async () => {
+    $('#checkAvailability').disabled=true;
+    try { await refreshAccess(); } catch (e) { banner(e.message); }
+    finally { $('#checkAvailability').disabled=false; }
+  });
+  $('#judgeForm').addEventListener('submit', async (event) => {
+    event.preventDefault(); $('#judgeGo').disabled=true; $('#judgeMsg').textContent='Opening your private workspace…';
+    try {
+      const result=await api(S.session.public_demo ? '/api/demo/access' : '/api/judge/access',{method:'POST',json:S.session.public_demo ? {} : {code:$('#judgeCode').value}});
+      $('#judgeCode').value=''; S.csrf=result.csrf;
+      await loadSession(); $('#judgeDialog').close(); $('#judgeMsg').textContent='';
+      await signedIn();
+    } catch(e) { $('#judgeMsg').textContent=e.message; }
+    finally { $('#judgeGo').disabled=false; }
+  });
+}
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
-  initSignin(); initJobs();
+  $('#headerSignIn').textContent = S.session.public_demo ? 'Try live demo' : 'Judge access';
+  initSignin(); initJobs(); initJudgeAccess(); publicGallery();
   $('#backToIdeas').addEventListener('click', () => {
     history.pushState(null, '', '/'); returnToEntry();
     $('#entryH').tabIndex = -1; $('#entryH').focus();
@@ -381,12 +441,16 @@ async function boot() {
     const open = $('#heroLibrary').hidden; show('#heroLibrary', open); $('#showLibrary').setAttribute('aria-expanded', String(open));
     if (open) await refreshList().catch((e) => banner(e.message));
   });
+  document.querySelectorAll('a[href="#gallery"]').forEach(link => link.addEventListener('click', event => {
+    event.preventDefault(); history.pushState(null, '', '/#gallery'); returnToEntry();
+    $('#gallery').scrollIntoView({block:'start'});
+  }));
   window.addEventListener('popstate', () => {
     const id = new URLSearchParams(location.hash.slice(1)).get('job');
     if (id) openJob(id, true); else returnToEntry();
   });
   $('#headerSignIn').addEventListener('click', async () => {
-    try { if (location.pathname !== '/signin') await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
+    try { if (!['/signin','/admin/signin'].includes(location.pathname)) await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
     signIn();
   });
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
@@ -396,6 +460,7 @@ async function boot() {
   });
   $('#headerSignIn').disabled = false;
   if (location.pathname === '/signin') { show('#loading', false); return initVerify(); }
+  if (location.pathname === '/admin/signin') { show('#loading', false); signIn(); return; }
   await restoreDraft();
   show('#loading', false); show('#entry');
   if (S.session.signed_in) await signedIn();

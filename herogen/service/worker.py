@@ -297,7 +297,7 @@ def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> S
                         blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd)
 
 
-def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
+def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
               runner: StageRunner, workdir: Workdir, compute_price_per_s: float = 0.0) -> GroupResult:
     """Run the stages of one group for one attempt; see the module docstring."""
     jid = job["id"]
@@ -357,6 +357,24 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
 
 
 GroupExecutor = Callable[[dict[str, Any], int, str, int], GroupResult]
+def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
+              runner: StageRunner, workdir: Workdir, compute_price_per_s: float = 0.0) -> GroupResult:
+    if not job.get('budget_required'):
+        return _run_group(store, settings, job, attempt, group, resume, runner, workdir, compute_price_per_s)
+    if not store.job_current(job['id'], attempt):
+        return GroupResult('stale')
+    if job.get('code_commit') != settings.code_commit:
+        return GroupResult('error', None, 'version_changed', 'This generation version changed; operator review is required.', False)
+    token = secrets.token_hex(16)
+    store.admission_work_begin(job['id'], token, group, settings.cost_signature)
+    result = None
+    try:
+        result = _run_group(store, settings, job, attempt, group, resume, runner, workdir, compute_price_per_s)
+        return result
+    finally:
+        store.admission_work_end(job['id'], token, bool(result and result.status in ('ok', 'rejected')))
+
+
 QC_UNAVAILABLE = ("The quality check is unavailable for this hero: the held-out views could not be made. "
                   "The hero is not affected.")
 QC_NOT_ACCEPTED = ("The quality check did not accept the held-out views (they are kept for review). "
@@ -371,10 +389,16 @@ def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRun
     retries, refund and quota are never touched. At most one run per job (`store.side_claim`), never retried.
     Returns the stage's state, or None when this call had nothing to do."""
     jid = job["id"]
+    if job.get('budget_required') and job.get('code_commit') != settings.code_commit:
+        raise ValueError('Held-out generation version changed; no compute was started.')
     claim = secrets.token_hex(8)
     if not store.side_claim(jid, "2h", claim, LEASE_TTL_S):
         event("heldout_skipped", job=jid)
         return None
+    budget_token = secrets.token_hex(16) if job.get('budget_required') else None
+    certain = False
+    if budget_token:
+        store.admission_work_begin(jid, budget_token, 'heldout', settings.cost_signature)
     event("heldout_started", job=jid)
     state, message, seconds, cost = "unavailable", QC_UNAVAILABLE, 0.0, 0.0
     # The lease is renewed from the claim to the record: the copy in (the user's whole cache), the run and the copy
@@ -384,6 +408,7 @@ def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRun
         try:
             ctx = workdir.open()
             out = runner.run(HELDOUT, ctx)
+            certain = out.state in ('passed', 'rejected', 'skipped')
             seconds, cost = out.seconds, out.cost_usd
             rec = read_record(ctx.run_dir, HELDOUT.record) or {}
             if out.state == "passed":
@@ -407,11 +432,14 @@ def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRun
             store.side_finish(jid, "2h", claim, state, seconds=seconds, cost_usd=total, message=message)
         except Exception:
             log.exception("could not record the held-out views of %s", jid)
+    if budget_token:
+        store.admission_work_end(jid, budget_token, certain)
+        store.admission_side_done(jid)
     event("heldout_finished", job=jid, state=state, seconds=seconds, cost_usd=total)
     return state
 
 
-def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
+def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
             redispatch: Callable[[str], None] | None = None, volume=None,
             heldout: Callable[[dict[str, Any]], None] | None = None) -> str | None:
     """Orchestrate one attempt of a job; returns the job's state afterwards (None when this worker had nothing
@@ -492,6 +520,20 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
         event("job_finished", job=job_id, attempt=attempt, state="succeeded", seconds=took,
               cost_usd=round(carried + cost + compute, 6))
         return "succeeded"
+
+
+def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
+            redispatch: Callable[[str], None] | None = None, volume=None,
+            heldout: Callable[[dict[str, Any]], None] | None = None) -> str | None:
+    try:
+        return _run_job(store, settings, storage, job_id, call_id, execute, redispatch, volume, heldout)
+    finally:
+        job = store.job_get(job_id)
+        if job and job.get('budget_required') and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled'):
+            stages = store.job_stages(job_id)
+            if heldout is None or not any(s['stage'] == '2' and s['state'] == 'passed' for s in stages):
+                store.admission_side_done(job_id)
+            store.admission_main_done(job_id)
 
 
 def _bytes(storage: Storage, job: dict[str, Any], volume) -> int:

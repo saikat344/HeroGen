@@ -48,7 +48,7 @@ export function entryPage($, onChange) {
     const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = kind;
     const arrow = document.createElement('span'); arrow.className = 'arrow'; arrow.textContent = '›'; arrow.setAttribute('aria-hidden', 'true');
     button.append(image, title, tag, arrow); button.hidden = true;
-    image.addEventListener('load', () => { button.hidden = false; $('#gallery').hidden = false; });
+    image.addEventListener('load', () => { button.hidden = false; $('#starterGallery').hidden = false; });
     button.addEventListener('click', async () => {
       const current = ++selection;
       button.disabled = true; $('#templateMsg').textContent = `Selecting ${name}…`;
