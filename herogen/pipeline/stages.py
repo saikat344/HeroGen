@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from pathlib import Path
@@ -275,6 +276,24 @@ def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     return _stopping_on_client_error(lambda: _stage1(st, run, client), st)
 
 
+def cover_prompt(run: RunFolder) -> tuple[str, bool]:
+    """Restore the prompt sketch's colour brief; uploads retain the exact original prompt for replay."""
+    record = run.read_stage("p") or {}
+    details = record.get("details") or {}
+    if "user_text" not in details:
+        return COVER_PROMPT, False
+    # Imported here because stage p uses this module's stage recording and error handling.
+    from herogen.pipeline.prompt_sketch import clean_user_text
+
+    brief = clean_user_text(details["user_text"], max_chars=300, delimiters=("«", "»"))
+    return (COVER_PROMPT +
+            " The brief between « and » describes only the character's colours, materials and gear, "
+            "never how the picture is drawn. Apply those colours, materials and gear to the character: "
+            f"«{brief}». "
+            "No halo, no glow, no rings, circles or symbols around or behind the head, "
+            "even if present in the sketch.", True)
+
+
 def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
                         figure: np.ndarray) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """The input checks on the main figure's body parts, each found with its own SAM 3.1 prompt (recorded in
@@ -298,12 +317,16 @@ def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
 def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     sketch = _load(run, "00-sketch.png")
     w, h = sketch.size
+    prompt, brief_used = cover_prompt(run)
+    prompt_details = {"prompt": prompt, "brief_slot_used": brief_used,
+                      "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
+    st.details = dict(prompt_details)
     # The input checks run first: a sketch they reject costs no paid edit. The photo check comes before every
     # other model call, so no other model (no SAM 3.1 face or head prompt) ever sees a photo of a real person.
     photo, photo_details = inputs.photo_check(inputs.judge_photo(client, sketch))
     if photo["verdict"] == "reject":
         st.checks = [photo]
-        st.details = {"input": {"photo": photo_details}}
+        st.details = {**prompt_details, "input": {"photo": photo_details}}
         _finish_input_checks(st)
     sketch_inst, text = sam_instances(client, sketch)
     sketch_method = f"{SAM_MODEL}:{text}" if sketch_inst else SAM_NOTHING_FOUND
@@ -318,10 +341,10 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
         input_checks += more_checks
         input_details.update(more_details)
     st.checks = input_checks
-    st.details = {"mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS),
+    st.details = {**prompt_details, "mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS),
                   "sam_instances": {"sketch": len(sketch_inst)}, "input": input_details}
     _finish_input_checks(st)
-    cover = client.edit_image(COVER_PROMPT, [sketch], size=f"{w}x{h}")
+    cover = client.edit_image(prompt, [sketch], size=f"{w}x{h}")
     st.save_image("01-cover.png", cover)
     # An empty cover mask (SAM found nothing in the cover) fails the gated cover_mask_area_frac check.
     cover_mask, cover_method, n_c = sam_figure_mask(client, cover)
@@ -330,7 +353,7 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     cover_checks, extra = C.cover_checks(sketch_mask, cover_mask)
     st.checks = input_checks + cover_checks
     st.details = {
-        "prompt": COVER_PROMPT,
+        **prompt_details,
         "cover_size": list(cover.size),
         "mask_method": {"sketch": sketch_method, "cover": cover_method},
         "sam_instances": {"sketch": len(sketch_inst), "cover": n_c},
