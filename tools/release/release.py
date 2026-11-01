@@ -64,7 +64,8 @@ REQUIRED = (
 )
 OPTIONAL = ("HEROGEN_SERVICE_PUBLIC_DEMO", "HEROGEN_SERVICE_GALLERY", "HEROGEN_SERVICE_MAX_RUNNING",
             "HEROGEN_SERVICE_ADMIN_EMAILS", "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS",
-            "HEROGEN_SERVICE_SPEND_LIMITS", "HEROGEN_SERVICE_REFINE_CAP_USD", "HEROGEN_TEXTURE_NOTES")
+            "HEROGEN_SERVICE_SPEND_LIMITS", "HEROGEN_SERVICE_REFINE_CAP_USD", "HEROGEN_TEXTURE_NOTES",
+            "HEROGEN_SERVICE_REFINE_PROFILE", "HEROGEN_FAST_LANE")
 # Settings every deploy runs with. The service refuses to deploy in any mode but `production` (staging included:
 # the mode is "not dev", not the environment), and production mode needs a real email provider; `resend` is the
 # only one the service has.
