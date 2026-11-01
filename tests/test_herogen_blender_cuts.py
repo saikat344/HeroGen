@@ -120,6 +120,60 @@ class TestCutMeasurements(unittest.TestCase):
         self.assertEqual(set(result["gate"]), {"Neck"})
         self.assertLess(result["gate"]["Neck"], 0.01)
 
+    def test_rimless_mesh_full_lane_raises_fast_keeps_fifteen_parts(self):
+        verts, faces, count = [], [], 0
+        for section in self.secs.values():
+            centre = section.verts.mean(axis=0)
+            verts.append(centre + .6 * (section.verts - centre))
+            faces.append(section.faces + count)
+            count += len(section.verts)
+        verts, faces = np.concatenate(verts), np.concatenate(faces)
+        args = (verts, faces, self.sk, {"rest": {}}, (verts, faces),
+                {"owner": "UpperTorso", "radius": 2.5, "outset": 0.0}, (1, 8), .15)
+        messages = []
+        for kwargs in ({}, {"fast": False}):
+            with self.assertRaises(cuts.UnmeasurableJoints) as exc:
+                cuts.choose(*args, **kwargs)
+            self.assertIn("RightElbow", exc.exception.reasons)
+            messages.append(str(exc.exception).encode())
+        self.assertEqual(messages[0], messages[1])
+        offsets, record = cuts.choose(*args, fast=True)
+        self.assertIn("RightElbow", record["unverified_joints"])
+        self.assertEqual(offsets["RightElbow"], 0.)
+        sections, _ = split.build_sections(verts, faces, self.sk, cut_offsets=offsets)
+        self.assertEqual(set(sections), set(SECTIONS))
+        self.assertTrue(all(len(s.faces) for s in sections.values()))
+        self.assertNotIn("RightElbow", record["unmoved_worst_gap"])
+
+    def test_full_lane_exception_bytes_are_unchanged(self):
+        secs = dict(self.secs)
+        child = secs["RightLowerArm"]
+        secs["RightLowerArm"] = replace(child, rims=[])
+        with patch.object(cuts.split, "build_sections", return_value=(secs, None)):
+            with self.assertRaises(cuts.UnmeasurableJoints) as exc:
+                self.measure({"RightElbow"})
+        self.assertEqual(str(exc.exception).encode(),
+                         b"cannot measure cut gaps (RightElbow: no shared rim between RightLowerArm and "
+                         b"RightUpperArm); check the stage 3 mesh and joint placement")
+
+    def test_fast_candidates_cannot_remove_a_measurable_joint(self):
+        zero = dict.fromkeys(self.expected - {"RightElbow"}, .01)
+        zero["Neck"] = .2
+
+        def measure(verts, faces, sk, offsets, *args, unverified=None):
+            if unverified is not None:
+                unverified["RightElbow"] = "no shared rim"
+            if offsets.get("Neck", 0.):
+                raise cuts.UnmeasurableJoints({"Neck": "no shared rim"})
+            return {"gate": zero}
+
+        with patch.object(cuts, "worst_by_joint", side_effect=measure):
+            offsets, record = cuts.choose(self.verts, self.faces, self.sk, {"rest": {}},
+                                          (self.verts, self.faces), {}, (1, 8), .15, fast=True)
+        self.assertEqual(offsets["Neck"], 0.)
+        self.assertEqual(record["unmoved_worst_gap"]["Neck"], .2)
+        self.assertTrue(all("unmeasurable_joints" in t for t in record["trials"]["torso"]["tried"][1:]))
+
     def test_measurement_does_not_depend_on_a_pose_named_rest(self):
         result = self.measure(poses={"neutral": {}})
         self.assertEqual(set(result["gate"]), self.expected)

@@ -80,14 +80,8 @@ def affected(kinds) -> set:
     return {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None and (s in secs or p in secs)}
 
 
-def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
-                   cover: dict, dome: tuple[int, int], joints: set | None = None) -> dict:
-    """Per pose set, each joint's worst visible gap (studs) on the body cut at `offsets`, covers on (only
-    `joints`, when given)."""
-    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
-                                   cut_offsets=offsets)
-    # Gap measurements exist only at a shared parent/child rim. An absent section or rim is unknown, never
-    # a zero gap: the baseline must be measurable and a candidate must not win by removing a joint.
+def unmeasurable_joints(secs: dict, joints: set | None = None) -> dict[str, str]:
+    """Missing parent/child sections or shared rims, never evidence of a zero gap."""
     expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
     if joints is not None:
         expected &= joints
@@ -101,8 +95,29 @@ def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose
             missing[j] = "empty section " + ", ".join(empty)
         elif not any(r["neighbour"] == parent and len(r["points"]) for r in secs[child].rims):
             missing[j] = f"no shared rim between {child} and {parent}"
+    return missing
+
+
+def worst_by_joint(verts: np.ndarray, faces: np.ndarray, sk, offsets: dict, pose_sets: dict, cover_mesh: tuple,
+                   cover: dict, dome: tuple[int, int], joints: set | None = None,
+                   unverified: dict | None = None) -> dict:
+    """Per pose set, each joint's worst visible gap (studs), covers on (only `joints`, when given).
+
+    By default missing measurements raise. The fast lane can supply `unverified` to collect their reasons;
+    those joints are omitted from the measurements, never assigned a zero gap.
+    """
+    secs, _ = split.build_sections(verts, faces, sk, cap="dome", rings=dome[0], ring_points=dome[1],
+                                   cut_offsets=offsets)
+    expected = {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
+    if joints is not None:
+        expected &= joints
+    missing = unmeasurable_joints(secs, joints)
     if missing:
-        raise UnmeasurableJoints(missing)
+        if unverified is None:
+            raise UnmeasurableJoints(missing)
+        unverified.update(missing)
+        expected -= missing.keys()
+        joints = expected
     covered, _ = covers.add_covers(secs, cover_mesh[0], cover_mesh[1], **cover)
     out = {}
     for name, poses in pose_sets.items():
@@ -118,20 +133,25 @@ def validate_workers(workers: int) -> None:
 
 
 def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tuple, cover: dict,
-           dome: tuple[int, int], gate: float, workers: int = 3) -> tuple[dict, dict]:
+           dome: tuple[int, int], gate: float, workers: int = 3, fast: bool = False) -> tuple[dict, dict]:
     """Cut offsets (joint -> studs along the cut normal) for the reference mesh, and the record of the search.
 
     `poses` are the gate poses (the ungated ones left out); `cover_mesh` (verts, faces) and `cover` (add_covers
     keyword arguments) shape the shoulder covers as stage 4 does; `dome` is (rings, ring_points) of the caps;
     `gate` the joint-gap gate the margin is measured from. `workers` (1 through 12) bounds concurrent candidate
-    evaluations; results are consumed in the original candidate order, including equal-score ties."""
+    evaluations; results are consumed in the original candidate order, including equal-score ties. `fast`
+    reports unmeasurable baseline joints and leaves their cut kinds unmoved; candidates must still preserve
+    every measurement that exists at the baseline."""
     validate_workers(workers)
     t0 = time.monotonic()
     rig = split.build_rig(sk)
     radius = {j: float(rig.bones[CHILD[j]][2]) for j in JOINTS}
 
-    def worst_gaps(fractions: dict, joints: set | None = None) -> dict:
+    def worst_gaps(fractions: dict, joints: set | None = None, unverified: dict | None = None) -> dict:
         offsets = {j: fractions.get(kind, 0.0) * radius[j] for kind in fractions for j in joints_of(kind)}
+        if unverified is not None:
+            return worst_by_joint(verts, faces, sk, offsets, {"gate": poses}, cover_mesh, cover, dome, joints,
+                                  unverified=unverified)["gate"]
         return worst_by_joint(verts, faces, sk, offsets, {"gate": poses}, cover_mesh, cover, dome, joints)["gate"]
 
     def evaluate(fr: dict):
@@ -140,8 +160,10 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
         except UnmeasurableJoints as exc:
             return fr, None, exc.reasons
 
-    zero = worst_gaps({})
+    unverified = {} if fast else None
+    zero = worst_gaps({}, unverified=unverified)
     eligible = sorted(k for kinds in GROUPS.values() for k in kinds
+                      if all(j in zero for j in joints_of(k))
                       if max(zero[j] for j in joints_of(k)) >= gate - MARGIN_STUDS)
     chosen = {k: 0.0 for kinds in GROUPS.values() for k in kinds}
     trials = {}
@@ -149,8 +171,8 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
         movable = [k for k in kinds if k in eligible]
         if not movable:
             continue
-        own = [j for k in kinds for j in joints_of(k)]
-        others = sorted(affected(kinds) - set(own))
+        own = [j for k in kinds for j in joints_of(k) if j in zero]
+        others = sorted((affected(kinds) - set(own)) & zero.keys())
         unmoved = max(zero[j] for j in own)
         best_score = float("inf")
         best = {}
@@ -185,4 +207,6 @@ def choose(verts: np.ndarray, faces: np.ndarray, sk, poses: dict, cover_mesh: tu
               "eligible": eligible, "trials": trials, "chosen_fraction": chosen,
               "offsets_studs": {j: round(o, 4) for j, o in offsets.items()},
               "seconds": round(time.monotonic() - t0, 1)}
+    if fast:
+        record["unverified_joints"] = unverified
     return offsets, record

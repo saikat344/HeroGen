@@ -54,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--timeout", type=float, default=900.0, help="seconds allowed per Blender call")
     r.add_argument("--cut-workers", type=int, choices=range(1, 13), default=3,
                    help="concurrent stage 4 cut candidates (default: 3; deterministic for any count)")
+    r.add_argument("--fast", action="store_true", help="stage 4: report unmeasurable seams and keep their cuts unmoved")
     r.add_argument("--force", action="store_true", help="run even if the previous stage did not pass")
     r.add_argument("--profile", choices=tuple(PROFILES), default=DEFAULT_PROFILE,
                    help="stage 4 target: best (default; no triangle budget, full detail, no low LOD), "
@@ -161,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
         from .stage4 import run_stage4
 
         try:
-            rec = run_stage4(a.run, a.height, timeout=a.timeout, profile=a.profile, cut_workers=a.cut_workers)
+            rec = run_stage4(a.run, a.height, timeout=a.timeout, profile=a.profile, cut_workers=a.cut_workers,
+                             **({"fast": True} if a.fast else {}))
         except (BlenderError, ModuleNotFoundError, ValueError, KeyError, OSError) as exc:
             print(f"stage 4 stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
