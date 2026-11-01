@@ -328,10 +328,11 @@ and the final carve can change retrying and the kept sheet, and a top API error 
 after selection would change those outcomes.
 
 `stage2_turnaround(..., concurrency=1)` retains serial calls by default. The pipeline CLI and service
-stage adapter expose `--turnaround-concurrency`; a value above one overlaps the sheet edit/mask branches
+stage adapter expose `--turnaround-concurrency` with a default of four; a value above one overlaps the sheet edit/mask branches
 and one independent top edit/mask branch, bounded by that many worker threads. Local checks, top scaling,
 ranking and earliest-passing selection remain in attempt order with the same prompts and sample numbers.
-The top is scaled separately for each eligible sheet. Branch logs join in logical order; repeated top uses
+Parallel mode draws the top speculatively even if no sheet becomes eligible. The top is scaled separately
+for each eligible sheet. Branch logs join in logical order; repeated top uses
 are recorded as cache hits. Identical candidate images serialize segmentation to avoid duplicate sends or
 concurrent writes to one cache entry. Unused speculative candidates are still paid and logged, and every
 launched call is drained before success: any model error or replay miss stops the stage. A replay therefore

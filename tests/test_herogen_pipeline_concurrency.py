@@ -74,6 +74,15 @@ class TurnaroundConcurrencyTest(unittest.TestCase):
                 self.assertEqual(client.state["active"], 0)
                 self.assertEqual(len(client.log.calls), 5)
 
+    def test_cli_defaults_to_four_and_can_request_serial_scheduling(self):
+        from herogen.pipeline import __main__ as cli
+        with patch.object(cli, "run_pipeline", return_value=0) as run:
+            self.assertEqual(cli.main(["run", "--run-id", "r", "--stages", "2"]), 0)
+            self.assertEqual(run.call_args.kwargs["turnaround_concurrency"], 4)
+            self.assertEqual(cli.main(["run", "--run-id", "r", "--stages", "2",
+                                       "--turnaround-concurrency", "1"]), 0)
+            self.assertEqual(run.call_args.kwargs["turnaround_concurrency"], 1)
+
     def test_invalid_limits_and_single_request_budget_callbacks_are_rejected_before_work(self):
         with tempfile.TemporaryDirectory() as root:
             run = RunFolder(Path(root), "r")

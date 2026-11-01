@@ -849,6 +849,19 @@ class TestStageCommands(TempDirCase):
                 mock.patch("sys.stderr"):
             self.assertEqual(pipestage.main(args), 1)
 
+    def test_turnaround_adapter_defaults_to_four_and_allows_serial_calls(self):
+        from unittest import mock
+        from herogen.pipeline import stages as pstages
+        from herogen.service import pipestage
+        args = ["2", "--run-id", "r", "--runs", str(self.tmp / "runs"), "--cache", str(self.tmp / "cache")]
+        result = {"name": "turnaround", "seconds": 1.0, "cost_usd": 0.02}
+        with mock.patch.object(pstages, "stage2_turnaround", return_value=result) as stage, \
+                mock.patch("sys.stdout"):
+            self.assertEqual(pipestage.main(args), 0)
+            self.assertEqual(stage.call_args.kwargs["concurrency"], 4)
+            self.assertEqual(pipestage.main(args + ["--turnaround-concurrency", "1"]), 0)
+            self.assertEqual(stage.call_args.kwargs["concurrency"], 1)
+
     def test_model_key_reaches_stage3_but_not_stage4_or_export(self):
         from unittest import mock
         import subprocess
