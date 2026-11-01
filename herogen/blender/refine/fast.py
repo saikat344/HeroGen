@@ -300,9 +300,13 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         remaining[future] = (job, index, wave_index)
                 # Only first tries contribute at this barrier, even if retries already finished.
                 if wave_index == 1:
-                    for job in jobs:
-                        collect(job, 0)
-                        remaining.pop(job.tasks[0][0])
+                    firsts = {job.tasks[0][0] for job in jobs}
+                    while firsts:
+                        completed, _ = wait(firsts, return_when=FIRST_COMPLETED)
+                        for future in sorted(completed, key=lambda f: all_passes.index(remaining[f][0])):
+                            job, index, _ = remaining.pop(future)
+                            collect(job, index)
+                            firsts.remove(future)
                 else:
                     firsts = {job.tasks[0][0] for job in jobs}
                     while firsts:
