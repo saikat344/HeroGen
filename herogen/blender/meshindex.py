@@ -318,13 +318,15 @@ class MeshIndex:
     def ray_first_hit(self, origins: np.ndarray, dirs: np.ndarray, t_min: float = 0.0,
                       t_max: float = np.inf, step_cells: int = 8, side: str = "both"
                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """First hit at t_min < t <= t_max; t is distance for unit directions.
+        """First forward hit at 0 <= t_min < t <= t_max; t is distance for unit directions.
 
         Equal-t hits choose the lowest triangle id. Misses return (-1, NaN barycentrics, infinity).
         `side` can restrict hits to front faces (normal opposes ray) or back faces (normal follows ray).
         A triangle's bounding box can reach an earlier cell than its intersection: keep walking until the
         unvisited cells start beyond the best t, rather than accepting the first batch's hit.
         """
+        if t_min < 0:
+            raise ValueError("invalid rays: first-hit t_min must be nonnegative")
         return self._ray_query(origins, dirs, t_min, t_max, step_cells, side)
 
     def _ray_query(self, origins, dirs, t_min, t_max, step_cells, side, *, any_hit=False):

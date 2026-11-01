@@ -84,7 +84,6 @@ class TestFirstHit(unittest.TestCase):
         np.testing.assert_allclose(t[:2], 1)
         self.assertTrue((index.ray_first_hit(o, d, t_max=.999)[0] == -1).all())
         self.assertTrue((index.ray_first_hit(o, d, t_min=1)[0] == -1).all())
-        self.assertEqual(index.ray_first_hit(o[2:3], d[2:3], t_min=-1e-9)[0][0], 0)
         self.assertEqual(index.ray_first_hit(o[:1], d[:1], side="front")[0][0], 0)
         self.assertEqual(index.ray_first_hit(o[:1], d[:1], side="back")[0][0], -1)
         self.assertEqual(index.ray_first_hit(-o[:1], -d[:1], side="back")[0][0], -1)
@@ -95,7 +94,7 @@ class TestFirstHit(unittest.TestCase):
             self.assertTrue(np.isnan(bary).all())
             self.assertTrue(np.isinf(t).all())
         self.assertEqual(len(index.ray_first_hit(o[:0], d[:0])[0]), 0)
-        for kw in ({"t_max": -1}, {"t_max": np.nan}, {"step_cells": 0}, {"side": "unknown"}):
+        for kw in ({"t_min": -1}, {"t_max": -1}, {"t_max": np.nan}, {"step_cells": 0}, {"side": "unknown"}):
             with self.assertRaisesRegex(ValueError, "invalid rays"):
                 index.ray_first_hit(o, d, **kw)
 
