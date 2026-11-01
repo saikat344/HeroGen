@@ -58,7 +58,8 @@ class GenerationStore:
                 'remaining_usd': max(0, round(row['limit_usd'] - spent - running, 6)),
                 'accepting': reason == 'available', 'reason': reason,
                 'sentence': (f"Accepting heroes now: up to {row['max_running']} at a time, ${spent:.2f} of ${row['limit_usd']:g} spent"
-                             if row['enabled'] else 'Paused')}
+                             if reason == 'available' else 'Live generation is paused right now.'
+                             if reason == 'generation_paused' else 'The live-generation budget is used up for now.')}
 
     def generation_get(self):
         with self._tx() as c:

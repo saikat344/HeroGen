@@ -36,6 +36,15 @@ class SpendGuardTest(TempDirCase):
         with self.assertRaisesRegex(StoreError, '^The live-generation budget is used up for now\\.$'):
             self.create()
 
+    def test_sentence_matches_acceptance_and_refusal_reason(self):
+        self.assertTrue(self.store.generation_get()['sentence'].startswith('Accepting heroes now:'))
+        self.store.generation_update(actor=self.user['id'], enabled=False)
+        self.assertEqual(self.store.generation_get()['sentence'], 'Live generation is paused right now.')
+        self.store.generation_update(actor=self.user['id'], enabled=True, limit_usd=0)
+        status = self.store.generation_get()
+        self.assertFalse(status['accepting'])
+        self.assertEqual(status['sentence'], 'The live-generation budget is used up for now.')
+
     def test_every_final_state_releases_estimate_automatically(self):
         for state in ('succeeded', 'failed', 'rejected', 'canceled', 'stopped', 'crashed'):
             with self.subTest(state=state):
@@ -128,6 +137,33 @@ class SpendGuardTest(TempDirCase):
 
 
 class GuestHTTPTest(WebCase):
+    def test_session_exposes_only_public_generation_status(self):
+        self.store.generation_update(actor='operator', enabled=True, limit_usd=123.45,
+                                     running_estimate_usd=1.75, max_running=6)
+        anonymous = Browser(self.app)
+        guest = Browser(self.app)
+        guest.session()
+        self.assertEqual(guest.post('/api/demo/access', json={}).status_code, 200)
+        admin = self.signin('ops@example.com')
+        for browser in (anonymous, guest, admin):
+            with self.subTest(browser=browser):
+                self.assertEqual(browser.session()['generation'], {
+                    'accepting': True, 'reason': 'available', 'sentence': 'Accepting heroes now.'})
+        for browser in (anonymous, guest):
+            self.assertEqual(browser.get('/api/admin/generation').status_code, 403)
+        private = admin.get('/api/admin/generation').json()
+        self.assertTrue({'spent_usd', 'limit_usd', 'running_usd', 'remaining_usd',
+                         'running_estimate_usd', 'max_running', 'active', 'enabled'} <= private.keys())
+        self.assertEqual((private['limit_usd'], private['running_estimate_usd'], private['max_running']),
+                         (123.45, 1.75, 6))
+        for enabled, limit, reason, sentence in (
+                (False, 123.45, 'generation_paused', 'Live generation is paused right now.'),
+                (True, 0, 'generation_budget_exhausted', 'The live-generation budget is used up for now.')):
+            self.store.generation_update(actor='operator', enabled=enabled, limit_usd=limit)
+            for browser in (anonymous, guest):
+                self.assertEqual(browser.session()['generation'], {
+                    'accepting': False, 'reason': reason, 'sentence': sentence})
+
     def test_retired_public_account_session_must_open_guest_access(self):
         browser = Browser(self.app)
         browser.session()

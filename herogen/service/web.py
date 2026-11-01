@@ -361,7 +361,14 @@ class App:
         data: dict[str, Any] = {"signed_in": u is not None, "is_admin": self.s.is_admin(u),
                                 "limits": self.s.public(), "terms_ready": self.terms_ready(),
                                 "public_demo": self.s.public_demo}
-        data['generation'] = await self.call(self.svc.store.generation_get)
+        generation = await self.call(self.svc.store.generation_get)
+        public_sentences = {
+            'available': 'Accepting heroes now.',
+            'generation_paused': 'Live generation is paused right now.',
+            'generation_budget_exhausted': 'The live-generation budget is used up for now.',
+        }
+        data['generation'] = {'accepting': generation['accepting'], 'reason': generation['reason'],
+                              'sentence': public_sentences[generation['reason']]}
         if u is not None:
             data["user"] = {"email": u["email"], "created_at": u["created_at"], "kind": u.get('kind', 'account')}
         data["csrf"], new = self.csrf_for(request)
