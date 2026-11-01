@@ -310,6 +310,8 @@ class TestSchema(TempDirCase):
         from herogen.service import migrations as store_mod
 
         schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '').replace(store_mod.ANALYTICS_SCHEMA, '')
+        if version < 14:
+            schema = schema.replace("  build_all INTEGER NOT NULL DEFAULT 0,\n", '')
         if version < 8:
             schema = schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, "
                                     "note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n", "")
@@ -367,6 +369,9 @@ class TestSchema(TempDirCase):
             con.execute("UPDATE generation_settings SET enabled=1,limit_usd=42,running_estimate_usd=2,max_running=3 WHERE id=1")
         if version >= 12:
             for stmt in store_mod.MIGRATIONS[11]:
+                con.execute(stmt)
+        if version >= 13:
+            for stmt in store_mod.MIGRATIONS[12]:
                 con.execute(stmt)
         con.execute(f"PRAGMA user_version={version}")
         con.commit()

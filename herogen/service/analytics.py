@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS analytics_events_at ON analytics_events(at);
 CREATE INDEX IF NOT EXISTS analytics_events_day_event ON analytics_events(day, event);
 """
 
-PUBLIC = {"analytics_record", "analytics_report", "analytics_stage_times"}
+PUBLIC = {"analytics_record", "analytics_report", "analytics_stage_times", "analytics_stage_samples"}
 
 MAX_BATCH = 25
 MIN_DAYS = 1
@@ -191,7 +191,46 @@ def _stage_seconds(rows: list[dict[str, Any]]) -> list[float]:
     return _finite([r["seconds"] for r in rows if r["state"] in ("passed", "failed", "rejected", "canceled", "unavailable")])
 
 
+def real_timing(record: object) -> bool:
+    """Reused work and zero-cost stages whose calls were all replayed are not live measurements."""
+    if not isinstance(record, dict) or record.get('reused_from'):
+        return False
+    calls = record.get('calls', [])
+    if isinstance(calls, dict):
+        cached = calls.get('cached', 0)
+        total = calls.get('total', calls.get('count', 0))
+        if record.get('cost_usd') == 0 and cached and cached == total:
+            return False
+    flags = []
+    def visit(value):
+        if isinstance(value, dict):
+            for key in ('cached', 'replayed'):
+                if isinstance(value.get(key), bool):
+                    flags.append(value[key])
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+    visit(record)
+    return not (record.get('cost_usd') == 0 and flags and all(flags))
+
+
+def typical_stage_times(rows: list[dict[str, Any]]) -> dict[str, float]:
+    result = {}
+    for key in MAIN_STAGE_ORDER:
+        seconds = _stage_seconds([r for r in rows if r['stage'] == key])
+        if len(seconds) >= 3:
+            result[key] = _percentile(seconds, .5, 2)
+    return result
+
+
 class AnalyticsStore:
+    def analytics_stage_samples(self) -> list[dict[str, Any]]:
+        """Internal candidates for website hints; the web layer verifies their pipeline records."""
+        return self._all("SELECT js.*, j.user_id FROM job_stages js JOIN jobs j ON j.id=js.job_id "
+                         "WHERE j.created_at>=? AND j.deleted_at IS NULL", (self.clock() - DEFAULT_DAYS * 86400,))
+
     def analytics_stage_times(self) -> dict[str, float]:
         """The same seven-day stage medians as reporting, after three measured finishes."""
         rows = self._all("SELECT js.stage, js.state, js.seconds FROM job_stages js JOIN jobs j ON j.id=js.job_id "

@@ -42,9 +42,10 @@ from herogen.service.analytics import SCHEMA as ANALYTICS_SCHEMA
 ADMISSION_SCHEMA = SCHEMA
 LEGACY_ADMISSION_SCHEMA = LEGACY_SCHEMA
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
+    13: ("ALTER TABLE jobs ADD COLUMN build_all INTEGER NOT NULL DEFAULT 0",),
     12: ("ALTER TABLE jobs ADD COLUMN mesh_saved INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE jobs ADD COLUMN model_ready_at REAL",
          "ALTER TABLE jobs ADD COLUMN export_state TEXT NOT NULL DEFAULT 'pending'",
@@ -113,6 +114,7 @@ CREATE TABLE jobs (
   error_code TEXT, error_stage TEXT, error_message TEXT, counts_quota INTEGER NOT NULL DEFAULT 1,
   seconds REAL, cost_usd REAL, cost_detail TEXT, code_commit TEXT NOT NULL DEFAULT '', bytes INTEGER,
   continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,
+  build_all INTEGER NOT NULL DEFAULT 0,
   deleted_at REAL, refunded_at REAL, budget_required INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, client_key)
 );
 CREATE INDEX jobs_user ON jobs(user_id, created_at);
