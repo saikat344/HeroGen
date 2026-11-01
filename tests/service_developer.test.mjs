@@ -142,3 +142,11 @@ test('recorded text is rendered literally and focus survives refreshed data', as
   assert.equal(document.activeElement.attrs['data-dev-focus'], 'stage:3');
   assert.equal(panel.children.some((c) => c.tag === 'img'), false);
 });
+
+test('the visible close control returns to the normal view and restores toggle focus', async () => {
+  const { button, panel, mode } = setup(async () => ({ stages: [] }));
+  mode.update(job('one')); button.events.click(); await tick();
+  panel.querySelectorAll('[data-dev-focus]').find((n) => n.attrs['data-dev-focus'] === 'close').events.click();
+  assert.equal(panel.hidden, true);
+  assert.equal(document.activeElement, button);
+});

@@ -94,8 +94,9 @@
   <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>
 
   <section id="app" hidden>
-    <div class="workspace-heading row"><h2>Your workshop</h2><div class="spacer"></div><a href="#entry">＋ New hero</a></div>
-    <div class="grid">
+    <div class="workspace-heading row"><button type="button" id="backToIdeas" class="link">← Back to ideas</button><div class="spacer"></div><button type="button" id="showLibrary" class="link" aria-expanded="false" aria-controls="heroLibrary">Your heroes</button></div>
+    <p id="jobLoading" role="status" hidden>Opening your hero…</p>
+    <div id="heroLibrary" class="grid" hidden>
       <section class="card" aria-labelledby="listH">
         <h2 id="listH">Your heroes</h2>
         <ul id="jobs" class="jobs"></ul>
@@ -103,25 +104,29 @@
       </section>
     </div>
 
-    <section id="detail" class="card" tabindex="-1" hidden aria-labelledby="detailH">
-      <div class="row"><h2 id="detailH"></h2><span id="state" class="state"></span><div class="spacer"></div>
-        <button type="button" id="cancelJob" class="link" hidden>Cancel</button>
-        <button type="button" id="deleteJob" class="link danger">Delete</button></div>
-      <p id="detailSub" class="muted"></p>
-      <p id="detailErr" class="err" hidden></p>
-      <ol id="stages" class="stages"></ol>
-      <div id="images" class="images"></div>
-      <div id="previewWrap" hidden><canvas id="preview" aria-label="3D preview of the body"></canvas></div>
-      <div id="downloads" class="downloads"></div>
-      <div id="studio" hidden>
-        <h3>Using it in Roblox Studio</h3>
-        <ol class="steps">
-          <li>Download the Roblox bundle and unzip it.</li>
-          <li>Open README.txt from the bundle and follow it: it imports <code>high.glb</code>, inserts the rig and runs <code>bind_meshes.luau</code>, then checks the result with the rig test script.</li>
-        </ol>
-        <details><summary>README.txt</summary><pre id="readme"></pre></details>
+    <section id="detail" class="generation" tabindex="-1" hidden aria-labelledby="generationTitle">
+      <div class="generation-heading"><div><p class="eyebrow">From imagination to your game <span></span></p><h1 id="generationTitle">Your hero is taking shape.</h1><p id="generationSubtitle" class="generation-subtitle" role="status"></p></div><div class="generation-actions"><span id="state" class="state"></span><button type="button" id="cancelJob" class="link" hidden>Cancel generation</button></div></div>
+      <div class="progress-heading"><p id="workbenchName"></p><span id="progressCount"></span></div>
+      <ol id="stages" tabindex="0" role="list" class="stages generation-stages" aria-label="Generation stages"></ol>
+      <div class="generation-grid">
+        <section class="artboard" aria-labelledby="artifactLabel">
+          <div class="artboard-top"><span id="artifactLabel">Your character workbench</span><div class="artboard-tabs" aria-label="Preview type"><button type="button" id="artTab" aria-pressed="true">Images</button><button type="button" id="modelTab" aria-pressed="false" hidden>3D preview</button></div></div>
+          <div class="artboard-canvas"><img id="artboardImage" alt="" hidden><div id="artboardEmpty"><span class="waiting-symbol" aria-hidden="true">✧</span><h2>A little imagination.<br>A new dimension.</h2><p id="artboardEmptyText">Your first image will appear here when it is ready.</p></div><div id="previewWrap" hidden><canvas id="preview" aria-label="3D preview of the body"></canvas></div><div id="imageError" class="artifact-error" role="status" hidden><p>This image could not be loaded.</p><button type="button" id="retryImage">Try image again</button></div><div id="previewError" class="artifact-error" role="status" hidden><p>The inline 3D preview could not be loaded. You can still download the file or open the full viewer.</p></div></div>
+          <div id="images" class="artifact-strip" aria-label="Available character images"></div>
+          <p id="orbitHint" class="artboard-hint" hidden>Drag to orbit · Scroll to zoom</p>
+        </section>
+        <aside class="generation-notes">
+          <section class="work-note"><p class="note-label">On the workbench</p><h2 id="currentStep"></h2><p id="stepDescription"></p><p id="stepMessage" class="small"></p><p class="work-note-foot">Every new result appears here as it becomes available.</p></section>
+          <section id="qualityReview" class="quality-note" aria-labelledby="qualityH"><p class="note-label">A second look</p><h3 id="qualityH">Quality review</h3><p id="qualityStatus"></p><p id="qualityNote" class="small muted"></p></section>
+          <section class="generation-facts"><h2 id="detailH"></h2><p id="detailSub" class="muted small"></p></section>
+        </aside>
       </div>
-      <p class="small"><a id="viewerLink" href="/viewer">Open in the viewer</a></p>
+      <div id="detailErr" class="generation-error" role="alert" hidden></div>
+      <section id="stageIssues" class="stage-issues" aria-label="Steps needing attention" hidden></section>
+      <section class="result-section" aria-labelledby="resultsH"><div class="row"><div><p class="note-label">The next chapter</p><h2 id="resultsH">Bring your hero into your world.</h2></div><div class="spacer"></div><a id="viewerLink" class="button" href="/viewer">Open full viewer ↗</a></div><div id="downloads" class="downloads"></div>
+        <div id="studio" hidden><h3>Using it in Roblox Studio</h3><ol class="steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details><summary>Read Roblox setup notes</summary><pre id="readme"></pre></details></div>
+      </section>
+      <div class="generation-bottom"><span>Your progress is saved by the service. You can return to this hero later.</span><button type="button" id="deleteJob" class="link danger">Delete hero</button></div>
     </section>
 
     <section id="developerPanel" class="card developer" aria-labelledby="developerH" hidden></section>

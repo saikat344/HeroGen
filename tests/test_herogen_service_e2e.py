@@ -365,6 +365,73 @@ class TestServicePage(TempDirCase):
         t.eval("document.querySelector('#closeSignin').click(); document.querySelector('#howButton').click()")
         self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
 
+    def test_generation_navigation_artifact_selection_and_developer_mode(self):
+        self.signin()
+        t = self.tab
+        t.eval("""(() => {
+            window.inspectionReads=0; const original=window.fetch;
+            window.fetch=(url,options)=>{if(String(url).startsWith('/api/runs/')) window.inspectionReads++; return original(url,options);};
+        })()""")
+        self.make_hero('Workbench hero')
+        self.assertTrue(t.eval("document.querySelector('#entry').hidden"))
+        self.assertIn('job=', t.eval('location.hash'))
+        t.wait("document.querySelector('#images button') !== null")
+        t.eval("document.querySelector('#images button').click()")
+        selected = t.eval("document.querySelector('#artboardImage').getAttribute('src')")
+        self.assertEqual(t.eval('window.inspectionReads'), 0)
+        t.eval("document.querySelector('#developerMode').click()")
+        t.wait("!document.querySelector('#developerPanel').hidden && window.inspectionReads > 0")
+        self.runner.gate.set()
+        t.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
+        self.assertEqual(t.eval("document.querySelector('#artboardImage').getAttribute('src')"), selected)
+        self.assertTrue(t.eval("document.querySelector('#previewWrap').hidden"))
+        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"), 'Meet your hero.')
+        t.eval("document.querySelector('#modelTab').click()")
+        self.assertFalse(t.eval("document.querySelector('#previewWrap').hidden"))
+        t.eval("document.querySelector('#artTab').click()")
+        self.assertTrue(t.eval("document.querySelector('#previewWrap').hidden"))
+        saved_hash = t.eval('location.hash')
+        t.eval("document.querySelector('#backToIdeas').click()")
+        t.wait("!document.querySelector('#entry').hidden && document.querySelector('#detail').hidden")
+        self.assertTrue(t.eval("document.querySelector('#developerPanel').hidden"))
+        t.goto(self.url + '/' + saved_hash)
+        t.wait("!document.querySelector('#detail').hidden && document.querySelector('#entry').hidden")
+        self.assertEqual(t.eval("document.querySelector('#detailH').textContent"), 'Workbench hero')
+        t.eval("document.querySelector('#backToIdeas').click(); document.querySelector('#showLibrary').click()")
+        t.eval(r"""(() => {
+            const original=window.fetch;
+            window.fetch=async (url, options)=>{
+                const response=await original(url,options);
+                if(/^\/api\/jobs\/[^/]+$/.test(String(url))) await new Promise(resolve=>window.releaseJob=resolve);
+                return response;
+            };
+            document.querySelector('#jobs button').click();
+        })()""")
+        t.wait("typeof window.releaseJob === 'function'")
+        t.eval("document.querySelector('#backToIdeas').click(); window.releaseJob()")
+        t.eval("new Promise(resolve=>setTimeout(resolve,100))")
+        self.assertFalse(t.eval("document.querySelector('#entry').hidden"))
+        self.assertTrue(t.eval("document.querySelector('#detail').hidden"))
+
+    def test_confirmed_creation_still_opens_when_library_refresh_fails(self):
+        self.signin()
+        t = self.tab
+        t.eval("""(() => {
+            const original=window.fetch; window.submittedJobs=0;
+            window.fetch=async (url,options)=>{
+                if(url === '/api/jobs' && options?.method === 'POST') {
+                    window.submittedJobs++; return original(url,options);
+                }
+                if(url === '/api/jobs' && window.submittedJobs) return new Response(JSON.stringify({error:{message:'Library temporarily unavailable'}}),{status:503});
+                return original(url,options);
+            };
+        })()""")
+        self.make_hero('Saved despite refresh')
+        t.wait("/Your hero is saved/.test(document.querySelector('#banner').textContent)")
+        self.assertTrue(t.eval("document.querySelector('#entry').hidden"))
+        self.assertEqual(t.eval('window.submittedJobs'),1)
+        self.assertIsNone(t.eval("sessionStorage.getItem('hg-pending-job')"))
+
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""
         self.tab.eval("""(() => {
@@ -395,7 +462,7 @@ class TestServicePage(TempDirCase):
         settled = self.tab.eval("window.__polls")
         time.sleep(2 * POLL_S + 1)
         self.assertEqual(self.tab.eval("window.__polls"), settled, "the page kept polling a canceled job")
-        self.assertEqual(self.stage_states()["cover art"], "canceled")
+        self.assertEqual(self.stage_states()["Artwork"], "canceled")
         self.assertTrue(self.tab.eval("document.querySelector('#cancelJob').hidden"))
         self.assertEqual(self.tab.errors, [])
 
@@ -407,7 +474,7 @@ class TestServicePage(TempDirCase):
         self.tab.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
         self.tab.wait("!document.querySelector('.st-running')", timeout=60)
         states = self.stage_states()
-        self.assertEqual(states["quality check (held-out views)"], "passed", states)
+        self.assertIn("Passed", self.tab.eval("document.querySelector('#qualityStatus').textContent"))
         self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some((a) => "
                                       "a.textContent === 'Download GLB')"))
         time.sleep(POLL_S + 1.5)

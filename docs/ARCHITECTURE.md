@@ -2385,3 +2385,32 @@ available without the bundle. These illustrations are starter inputs, not eviden
 The static asset handler serves PNG, JPEG and WebP with image MIME types using its existing path confinement
 and symlink rejection. The workshop, viewer, downloads, and read-only developer inspection continue to use the
 existing service endpoints.
+
+
+### Generation workbench
+
+Selecting or creating a job opens a dedicated generation screen at `/#job=<id>`. A confirmed creation
+opens directly from the returned job view. Later library/account refresh failures are reported as such and
+never turn an accepted creation into a request to resubmit. It hides the idea-entry
+screen, renders the ordered main stages supplied by `GET /api/jobs/{id}`, and displays held-out side stages
+separately. The stage count measures passed main stages, not elapsed work or an estimated percentage.
+Pending stages on interrupted jobs are labelled not reached. Skipped, unavailable and failed optional steps
+remain visible even when the main job succeeds. Recorded stage durations, job duration and costs are displayed
+only when supplied. No remaining-time estimate, fabricated quality score, or model attribution is inferred.
+
+The artwork board follows available image URLs until a user selects an image or preview explicitly. Selection
+survives polling; a different job resets it. The inline 3D preview and full-viewer link appear when the GLB
+download is available. The current API exposes that file after successful completion; it does not expose an
+intermediate clay mesh. The workbench therefore keeps actual images visible during reconstruction rather
+than simulating intermediate geometry. Failed image/3D loads have explicit messages and recovery paths.
+
+Returning to ideas invalidates outstanding reads, stops polling and pauses 3D rendering. The service keeps
+running the job independently. Job selection, cancellation and deletion protect against delayed responses
+from an older selection. Inline model loads use their own generation token, discard superseded results,
+dispose replaced geometry/material resources, and pause rendering when hidden. Browser history restores the
+selected job. The library refreshes when opened.
+
+Developer mode remains opt-in and read-only. It loads the selected job's saved Lab records and exposes real
+model provenance, recorded costs, checks and thresholds without replacing missing values with invented data.
+It has a visible close control and Escape support; background polling does not steal artifact selection or
+focus. The held-out review's result remains distinct from the main job's status.
