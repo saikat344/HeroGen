@@ -94,7 +94,7 @@ class RedoModelErrorsTest(JobCase):
 
     def test_redo_policy_refusals_are_private_rejections_without_refunds(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
-        self.fail_top = True  # No concurrent call returns a paid answer in this case.
+        self.fail_top = True  # An unreached top must not affect the refusal.
         for stage in (1, 2):
             with self.subTest(stage=stage):
                 child, saved = self.run_failure(stage, "rejected", "rejected")
@@ -107,12 +107,13 @@ class RedoModelErrorsTest(JobCase):
                 record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(stage)
                 self.assertEqual(record["status"], "error")
 
-    def test_redo_policy_refusal_counts_completed_concurrent_top_calls(self):
+    def test_redo_policy_refusal_never_sends_or_charges_an_unreached_top(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
         child, saved = self.run_failure(2, "rejected", "rejected")
         self.assertEqual(saved["counts_quota"], 1)
         self.assertIsNone(saved["refunded_at"])
-        self.assertAlmostEqual(saved["cost_usd"], .0125)  # Independent top edit and its SAM mask.
+        self.assertEqual(saved["cost_usd"], 0)
+        self.assertNotIn(TOP_PROMPT, self.api.prompts)
         record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(2)
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["cost_usd"], saved["cost_usd"])

@@ -327,17 +327,14 @@ sheet and part-mask calls); later attempts reuse those results and scale them to
 and the final carve can change retrying and the kept sheet, and a top API error stops the stage; deferring top requests until
 after selection would change those outcomes.
 
-`stage2_turnaround(..., concurrency=1)` retains serial calls by default. The pipeline CLI and service
-stage adapter expose `--turnaround-concurrency` with a default of four; a value above one overlaps the sheet edit/mask branches
-and one independent top edit/mask branch, bounded by that many worker threads. Local checks, top scaling,
-ranking and earliest-passing selection remain in attempt order with the same prompts and sample numbers.
-Parallel mode draws the top speculatively even if no sheet becomes eligible. The top is scaled separately
-for each eligible sheet. Branch logs join in logical order; repeated top uses
-are recorded as cache hits. Identical candidate images serialize segmentation to avoid duplicate sends or
-concurrent writes to one cache entry. Unused speculative candidates are still paid and logged, and every
-launched call is drained before success: any model error or replay miss stops the stage. A replay therefore
-needs the speculative candidates too. Existing single-request budget callbacks require concurrency one;
-a parallel caller must reserve the bounded stage cost before launch. This does not change any gate.
+Stage 2 dispatches model calls in gate order. A sheet edit and its segmentation must complete before
+its local checks; only an eligible sheet requests a top, and only a failed attempt requests another sheet.
+This preserves the first error, its retry classification, replay requirements and recorded spend across
+callers. Unreached calls are never sent, so their failures cannot replace a primary error and they incur no
+charges. Errors from every reached model call still stop the stage. `stage2_turnaround` retains the positive
+integer `concurrency` argument (default one), and the CLI and service retain `--turnaround-concurrency`
+(default four), for compatibility; these settings do not speculate across the gates. Single-request budget
+callbacks therefore apply to every dispatched call. Prompts, sample numbers, gates and ranking are unchanged.
 
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the
