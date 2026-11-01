@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from herogen.blender.remote import client as rc
 
@@ -172,11 +173,28 @@ class Live(Base):
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         self._env = dict(os.environ)
         os.environ["HEROGEN_MODAL"] = str(fake)
+        os.environ["HEROGEN_REMOTE_DEPLOYED"] = "0"
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._env)
         super().tearDown()
+
+    def test_deployed_option_uses_the_bridge_without_calling_a_real_deployment(self):
+        os.environ["HEROGEN_REMOTE_DEPLOYED"] = "1"
+        run = subprocess.run
+        seen = []
+
+        def offline(argv, **kwargs):
+            seen.append(argv)
+            self.assertEqual(argv[:3], [sys.executable, "-m", "herogen.service.modal_bridge"])
+            return run([os.environ["HEROGEN_MODAL"], *argv[3:]], **kwargs)
+
+        with mock.patch.object(rc.subprocess, "run", side_effect=offline):
+            result = rc.RemoteClient(self.cache, mode="live", timeout=60).objects(self.img, self.msk)
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(result.cached)
+        self.assertTrue(result.path("mesh.glb").is_file())
 
     def test_records_outputs_entry_and_runner_environment(self):
         c = rc.RemoteClient(self.cache, mode="live", timeout=60, body_gpu="T4")
