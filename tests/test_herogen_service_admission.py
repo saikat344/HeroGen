@@ -134,6 +134,22 @@ class TestAdmission(TempDirCase):
         result=run_job(self.store,self.s,storage,j['id'],'call',execute,heldout=heldout)
         return j,result
 
+    def test_failed_local_stage_frees_its_slot_at_the_next_sweep(self):
+        # A local Blender stage that exits with an error leaves its work uncertain, which holds the slot.
+        # The worker proved its own process stopped, so the periodic sweep settles it without an operator.
+        self.configure(max_active=1)
+        u,_=self.guest(); j,result=self.execute_job(u,FakeRunner(fail={'4':'error'}),lambda job:None)
+        self.assertEqual(result,'failed')
+        self.assertEqual(self.status()['reason'],'generation_capacity')
+        states=dict(self.store.db.execute("SELECT kind,state FROM admission_work WHERE job_id=?",(j['id'],)).fetchall())
+        self.assertEqual(states['blender'],'uncertain')
+        self.assertEqual(settle_admissions(self.store),[], 'no settlement before the grace period')
+        self.clock.advance(61)
+        self.assertEqual(reconcile(self.store,self.s,lambda jid:'unused')['auto_settled'],[j['id']])
+        row=self.store.budget_report()['admissions'][0]
+        self.assertTrue(row['closed']); self.assertTrue(row['auto_settled']); self.assertEqual(row['actual_micro'],0)
+        self.assertTrue(self.status()['accepting'])
+
     def test_rejected_deleted_or_unspawned_side_checks_release_certain_capacity(self):
         u,_=self.guest(); j,result=self.execute_job(u,FakeRunner(fail={'3':'reject'}),lambda job:None)
         self.assertEqual(result,'rejected'); self.assertTrue(self.store.budget_report()['admissions'][0]['closed'])
