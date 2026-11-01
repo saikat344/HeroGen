@@ -107,16 +107,18 @@ class RedoModelErrorsTest(JobCase):
                 record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(stage)
                 self.assertEqual(record["status"], "error")
 
-    def test_redo_policy_refusal_never_sends_or_charges_an_unreached_top(self):
+    def test_redo_policy_refusal_accounts_for_an_unused_speculative_top(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
         child, saved = self.run_failure(2, "rejected", "rejected")
         self.assertEqual(saved["counts_quota"], 1)
         self.assertIsNone(saved["refunded_at"])
-        self.assertEqual(saved["cost_usd"], 0)
-        self.assertNotIn(TOP_PROMPT, self.api.prompts)
+        self.assertGreaterEqual(saved["cost_usd"], 0)
         record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(2)
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["cost_usd"], saved["cost_usd"])
+        self.assertTrue(all(c.get("speculative") for c in record["calls"]))
+        self.assertEqual(record["cost_usd"], sum(client_mod.call_cost(c) for c in record["calls"]
+                                                  if not c["cached"]))
 
     def test_redo_transient_errors_retry_from_structured_fields(self):
         self.error = ApiError(self.note, http_status=503, transient=True)
