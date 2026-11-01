@@ -1,0 +1,100 @@
+"""Call receipts and report arithmetic without live model or GPU work."""
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+import urllib.error
+from unittest import mock
+
+from PIL import Image
+from herogen.pipeline import client as client_module
+from herogen.pipeline.client import ApiError, ModelClient, ReplayMiss
+from herogen.pipeline.report import report
+from herogen.pipeline.runfolder import RunFolder
+from herogen.blender.remote import client as remote_module
+
+
+class CallReportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_env_switch_and_two_transport_attempts_both_recorded(self):
+        limiter = mock.Mock()
+        limiter.acquire.return_value = ("slot", 0)
+        from herogen.pipeline.retry import RetryPolicy
+        with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "1", "MODEL_API_KEY": "placeholder"}):
+            client = ModelClient(self.root / "cache", mode="live", limiter=limiter,
+                                 policy=RetryPolicy(max_attempts=8, sleep=lambda s: None, base_s=0))
+            self.assertEqual(client.policy.max_attempts, 2)
+            with mock.patch.object(client_module, "_open", side_effect=urllib.error.HTTPError(
+                    "url", 429, "busy", {}, None)) as send:
+                with self.assertRaises(ApiError):
+                    client.generate_image("a knight")
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(len(client.log.calls), 2)
+        self.assertEqual([c["attempt"] for c in client.log.calls], [1, 2])
+        self.assertEqual(client.log.cost_usd(), 0)
+        self.assertTrue(all(c["wall_seconds"] >= 0 for c in client.log.calls))
+
+    def test_cached_calls_and_replay_misses_have_receipts(self):
+        client = ModelClient(self.root / "cache", fast=True)
+        image = Image.new("RGB", (8, 8))
+        with self.assertRaises(ReplayMiss):
+            client.segment(image, "face")
+        self.assertEqual(client.log.calls[-1]["outcome"], "ReplayMiss")
+        self.assertEqual(client.log.cost_usd(), 0)
+        with mock.patch.object(client, "_load", return_value={"instances": []}):
+            self.assertEqual(client.segment(image, "face"), [])
+        self.assertTrue(client.log.calls[-1]["cached"])
+        self.assertIn("segment face", client.log.calls[-1]["purpose"])
+
+    def test_report_sums_all_stages_and_orders_cached_and_failed_calls(self):
+        run = RunFolder(self.root, "hero")
+        for stage, start, seconds, calls in [
+            (3, "2026-11-01T01:00:02+00:00", 7, [
+                {"model": "sam-3d-objects", "kind": "gpu", "purpose": "shape", "cached": False,
+                 "started": "2026-11-01T01:00:02+00:00", "wall_seconds": 2, "cost_usd": .05,
+                 "outcome": "RemoteError"}]),
+            (1, "2026-11-01T01:00:01+00:00", 4, [
+                {"model": "muse-image-1.0", "kind": "edit", "purpose": "cover art", "cached": True,
+                 "started": "2026-11-01T01:00:01+00:00", "wall_seconds": .2}]),
+            (5, "2026-11-01T01:00:03+00:00", 1, [])]:
+            run.write_stage({"stage": stage, "name": "synthetic", "started": start,
+                             "seconds": seconds, "calls": calls})
+        output = io.StringIO()
+        result = report(run.path, stream=output)
+        self.assertEqual([c["stage"] for c in result["calls"]], [1, 3])
+        self.assertEqual(result["total"], {"calls": 2, "seconds": 2.2, "elapsed_seconds": 12,
+                                          "cost_usd": .05, "unknown_cost_calls": 0})
+        self.assertIn("RemoteError", output.getvalue())
+        self.assertIn("TOTAL", output.getvalue())
+        self.assertEqual(result, json.loads((run.path / "fast-report.json").read_text()))
+
+    def test_report_labels_unknown_gpu_prices(self):
+        run = RunFolder(self.root, "unknown")
+        run.write_stage({"stage": 3, "name": "shape", "calls": [
+            {"model": "sam-3d-objects", "cost_usd": None, "cached": False}]})
+        output = io.StringIO()
+        data = report(run.path, stream=output)
+        self.assertEqual(data["total"]["unknown_cost_calls"], 1)
+        self.assertIn("known costs only", output.getvalue())
+
+    def test_timed_out_gpu_call_has_one_failure_receipt(self):
+        image = self.root / "image.png"
+        Image.new("RGB", (8, 8)).save(image)
+        remote = remote_module.RemoteClient(self.root / "remote", mode="live", timeout=1, fast=True)
+        with mock.patch.object(remote_module, "find_modal", return_value="synthetic"), \
+                mock.patch.object(remote_module.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+                    "synthetic", 1)) as send:
+            with self.assertRaises(remote_module.RemoteError):
+                remote.objects(image, image)
+        send.assert_called_once()
+        self.assertEqual(len(remote.log.calls), 1)
+        self.assertEqual(remote.log.calls[0]["outcome"], "RemoteError")
+        self.assertEqual(remote.log.calls[0]["kind"], "gpu")
+        self.assertGreaterEqual(remote.log.calls[0]["wall_seconds"], 0)
