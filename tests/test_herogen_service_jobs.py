@@ -548,6 +548,21 @@ class TestStageCommands(TempDirCase):
                 runner.run(specs[key], self.ctx())
             self.assertEqual("MODEL_API_KEY" in execute.call_args.kwargs["env"], key in ("1", "3", "3f"))
 
+    def test_stage_env_forwards_fast_lane_and_request_budgets(self):
+        from unittest import mock
+        from herogen.service.runner import base_env
+
+        values = {"HEROGEN_FAST_LANE": "1", "HEROGEN_MAX_IN_FLIGHT": "6",
+                  "HEROGEN_RPM_IMAGE": "30", "HEROGEN_RPM_TEXT": "120",
+                  "HEROGEN_REFINE_NOTE": "private per-job text"}
+        with mock.patch.dict(os.environ, values, clear=True):
+            env = base_env()
+        for key in values:
+            if key != "HEROGEN_REFINE_NOTE":
+                self.assertEqual(env[key], values[key])
+        self.assertNotIn("HEROGEN_REFINE_NOTE", env)
+        self.assertNotIn(values["HEROGEN_REFINE_NOTE"], env.values())
+
     def test_stage_env_holds_no_secrets(self):
         from herogen.service.runner import base_env
 
