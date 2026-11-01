@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--stages", default="3,3f,4",
                    help="3, 3f (texture refine), 4; 3,4 also includes 3f under best and both Roblox profiles")
     r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
+    r.add_argument("--refine-profile", choices=("best", "fast"), default=None,
+                   help="texture repaint schedule (default best; fast uses frozen-atlas waves)")
     r.add_argument("--refine-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
     r.add_argument("--refine-cap-usd", type=lambda value: None if value == "none" else float(value), default=0.80, help="per-run texture-refine API cap")
     r.add_argument("--refine-recipe", choices=("RF2R", "RF2W"), default="RF2R",
@@ -152,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
                               profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout,
-                              upscale_texture=a.upscale_texture, recipe=a.refine_recipe)
+                              upscale_texture=a.upscale_texture, recipe=a.refine_recipe, refine_profile=a.refine_profile)
         except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
