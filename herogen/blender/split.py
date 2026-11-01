@@ -471,6 +471,7 @@ class Section:
     rims: list            # [{"neighbour", "joint", "points": [k,3]}]
     cap_triangles: int
     cap_points_outside: int = 0   # cap samples still outside the neighbour after squashing (poke-through)
+    colour_exterior: np.ndarray | None = None  # per face; caps and cover interiors are False
 
 
 def _neighbour_of(g: int, name: str, pair_of: dict) -> str | None:
@@ -688,5 +689,6 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         n_before = len(lf)
         cv, cf = close_section(lv, lf, loops, caps)
         poke = int(sum(cp.get("outside", 0) for cp in caps if cp is not None))
-        out[name] = Section(name, cv, cf, pivot, rims, int(len(cf) - n_before), poke)
+        out[name] = Section(name, cv, cf, pivot, rims, int(len(cf) - n_before), poke,
+                            np.arange(len(cf)) < n_before)
     return out, rig

@@ -281,6 +281,14 @@ class TestSections(SyntheticBase):
         added = len(covered["UpperTorso"].faces) - len(secs["UpperTorso"].faces)
         self.assertEqual(added, sum(i["triangles"] for i in info.values()))
         self.assertEqual(_open_edges(covered["UpperTorso"].faces), 0)
+        for name, section in secs.items():
+            self.assertEqual(int((~section.colour_exterior).sum()), section.cap_triangles, name)
+        original = secs["UpperTorso"]
+        section = covered["UpperTorso"]
+        np.testing.assert_array_equal(section.colour_exterior[:len(original.faces)], original.colour_exterior)
+        # Each shell's reversed inner patch and connecting walls are excluded.
+        self.assertGreater(int(section.colour_exterior[len(original.faces):].sum()), 0)
+        self.assertLess(int(section.colour_exterior[len(original.faces):].sum()), added / 2)
 
     def test_visible_gap_never_exceeds_geometric_gap(self):
         secs, _ = split.build_sections(self.verts, self.faces, self.sk, rings=1, ring_points=8)
@@ -370,10 +378,12 @@ class TestEndToEndBlender(SyntheticBase):
         with mock.patch.object(texture, "load_closeups", return_value=(
                 {"front": closeup}, {"used": ["front"], "notes": []})):
             r4 = run_stage4(run, timeout=600, profile="roblox-ingame")
+        self.assertTrue(r4["ok"], r4)
         recorded = json.loads((run / "stage-4.json").read_text())
         info = recorded["body"]["texture"]
         self.assertEqual(info["colour_source"], "refined")
         self.assertFalse(info["source_fallback"])
+        self.assertEqual(info["colour_views"], [])
         self.assertEqual(info["refined"]["stage3f_source_sha256"], source_sha)
         self.assertEqual(info["refined"]["refined_glb_sha256"],
                          hashlib.sha256((run / "03-refined.glb").read_bytes()).hexdigest())
@@ -423,7 +433,7 @@ class TestEndToEndBlender(SyntheticBase):
                 stats = info["bake"][lod]["head"] if section == "Head" else info["bake"][lod]
                 self.assertEqual(stats["texels_primary"], 1)
                 self.assertFalse(stats["closeups_applied"])
-                self.assertEqual(stats["sampling"], "smooth-normal cage rays with closest-triangle fallback")
+                self.assertEqual(stats["sampling"], "reliable closest triangles with smooth-normal fold rays")
                 projection = stats["primary_projection"]
                 self.assertGreater(projection["max_distance"], 0)
                 self.assertEqual(projection["distance_factor"], 4)
@@ -435,7 +445,7 @@ class TestEndToEndBlender(SyntheticBase):
             self.assertEqual(overall["fallback_count"], stats["primary_projection"]["fallback_count"]
                              + stats["head"]["primary_projection"]["fallback_count"])
             self.assertEqual(overall["fallback_fraction"], overall["fallback_count"] / overall["samples"])
-            self.assertEqual(stats["head"]["primary_projection"]["normal_fields"], {"Head": "bounding ellipsoid"})
+            self.assertEqual(stats["head"]["primary_projection"]["normal_fields"], {"Head": "area-weighted vertex normals"})
         for name in ("atlas-high-views.png", "atlas-head-high-views.png"):
             self.assertTrue((run / "04-body" / name).is_file())
             self.assertFalse(any(name in path for path in r4["outputs"]))
@@ -448,6 +458,16 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertTrue(r6["ok"], r6)
         self.assertFalse(any("views.png" in path for path in r6["outputs"]))
         self.assertNotIn("views.png", (run / "06-roblox" / "HeroGen-R15.rbxmx").read_text())
+
+        # A validated refinement remains usable without either view colour or the raw source fallback.
+        (work / "03-source-texture.png").unlink()
+        with mock.patch.object(texture, "observed_colour_views", return_value={}):
+            no_views = run_stage4(run, timeout=600, profile="roblox-ingame")
+        self.assertTrue(no_views["ok"], no_views)
+        self.assertEqual(no_views["body"]["texture"]["colour_views"], [])
+        self.assertNotIn("high_views", no_views["body"]["texture"]["bake"])
+        self.assertFalse((run / "04-body" / "atlas-high-views.png").exists())
+        self.assertFalse((run / "04-body" / "atlas-head-high-views.png").exists())
 
     def test_stages_3_and_4(self):
         from herogen.blender.stage3 import run_stage3

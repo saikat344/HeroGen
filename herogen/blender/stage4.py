@@ -500,8 +500,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     (body / "pose-renders").mkdir(parents=True, exist_ok=True)
     (body / "rest-renders").mkdir(parents=True, exist_ok=True)
     # A comparison from an earlier colour source must not be scored as a variant of this body.
-    for stale in body.glob("atlas-high-*.png"):
-        stale.unlink()
+    for pattern in ("atlas-high-*.png", "atlas-head-high-*.png"):
+        for stale in body.glob(pattern):
+            stale.unlink()
     for lod in ("high", "low"):            # a LOD this profile does not build must not survive from a past run
         if lod not in builds:
             for stale in (body / f"{lod}.glb", body / f"atlas-{lod}.png"):
@@ -606,7 +607,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                 # body, no source fallback (its effect), and the side views down-weighted (they did not shape
                 # this mesh, so their colours land on oblique surfaces at the wrong depth)
                 variants = {}
-                if primary is not None:
+                if primary is not None and (colour_views or source is not None):
                     variants["views"] = {"source": source}
                 elif closeups:
                     variants["no-closeup"] = {"source": source}
@@ -825,7 +826,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                     "head_front_island_scale": HEAD_FRONT_DENSITY if primary is not None else 1.0,
                     "head_textures": {k: v.relative_to(run).as_posix() for k, v in head_paths.items()},
                     "closeups": closeup_info,
-                    "colour_views": sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
+                    "colour_views": [] if primary is not None else sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
                     "transfer_metrics": transfer_metrics,
                     "comparison_mask": "intersection with the existing two-pixel inset",
                     "gates": {"reference": "refined" if primary is not None else "turnaround",

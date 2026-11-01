@@ -3,10 +3,10 @@
 With an explicit `primary` SourceColour, every covered texel takes that source's colour, including the Head
 and every LOD. View projections, the raw source fallback and stage 2f close-ups do not alter it. The same
 rasterisation, whole-body depth maps and outward island padding are retained. Refined lookup casts bounded
-rays along a continuous cage normal field in both directions, using the nearest outward-facing hit's exact
-corner UVs. Body sections interpolate area-weighted vertex normals. The Head uses the bounding ellipsoid's
-smooth field: remeshed nose/cheek normals otherwise aim into folded source sheets. Misses use the exact
-closest triangle. Distance measurements and fallback fractions are recorded.
+rays only where exact closest-triangle correspondence is unreliable. Coincident sheets retain their exact
+corner UVs. Reliable nearby sheets with agreeing true normals retain closest points; folds use bounded rays
+along area-weighted smooth surface normals. Interior joint caps and inner cover walls do not calibrate the
+ray distance limit. Distance measurements and fallback fractions are recorded.
 Stage 4 validates the refined source's provenance and frame first. The view fallback retains dense samples.
 
 Without a primary source the colour rules below apply unchanged.
@@ -63,6 +63,9 @@ CLOSEUP_PREFILTER = 0.42
 # Measured per bake on up to 4096 evenly spaced covered texels; record both the measurement and the limit.
 CAGE_DISTANCE_FACTOR = 4.0
 CAGE_DISTANCE_SAMPLES = 4096
+# Nearby exterior sheets agree within .01 studs and a normal cosine of .8.
+CLOSEST_DISTANCE = 0.01
+CLOSEST_NORMAL_COS = 0.8
 
 
 @dataclass
@@ -179,7 +182,7 @@ class SourceColour:
     """Source colour through dense fallback samples, exact closest triangles or bounded cage rays.
 
     Calling the source retains its existing closest-point lookup; the view bake uses dense samples.
-    Refined-primary bakes use cage(), which interpolates exact hit UVs and falls back to closest triangles.
+    Refined-primary bakes use cage(), preserving reliable closest points and projecting fold correspondences.
     Queries are bounded in memory.
     """
 
@@ -231,9 +234,9 @@ class SourceColour:
                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Nearest outward-facing smooth-normal ray hit, or exact closest triangle on a miss.
 
-        Returns triangle ids, barycentrics, travel distances and the fallback mask. Zero normals fall back.
-        Reject back-facing source sheets, which can otherwise be closer inside a crease than its exterior.
-        Ray origins move back by a roundoff allowance so a point exactly on the source surface also hits.
+        Returns triangle ids, barycentrics, travel distances and the fallback mask. Zero normals fall back
+        unless the closest sheet is coincident. Coincident sheets are valid on either side; farther hits
+        reject back-facing sheets inside a crease. Ray origins move back by a roundoff allowance.
         """
         if self.index is None or not np.isfinite(max_distance) or max_distance <= 0:
             raise ValueError("cage projection needs an exact source and a positive finite distance limit")
@@ -244,6 +247,12 @@ class SourceColour:
         n = normals / np.maximum(length, 1e-30)[:, None]
         ids, bary, dist = np.full(len(p), -1, dtype=np.int64), np.full((len(p), 3), np.nan), np.full(len(p), np.inf)
         eps = 32 * np.finfo(float).eps * max(1., float(np.abs(self.verts).max()))
+        # A coincident hit is valid from either side, including an overhang's underside.
+        closest_ids, closest_bary, closest_dist = self.closest(p)
+        coincident = closest_dist <= 2 * eps
+        ids[coincident] = closest_ids[coincident]
+        bary[coincident] = closest_bary[coincident]
+        dist[coincident] = closest_dist[coincident]
         for start in range(0, len(p), 4096):
             end = min(start + 4096, len(p))
             for sign in (1, -1):
@@ -261,30 +270,47 @@ class SourceColour:
             ids[fallback], bary[fallback], dist[fallback] = self.closest(p[fallback])
         return ids, bary, dist, fallback
 
-    def cage(self, p: np.ndarray, normals: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Colour, sampled nearest distances and cage diagnostics for this bake.
+    def cage(self, p: np.ndarray, normals: np.ndarray, *, surface_normals: np.ndarray | None = None,
+             exterior: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Preserve reliable exact closest points; project unreliable fold correspondences along the surface.
 
-        The second array contains the deterministic calibration subset's exact nearest distances, not one
-        distance per texel. Per-lookup travel distances (rays and misses) are summarised separately.
+        Only exterior texels calibrate remeshing distances. Interior geometry still receives source colour,
+        using closest triangles, but cannot widen the ray limit or contaminate distance statistics.
         """
-        sample = p[np.linspace(0, len(p) - 1, min(len(p), CAGE_DISTANCE_SAMPLES), dtype=np.int64)]
-        nearest = self.closest(sample)[2]
-        p95 = float(np.percentile(nearest, 95))
+        ids, bary, distances = self.closest(p)
+        exterior = np.ones(len(p), dtype=bool) if exterior is None else np.asarray(exterior, bool)
+        eligible = np.flatnonzero(exterior)
+        sample = eligible[np.linspace(0, len(eligible) - 1, min(len(eligible), CAGE_DISTANCE_SAMPLES), dtype=np.int64)]
+        nearest = distances[sample]
+        p95 = float(np.percentile(nearest, 95)) if len(nearest) else 0.
         floor = float(64 * np.finfo(float).eps * max(1., float(np.abs(self.verts).max())))
         limit = max(CAGE_DISTANCE_FACTOR * p95, floor)
-        ids, bary, distances, fallback = self.project(p, normals, limit)
+        true = normals if surface_normals is None else surface_normals
+        true = true / np.maximum(np.linalg.norm(true, axis=1), 1e-30)[:, None]
+        source_normal = self.index.normal[ids]
+        source_normal = source_normal / np.maximum(np.linalg.norm(source_normal, axis=1), 1e-30)[:, None]
+        agree = np.einsum("ij,ij->i", true, source_normal) >= CLOSEST_NORMAL_COS
+        reliable = (distances <= floor) | ((distances <= CLOSEST_DISTANCE) & agree)
+        ray = exterior & ~reliable
+        fallback = np.zeros(len(p), dtype=bool)
+        if ray.any():
+            ids[ray], bary[ray], distances[ray], fallback[ray] = self.project(p[ray], normals[ray], limit)
         uv = np.einsum("ni,nij->nj", bary, self.corner_uv[ids])
         t = self.texture
         colour = _bilinear(t, uv[:, 1] * t.shape[0] - .5, uv[:, 0] * t.shape[1] - .5)
         return colour, nearest, {
-            "sampling": "smooth-normal cage rays with closest-triangle fallback",
+            "sampling": "reliable closest triangles with smooth-normal fold rays",
             "primary_projection": {"max_distance": limit, "distance_factor": CAGE_DISTANCE_FACTOR,
                                    "distance_samples": len(sample), "nearest_distance_p95": p95,
                                    "roundoff_floor": floor, "samples": len(p),
+                                   "closest_distance_max": CLOSEST_DISTANCE,
+                                   "closest_normal_cos_min": CLOSEST_NORMAL_COS,
+                                   "closest_count": int((~ray).sum()), "ray_count": int(ray.sum()),
+                                   "interior_count": int((~exterior).sum()),
                                    "fallback_count": int(fallback.sum()), "fallback_fraction": float(fallback.mean()),
-                                   "travel_distance_mean": float(distances.mean()),
-                                   "travel_distance_p95": float(np.percentile(distances, 95)),
-                                   "travel_distance_max": float(distances.max())}}
+                                   "travel_distance_mean": float(distances[exterior].mean()) if len(eligible) else None,
+                                   "travel_distance_p95": float(np.percentile(distances[exterior], 95)) if len(eligible) else None,
+                                   "travel_distance_max": float(distances[exterior].max()) if len(eligible) else None}}
 
 
 def vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -298,18 +324,7 @@ def vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
 
 
 def cage_normals(name: str, verts: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, str]:
-    """A continuous per-vertex ray field, interpolated across the body's original triangles.
-
-    For the Head, the gradient of its bounding ellipsoid suppresses remeshing creases in the cage itself.
-    It has no fitted parameters: centre is the bounding-box midpoint and radii are its half extents. On s009,
-    ordinary smooth normals leave source-sheet jumps at the nose; this outer field removes those switches.
-    Flat/empty Heads and other sections retain area-weighted mesh normals.
-    """
-    span = np.ptp(verts, axis=0) if len(verts) else np.zeros(3)
-    if name == "Head" and np.all(span > 1e-12):
-        centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
-        normal = (verts - centre) / span ** 2
-        return normal / np.maximum(np.linalg.norm(normal, axis=1), 1e-30)[:, None], "bounding ellipsoid"
+    """True area-weighted smooth surface normals, independent of section name."""
     return vertex_normals(verts, faces), "area-weighted vertex normals"
 
 
@@ -425,7 +440,7 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     (module notes). `primary` supplies every covered texel and suppresses view colour and close-ups."""
     if primary is not None:
         closeups = None
-    pos, uv, nrm, smooth, normal_fields = [], [], [], [], {}
+    pos, uv, nrm, smooth, exterior, normal_fields = [], [], [], [], [], {}
     for name, s in sections.items():
         if name not in uvs or len(s.faces) == 0:
             continue
@@ -435,7 +450,11 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         uv.append(uvs[name])
         nrm.append(n / np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None])
         if primary is not None:
-            normal, normal_fields[name] = cage_normals(name, s.verts, s.faces)
+            outer = getattr(s, "colour_exterior", None)
+            if outer is None:
+                outer = np.arange(len(s.faces)) < len(s.faces) - getattr(s, "cap_triangles", 0)
+            exterior.append(outer)
+            normal, normal_fields[name] = cage_normals(name, s.verts, s.faces[outer])
             smooth.append(normal[s.faces])
     if not pos:
         # nothing to bake (an empty section, say the Head of a broken body): a blank texture, so stage 4 reaches
@@ -491,14 +510,15 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     src_stats = {}
     if primary is not None:
         normal = np.einsum("ni,nij->nj", raster[3], np.concatenate(smooth)[tri])
-        col, dist, projection = primary.cage(p3, normal)
+        col, dist, projection = primary.cage(p3, normal, surface_normals=n3,
+                                             exterior=np.concatenate(exterior)[tri])
         projection["primary_projection"]["normal_fields"] = normal_fields
         src_stats = {"colour_source": "refined", "texels_primary": 1.0,
                      **projection,
                      "primary_nearest_distance_samples": len(dist),
-                     "primary_nearest_distance_mean": float(dist.mean()),
-                     "primary_nearest_distance_p95": float(np.percentile(dist, 95)),
-                     "primary_nearest_distance_max": float(dist.max()), "closeups_applied": False}
+                     "primary_nearest_distance_mean": float(dist.mean()) if len(dist) else None,
+                     "primary_nearest_distance_p95": float(np.percentile(dist, 95)) if len(dist) else None,
+                     "primary_nearest_distance_max": float(dist.max()) if len(dist) else None, "closeups_applied": False}
     elif source is not None:
         alpha = np.clip(best_facing / fallback_facing, 0.0, 1.0)[:, None]
         need = alpha[:, 0] < 1.0

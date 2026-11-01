@@ -105,8 +105,14 @@ class RefinedSourceTests(unittest.TestCase):
         np.testing.assert_allclose(colour, [[255, 0, 0]])
         json.dumps(info, allow_nan=False)
 
+    def test_cap_reached_uses_exported_refined_source(self):
+        self.write_record(status="cap_reached")
+        primary, info = self.load()
+        self.assertIsNotNone(primary, info)
+        self.assertTrue(info["used"])
+
     def test_incomplete_status_never_uses_stale_glb(self):
-        for status in ("skipped", "running", "error", "cap_reached", None):
+        for status in ("skipped", "running", "error", None):
             with self.subTest(status=status):
                 self.write_record(status=status)
                 self.assertRejected("not complete")
