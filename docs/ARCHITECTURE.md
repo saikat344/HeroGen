@@ -26,6 +26,69 @@ tested separately. A run can also start from a text prompt: stage p draws the sk
 Stage 6 writes the files Roblox Studio imports (see "Roblox export"); play-testing in a game engine is not part
 of this pipeline.
 
+
+### Run versions and appearance notes
+
+`herogen.pipeline.redo.fork_run` creates a new, absent run folder from a parent at stage 1 (cover) or 2
+(turnaround). It validates all earlier records and outputs before publishing a staged copy by rename.
+Stage 0 is required; stage p is copied when present, preserving the original character brief. Stage 1 and
+its masks are also copied for a stage-2 redo. Output paths must remain inside the parent, with no links.
+No file is linked to the parent or opened there for writing. Failed earlier gates, missing files, linked
+outputs and an existing destination are refused before generation.
+
+`redo.json` holds `parent_run` (the parent's run id), `from_stage` (1 or 2) and the cleaned `note`. Records
+written through `RunFolder.write_stage` carry the same fields. Copied records retain their original checks,
+details and historical calls, add `reused_from` and `original_cost_usd`, and set `cost_usd` and `seconds` to
+zero for the new version. The parent record remains unchanged. A cover redo also copies the parent cover to
+`redo/parent-cover.png` as the editing reference; this is not a passing cover for the new version. Stage 1
+still performs the original input checks on `00-sketch.png` and all cover gates against that sketch.
+Stage 2 uses the copied cover and regenerates the complete four-view sheet, with its existing retry,
+ranking, masks, top selection and gates. Naming a view in a note does not select a single-view edit.
+
+Notes reuse `prompt_sketch.clean_user_text`: NFKC normalization; control, format and separator characters
+become spaces; `«»` are removed; whitespace collapses. A nonempty note needs a letter and at most 300
+characters after cleaning; overlong text is refused, never truncated. An omitted or empty note adds no
+prompt text. The existing cover brief and the selected turnaround prompt remain byte-identical in that
+case, including replay keys when the input image is unchanged.
+
+Nonempty notes select `cover_redo` or `turnaround_redo` in `prompts/defaults.json`, currently
+`cover-redo-v1` and `turnaround-redo-v1`. Each frozen version hashes the base prompt, parameters, length
+bound and appended note template. The slot quotes the cleaned note and limits its meaning to changes in
+the character's colours, materials, gear or character style, excluding instructions about the image,
+layout, view count or checks. The note reaches only the redone stage. Cover records store the exact prompt
+and its SHA-256 plus the selected note version; turnaround records store the exact prompt and version.
+The earlier frozen files are unchanged. No acceptance threshold or model changes for a redo.
+
+`run --parent <id-or-path> --from-stage 1|2 --note TEXT --run-id <new-id>` copies the earlier stages and
+filters them out of the selected CLI stages. `--stop-after 1|2` stops before later stages and their side
+work. Continuing on the CLI uses the new run id with the remaining `--stages`.
+
+The service's JSON API adds three owner-scoped endpoints, all behind the existing session, API rate and
+CSRF middleware:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /api/jobs/<id>/redo` | Accepts `stage: "cover"|"turnaround"` and optional `note`; requires the normal `Idempotency-Key`. Copies the owned inactive parent's earlier run data, commits the copy, then creates a new queued job with the parent's input, profile and owner, `parent_job`, `from_stage`, `note`, and `stop_after`. Different requests with one key conflict. |
+| `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains its quota slot and prior spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
+| `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, and `cover_thumbnail_url`, pointing at the existing owner-checked cover route or null. |
+
+The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
+fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
+Redo admission uses the same active account, daily/lifetime quota and storage checks as new heroes, in
+one transaction. Both new hero creation and continuation atomically refuse another queued or running
+job in the same user's workspace. Continuation needs storage capacity and the existing request rate limit;
+it does not consume a second quota slot. This service version requires sign-in and has no guest admission
+path. Missing or foreign jobs return the same plain 404 message.
+
+Workers resume after the copied passing records even on a new job's first attempt. A redo with
+`stop_after` runs only its model group through the requested stage; no later worker group, held-out view
+or 3D work starts. Passing changes the job to `stopped`, with its actual new cost and storage recorded.
+Continuation resumes after the completed records and runs the ordinary remaining groups and held-out
+work. Rejections, model failures, automatic retries and refunds use the existing outcome policy. A lost
+or ambiguous store acknowledgement keeps the prepared files for reconciliation; refusal or idempotent
+replay removes the unused copy. Retention removes prepared run folders older than a day only when no
+metadata job claims them, covering unconfirmed creations that were never saved.
+
 ## Stage record: `stage-<n>.json`
 
 ```json
