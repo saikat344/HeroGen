@@ -126,6 +126,15 @@ class AdmissionStore:
             c.execute('INSERT INTO admission_work(token,job_id,kind,state,created_at) VALUES (?,?,?,?,?)',
                       (token, job_id, kind, 'open', self.clock()))
 
+    def _terminal_admission(self, c, job_id: str) -> None:
+        job = c.execute('SELECT state,deleted_at FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if job and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled'):
+            c.execute('UPDATE admissions SET main_done=1 WHERE job_id=?', (job_id,))
+            if job['state'] != 'succeeded' or job['deleted_at'] is not None:
+                # A queued side worker can no longer claim this job; running paid work retains its receipt.
+                c.execute('UPDATE admissions SET side_done=1 WHERE job_id=?', (job_id,))
+            self._close_admission(c, job_id)
+
     def _close_admission(self, c, job_id: str) -> None:
         c.execute('UPDATE admissions SET closed=1 WHERE job_id=? AND main_done=1 AND (side_required=0 OR side_done=1) '
                   'AND NOT EXISTS(SELECT 1 FROM admission_work WHERE job_id=? AND state!=\'closed\')', (job_id, job_id))
@@ -145,8 +154,13 @@ class AdmissionStore:
         with self._tx() as c:
             c.execute('UPDATE admissions SET side_required=1 WHERE job_id=? AND closed=0', (job_id,))
 
-    def admission_side_done(self, job_id: str) -> None:
+    def admission_side_done(self, job_id: str, unavailable_message: str = '') -> None:
         with self._tx() as c:
+            if unavailable_message:
+                job = c.execute('SELECT attempts FROM jobs WHERE id=?', (job_id,)).fetchone()
+                if job:
+                    c.execute("INSERT INTO job_stages(job_id,stage,state,attempt,message) VALUES (?,'2h','unavailable',?,?) "
+                              "ON CONFLICT(job_id,stage) DO NOTHING", (job_id, job['attempts'], unavailable_message[:2000]))
             c.execute('UPDATE admissions SET side_done=1 WHERE job_id=?', (job_id,))
             self._close_admission(c, job_id)
 
@@ -197,8 +211,11 @@ class AdmissionStore:
             job = c.execute('SELECT state FROM jobs WHERE id=?', (job_id,)).fetchone()
             if job and job['state'] in ('running', 'queued'):
                 raise ValueError('Cannot reconcile an active job.')
-            if not row['closed'] and not work_stopped:
+            outstanding = c.execute("SELECT 1 FROM admission_work WHERE job_id=? AND state!='closed'", (job_id,)).fetchone()
+            if (not row['closed'] or outstanding) and not work_stopped:
                 raise ValueError('Confirm that all main, side and uncertain remote work has stopped first.')
+            if work_stopped:
+                c.execute("UPDATE admission_work SET state='closed',finished_at=? WHERE job_id=? AND state!='closed'", (self.clock(), job_id))
             if actual_micro > row['amount_micro']:
                 c.execute('UPDATE admission_policy SET enabled=0 WHERE id=1')
             c.execute('UPDATE admissions SET actual_micro=?,closed=1,evidence=? WHERE job_id=?',

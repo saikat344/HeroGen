@@ -20,13 +20,18 @@ from herogen.service import config, modal_bridge
 
 
 class _Chain:
-    def __init__(self, log):
+    def __init__(self, log, mounted=False, environment=None):
         self.log = log
+        self.mounted = mounted
+        self.environment = environment or {}
 
     def __getattr__(self, name):
         def call(*a, **k):
+            if self.mounted and name in ('env','pip_install','pip_install_from_requirements','apt_install','run_commands'):
+                raise ValueError('A build step cannot follow lazy local mounts')
             self.log.append((name, a, k))
-            return self
+            environment={**self.environment, **(a[0] if name=='env' else {})}
+            return _Chain(self.log, self.mounted or name.startswith('add_local_'), environment)
         return call
 
 
@@ -97,6 +102,21 @@ class TestModalApp(TempDirCase):
                 sys.modules["modal"] = old
             sys.modules.pop("herogen.service.modal_app", None)
         return mod, fake
+
+    def test_gallery_image_mounts_follow_build_steps_and_hide_host_path(self):
+        import hashlib
+        from herogen.service.fakes import box_glb
+        from test_herogen_service_support import png
+        root=self.tmp/'gallery'; (root/'hero').mkdir(parents=True)
+        assets={}
+        for kind,suffix,content in [('sketch','.png',png()),('artwork','.png',png()),('model','.glb',box_glb())]:
+            name=f'hero/{kind}{suffix}'; (root/name).write_bytes(content)
+            assets[kind]={'file':name,'sha256':hashlib.sha256(content).hexdigest()}
+        (root/'catalog.json').write_text(json.dumps({'version':1,'items':[{'id':'hero','title':'Hero','code_commit':'a'*40,'assets':assets}]}))
+        mod,_=self.load({**PROD,'HEROGEN_SERVICE_GALLERY':str(root)})
+        self.assertNotIn('HEROGEN_SERVICE_GALLERY',mod.IMAGE_ENV)
+        self.assertEqual(mod.web_image.environment['HEROGEN_SERVICE_GALLERY'],'/public-gallery')
+        self.assertNotIn('HEROGEN_SERVICE_GALLERY',mod.blender_image.environment)
 
     def test_blender_image_installs_hybrid_dependencies(self):
         _, fake = self.load()

@@ -537,6 +537,8 @@ class Store(AdmissionStore):
             c.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, user_id))
             c.execute("UPDATE users SET email=?, deleted_at=?, status='disabled' WHERE id=?",
                       (f"deleted:{user_id}", now, user_id))
+            for job_id in jobs:
+                self._terminal_admission(c, job_id)
             # Forget the address everywhere it may be: links, the allowlist, invites bound to it (revoked, so the
             # code does not become usable by anyone) and any audit entry naming it.
             email = row["email"]
@@ -638,6 +640,8 @@ class Store(AdmissionStore):
         cols["state"] = new
         sets = ", ".join(f"{k}=?" for k in cols)
         c.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*cols.values(), job["id"]))
+        if new in TERMINAL_STATES:
+            self._terminal_admission(c, job["id"])
         if old == "running" and new != "running":
             self._end_stages(c, job["id"], STAGE_WHEN_ENDED.get(new, "failed"))
 
@@ -916,12 +920,24 @@ class Store(AdmissionStore):
         now = self.clock()
         out = []
         with self._tx() as c:
+            expired_side = [r['job_id'] for r in c.execute("SELECT job_id FROM job_stages WHERE state='running' AND claim IS NOT NULL AND lease_until<?", (now,))]
             c.execute("UPDATE job_stages SET state='unavailable', lease_until=NULL, message=? WHERE state='running' "
                       "AND claim IS NOT NULL AND lease_until<?",
                       ("The quality check stopped before it finished; the hero is not affected.", now))
+            for job_id in expired_side:
+                c.execute("UPDATE admission_work SET state='uncertain',finished_at=? WHERE job_id=? AND kind='heldout' AND state='open'", (now, job_id))
+                c.execute('UPDATE admissions SET side_done=1 WHERE job_id=?', (job_id,))
+                self._close_admission(c, job_id)
             for job in c.execute("SELECT * FROM jobs WHERE state='running' AND lease_until<?", (now,)).fetchall():
-                out.append((job["id"], self._requeue(c, job, max_attempts, "worker_lost", job["stage"],
-                                                     "The worker stopped responding.")))
+                if job['budget_required']:
+                    c.execute("UPDATE admission_work SET state='uncertain',finished_at=? WHERE job_id=? AND kind!='heldout' AND state='open'", (now, job['id']))
+                    self._fail_ours(c, job, 'generation_uncertain', job['stage'],
+                                    'The worker stopped responding. Remote work must be confirmed stopped before another generation.')
+                    out.append((job['id'], 'failed'))
+                else:
+                    out.append((job['id'], self._requeue(c, job, max_attempts, 'worker_lost', job['stage'],
+                                                       'The worker stopped responding.')))
+
         return out
 
     def job_cancel(self, job_id: str, user_id: str) -> dict[str, Any]:
@@ -947,6 +963,7 @@ class Store(AdmissionStore):
         self.job_cancel(job_id, user_id)
         with self._tx() as c:
             c.execute("UPDATE jobs SET deleted_at=? WHERE id=? AND user_id=?", (self.clock(), job_id, user_id))
+            self._terminal_admission(c, job_id)
             self._audit(c, user_id, "job_deleted", job_id)
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row)
@@ -965,6 +982,7 @@ class Store(AdmissionStore):
         with self._tx() as c:
             c.execute("UPDATE jobs SET bytes=-1, prompt='', name='', deleted_at=COALESCE(deleted_at, ?) WHERE id=?",
                       (self.clock(), job_id))
+            self._terminal_admission(c, job_id)
             self._audit(c, "system", "job_purged", job_id)
 
     def purge_expired(self, audit_retention_s: float) -> dict[str, int]:

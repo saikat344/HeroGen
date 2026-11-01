@@ -485,6 +485,8 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
                     heldout(job)
                 except Exception:
                     log.exception("could not start the held-out views of %s", job_id)
+                    if job.get('budget_required'):
+                        store.admission_side_done(job_id, 'The quality check could not be started; the hero is not affected.')
             detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
                       "previous_work_usd": round(carried, 6),
                       "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "

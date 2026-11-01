@@ -37,3 +37,17 @@ class TestMonitor(TempDirCase):
         report.write_text(json.dumps(self.report()))
         result,out=run(); self.assertEqual(result,0); self.assertIn('monitor_unavailable',out['resolved'])
         self.assertEqual(state.stat().st_mode & 0o777,0o600)
+
+    def test_transient_meter_failure_preserves_alert_deduplication(self):
+        report,state=self.tmp/'report.json',self.tmp/'state.json'
+        import time
+        r=self.report(['budget_50_percent']); r['overhead']['updated_at']=time.time(); report.write_text(json.dumps(r))
+        def run():
+            out=io.StringIO()
+            with contextlib.redirect_stdout(out): main(['--report',str(report),'--state',str(state)])
+            return json.loads(out.getvalue())
+        self.assertIn('budget_50_percent',run()['new'])
+        report.unlink(); self.assertEqual(run()['new'],['monitor_unavailable'])
+        report.write_text(json.dumps(r)); result=run()
+        self.assertEqual(result['new'],[]); self.assertEqual(result['resolved'],['monitor_unavailable'])
+        state.write_text('invalid JSON'); self.assertEqual(run()['new'],['monitor_unavailable'])

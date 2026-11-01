@@ -69,6 +69,9 @@ jobs:
           HEROGEN_SERVICE_EMAIL_FROM: ${{ vars.HEROGEN_SERVICE_EMAIL_FROM }}
           HEROGEN_SERVICE_TERMS_VERSION: ${{ vars.HEROGEN_SERVICE_TERMS_VERSION }}
           HEROGEN_SERVICE_DOMAIN: ${{ vars.HEROGEN_SERVICE_DOMAIN }}
+          HEROGEN_SERVICE_PUBLIC_DEMO: ${{ vars.HEROGEN_SERVICE_PUBLIC_DEMO }}
+          HEROGEN_SERVICE_GALLERY: ${{ vars.HEROGEN_SERVICE_GALLERY }}
+          HEROGEN_SERVICE_MAX_RUNNING: ${{ vars.HEROGEN_SERVICE_MAX_RUNNING }}
         run: python3 tools/release/release.py check "$TAG"
       - uses: actions/setup-python@v5
         with:
@@ -87,4 +90,7 @@ jobs:
           HEROGEN_SERVICE_EMAIL_FROM: ${{ vars.HEROGEN_SERVICE_EMAIL_FROM }}
           HEROGEN_SERVICE_TERMS_VERSION: ${{ vars.HEROGEN_SERVICE_TERMS_VERSION }}
           HEROGEN_SERVICE_DOMAIN: ${{ vars.HEROGEN_SERVICE_DOMAIN }}
+          HEROGEN_SERVICE_PUBLIC_DEMO: ${{ vars.HEROGEN_SERVICE_PUBLIC_DEMO }}
+          HEROGEN_SERVICE_GALLERY: ${{ vars.HEROGEN_SERVICE_GALLERY }}
+          HEROGEN_SERVICE_MAX_RUNNING: ${{ vars.HEROGEN_SERVICE_MAX_RUNNING }}
         run: python3 tools/release/release.py deploy "$TAG"

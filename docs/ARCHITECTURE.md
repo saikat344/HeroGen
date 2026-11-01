@@ -2489,3 +2489,13 @@ zero spending. A full-capacity alert requires ten continuous minutes; long-runni
 hours. Non-job billing evidence older than a day (or missing) is flagged. External scheduling and notification
 delivery are operator configuration; neither runs inside the public web app. A saved report can be checked
 without any network using `--report <report.json>` instead of `--app`.
+
+For controlled guest generations, an expired main-worker lease fails the job with an explicit uncertain-work
+error instead of automatically re-running potentially live remote compute. The sweep marks its open receipts
+uncertain; side-worker lease loss does the same without changing the main outcome. Reconciliation with confirmed
+shutdown closes the receipts and resolves that alert. A side check that cannot claim a failed/deleted job, or
+cannot be spawned, does not retain a capacity slot when no paid work is running. Failed side spawning records
+an unavailable check. Active or uncertain work still retains its reservation. Account deletion and file purge
+use the same terminal accounting. Deploys forward the optional public-guest/gallery/dispatcher settings through
+the release CLI; gallery environment build steps precede lazy Modal mounts, and host gallery paths are not
+baked into worker environments.

@@ -256,7 +256,6 @@ main.doc { padding:20px 16px 40px; }
 .public-viewer-grid { display:grid; grid-template-columns:1.6fr 1fr; gap:24px; margin:28px 0 20px; }.public-viewer-grid canvas { display:block; width:100%; height:600px; background:#f3ecdd; }.public-viewer-grid button { font-size:11px; padding:6px 10px; }
 .public-reference img { width:100%;height:600px;display:block;object-fit:contain;padding:12px; }.public-viewer-grid p { padding:0 18px; font-size:12px; color:var(--muted); }
 @media(max-width:760px) { .public-gallery-grid { grid-template-columns:1fr; }.public-character img { height:340px;object-fit:contain; }.public-viewer-grid { grid-template-columns:1fr; }.gallery-page h1 { font-size:42px; }.public-viewer-grid canvas,.public-reference img { height:430px; } }
-#judgeCode { width:100%; padding:12px; font:inherit; border:1px solid var(--line); border-radius:4px; background:#fff9; }
 #guestForm button { margin-top:18px; }.access-summary { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:14px 0; padding:12px 16px; border:1px solid var(--line); background:#fff6; font-size:12px; }.access-summary button { font-size:12px;white-space:nowrap; }
 
 .public-record { margin:24px 0;padding:18px;border:1px solid var(--line);border-radius:5px; }.public-record summary { cursor:pointer;font-weight:600; }.public-record dl { display:grid;grid-template-columns:minmax(130px,1fr) 3fr;gap:12px;font-size:13px; }.public-record dd { margin:0;overflow-wrap:anywhere; }

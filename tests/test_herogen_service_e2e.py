@@ -539,17 +539,13 @@ class TestServicePage(ServiceBrowserCase):
         self.assertEqual(self.tab.errors, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, "set E2E_CDP_PORT and install requirements-dev.txt")
 class TestPublicLivePage(ServiceBrowserCase):
     service_settings = {'public_demo': True, 'code_commit': 'a'*40}
 
     def test_create_opens_guest_and_starts_without_an_account_or_code(self):
         t=self.tab; t.goto(self.url+'/')
-        t.wait("document.querySelector('#headerSignIn').textContent === 'Open workspace'")
+        t.wait("document.querySelector('#headerSignIn').textContent === 'Open workspace' && !document.querySelector('#headerSignIn').disabled")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit(); document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
         self.assertEqual(len(self.store.users_list()),1)
@@ -565,6 +561,11 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.assertEqual(len(self.store.jobs_admin_list()),2)
         self.assertEqual(self.tab.errors,[])
 
+    def test_public_gallery_fragment_scrolls_after_entry_is_loaded(self):
+        t=self.tab; t.goto(self.url+'/#gallery')
+        t.wait("!document.querySelector('#headerSignIn').disabled && window.scrollY > 0 && document.querySelector('#gallery').getBoundingClientRect().top < window.innerHeight")
+        self.assertEqual(self.store.users_list(),[])
+
     def test_unfunded_public_generation_preserves_draft_with_clear_error(self):
         self.store.db.execute('UPDATE admission_policy SET enabled=0')
         t=self.tab; t.goto(self.url+'/')
@@ -573,3 +574,7 @@ class TestPublicLivePage(ServiceBrowserCase):
         t.wait("/temporarily paused/.test(document.querySelector('#jobMsg').textContent)")
         self.assertEqual(len(self.store.jobs_admin_list()),0)
         self.assertIn('forest courier',t.eval("document.querySelector('#prompt').value"))
+
+
+if __name__ == "__main__":
+    unittest.main()

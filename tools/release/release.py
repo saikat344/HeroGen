@@ -62,6 +62,7 @@ REQUIRED = (
     ("HEROGEN_SERVICE_TERMS_VERSION", "variable"),
     ("HEROGEN_SERVICE_DOMAIN", "variable"),
 )
+OPTIONAL = ("HEROGEN_SERVICE_PUBLIC_DEMO", "HEROGEN_SERVICE_GALLERY", "HEROGEN_SERVICE_MAX_RUNNING")
 # Settings every deploy runs with. The service refuses to deploy in any mode but `production` (staging included:
 # the mode is "not dev", not the environment), and production mode needs a real email provider; `resend` is the
 # only one the service has.
@@ -421,10 +422,10 @@ def check(name: str, env: Mapping[str, str], root: Path) -> Tag:
 
 
 def deploy_env(env: Mapping[str, str]) -> dict[str, str]:
-    """The environment `modal deploy` runs with: `env` without any HEROGEN_SERVICE_* variable but REQUIRED's,
-    then FIXED."""
+    """The deploy environment keeps reviewed REQUIRED and OPTIONAL service settings, then applies FIXED."""
     out = {k: v for k, v in env.items() if not k.startswith(SERVICE_PREFIX)}
     out.update({n: env[n] for n, _ in REQUIRED})
+    out.update({n: env[n] for n in OPTIONAL if env.get(n)})
     out.update(FIXED)
     return out
 
