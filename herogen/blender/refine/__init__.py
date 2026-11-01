@@ -155,6 +155,8 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         feather = I.feather_map(alpha, depth, valid, px_per_unit(cam), tex.height)
         if closeup_reference is not None:
             feather *= I.frame_feather(alpha.shape, cam["frame_border_px"])
+        elif I.CLOSEUP_FEATHER and (hair or (body_cam is not None and I.is_closeup(cam, body_cam))):
+            feather *= I.closeup_feather(figure)
         record["texels"] = tex.apply(cam, refined, feather, depth, valid, weight, I.HAIR_BONUS if hair else 1.0)
         for name, arr in (("refined", refined), ("weight", weight)):
             Image.fromarray((np.clip(arr, 0, 1) * 255).round().astype(np.uint8)).save(folder / f"{name}.png")
@@ -236,7 +238,14 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if stage3.get("ok") is not True:
             raise ValueError("texture refine needs a passed stage-3.json")
         from . import character as C, imaging as I
-        rec.data["thresholds"] = {"outline": I.GATE, "closeup_outline": I.CLOSEUP_GATE, "hair": I.HAIR_GATE, "face_outside_max": I.PART_EXTRA_MAX}
+        rec.data["thresholds"] = {
+            "outline": I.GATE,
+            "closeup_outline": I.CLOSEUP_GATE,
+            "hair": I.HAIR_GATE,
+            "face_outside_max": I.PART_EXTRA_MAX,
+            "closeup_feather_px": I.CLOSEUP_FEATHER_PX if I.CLOSEUP_FEATHER else 0,
+            "exposure_mode": I.EXPOSURE_MODE if I.EXPOSURE_SOLVE else "off",
+        }
         source = run / "03-source.glb"
         rec.data["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
         work = run / "blender-work" / "texture-refine"
@@ -288,6 +297,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             save(ok=False, status="running")
         if upscale_texture:
             # Close-ups render and gate against the refined atlas after all twenty original views.
+            if any(v["accepted"] for v in rec.data["views"].values()) and (I.EXPOSURE_SOLVE or I.CLOSEUP_FEATHER):
+                I.rebake_views(tex, work, rec.data["views"], body_cam=cams["body+0"])
             current = tex.save(work / "texture.png")
             for cam in closeup_cams:
                 key = cam["name"]
@@ -314,6 +325,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         rec.add(check("accepted_views", accepted, 1, gate=False))
         if accepted:
             from .backend import blender
+            if I.EXPOSURE_SOLVE or I.CLOSEUP_FEATHER:
+                gains = I.rebake_views(tex, work, rec.data["views"], body_cam=cams["body+0"])
+                if gains and I.EXPOSURE_SOLVE:
+                    rec.data["exposure_gains"] = gains
             final = tex.save(work / "texture.png")
             blender("export", {"blend": str(prep / "work.blend"), "texture": str(final), "out": str(pending)},
                     work / "blender.log", timeout=timeout)

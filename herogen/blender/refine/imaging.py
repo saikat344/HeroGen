@@ -31,7 +31,16 @@ PARTS = ("face",)
 PART_EXTRA_MAX = 0.25
 PART_MIN_AREA = 0.005
 FEATHER_PX = 14        # in render pixels, from the outline and depth jumps
+CLOSEUP_FEATHER = True
+CLOSEUP_FEATHER_PX = 96  # raised-cosine ramp on frame-cut borders of head/hair close-ups, per 1024 render pixels
 COLOUR_SIGMA = 0.04    # residual low-frequency colour match, as a fraction of the render's larger side
+EXPOSURE_SOLVE = True
+EXPOSURE_MODE = "scalar"       # "scalar" (log-gain least squares) or "affine" (scalar gain + bounded offset)
+EXPOSURE_SIGMA_PX = 12.0       # surface smoothing in body-camera pixels per 1024 for 3D overlap comparisons
+EXPOSURE_GAIN_CLIP = (0.80, 1.25)
+EXPOSURE_OFFSET_CLIP = 0.06
+EXPOSURE_REG = 0.03
+LUMA_WEIGHTS = (0.2126, 0.7152, 0.0722)
 Q0_FACING = 0.30       # SAM's colour counts as a view with cos^2 = 0.30 at body resolution
 JUMP = 0.004          # a depth step above this fraction of the body height between neighbour pixels is an edge
 VIS_WINDOW = 3         # a texel is visible only if no surface in this pixel window lies in front of it
@@ -185,6 +194,23 @@ def frame_feather(shape, width=96):
     y, x = np.ogrid[:h, :w]
     distance = np.minimum(np.minimum(y, h - 1 - y), np.minimum(x, w - 1 - x))
     return (0.5 - 0.5 * np.cos(np.pi * np.clip(distance / width, 0, 1))).astype(np.float32)
+
+
+def closeup_border_px(shape, width=CLOSEUP_FEATHER_PX):
+    """Scale `width` (measured per 1024 render pixels) to `shape`."""
+    if not math.isfinite(width) or width <= 0:
+        raise ValueError("close-up feather width must be positive")
+    return max(1, round(width * max(shape) / 1024))
+
+
+def closeup_feather(figure, width=CLOSEUP_FEATHER_PX):
+    """Raised cosine from zero on frame-cut silhouette borders to one `closeup_border_px` inside."""
+    w = closeup_border_px(figure.shape, width)
+    touch = border_touch(figure)
+    if not touch.any():
+        return np.ones(figure.shape, np.float32)
+    dist = ndimage.distance_transform_edt(~touch)
+    return (0.5 - 0.5 * np.cos(np.pi * np.clip(dist / w, 0.0, 1.0))).astype(np.float32)
 
 
 def closeup_outline(a, b, zoom):
@@ -399,33 +425,281 @@ def feather_map(alpha, depth, valid, cam_k, height):
     return (f * f * (3 - 2 * f)) * fig
 
 
+def apply_exposure(rgb, figure, gain, offset=0.0):
+    """Apply `(gain, offset)` inside `figure`, leaving exterior background pixels untouched."""
+    if gain == 1.0 and offset == 0.0:
+        return rgb
+    fig = np.asarray(figure, bool)
+    adjusted = np.clip(rgb * np.float32(gain) + np.float32(offset), 0.0, 1.0).astype(np.float32)
+    return np.where(fig[..., None], adjusted, rgb.astype(np.float32))
+
+
+def solve_exposure(views, height, *, mode=None, sigma_px=None, gain_clip=None, offset_clip=None, reg=None):
+    """Solve per-camera exposure over shared 3D surface samples, anchored to accepted non-hair views."""
+    mode = EXPOSURE_MODE if mode is None else mode
+    if mode not in ("scalar", "affine"):
+        raise ValueError(f"unknown exposure mode {mode!r} (use scalar or affine)")
+    sigma_px = EXPOSURE_SIGMA_PX if sigma_px is None else sigma_px
+    gain_clip = EXPOSURE_GAIN_CLIP if gain_clip is None else gain_clip
+    offset_clip = EXPOSURE_OFFSET_CLIP if offset_clip is None else offset_clip
+    reg = EXPOSURE_REG if reg is None else reg
+
+    n_views = len(views)
+    if n_views < 2:
+        return {v["key"]: (1.0, 0.0) for v in views}
+
+    w_luma = np.asarray(LUMA_WEIGHTS, dtype=np.float32)
+    ppus = [px_per_unit(v["cam"]) for v in views]
+    min_ppu = min(ppus)
+    ref_idx = int(np.argmin(ppus))
+    res_scale = min(views[ref_idx]["valid"].shape) / 1024.0
+
+    lumas, masks, mean_luma, area_w = [], [], [], []
+    min_mask_px = max(8, round(64 * res_scale * res_scale))
+    for idx, v in enumerate(views):
+        erode_px = max(1, round(3.0 * res_scale * ppus[idx] / min_ppu))
+        raw_mask = np.asarray(v["valid"], bool) & (np.asarray(v["weight"]) > 0.5)
+        mask = ndimage.binary_erosion(raw_mask, iterations=erode_px) if raw_mask.any() else raw_mask
+        if int(mask.sum()) < min_mask_px:
+            mask = raw_mask
+        luma = (v["refined"][..., :3] @ w_luma).astype(np.float32)
+        sig = max(0.5, sigma_px * res_scale * (ppus[idx] / min_ppu))
+        lumas.append(masked_blur(luma, mask, sig))
+        masks.append(mask)
+        if mask.any():
+            mean_luma.append(float(luma[mask].mean()))
+            area_w.append(float(mask.sum()) / ((ppus[idx] / 1000.0) ** 2))
+        else:
+            mean_luma.append(0.5)
+            area_w.append(1.0)
+
+    overlaps = []
+    adj = [set() for _ in range(n_views)]
+    for i in range(n_views):
+        for j in range(i + 1, n_views):
+            vi, vj = views[i], views[j]
+            delta = abs((vi["cam"]["angle"] - vj["cam"]["angle"] + 180) % 360 - 180)
+            hair_i, hair_j = bool(vi.get("hair", False)), bool(vj.get("hair", False))
+            close_i, close_j = bool(vi.get("closeup", False)), bool(vj.get("closeup", False))
+            if delta > 90:
+                continue
+            if hair_i != hair_j and delta > 45:
+                continue
+            if (close_i != close_j) and not (hair_i or hair_j) and delta > 45:
+                continue
+
+            stride = max(1, min(4, min(max(masks[i].shape), max(masks[j].shape)) // 128))
+            min_dir = max(8, round(32 * (res_scale / (stride / 4.0)) ** 2))
+            li_parts, lj_parts = [], []
+            for s_idx, d_idx, flip in ((i, j, False), (j, i, True)):
+                vs, vd = views[s_idx], views[d_idx]
+                ms, md = masks[s_idx], masks[d_idx]
+                ys, xs = np.where(ms[::stride, ::stride])
+                ys *= stride
+                xs *= stride
+                if len(ys) == 0:
+                    continue
+                pts = vs["pos"][ys, xs]
+                px, py, _ = project(vd["cam"], pts)
+                xi, yi = np.floor(px).astype(np.int64), np.floor(py).astype(np.int64)
+                hd, wd = md.shape
+                ins = (xi >= 0) & (xi < wd) & (yi >= 0) & (yi < hd)
+                xic, yic = np.clip(xi, 0, wd - 1), np.clip(yi, 0, hd - 1)
+                tol = 2.0 / min(ppus[s_idx], ppus[d_idx]) + 0.001 * height
+                keep = ins & md[yic, xic] & (np.linalg.norm(pts - vd["pos"][yic, xic], axis=1) <= tol)
+                if int(keep.sum()) < min_dir:
+                    continue
+                ls = lumas[s_idx][ys[keep], xs[keep]]
+                ld = lumas[d_idx][yic[keep], xic[keep]]
+                if not flip:
+                    li_parts.append(ls)
+                    lj_parts.append(ld)
+                else:
+                    li_parts.append(ld)
+                    lj_parts.append(ls)
+
+            if not li_parts:
+                continue
+            li = np.concatenate(li_parts).astype(np.float64)
+            lj = np.concatenate(lj_parts).astype(np.float64)
+            if len(li) < 2 * min_dir:
+                continue
+            scale_factor = ((min_ppu / ppus[i]) ** 2 + (min_ppu / ppus[j]) ** 2) * 0.5
+            area_1024 = len(li) * (stride ** 2) * scale_factor / max(res_scale ** 2, 1e-6)
+            eff_w = (area_1024 / 16.0) * math.cos(math.radians(delta * 0.6))
+            overlaps.append((i, j, li, lj, eff_w))
+            adj[i].add(j)
+            adj[j].add(i)
+
+    if not overlaps:
+        return {v["key"]: (1.0, 0.0) for v in views}
+
+    u = np.zeros(n_views, np.float64)
+    for _ in range(6):
+        H = np.eye(n_views, dtype=np.float64) * reg
+        rhs = np.zeros(n_views, np.float64)
+        for i, j, li, lj, eff_w in overlaps:
+            hair_i, hair_j = bool(views[i].get("hair", False)), bool(views[j].get("hair", False))
+            pair_w = 0.20 if (hair_i != hair_j) else (0.50 if hair_i else 1.0)
+            gi, gj = math.exp(u[i]), math.exp(u[j])
+            res = gi * li - gj * lj
+            med = float(np.median(res))
+            mad = float(np.median(np.abs(res - med))) + 1e-4
+            inlier = (np.abs(res - med) <= max(0.08, 2.5 * mad)) & (np.abs(li - lj) <= 0.22)
+            inlier_frac = float(inlier.mean())
+            if inlier_frac < 0.35:
+                inlier = np.abs(res - med) <= np.quantile(np.abs(res - med), 0.50)
+                pair_w *= 0.15
+            si2 = float((li[inlier] ** 2).mean())
+            sj2 = float((lj[inlier] ** 2).mean())
+            if si2 < 1e-3 or sj2 < 1e-3:
+                continue
+            target = 0.5 * math.log(sj2 / si2)
+            rms_scale = math.sqrt(math.sqrt(si2 * sj2))
+            conf = pair_w * (rms_scale ** 2) * min(2.0, eff_w * inlier_frac / 2500.0)
+            pair_res = rms_scale * ((u[i] - u[j]) - target)
+            if abs(pair_res) > 0.06:
+                conf *= 0.06 / abs(pair_res)
+            H[i, i] += conf
+            H[j, j] += conf
+            H[i, j] -= conf
+            H[j, i] -= conf
+            rhs[i] += conf * target
+            rhs[j] -= conf * target
+        u = np.linalg.solve(H, rhs)
+
+    gains = np.exp(u)
+    seen = [False] * n_views
+    components = []
+    for start in range(n_views):
+        if seen[start]:
+            continue
+        comp, stack = [], [start]
+        seen[start] = True
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nb in adj[cur]:
+                if not seen[nb]:
+                    seen[nb] = True
+                    stack.append(nb)
+        components.append(comp)
+
+    for comp in components:
+        if len(comp) == 1:
+            gains[comp[0]] = 1.0
+            continue
+        anchor_idx = [i for i in comp if not views[i].get("hair", False)] or comp
+        num = sum(area_w[i] * mean_luma[i] for i in anchor_idx)
+        den = sum(area_w[i] * gains[i] * mean_luma[i] for i in anchor_idx)
+        if den > 1e-8:
+            for i in comp:
+                gains[i] *= num / den
+    gains = np.clip(gains, gain_clip[0], gain_clip[1])
+
+    if mode == "scalar":
+        return {views[i]["key"]: (float(gains[i]), 0.0) for i in range(n_views)}
+
+    H_b = np.eye(n_views, dtype=np.float64) * 0.25
+    rhs_b = np.zeros(n_views, np.float64)
+    for i, j, li, lj, eff_w in overlaps:
+        hair_i, hair_j = bool(views[i].get("hair", False)), bool(views[j].get("hair", False))
+        pair_w = 0.20 if (hair_i != hair_j) else 1.0
+        inlier = np.abs(li - lj) <= 0.22
+        if int(inlier.sum()) < 16:
+            continue
+        diff = float((gains[i] * li[inlier] - gains[j] * lj[inlier]).mean())
+        conf = pair_w * min(2.0, eff_w * float(inlier.mean()) / 2500.0)
+        H_b[i, i] += conf
+        H_b[j, j] += conf
+        H_b[i, j] -= conf
+        H_b[j, i] -= conf
+        rhs_b[i] -= conf * diff
+        rhs_b[j] += conf * diff
+    b = np.linalg.solve(H_b, rhs_b)
+    for comp in components:
+        if len(comp) == 1:
+            b[comp[0]] = 0.0
+            continue
+        anchor_idx = [i for i in comp if not views[i].get("hair", False)] or comp
+        tot_a = sum(area_w[i] for i in anchor_idx)
+        shift = sum(area_w[i] * b[i] for i in anchor_idx) / max(tot_a, 1e-8)
+        for i in comp:
+            b[i] -= shift
+    b = np.clip(b, -offset_clip, offset_clip)
+    return {views[i]["key"]: (float(gains[i]), float(b[i])) for i in range(n_views)}
+
+
 class Texture:
     def __init__(self, prep, info):
         self.prep = Path(prep)
         P, N, cov = C.texel_maps(self.prep)
+        base = np.asarray(Image.open(self.prep / "base.png").convert("RGB"), dtype=np.float32) / 255
+        self._init_arrays(P, N, cov, base, info["height"])
+
+    @classmethod
+    def from_arrays(cls, pos, nrm, cov, base_rgb, height):
+        self = cls.__new__(cls)
+        self.prep = None
+        self._init_arrays(pos, nrm, cov, np.asarray(base_rgb, dtype=np.float32), height)
+        return self
+
+    def _init_arrays(self, pos, nrm, cov, base, height):
+        cov = np.asarray(cov, bool)
         if not cov.any():
             raise ValueError("the refined atlas has no covered texels")
         self.cov = cov
         self.idx = np.flatnonzero(cov.ravel())
-        self.P = P.reshape(-1, 3)[self.idx].astype(np.float64)
-        self.N = N.reshape(-1, 3)[self.idx].astype(np.float64)
-        base = np.asarray(Image.open(self.prep / "base.png").convert("RGB"), dtype=np.float32) / 255
-        self.T = base
-        k_body = max(C.BODY_RES) / (info["height"] * C.BODY_FRAME)
-        self.Q = np.full(len(self.idx), Q0_FACING * k_body, np.float64)
-        dist, near = ndimage.distance_transform_edt(~cov, return_indices=True)
+        self.P = pos.reshape(-1, 3)[self.idx].astype(np.float64)
+        self.N = nrm.reshape(-1, 3)[self.idx].astype(np.float64)
+        self.base = base.astype(np.float32)
+        r0, c0 = np.divmod(self.idx, self.base.shape[1])
+        self.base_cov = self.base[r0, c0].copy()
+        k_body = max(C.BODY_RES) / (height * C.BODY_FRAME)
+        self.q0 = float(Q0_FACING * k_body)
+        _, near = ndimage.distance_transform_edt(~cov, return_indices=True)
         # every texel no triangle covers takes its nearest covered texel's colour: island margins, and the spots of
         # sliver triangles too thin to cover a texel centre (left black by the bake, visible as dark specks)
         self.margin = ~cov
         self.margin_src = (near[0][self.margin], near[1][self.margin])
+        self.height = height
+        self.reset()
+
+    def reset(self):
+        self.T = self.base.copy()
         self.T[self.margin] = self.T[self.margin_src]
-        self.height = info["height"]
+        self.U = np.ones(len(self.idx), np.float64)
+        self.R = np.zeros((len(self.idx), 3), np.float32)
+        self.Q_ref = np.zeros(len(self.idx), np.float64)
+        self.Q = np.full(len(self.idx), self.q0, np.float64)
 
     def save(self, path):
         t = self.T.copy()
         t[self.margin] = t[self.margin_src]
         Image.fromarray((np.clip(t, 0, 1) * 255).round().astype(np.uint8)).save(path)
         return path
+
+    def render_view(self, cam, depth_img, valid_img):
+        """Project current covered atlas colours onto `cam`'s pixel grid, returning `(rgb, mask)`."""
+        h, w = valid_img.shape
+        x, y, d = project(cam, self.P)
+        xi, yi = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+        ins = (xi >= 0) & (xi < w) & (yi >= 0) & (yi < h)
+        xic, yic = np.clip(xi, 0, w - 1), np.clip(yi, 0, h - 1)
+        k = px_per_unit(cam)
+        eps = 3.0 / k + 0.001 * self.height
+        front = ndimage.minimum_filter(np.where(valid_img, depth_img, np.inf), size=VIS_WINDOW)
+        _, _, fwd = axes(cam)
+        vis = ins & valid_img[yic, xic] & (d <= front[yic, xic] + eps) & ((self.N @ fwd) < 0)
+        r_uv, c_uv = np.divmod(self.idx[vis], self.T.shape[1])
+        acc = np.zeros((h, w, 3), np.float32)
+        cnt = np.zeros((h, w), np.float32)
+        np.add.at(acc, (yic[vis], xic[vis]), self.T[r_uv, c_uv])
+        np.add.at(cnt, (yic[vis], xic[vis]), 1.0)
+        has = cnt > 0
+        out = np.full((h, w, 3), C.BG, np.float32)
+        out[has] = acc[has] / cnt[has, None]
+        return out, has
 
     def apply(self, cam, refined, feather, depth_img, valid_img, weight_mask, bonus=1.0):
         """Project `refined` (float RGB on the render grid) onto the texels this camera sees."""
@@ -442,22 +716,145 @@ class Texture:
         _, _, fwd = axes(cam)
         cos = np.clip(-(self.N @ fwd), 0, 1)
         q = cos ** 2 * k * bonus
-        t = np.clip((q / self.Q - 1) / RAMP, 0, 1)
-        a = vis * (t * t * (3 - 2 * t))
-        cand = np.flatnonzero(a > 1e-3)
-        xs, ys = x[cand], y[cand]
-        a_c = a[cand] * sample(feather.astype(np.float32), xs, ys) * sample(weight_mask.astype(np.float32), xs, ys)
-        keep = a_c > 1e-3
-        cand, xs, ys, a_c = cand[keep], xs[keep], ys[keep], a_c[keep]
+        if getattr(self, "U", None) is None:
+            t = np.clip((q / self.Q - 1) / RAMP, 0, 1)
+            a = vis * (t * t * (3 - 2 * t))
+            cand = np.flatnonzero(a > 1e-3)
+            xs, ys = x[cand], y[cand]
+            a_c = a[cand] * sample(feather.astype(np.float32), xs, ys) * sample(weight_mask.astype(np.float32), xs, ys)
+            keep = a_c > 1e-3
+            cand, xs, ys, a_c = cand[keep], xs[keep], ys[keep], a_c[keep]
+            if not len(cand):
+                return 0
+            cols = sample(refined.astype(np.float32), xs, ys)
+            ii = self.idx[cand]
+            r, c = np.divmod(ii, self.T.shape[1])
+            av = a_c[:, None]
+            self.T[r, c] = self.T[r, c] * (1 - av) + cols * av
+            self.Q[cand] = self.Q[cand] + a_c * (q[cand] - self.Q[cand])
+            return int(len(cand))
+
+        t0 = np.clip((q / self.q0 - 1) / RAMP, 0, 1)
+        s0 = vis * (t0 * t0 * (3 - 2 * t0))
+        has_ref = self.Q_ref > 0
+        t_ref = np.where(has_ref, np.clip((q / np.maximum(self.Q_ref, 1e-12) - 1) / RAMP, 0, 1), 0.0)
+        s_ref = vis * (t_ref * t_ref * (3 - 2 * t_ref))
+        eff = self.U * s0 + (1.0 - self.U) * s_ref
+        cand = np.flatnonzero(eff > 1e-3)
         if not len(cand):
             return 0
-        cols = sample(refined.astype(np.float32), xs, ys)
-        sel = cand
-        a = np.zeros_like(a)
-        a[sel] = a_c
-        ii = self.idx[sel]
+        xs, ys = x[cand], y[cand]
+        w_sp = (sample(feather.astype(np.float32), xs, ys)
+                * sample(weight_mask.astype(np.float32), xs, ys)).astype(np.float64)
+        keep = (eff[cand] * w_sp) > 1e-3
+        cand, xs, ys, w_sp = cand[keep], xs[keep], ys[keep], w_sp[keep]
+        if not len(cand):
+            return 0
+        cols = sample(refined.astype(np.float32), xs, ys).astype(np.float32)
+        u_old = self.U[cand]
+        m_old = 1.0 - u_old
+        du = u_old * (s0[cand] * w_sp)
+        u_new = u_old - du
+        m_new = m_old + du
+        a_ref = s_ref[cand] * w_sp
+        m_keep = m_old * (1.0 - a_ref)
+        m_add = m_old * a_ref + du
+        denom = np.maximum(m_new, 1e-12)
+        r_new = ((m_keep[:, None] * self.R[cand] + m_add[:, None] * cols) / denom[:, None]).astype(np.float32)
+        q_new = (m_keep * self.Q_ref[cand] + m_add * q[cand]) / denom
+        self.U[cand] = u_new
+        self.R[cand] = r_new
+        self.Q_ref[cand] = q_new
+        self.Q[cand] = u_new * self.q0 + m_new * q_new
+        ii = self.idx[cand]
         r, c = np.divmod(ii, self.T.shape[1])
-        av = a[sel][:, None]
-        self.T[r, c] = self.T[r, c] * (1 - av) + cols * av
-        self.Q[sel] = self.Q[sel] + a[sel] * (q[sel] - self.Q[sel])
-        return int(len(sel))
+        self.T[r, c] = (u_new[:, None] * self.base_cov[cand] + m_new[:, None] * r_new).astype(np.float32)
+        return int(len(cand))
+
+
+def load_accepted_views(work, view_records, height, *, body_cam=None):
+    """Load saved per-view render masks, 3D positions and accepted repaints from `work`."""
+    from .cameras import decode_pos, read_exr
+
+    work = Path(work)
+    views = []
+    for key, rec in view_records.items():
+        if not rec.get("accepted"):
+            continue
+        cam = rec["camera"]
+        cname = cam["name"]
+        folder = work / key
+        with Image.open(folder / f"{cname}.png") as rgba:
+            alpha = np.asarray(rgba.convert("RGBA"))[..., 3].astype(np.float32) / 255.0
+        pos, valid = decode_pos(read_exr(folder / f"{cname}.pos.exr"))
+        _, _, depth = project(cam, pos)
+        with Image.open(folder / "refined.png") as img:
+            refined = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+        with Image.open(folder / "weight.png") as img:
+            weight = np.asarray(img.convert("L"), dtype=np.float32) / 255.0
+        hair = key.startswith("hair-")
+        closeup = bool(body_cam is not None and is_closeup(cam, body_cam)) or ("frame_border_px" in cam)
+        views.append({
+            "key": key,
+            "cam": cam,
+            "hair": hair,
+            "closeup": closeup,
+            "alpha": alpha,
+            "pos": pos.astype(np.float32),
+            "valid": valid,
+            "depth": depth.astype(np.float32),
+            "refined": refined,
+            "weight": weight,
+            "base_feather": feather_map(alpha, depth, valid, px_per_unit(cam), height).astype(np.float32),
+        })
+    return views
+
+
+def rebake_views(tex, work=None, view_records=None, *, body_cam=None, views=None, solve=None,
+                 feather_closeups=None, feather_px=None, mode=None):
+    """Solve cross-view exposure on accepted views and re-project them coarse-to-fine onto `tex`."""
+    if not isinstance(getattr(tex, "U", None), np.ndarray):
+        return {}
+    solve = EXPOSURE_SOLVE if solve is None else solve
+    feather_closeups = CLOSEUP_FEATHER if feather_closeups is None else feather_closeups
+    feather_px = CLOSEUP_FEATHER_PX if feather_px is None else feather_px
+    mode = EXPOSURE_MODE if mode is None else mode
+    if views is None:
+        if work is None or view_records is None:
+            return {}
+        views = load_accepted_views(work, view_records, tex.height, body_cam=body_cam)
+    if not views:
+        return {}
+    gains = (solve_exposure(views, tex.height, mode=mode) if solve
+             else {v["key"]: (1.0, 0.0) for v in views})
+    tex.reset()
+    ordered = sorted(
+        views,
+        key=lambda v: (
+            2 if "frame_border_px" in v["cam"] else (1 if v["hair"] else 0),
+            px_per_unit(v["cam"]) * (HAIR_BONUS if v["hair"] else 1.0),
+        ),
+    )
+    for v in ordered:
+        g, b = gains[v["key"]]
+        fig = v["alpha"] > 0.5
+        rgb = apply_exposure(v["refined"], fig, g, b)
+        feather = (v["base_feather"].copy() if "base_feather" in v
+                   else feather_map(v["alpha"], v["depth"], v["valid"], px_per_unit(v["cam"]), tex.height).astype(np.float32))
+        if "frame_border_px" in v["cam"]:
+            feather *= frame_feather(v["alpha"].shape, v["cam"]["frame_border_px"])
+        elif feather_closeups and (v["hair"] or v["closeup"]):
+            feather *= closeup_feather(fig, feather_px)
+        weight = v["weight"].copy()
+        if v["hair"]:
+            cur_rgb, has_cur = tex.render_view(v["cam"], v["depth"], v["valid"])
+            sig = AGREE_SIGMA * max(weight.shape)
+            m_valid = has_cur & fig
+            if m_valid.any():
+                d_lf = np.abs(masked_blur(rgb, m_valid, sig) - masked_blur(cur_rgb, m_valid, sig)).max(-1)
+                lo, hi = AGREE_TOL
+                weight *= np.where(has_cur, np.clip((hi - d_lf) / (hi - lo), 0.0, 1.0), 1.0).astype(np.float32)
+        tex.apply(v["cam"], rgb, feather, v["depth"], v["valid"], weight, HAIR_BONUS if v["hair"] else 1.0)
+    if mode == "affine":
+        return {k: {"gain": round(g, 5), "offset": round(b, 5)} for k, (g, b) in gains.items()}
+    return {k: round(g, 5) for k, (g, _) in gains.items()}
