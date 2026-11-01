@@ -5,6 +5,8 @@ import secrets
 import threading
 import json
 import sys
+import os
+import unittest
 from unittest import mock
 from test_herogen_service_support import Clock, TempDirCase, settings, png
 from herogen.service.store import Store, StoreError, new_id
@@ -294,6 +296,38 @@ class TestAdmission(TempDirCase):
             result=runner.run(plan_for('sketch','best')[0],ctx)
         self.assertEqual(result.code,'timeout')
         self.assertTrue(self.store._admission_snapshot(job['id'])['processes'][0]['stopped'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX process-group reaping')
+    def test_timeout_descendant_group_settles_from_another_host(self):
+        user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
+        self.store.admission_work_begin(job['id'],'timeout','model',self.s.cost_signature,
+                                        process={'host':'worker-container','pid':123})
+        ctx=make_context(self.s,storage,job); ctx.run_dir.mkdir(parents=True); ctx.timeout_s=.25
+        ctx.accounting=lambda action,**kw:self.store.admission_record(job['id'],'timeout',action,**kw)
+        script=("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+                "'import time; b=bytearray(200_000_000); time.sleep(60)']); time.sleep(60)")
+        runner=CliRunner()
+        with mock.patch.object(runner,'available',return_value=None), \
+                mock.patch.object(runner,'command',return_value=([sys.executable,'-c',script],None)):
+            result=runner.run(plan_for('sketch','best')[0],ctx)
+        self.assertEqual(result.code,'timeout')
+        self.assertTrue(self.store._admission_snapshot(job['id'])['processes'][0]['stopped'])
+        self.store.admission_work_end(job['id'],'timeout',False,worker_stopped=True)
+        self.close(job); self.clock.advance(61)
+        with mock.patch('herogen.service.processes.socket.gethostname',return_value='sweep-container'):
+            self.assertEqual(settle_admissions(self.store),[job['id']])
+        row=self.store.budget_report()['admissions'][0]
+        self.assertTrue(row['closed']); self.assertEqual(row['actual_micro'],0)
+        self.assertEqual(self.store.budget_report()['summary']['active'],0)
+        self.job(user)
+
+    def test_group_exit_wait_retains_unproven_processes(self):
+        from herogen.service.processes import wait_stopped
+        with mock.patch('herogen.service.processes.stopped',side_effect=[False,False,True]), \
+                mock.patch('herogen.service.processes.time.sleep'):
+            self.assertTrue(wait_stopped(identity(),group=True))
+        with mock.patch('herogen.service.processes.stopped',return_value=False):
+            self.assertFalse(wait_stopped(identity(),group=True,timeout=0))
 
     def test_parallel_settlers_commit_once(self):
         job,_=self.settlement_job(); self.clock.advance(181)
