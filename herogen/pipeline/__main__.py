@@ -234,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
     r.add_argument("--turnaround-concurrency", type=int, default=4,
-                   help="parallel sheet/top calls; values above one may pay for unused candidates")
+                   help="compatibility setting; gated turnaround calls execute in serial order")
     r.add_argument("--label", default="", help="label for the input, e.g. 'stand-in sketch'")
     r.add_argument("--views", default=None,
                    help="held-out views to make, e.g. front-left-60,front-right-60 (default all; the others "
