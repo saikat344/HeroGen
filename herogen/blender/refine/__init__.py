@@ -109,7 +109,7 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
 
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
           closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
-          apply=None, attempts=None, attempt_start=0, cancelled=None):
+          apply=None, attempts=None, attempt_start=0, cancelled=None, user_note=""):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -151,7 +151,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         record["attempts"].append(trial)
         record["tries"] = attempt + 1
         references = [inp, cover] if closeup_reference is None else [inp, closeup_reference, cover]
-        edit = client.edit_image(prompt(recipe, cam["angle"]), references,
+        edit = client.edit_image(prompt(recipe, cam["angle"], user_note), references,
                                  size=f"{cam['res'][0]}x{cam['res'][1]}", attempt=attempt)
         edit = edit.convert("RGB")
         edit.save(folder / f"edit-{attempt}.png")
@@ -211,17 +211,24 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                budget_store=None, upscale_texture=False, recipe="RF2R", refine_profile=None):
+                budget_store=None, upscale_texture=False, recipe="RF2R", refine_profile=None, user_note: str = ""):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
     cost_usd itself counts this invocation's calls, matching the other stages' convention.
+
+    ``user_note``: optional user design guidance (the service's Refine note, cleaned upstream) appended to every
+    repaint prompt as quoted data after all rules, so it cannot override framing, outline, silhouette, pose, face
+    and feature preservation or the artwork's fixed details. An empty note changes nothing. Like
+    ``HEROGEN_REFINE_PROFILE``, runners that cannot pass parameters may supply it as ``HEROGEN_REFINE_NOTE``; an
+    explicit non-empty parameter wins. A non-empty note and its hash are recorded in stage-3f.json.
     """
     refine_profile = refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")
     if refine_profile not in ("best", "fast"):
         raise ValueError("refine_profile must be best or fast")
     if refine_profile == "fast" and upscale_texture:
         raise ValueError("fast refinement cannot add upscale-texture passes")
+    user_note = user_note or os.environ.get("HEROGEN_REFINE_NOTE", "")
     run = Path(run).resolve()
     output = run / "03-refined.glb"
     pending = run / "03-refined.part.glb"
@@ -252,6 +259,9 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         empty_progress(run)
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
+    if user_note:
+        rec.data["user_note"] = user_note
+        rec.data["user_note_sha256"] = hashlib.sha256(user_note.encode()).hexdigest()
     start = len(client.log.calls)
     previous_guard = client.before_api_attempt
     previous_settle = client.after_api_attempt
@@ -341,7 +351,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if refine_profile == "fast":
             from .fast import waves
             current, stopped = waves(client, prep, current, tex, cams, work, rec.data, timeout,
-                                     cover, head_found, recipe, save, budget.lock)
+                                     cover, head_found, recipe, save, budget.lock, user_note=user_note)
         else:
             for step, (name, hair) in enumerate(sequence):
                 key = ("hair-" if hair else "") + name
@@ -356,7 +366,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 save(ok=False, status="running")
                 try:
                     current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                    current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe)
+                                    current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe,
+                                    user_note=user_note)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)
@@ -382,7 +393,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 save(ok=False, status="running")
                 try:
                     current = _view(client, prep, current, tex, cam, False, folder, current_record,
-                                    timeout, cover, face_exclusion=head_found, closeup_reference=crop)
+                                    timeout, cover, face_exclusion=head_found, closeup_reference=crop,
+                                    user_note=user_note)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)

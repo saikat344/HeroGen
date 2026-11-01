@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--refine-cap-usd", type=float, default=0.80, help="per-run texture-refine API cap")
     r.add_argument("--refine-recipe", choices=("RF2R", "RF2W"), default="RF2R",
                    help="frozen normal-pass recipe (RF2W preserves artwork wear)")
+    r.add_argument("--refine-note", default="",
+                   help="user design note appended to every repaint prompt as quoted data; it cannot override "
+                        "the fixed framing, outline, pose or detail rules")
     r.add_argument("--upscale-texture", action="store_true", help="add close-up texture passes after the 20 refine views")
     r.add_argument("--height", type=float, default=HEIGHT_STUDS, help="body height in studs")
     r.add_argument("--voxels", type=int, default=None, help="voxel grid resolution along the height")
@@ -153,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
                               profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout,
-                              upscale_texture=a.upscale_texture, recipe=a.refine_recipe, refine_profile=a.refine_profile)
+                              upscale_texture=a.upscale_texture, recipe=a.refine_recipe, refine_profile=a.refine_profile,
+                              user_note=a.refine_note)
         except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
