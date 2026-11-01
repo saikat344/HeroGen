@@ -2,8 +2,11 @@
 
 With an explicit `primary` SourceColour, every covered texel takes that source's colour, including the Head
 and every LOD. View projections, the raw source fallback and stage 2f close-ups do not alter it. The same
-rasterisation, whole-body depth maps and outward island padding are retained. Refined lookup uses the exact
-closest triangle's barycentric corner UVs; coverage and exact source-surface distances are recorded.
+rasterisation, whole-body depth maps and outward island padding are retained. Refined lookup casts bounded
+rays along a continuous cage normal field in both directions, using the nearest outward-facing hit's exact
+corner UVs. Body sections interpolate area-weighted vertex normals. The Head uses the bounding ellipsoid's
+smooth field: remeshed nose/cheek normals otherwise aim into folded source sheets. Misses use the exact
+closest triangle. Distance measurements and fallback fractions are recorded.
 Stage 4 validates the refined source's provenance and frame first. The view fallback retains dense samples.
 
 Without a primary source the colour rules below apply unchanged.
@@ -56,6 +59,10 @@ CLOSEUP_RECORD = "views/closeup.json"
 CLOSEUP_FEATHER_PX = 3.0  # view pixels
 # Gaussian sigma of the prefilter, in close-up pixels per texel: about a box filter over one texel.
 CLOSEUP_PREFILTER = 0.42
+# Four times the measured body-to-refined p95 leaves room for normal rather than shortest-distance travel.
+# Measured per bake on up to 4096 evenly spaced covered texels; record both the measurement and the limit.
+CAGE_DISTANCE_FACTOR = 4.0
+CAGE_DISTANCE_SAMPLES = 4096
 
 
 @dataclass
@@ -169,10 +176,11 @@ def _closeup_colour(cu: Closeup, view, row: np.ndarray, col: np.ndarray, colour:
 
 
 class SourceColour:
-    """Source colour at a closest surface point; exact triangle UVs for refined transfers.
+    """Source colour through dense fallback samples, exact closest triangles or bounded cage rays.
 
-    The view bake retains its dense-sample fallback. Exact lookup interpolates corner UVs on the closest
-    triangle, avoiding spatial quantisation of a high-resolution painting. Queries are bounded in memory.
+    Calling the source retains its existing closest-point lookup; the view bake uses dense samples.
+    Refined-primary bakes use cage(), which interpolates exact hit UVs and falls back to closest triangles.
+    Queries are bounded in memory.
     """
 
     def __init__(self, verts: np.ndarray, faces: np.ndarray, corner_uv: np.ndarray, texture: np.ndarray,
@@ -201,18 +209,108 @@ class SourceColour:
             dist, idx = self.tree.query(p, workers=-1)
             uv = self.uv[idx]
         else:
-            uv, dist = np.empty((len(p), 2)), np.empty(len(p))
-            # Samples supply only an upper distance bound. Triangle search still proves the nearest point;
-            # UVs never come from the samples. Tight boxes avoid searching 27 full cells for every texel.
-            bound = self.tree.query(p, workers=-1)[0]
-            for start in range(0, len(p), 256):
-                stop = start + 256
-                tri, bary, dist[start:stop] = self.index.closest(p[start:stop], bound[start:stop])
-                if (tri < 0).any():
-                    raise ValueError("source colour needs a non-degenerate surface")
-                uv[start:stop] = np.einsum("ni,nij->nj", bary, self.corner_uv[tri])
+            tri, bary, dist = self.closest(p)
+            uv = np.einsum("ni,nij->nj", bary, self.corner_uv[tri])
         t = self.texture
         return _bilinear(t, uv[:, 1] * t.shape[0] - 0.5, uv[:, 0] * t.shape[1] - 0.5), dist
+
+    def closest(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Exact surface correspondence; dense samples only bound the search, never supply UVs."""
+        if self.index is None:
+            raise ValueError("exact source surface required for cage projection")
+        ids, bary, dist = np.empty(len(p), dtype=np.int64), np.empty((len(p), 3)), np.empty(len(p))
+        bound = self.tree.query(p, workers=-1)[0]
+        for start in range(0, len(p), 256):
+            stop = start + 256
+            ids[start:stop], bary[start:stop], dist[start:stop] = self.index.closest(p[start:stop], bound[start:stop])
+        if (ids < 0).any():
+            raise ValueError("source colour needs a non-degenerate surface")
+        return ids, bary, dist
+
+    def project(self, p: np.ndarray, normals: np.ndarray, max_distance: float
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Nearest outward-facing smooth-normal ray hit, or exact closest triangle on a miss.
+
+        Returns triangle ids, barycentrics, travel distances and the fallback mask. Zero normals fall back.
+        Reject back-facing source sheets, which can otherwise be closer inside a crease than its exterior.
+        Ray origins move back by a roundoff allowance so a point exactly on the source surface also hits.
+        """
+        if self.index is None or not np.isfinite(max_distance) or max_distance <= 0:
+            raise ValueError("cage projection needs an exact source and a positive finite distance limit")
+        p, normals = np.asarray(p, float).reshape(-1, 3), np.asarray(normals, float).reshape(-1, 3)
+        if normals.shape != p.shape or not np.isfinite(normals).all():
+            raise ValueError("cage normals must be finite and match the points")
+        length = np.linalg.norm(normals, axis=1)
+        n = normals / np.maximum(length, 1e-30)[:, None]
+        ids, bary, dist = np.full(len(p), -1, dtype=np.int64), np.full((len(p), 3), np.nan), np.full(len(p), np.inf)
+        eps = 32 * np.finfo(float).eps * max(1., float(np.abs(self.verts).max()))
+        for start in range(0, len(p), 4096):
+            end = min(start + 4096, len(p))
+            for sign in (1, -1):
+                direction = sign * n[start:end]
+                f, b, t = self.index.ray_first_hit(p[start:end] - eps * direction, direction,
+                                                   t_max=max_distance + eps,
+                                                   side="back" if sign == 1 else "front")
+                t = np.abs(t - eps)
+                better = (f >= 0) & (t < dist[start:end])
+                ids[start:end][better] = f[better]
+                bary[start:end][better] = b[better]
+                dist[start:end][better] = t[better]
+        fallback = ids < 0
+        if fallback.any():
+            ids[fallback], bary[fallback], dist[fallback] = self.closest(p[fallback])
+        return ids, bary, dist, fallback
+
+    def cage(self, p: np.ndarray, normals: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Colour, sampled nearest distances and cage diagnostics for this bake.
+
+        The second array contains the deterministic calibration subset's exact nearest distances, not one
+        distance per texel. Per-lookup travel distances (rays and misses) are summarised separately.
+        """
+        sample = p[np.linspace(0, len(p) - 1, min(len(p), CAGE_DISTANCE_SAMPLES), dtype=np.int64)]
+        nearest = self.closest(sample)[2]
+        p95 = float(np.percentile(nearest, 95))
+        floor = float(64 * np.finfo(float).eps * max(1., float(np.abs(self.verts).max())))
+        limit = max(CAGE_DISTANCE_FACTOR * p95, floor)
+        ids, bary, distances, fallback = self.project(p, normals, limit)
+        uv = np.einsum("ni,nij->nj", bary, self.corner_uv[ids])
+        t = self.texture
+        colour = _bilinear(t, uv[:, 1] * t.shape[0] - .5, uv[:, 0] * t.shape[1] - .5)
+        return colour, nearest, {
+            "sampling": "smooth-normal cage rays with closest-triangle fallback",
+            "primary_projection": {"max_distance": limit, "distance_factor": CAGE_DISTANCE_FACTOR,
+                                   "distance_samples": len(sample), "nearest_distance_p95": p95,
+                                   "roundoff_floor": floor, "samples": len(p),
+                                   "fallback_count": int(fallback.sum()), "fallback_fraction": float(fallback.mean()),
+                                   "travel_distance_mean": float(distances.mean()),
+                                   "travel_distance_p95": float(np.percentile(distances, 95)),
+                                   "travel_distance_max": float(distances.max())}}
+
+
+def vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Area-weighted unit vertex normals, independent of UV island boundaries."""
+    tri = verts[faces]
+    area_normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    out = np.zeros_like(verts, dtype=np.float64)
+    for corner in range(3):
+        np.add.at(out, faces[:, corner], area_normal)
+    return out / np.maximum(np.linalg.norm(out, axis=1), 1e-30)[:, None]
+
+
+def cage_normals(name: str, verts: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, str]:
+    """A continuous per-vertex ray field, interpolated across the body's original triangles.
+
+    For the Head, the gradient of its bounding ellipsoid suppresses remeshing creases in the cage itself.
+    It has no fitted parameters: centre is the bounding-box midpoint and radii are its half extents. On s009,
+    ordinary smooth normals leave source-sheet jumps at the nose; this outer field removes those switches.
+    Flat/empty Heads and other sections retain area-weighted mesh normals.
+    """
+    span = np.ptp(verts, axis=0) if len(verts) else np.zeros(3)
+    if name == "Head" and np.all(span > 1e-12):
+        centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
+        normal = (verts - centre) / span ** 2
+        return normal / np.maximum(np.linalg.norm(normal, axis=1), 1e-30)[:, None], "bounding ellipsoid"
+    return vertex_normals(verts, faces), "area-weighted vertex normals"
 
 
 def observed_colour_views(vs: ViewSet, run: Path) -> dict:
@@ -235,9 +333,9 @@ def observed_colour_views(vs: ViewSet, run: Path) -> dict:
     return out
 
 
-def _texels(pos: np.ndarray, uv: np.ndarray, size: int, chunk: int = 4096):
-    """Rasterise triangles in UV space. Returns (flat texel index, 3D position, triangle index)."""
-    idx_all, p_all, t_all = [], [], []
+def _texels(pos: np.ndarray, uv: np.ndarray, size: int, chunk: int = 4096, *, with_bary: bool = False):
+    """Rasterise UV triangles: (flat index, position, triangle id), optionally followed by barycentrics."""
+    idx_all, p_all, t_all, b_all = [], [], [], []
     for s in range(0, len(pos), chunk):
         P, U = pos[s:s + chunk], uv[s:s + chunk] * size
         lo = np.floor(U.min(axis=1) - 0.5).astype(np.int64)
@@ -266,7 +364,10 @@ def _texels(pos: np.ndarray, uv: np.ndarray, size: int, chunk: int = 4096):
         idx_all.append(row * size + x)
         p_all.append(p3)
         t_all.append(tri + s)
-    return np.concatenate(idx_all), np.concatenate(p_all), np.concatenate(t_all)
+        if with_bary:
+            b_all.append(bary)
+    result = np.concatenate(idx_all), np.concatenate(p_all), np.concatenate(t_all)
+    return (*result, np.concatenate(b_all)) if with_bary else result
 
 
 def _project(view, p: np.ndarray):
@@ -324,7 +425,7 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
     (module notes). `primary` supplies every covered texel and suppresses view colour and close-ups."""
     if primary is not None:
         closeups = None
-    pos, uv, nrm = [], [], []
+    pos, uv, nrm, smooth, normal_fields = [], [], [], [], {}
     for name, s in sections.items():
         if name not in uvs or len(s.faces) == 0:
             continue
@@ -333,13 +434,17 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
         pos.append(tri)
         uv.append(uvs[name])
         nrm.append(n / np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None])
+        if primary is not None:
+            normal, normal_fields[name] = cage_normals(name, s.verts, s.faces)
+            smooth.append(normal[s.faces])
     if not pos:
         # nothing to bake (an empty section, say the Head of a broken body): a blank texture, so stage 4 reaches
         # its gates (`sections_non_empty`) and fails there with a clear error instead of here
         return np.zeros((size, size, 3), dtype=np.uint8), {"texels_used": 0, "atlas_fill": 0.0,
                                                            "notes": ["no faces to bake"]}, zbuf
     pos, uv, nrm = np.concatenate(pos), np.concatenate(uv), np.concatenate(nrm)
-    tidx, p3, tri = _texels(pos, uv, size)
+    raster = _texels(pos, uv, size, with_bary=primary is not None)
+    tidx, p3, tri = raster[:3]
     if primary is not None and not len(p3):
         return np.zeros((size, size, 3), dtype=np.uint8), {
             "texels_used": 0, "atlas_fill": 0.0, "colour_source": "refined", "texels_primary": 0.0,
@@ -385,9 +490,12 @@ def bake(sections: dict, uvs: dict, views: dict, size: int, zbuf: dict | None = 
                    fallback / np.maximum(fb_w, 1e-12)[:, None])
     src_stats = {}
     if primary is not None:
-        col, dist = primary(p3)
+        normal = np.einsum("ni,nij->nj", raster[3], np.concatenate(smooth)[tri])
+        col, dist, projection = primary.cage(p3, normal)
+        projection["primary_projection"]["normal_fields"] = normal_fields
         src_stats = {"colour_source": "refined", "texels_primary": 1.0,
-                     "sampling": primary.sampling,
+                     **projection,
+                     "primary_nearest_distance_samples": len(dist),
                      "primary_nearest_distance_mean": float(dist.mean()),
                      "primary_nearest_distance_p95": float(np.percentile(dist, 95)),
                      "primary_nearest_distance_max": float(dist.max()), "closeups_applied": False}

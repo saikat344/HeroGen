@@ -469,10 +469,28 @@ to rounding) and for samples interpolated across the placed refined mesh. The la
 that span multiple source triangles under a non-affine map.
 
 On success, `texture.bake(primary=SourceColour(..., exact=True))` samples the transformed refined mesh for every covered
-texel of both the shared atlas and the Head texture, at every LOD the profile builds. It finds the exact closest
-triangle and interpolates its corner UVs with barycentric coordinates. Dense surface samples supply only
-distance bounds to accelerate this search; they never select the UV. This removes the coarse mosaic caused
-by snapping texels to one of 15 samples per source triangle. Stage 2f close-ups are
+texel of both the shared atlas and the Head texture, at every LOD the profile builds. It casts rays in both
+directions along a continuous cage normal field, taking the nearer outward-facing hit and interpolating that
+triangle's exact corner UVs. Body sections use area-weighted unit vertex normals, barycentrically interpolated
+and normalised at the texel. The Head instead interpolates normals of its bounding ellipsoid: its centre is
+the bounding-box midpoint, and its radii are half the three extents. This removes sharp remeshing creases from
+the cage's directions without changing geometry, UVs or the painting. A flat Head retains mesh normals.
+`MeshIndex.ray_first_hit` reuses the uniform-grid DDA and Moller-Trumbore tests, retaining the nearest hit until
+the unvisited cells begin beyond it; a triangle whose bounding box reaches an early cell cannot hide a closer
+hit in a later cell. Equal-distance ties choose the lowest face index.
+
+Each bake measures exact closest-surface distances on at most 4096 evenly spaced covered samples. Its ray
+distance limit is four times their p95, with only a floating-point floor for coincident surfaces. A texel where
+neither ray hits within that limit uses the exact closest triangle. Dense surface samples supply only distance
+bounds to accelerate this fallback; they never select UVs. Back-facing source triangles are excluded from rays:
+inside a folded nose or cheek they can otherwise be closer than the painted exterior. The ellipsoid field was
+selected because ordinary smooth mesh normals still switch source sheets on the remeshed nose. A dense s009
+Head probe at 12 subdivisions per edge finds 175/50 face triangles above spacing ratios 3/8 for closest-point
+lookup, versus 43/18 with the cage. The old cheek seam's ratios of approximately 9-22 fall to 1.1-3.2. At four
+times the sampling density the residual nose ratios stay near 3, while the closest-point jumps grow fourfold;
+the residual is smooth geometric stretch, not the repeated lip. These measurements use the pre-export Head
+and placed refined triangles, with front-facing face centres at y < -0.1; they do not certify hair overhangs
+or exact geometry preservation. Stage 2f close-ups are
 not applied to these textures. The existing UV rasterisation, whole-body depth handling and eight iterations
 of island padding remain unchanged. High LOD also writes `atlas-high-views.png` and
 `atlas-head-high-views.png`: the previous view bake, including the raw source fallback and Head close-ups.
@@ -484,8 +502,12 @@ the source hash and completion status prevent reuse after a source replacement o
 and `refined`: both GLB/source hashes, `source_correspondence` with the method, sizes, raw geometry and placed
 surface-distance mean/p95/max (also as fractions of bbox diagonal), sample counts, raw threshold, and any fallback
 reason. The diagnostic `refined_texture` check reports eligibility
-without failing a valid view fallback. Each primary bake records full texel coverage and exact nearest
-colour-source distances separately from the exact frame check. Notes explicitly identify the refined Head
+without failing a valid view fallback. Each primary bake records full texel coverage, the exact nearest
+colour-source distance sample count/mean/p95/max separately from the exact frame check, and
+`primary_projection`: normal-field methods, measured distance limit and derivation, ray/fallback travel
+statistics, covered-sample count, fallback count and fraction. `bake.<lod>.head.primary_projection` reports the
+Head separately; `primary_projection_overall` combines atlas and Head lookup counts for that LOD. Counts are
+rasterised surface lookups, including multiple contributors at a shared texel. Notes explicitly identify the refined Head
 texture and suppression of close-ups; comparison close-ups are listed separately.
 
 **Texture gates follow the colour source.** Refined-primary `texture_colour_error_<view>` and
