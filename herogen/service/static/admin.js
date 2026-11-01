@@ -393,7 +393,9 @@ function bootAdmin() {
       steps.forEach((step, idx) => {
         const prev = idx > 0 ? steps[idx - 1].count : null;
         const pctTop = topCount > 0 ? `${Math.round((step.count / topCount) * 100)}% of landing` : '';
-        const pctPrev = prev && prev > 0 ? `${Math.round((step.count / prev) * 100)}% of previous` : '';
+        // Steps count events in the window, not one visitor's path, so repeat views can outnumber the step before.
+        const pctPrev = !prev ? '' : step.count > prev ? 'includes repeat views'
+          : `${Math.round((step.count / prev) * 100)}% of previous`;
         const meta = [pctPrev, idx > 1 ? pctTop : ''].filter(Boolean).join(' · ');
         funnelChart.append(barRow(`${idx + 1}. ${step.label}`, String(step.count), step.count, maxFunnel,
           idx === steps.length - 1 ? 'ok' : 'accent', meta));
