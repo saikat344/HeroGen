@@ -96,6 +96,14 @@ class TestAdmission(TempDirCase):
         self.configure(); self.clock.advance(86400*15)
         self.assertEqual(self.status()['reason'],'generation_paused')
 
+    def test_changed_refine_cap_unverifies_bound_and_refuses_workers(self):
+        bumped=self.s.with_(refine_cap_usd=80)
+        self.assertNotEqual(self.s.cost_signature,bumped.cost_signature)
+        self.assertEqual(self.store.admission_status(self.s.code_commit,bumped.cost_signature)['reason'],'cost_bound_unverified')
+        u,_=self.guest(); j,_=self.job(u)
+        with self.assertRaises(StoreError) as e: self.store.admission_work_begin(j['id'],'cap-changed','model',bumped.cost_signature)
+        self.assertEqual(e.exception.code,'generation_paused')
+
     def test_alerts_use_allocations_and_recorded_overhead(self):
         self.store.budget_overhead(500_000_000,'Synthetic non-job charges')
         self.assertIn('budget_50_percent',self.store.budget_report()['summary']['alerts'])

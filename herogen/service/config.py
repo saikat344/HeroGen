@@ -87,7 +87,7 @@ class Settings:
         import hashlib
         import json
         payload = {name: getattr(self, name) for name in (
-            'profiles', 'stage3_args', 'stage_timeout_s', 'blender_timeout_s', 'max_attempts',
+            'profiles', 'stage3_args', 'refine_cap_usd', 'stage_timeout_s', 'blender_timeout_s', 'max_attempts',
             'upload_max_side', 'prompt_max_chars', 'heldout_concurrency')}
         payload['prompt_selectors'] = {key: os.environ.get(key, '') for key in (
             'HEROGEN_PROMPT_SKETCH_VERSION', 'HEROGEN_SAME_CHARACTER_VERSION')}
