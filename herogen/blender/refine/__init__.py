@@ -112,6 +112,11 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     if rendered is None:
         blender("render", {"blend": str(prep / "work.blend"), "texture": str(current), "cams": [cam],
                            "out": str(folder), "pos": True}, folder / "blender.log", timeout=timeout)
+    else:
+        import shutil
+        # Rebaking consumes the original render and geometry alongside each accepted repaint.
+        for suffix in (".png", ".pos.exr"):
+            shutil.copy2(rendered / f"{cam['name']}{suffix}", folder / f"{cam['name']}{suffix}")
     rendered = folder if rendered is None else rendered
     with Image.open(rendered / f"{cam['name']}.png") as rgba:
         inp, alpha = C.composite(rgba.convert("RGBA"))
