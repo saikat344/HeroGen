@@ -237,6 +237,7 @@ class PromptJobTest(JobCase):
                 self.assertNotIn(self.description, saved["error_message"])
                 self.assertNotIn(self.description, "\n".join(logs.output))
                 self.assertEqual(self.record(job, "1")["status"], "error")
+                self.store.job_cancel(job["id"], self.user["id"])
 
     def test_cover_unexpected_output_and_timeouts_do_not_log_the_description(self):
         from herogen.service.worker import make_context

@@ -50,7 +50,7 @@ class TestVersions(WebCase):
         self.assertEqual(r.json()["stop_after"], None)
         runner.calls.clear()
         self.assertEqual(self.finish(j["id"], runner), "succeeded")
-        self.assertEqual(runner.calls, ["2", "3", "4", "6", "5"])
+        self.assertEqual(runner.calls, ["2", "3", "3f", "4", "6", "5"])
         self.assertAlmostEqual(self.store.job_get(j["id"])["cost_usd"], .0375)
         self.assertEqual(self.b.get("/api/quota").json()["jobs_total"], used)
         self.assertEqual(self.svc.storage.run_dir(self.uid, self.parent).joinpath("01-cover.png").read_bytes(), before)
