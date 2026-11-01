@@ -1,11 +1,17 @@
 """Owner-only progressive files, tolerant publication reads and measured stage timing."""
 
+import hashlib
 import json
+import os
+from pathlib import Path
+import shutil
+import unittest
 
 from test_herogen_service_support import web_test
 from test_herogen_service_web import Browser, WebCase
 from herogen.service.fakes import FakeRunner, box_glb
 from herogen.service.progressive import read_progress
+from herogen.service.runner import write_record
 
 
 @web_test
@@ -137,6 +143,85 @@ class ProgressiveFiles(WebCase):
         (run / '03-refined-v1.glb').symlink_to(self.tmp / 'outside.glb')
         (self.tmp / 'outside.glb').write_bytes(box_glb())
         self.assertEqual(read_progress(run)['versions'], [])
+
+    def test_signed_view_names_and_final_version_metadata(self):
+        run = self.tmp / 'signed-views'
+        run.mkdir()
+        versions = []
+        FakeRunner().publish_version(run, versions, 1, ['head+0', 'body-90', 'hair-upper+180'])
+        valid = {'profile': 'fast', 'versions': versions, 'done': True, 'final_n': 1}
+        (run / 'stage-3f-progress.json').write_text(json.dumps(valid))
+        self.assertEqual(read_progress(run)['final_n'], 1)
+        self.assertEqual(read_progress(run)['versions'][0]['accepted'], versions[0]['accepted'])
+        for field, value in (('final_n', True), ('final_n', 2), ('final_n', None),
+                             ('done', False), ('profile', '../fast')):
+            broken = {**valid, field: value}
+            (run / 'stage-3f-progress.json').write_text(json.dumps(broken))
+            self.assertEqual(read_progress(run), {'versions': [], 'done': False}, (field, value))
+        for view in ('../head+0', 'body/+90', 'body\\+90', '<head+0>'):
+            broken = json.loads(json.dumps(valid))
+            broken['versions'][0]['accepted'] = [view]
+            (run / 'stage-3f-progress.json').write_text(json.dumps(broken))
+            self.assertEqual(read_progress(run), {'versions': [], 'done': False}, view)
+
+    @unittest.skipUnless(os.environ.get('HEROGEN_RECORDED_REFINE_SEQUENCES'),
+                         'set HEROGEN_RECORDED_REFINE_SEQUENCES to both recorded sequence folders')
+    def test_recorded_sequences_replay_through_reader_and_owner_job_api(self):
+        roots = [Path(p) for p in os.environ['HEROGEN_RECORDED_REFINE_SEQUENCES'].split(os.pathsep)]
+        self.assertEqual({p.name for p in roots}, {'s023', 's037'})
+        owner = self.signin()
+        other = self.signin('sequence-other@example.com')
+        case = self
+        for root in roots:
+            with self.subTest(sequence=root.name):
+                manifest = json.loads((root / 'sequence.json').read_text())
+                for name, digest in manifest['files'].items():
+                    self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest, name)
+                jid = self.make_job(owner, key=f'recorded-{root.name}').json()['id']
+                seen = []
+
+                class RecordedPublisher(FakeRunner):
+                    def _stage_3f(self, ctx, run):
+                        def publish(name, expected, done):
+                            shutil.copyfile(root / name, run / 'stage-3f-progress.json')
+                            raw = json.loads((run / 'stage-3f-progress.json').read_text())
+                            progress = read_progress(run)
+                            case.assertEqual([v['n'] for v in progress['versions']], expected)
+                            case.assertEqual(progress['profile'], 'fast')
+                            case.assertEqual(progress['done'], done)
+                            case.assertEqual(progress['final_n'], expected[-1] if done else None)
+                            view = owner.get(f'/api/jobs/{jid}').json()
+                            case.assertEqual(view['refinement'], progress)
+                            case.assertEqual([m['n'] for m in view['models']], [0, *expected])
+                            for version, original in zip(progress['versions'], raw['versions']):
+                                case.assertEqual(version, {k: original[k] for k in version})
+                            case.check_private(owner, other, view)
+                            case.assertEqual(other.get(f'/api/jobs/{jid}').status_code, 404)
+                            case.assertEqual(Browser(case.app).get(f'/api/jobs/{jid}').status_code, 401)
+                            seen.append((expected.copy(), done, progress['final_n']))
+
+                        publish('stage-3f-progress-initial.json', [], False)
+                        expected = []
+                        for event in manifest['timeline']:
+                            shutil.copyfile(root / event['glb'], run / event['glb'])
+                            case.assertEqual(owner.get(f"/runs/r1/{jid}/{event['glb']}").status_code, 404)
+                            expected.append(event['n'])
+                            publish(event['progress'], expected, False)
+                        shutil.copyfile(run / manifest['timeline'][-1]['glb'], run / '03-refined.glb')
+                        publish('stage-3f-progress.json', expected, True)
+                        case.assertEqual((run / '03-refined.glb').read_bytes(),
+                                         (run / f"03-refined-v{expected[-1]}.glb").read_bytes())
+                        write_record(run, {'stage': '3f', 'ok': True, 'status': 'complete',
+                                           'outputs': ['03-refined.glb'], 'cost_usd': 0})
+
+                self.assertEqual(self.finish(jid, RecordedPublisher()), 'succeeded')
+                self.assertEqual(seen, [([], False, None), ([1], False, None), ([1, 2], False, None),
+                                        ([1, 2, 3], False, None), ([1, 2, 3], True, 3)])
+                final = owner.get(f'/api/jobs/{jid}').json()
+                self.assertEqual(final['refinement']['final_n'], 3)
+                self.assertTrue(final['refinement']['done'])
+                self.assertEqual(owner.get(final['downloads']['glb']['url']).content,
+                                 (root / '03-refined-v3.glb').read_bytes())
 
     def test_cancel_keeps_already_published_versions_available_to_owner(self):
         owner = self.signin()
