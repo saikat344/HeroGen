@@ -127,6 +127,7 @@ class StageContext:
     timeout_s: float = 3600.0
     blender_timeout_s: float = 3 * 3600.0
     env: dict[str, str] = field(default_factory=dict)
+    refine_profile: str = "best"
     refine_cap_usd: float = 0.80
     refine_budget: Callable | None = None
     accounting: Callable | None = None
@@ -395,6 +396,8 @@ class CliRunner:
             if spec.key == "3f":
                 argv += ["--refine", "live", "--refine-cache", str(ctx.cache_dir), "--profile", ctx.profile,
                          "--refine-cap-usd", str(ctx.refine_cap_usd)]
+                if ctx.refine_profile != "best":
+                    argv += ["--refine-profile", ctx.refine_profile]
             return argv, None
         if spec.key == "6":
             # With --out a run's 06-roblox folder, the export writes stage-6.json at the run root, its

@@ -76,6 +76,7 @@ class Settings:
     default_profile: str = "best"
     profiles: tuple[str, ...] = PROFILES
     stage3_args: str = "--mesh-source sam3d-objects --joints sam3d-body --remote live"
+    refine_profile: str = "best"
     refine_cap_usd: float = 0.80
     stage_timeout_s: int = 3600
     blender_timeout_s: int = 3 * 3600
@@ -89,6 +90,8 @@ class Settings:
         payload = {name: getattr(self, name) for name in (
             'profiles', 'stage3_args', 'refine_cap_usd', 'stage_timeout_s', 'blender_timeout_s', 'max_attempts',
             'upload_max_side', 'prompt_max_chars', 'heldout_concurrency')}
+        if self.refine_profile != 'best':
+            payload['refine_profile'] = self.refine_profile
         payload['prompt_selectors'] = {key: os.environ.get(key, '') for key in (
             'HEROGEN_PROMPT_SKETCH_VERSION', 'HEROGEN_SAME_CHARACTER_VERSION')}
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -164,6 +167,7 @@ ENV = {
     "default_profile": "HEROGEN_SERVICE_PROFILE",
     "profiles": "HEROGEN_SERVICE_PROFILES",
     "stage3_args": "HEROGEN_SERVICE_STAGE3_ARGS",
+    "refine_profile": "HEROGEN_SERVICE_REFINE_PROFILE",
     "refine_cap_usd": "HEROGEN_SERVICE_REFINE_CAP_USD",
     "stage_timeout_s": "HEROGEN_SERVICE_STAGE_TIMEOUT",
     "blender_timeout_s": "HEROGEN_SERVICE_BLENDER_TIMEOUT",
@@ -227,6 +231,8 @@ def validate(s: Settings, require_key: bool = True) -> None:
         raise ConfigError(f"{ENV['email_from']} must look like `HeroGen <signin@your-domain>`")
     if s.default_profile not in s.profiles or any(p not in PROFILES for p in s.profiles):
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
+    if s.refine_profile not in ("best", "fast"):
+        raise ConfigError(f"{ENV['refine_profile']} must be best or fast")
     if not math.isfinite(s.refine_cap_usd) or s.refine_cap_usd < 0:
         raise ConfigError(f"{ENV['refine_cap_usd']} must be finite and nonnegative")
     for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
