@@ -150,6 +150,12 @@ data_vol = modal.Volume.from_name(f"{APP_NAME}-data", create_if_missing=True)
 meta_vol = modal.Volume.from_name(f"{APP_NAME}-meta", create_if_missing=True)
 legal_vol = modal.Volume.from_name(f"{APP_NAME}-legal", create_if_missing=True)
 web_secret = modal.Secret.from_name(WEB_SECRET)
+# A deploying shell can supply the private allowlist without baking it into any image.
+web_secrets = [web_secret]
+if modal.is_local() and "HEROGEN_SERVICE_ADMIN_EMAILS" in os.environ:
+    web_secrets.append(modal.Secret.from_dict({
+        "HEROGEN_SERVICE_ADMIN_EMAILS": os.environ["HEROGEN_SERVICE_ADMIN_EMAILS"],
+    }))
 model_secret = modal.Secret.from_name(MODEL_SECRET)
 admin_secret = modal.Secret.from_name(ADMIN_SECRET)
 
@@ -264,7 +270,7 @@ def _submit(job_id: str) -> str:
     return run_job.spawn(job_id).object_id
 
 
-@app.function(image=web_image, secrets=[web_secret], volumes={DATA: data_vol, LEGAL: legal_vol}, min_containers=1,
+@app.function(image=web_image, secrets=web_secrets, volumes={DATA: data_vol, LEGAL: legal_vol}, min_containers=1,
               timeout=600)
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app(custom_domains=CUSTOM_DOMAINS or None)
@@ -401,7 +407,7 @@ def retention() -> dict:
     return purge(RemoteStore(), _settings(), Storage(Path(DATA)), volume=data_vol)
 
 
-@app.function(image=web_image, secrets=[web_secret, admin_secret], volumes={META: meta_vol}, timeout=120)
+@app.function(image=web_image, secrets=[*web_secrets, admin_secret], volumes={META: meta_vol}, timeout=120)
 def admin_command(argv: list) -> str:
     import logging
 

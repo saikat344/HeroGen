@@ -3,7 +3,7 @@
 Secrets come only from the environment, which on Modal is filled from Modal secrets:
 `HEROGEN_SESSION_KEY` (signs session ids, CSRF tokens, sign-in links and invite codes), `HEROGEN_EMAIL_API_KEY`
 (the email provider) and `MODEL_API_KEY` (the Meta Model API, read by herogen.pipeline in the stage workers only).
-Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default below.
+The private admin allowlist also stays in runtime secrets, never the image. Every other setting is a plain `HEROGEN_SERVICE_*` variable with the default below.
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ ENV = {
     "blender_timeout_s": "HEROGEN_SERVICE_BLENDER_TIMEOUT",
     "code_commit": "HEROGEN_SERVICE_COMMIT",
 }
-SECRET_FIELDS = ("signing_key", "email_api_key")
+SECRET_FIELDS = ("signing_key", "email_api_key", "admin_emails")
 
 
 def _parse(name: str, raw: str, default: Any) -> Any:
