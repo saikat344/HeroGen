@@ -156,20 +156,32 @@ prompts, thresholds, retries and acceptance rules are unchanged.
 
 - Stage p requests the design and full-body sketch once each. It skips identity model checks; stage 1
   checks the full-body sketch copied by stage 0 before accepting the cover.
-- Stage 0 records local input checks as informational. Stage 1 segments `character` and `feet` once each,
-  concurrently. Exactly one non-empty character instance is required, including small extra figures.
+- Stage 0 records local input checks as informational. Stage 1 first segments the input's `character`
+  and `feet` once each, concurrently. Exactly one non-empty character instance is required, including
+  small extra figures.
   At least `prompt_sketch.FEET_MIN` feet must be in its lower half, and the figure must clear the top and
   bottom edges by more than `prompt_sketch.edge_tolerance_px(height)`. No person, foot, boot, shoe, leg,
   face, head or identity requests are made for this step.
   Uploads also run the existing real-person photo judge concurrently with segmentation. No cover edit
-  starts until that judge and the figure checks pass. A prompt sketch skips the photo judge only when
+  starts until that judge and the one-character check pass. Upload full-body measurements are
+  informational, with `upload_` check names. A failed upload full-body check selects the frozen
+  `cover_complete_figure` prompt, which preserves the visible character and drawing medium while
+  completing the cut-off figure. Full-body uploads retain the original cover prompt. Both retain
+  the existing cover reference and bounded appearance-note handling.
+  After an upload's cover edit, `character` and `feet` are segmented on the cover concurrently;
+  the same full-body thresholds are necessary there. A missing or ambiguous cover figure also fails
+  the full-body check. A successful completion records `details.completed_figure: true` and
+  `details.upload_failed_checks` in `stage-1.json`; the latter lists the failed upload measurements
+  and their aggregate check. Failed covers keep their image and diagnostics for explicit Retry.
+  A prompt sketch skips the photo judge only when
   the passing stage-p and stage-0 provenance records exist and its pixels match `p-full-body.png`; its
   cover edit runs concurrently with both segmentation calls. A rejection discards the speculative edit
   and removes any stale cover. All submitted calls finish before recording or raising an error.
   Necessary check failures write `input_rejected` with plain messages and measured checks, without a retry.
   `sketch_characters_found` records the exact instance count. `sketch_feet_on_figure` records a boolean
-  conjunction of the three full-body measurements (threshold 1); `feet_in_lower_half`, `figure_top_gap_px`
-  and `figure_bottom_gap_px` retain their counts, gaps and original thresholds as diagnostic checks.
+  conjunction of the three full-body measurements (threshold 1), on the cover for uploads and the input
+  for prompt sketches. `feet_in_lower_half`, `figure_top_gap_px` and `figure_bottom_gap_px` retain
+  their counts, gaps and original thresholds as diagnostic checks, prefixed `cover_` on upload covers.
   These existing rejection names preserve the service's plain character and full-body messages.
   Other input and cover quality checks remain skipped or informational.
   Stage 2 requests one sheet and one top view, retaining local

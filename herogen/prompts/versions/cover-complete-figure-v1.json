@@ -1,0 +1,19 @@
+{
+  "name": "cover-complete-figure-v1",
+  "kind": "cover_complete_figure",
+  "summary": "Complete a cut-off uploaded character from head to feet.",
+  "steps": [
+    {
+      "name": "cover",
+      "endpoint": "images/edits",
+      "model": "muse-image-1.0",
+      "params": {
+        "n": 1,
+        "output_format": "png",
+        "size": "input"
+      },
+      "prompt": "Redraw THIS character full body from the top of the head to the feet, standing and facing forward, arms held a little away from the body. Keep the same character, outfit, colours, line style and medium as the upload. Keep everything visible in the upload; complete only what is cut off (legs, feet, boots), consistent with the visible clothing. Plain background."
+    }
+  ],
+  "sha256": "7833b23d14ee1cf1ad9a6286211b1c93c724ed36854bdc905421981f9a9e789f"
+}
