@@ -85,12 +85,12 @@ class FastLimiterTests(unittest.TestCase):
         b.release(third)
 
     def test_threads_share_rpm_and_in_flight_limits(self):
-        for rpm, ceiling in ((7, 32), (100, 3)):
+        for rpm, ceiling in ((7, 32), (100, 3), (100, 32)):
             with self.subTest(rpm=rpm, ceiling=ceiling), tempfile.TemporaryDirectory() as directory:
                 limiters = [retry.SharedRPMLimiter(directory, "key", model="sam-3.1", rpm=rpm,
                                                   max_in_flight=ceiling, clock=lambda: 1000)
-                            for _ in range(16)]
-                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+                            for _ in range(40)]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
                     slots = list(pool.map(lambda lim: lim.acquire(1000)[0], limiters))
                 self.assertEqual(sum(s is not None for s in slots), min(rpm, ceiling))
 
@@ -102,7 +102,7 @@ class FastLimiterTests(unittest.TestCase):
             lim = SharedRPMLimiter(root, "key", model="sam-3.1", rpm=int(rpm),
                                    max_in_flight=int(ceiling), clock=lambda: 1000)
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                slots = list(pool.map(lambda _: lim.acquire(1000)[0], range(8)))
+                slots = list(pool.map(lambda _: lim.acquire(1000)[0], range(12)))
             pathlib.Path(root, "ready-" + number).write_text("ready")
             deadline = time.monotonic() + 15
             while len(list(pathlib.Path(root).glob("ready-*"))) < 4:
@@ -111,7 +111,7 @@ class FastLimiterTests(unittest.TestCase):
                 time.sleep(.005)
             print(sum(s is not None for s in slots))
         ''')
-        for rpm, ceiling in ((7, 32), (100, 3)):
+        for rpm, ceiling in ((7, 32), (100, 3), (100, 32)):
             with self.subTest(rpm=rpm, ceiling=ceiling), tempfile.TemporaryDirectory() as directory:
                 procs = []
                 try:

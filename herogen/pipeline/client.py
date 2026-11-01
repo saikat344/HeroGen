@@ -233,7 +233,7 @@ class ModelClient:
 
     # ---- public calls -------------------------------------------------------------------------------
 
-    @tracked(IMAGE_MODEL, "generate")
+    @tracked(IMAGE_MODEL, "generate", isolate=True)
     def generate_image(self, prompt: str, *, size: str = "1024x1024", attempt: int = 0) -> Image.Image:
         """Muse Image generation. ``attempt`` > 0 asks again for the same request (a new sample, its own cache key);
         the API takes no seed, so a new sample is the only way to draw again."""
@@ -243,7 +243,7 @@ class ModelClient:
             summary["attempt"] = attempt
         return self._image_call("images/generations", body, summary, kind="generate")
 
-    @tracked(IMAGE_MODEL, "edit")
+    @tracked(IMAGE_MODEL, "edit", isolate=True)
     def edit_image(
         self, prompt: str, images: list[Image.Image], *, size: str = "1024x1024", attempt: int = 0
     ) -> Image.Image:
@@ -270,7 +270,7 @@ class ModelClient:
             summary["attempt"] = attempt
         return self._image_call("images/edits", body, summary, kind="edit")
 
-    @tracked(SAM_MODEL, "segment")
+    @tracked(SAM_MODEL, "segment", isolate=True)
     def segment(self, image: Image.Image, text: str) -> list[SamInstance]:
         """SAM 3.1 concept segmentation: every instance of ``text`` in ``image``, as full-size masks."""
         rgb = image.convert("RGB")
@@ -320,7 +320,7 @@ class ModelClient:
         self._save_entry(key, entry)
         return self._decode_and_save(key, entry, rgb.size)
 
-    @tracked(TEXT_MODEL, "compare")
+    @tracked(TEXT_MODEL, "compare", isolate=True)
     def compare_images(
         self,
         prompt: str,

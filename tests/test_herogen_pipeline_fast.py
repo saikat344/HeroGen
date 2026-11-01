@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -21,6 +22,30 @@ import test_herogen_pipeline_flow as flow
 import test_herogen_blender_refine as refine_tests
 
 
+class ConcurrentAPI(flow.FakeAPI):
+    """Direct fake transport whose decoder keeps the calling thread's SAM input."""
+
+    def __init__(self):
+        self._sam = threading.local()
+        super().__init__()
+
+    @property
+    def last_sam_image(self):
+        return getattr(self._sam, "image", None)
+
+    @last_sam_image.setter
+    def last_sam_image(self, image):
+        self._sam.image = image
+
+    @property
+    def last_sam_text(self):
+        return getattr(self._sam, "text", "")
+
+    @last_sam_text.setter
+    def last_sam_text(self, text):
+        self._sam.text = text
+
+
 class FastPipelineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -28,7 +53,7 @@ class FastPipelineTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
 
     def test_images_once_no_judges_no_side_stages_and_report_matches_records(self):
-        api = flow.FakeAPI()
+        api = ConcurrentAPI()
         original = api.post
         def post(client, endpoint, body, **kw):
             if endpoint == "images/edits" and not body["prompt"].startswith(

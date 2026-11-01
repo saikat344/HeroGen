@@ -160,6 +160,10 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   diagnostics without gating, ranking alternatives or selecting a replacement top on quality. Required
   figure masks still use segmentation, with one concept request rather than a second concept fallback.
   Unusable model output (for example, no four figures to extract) is a recorded error, never a regeneration.
+- Stage 2's front face and head mask requests run concurrently after the front image is ready. Both
+  requests finish before the stage writes its record; a failure propagates in face/head prompt order,
+  and every failed request retains its receipt. The design/full-body and sketch/cover dependencies in
+  stages p and 1 remain sequential; neither stage has independent segmentation calls in fast mode.
 - Stages 2h (held-out views) and 2f (face close-ups) are skipped, including explicit requests for them.
 - Stage 3 requests the configured shape and joints sources once each (by default SAM 3D Objects and
   SAM 3D Body). No carve or silhouette fallback is attempted. Structural and silhouette checks are
@@ -200,8 +204,13 @@ python3 -m herogen.pipeline report runs/fast-hero
 
 `report <run-dir>` reads the stage records without calling any model. It prints every model/GPU call in
 start-time order and writes the same data to `fast-report.json`: stage, purpose, model, kind, start time,
-wall seconds, estimated list-price USD, cache flag and outcome. Stage totals include call counts, summed
-call time, elapsed stage time (including local work) and USD, followed by grand totals. Cache hits cost zero;
+wall seconds, estimated list-price USD, cache flag and outcome. Stage totals include call counts,
+`wall_seconds` (elapsed stage time including local work, also retained as `seconds`), `call_seconds` (sum
+of recorded call durations), `peak_concurrent_calls` and USD, followed by grand totals. Peak concurrency
+counts overlapping positive-duration call intervals, including cache hits and failed attempts; touching
+endpoints do not overlap. Legacy receipts without call timings contribute no measured concurrency.
+Grand totals sum stage wall time and call time; their concurrency peak is computed over all call intervals,
+not by summing the stage peaks. Cache hits cost zero;
 unknown transport outcomes retain the client's conservative estimate. Failed API calls and replay misses
 remain visible, including calls that never returned usable output. Local CPU/Blender work contributes to
 elapsed stage time, not to the model-call count or GPU list-price estimate.

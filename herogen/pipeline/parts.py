@@ -19,6 +19,7 @@ the `parts` backfill on an older run) changes none of those files and every held
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -42,13 +43,21 @@ def part_file(part: str) -> str:
 def front_part_masks(client: ModelClient, image: Image.Image, figure: np.ndarray
                      ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """SAM 3.1 part masks of the front view. Returns ({part: mask} for the parts found, {part: record})."""
+    if getattr(client, "fast", False):
+        # Both prompts depend only on the front image. Drain both futures before returning or raising,
+        # so the stage's error record includes every request, with failures in prompt order.
+        with ThreadPoolExecutor(max_workers=len(PARTS)) as pool:
+            pending = {part: pool.submit(client.segment, image, text) for part, text in PARTS.items()}
+        answers = {part: future.result() for part, future in pending.items()}
+    else:
+        answers = None
     near = imaging.dilate(figure, 4)
     masks: dict[str, np.ndarray] = {}
     info: dict[str, Any] = {}
     for part, text in PARTS.items():
         rec: dict[str, Any] = {"file": None, "method": f"{SAM_MODEL}:{text}"}
         try:
-            insts = client.segment(image, text)
+            insts = answers[part] if answers is not None else client.segment(image, text)
         except ApiError as e:
             if getattr(client, "fast", False):
                 raise
