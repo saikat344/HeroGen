@@ -259,7 +259,8 @@ def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> S
                         run_dir=storage.run_dir(uid, jid), input_path=storage.input_path(uid, jid),
                         cache_dir=storage.cache_dir(uid), remote_cache_dir=storage.remote_cache_dir(uid),
                         stage3_args=stage3_args(settings.stage3_args), timeout_s=settings.stage_timeout_s,
-                        blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd)
+                        blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd,
+                        refine_profile=settings.refine_profile)
 
 
 def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,

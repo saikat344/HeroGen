@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -34,10 +35,24 @@ class Budget:
         self.client, self.cap, self.prior = client, cap, prior
         self.start = len(client.log.calls)
         self.state = state if state and "attempts" in state else None
+        self.lock = threading.RLock()
+        self._local = threading.local()
         self.active = None
         self._update("read")
 
+    @property
+    def active(self):
+        return getattr(self._local, "active", None)
+
+    @active.setter
+    def active(self, token):
+        self._local.active = token
+
     def _update(self, action, **kwargs):
+        with self.lock:
+            return self._locked_update(action, **kwargs)
+
+    def _locked_update(self, action, **kwargs):
         self.state = update_budget(self.state, action, cap=self.cap, prior=self.prior, **kwargs)
         return self.state
 
@@ -45,11 +60,12 @@ class Budget:
         return max(self.state["spent_usd_total"], round(self.prior + self.client.log.cost_usd(self.start), 6))
 
     def reserve(self, model):
-        self.before_attempt(model)
-        token = uuid.uuid4().hex
-        if not self._update("reserve", token=token, amount=PRICE_PER_IMAGE_USD[model])["allowed"]:
-            raise BudgetStop(f"API cap: next attempt exceeds ${self.cap:.4f}")
-        self.active = token
+        with self.lock:
+            self.before_attempt(model)
+            token = uuid.uuid4().hex
+            if not self._update("reserve", token=token, amount=PRICE_PER_IMAGE_USD[model])["allowed"]:
+                raise BudgetStop(f"API cap: next attempt exceeds ${self.cap:.4f}")
+            self.active = token
 
     def settle(self, cost):
         if self.active is None:
@@ -64,11 +80,18 @@ class Budget:
             raise BudgetStop(f"API cap: projected ${projected:.4f} exceeds ${self.cap:.4f}")
 
 
-def cost_estimate(maximum=False, upscale_texture=False):
+def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"):
     """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
     normal, hair = (3, 2) if maximum else (1, 1)
-    images = len(REFINE_ORDER) * normal + len(HAIR_ORDER) * hair
-    segments = 2 + len(REFINE_ORDER) * (1 + normal + 2) + len(HAIR_ORDER) * (1 + hair + 3)
+    if refine_profile == "fast":
+        from .fast import WAVES
+        sequence = [view for wave in WAVES for view in wave]
+        normal_count = sum(not hair for _, hair in sequence)
+        hair_count = len(sequence) - normal_count
+    else:
+        normal_count, hair_count = len(REFINE_ORDER), len(HAIR_ORDER)
+    images = normal_count * normal + hair_count * hair
+    segments = 2 + normal_count * (1 + normal + 2) + hair_count * (1 + hair + 3)
     if upscale_texture:
         images += 16 * normal
         segments += 16 * (3 + normal)
@@ -76,7 +99,8 @@ def cost_estimate(maximum=False, upscale_texture=False):
 
 
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
-          closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R"):
+          closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
+          apply=None, attempts=None):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -85,13 +109,15 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     from .prompts import prompt
 
     folder.mkdir(parents=True, exist_ok=True)
-    blender("render", {"blend": str(prep / "work.blend"), "texture": str(current), "cams": [cam],
-                       "out": str(folder), "pos": True}, folder / "blender.log", timeout=timeout)
-    with Image.open(folder / f"{cam['name']}.png") as rgba:
+    if rendered is None:
+        blender("render", {"blend": str(prep / "work.blend"), "texture": str(current), "cams": [cam],
+                           "out": str(folder), "pos": True}, folder / "blender.log", timeout=timeout)
+    rendered = folder if rendered is None else rendered
+    with Image.open(rendered / f"{cam['name']}.png") as rgba:
         inp, alpha = C.composite(rgba.convert("RGBA"))
     inp.save(folder / "input.png")
     render_rgb = np.asarray(inp, dtype=np.float32) / 255
-    positions, valid = decode_pos(read_exr(folder / f"{cam['name']}.pos.exr"))
+    positions, valid = decode_pos(read_exr(rendered / f"{cam['name']}.pos.exr"))
     _, _, depth = project(cam, positions)
     figure = alpha > 0.5
     parts = None
@@ -103,7 +129,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         if not measurable:
             record.update(accepted=False, reason="render outline not measurable")
             return current
-    for attempt in range(I.HAIR_ATTEMPTS if hair else I.ATTEMPTS):
+    for attempt in range(attempts if attempts is not None else I.HAIR_ATTEMPTS if hair else I.ATTEMPTS):
         trial = {"try": attempt + 1, "accepted": False, "reason": "incomplete"}
         record["attempts"].append(trial)
         record["tries"] = attempt + 1
@@ -153,22 +179,28 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             feather *= I.frame_feather(alpha.shape, cam["frame_border_px"])
         elif I.CLOSEUP_FEATHER and (hair or (body_cam is not None and I.is_closeup(cam, body_cam))):
             feather *= I.closeup_feather(figure)
-        record["texels"] = tex.apply(cam, refined, feather, depth, valid, weight, I.HAIR_BONUS if hair else 1.0)
+        record["texels"] = (tex.apply if apply is None else apply)(
+            cam, refined, feather, depth, valid, weight, I.HAIR_BONUS if hair else 1.0)
         for name, arr in (("refined", refined), ("weight", weight)):
             Image.fromarray((np.clip(arr, 0, 1) * 255).round().astype(np.uint8)).save(folder / f"{name}.png")
         trial["accepted"] = True
         record.update(accepted=True, reason="accepted")
-        return tex.save(folder / "texture.png")
+        return tex.save(folder / "texture.png") if apply is None else current
     return current
 
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                upscale_texture=False, recipe="RF2R"):
+                upscale_texture=False, recipe="RF2R", refine_profile=None):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
     cost_usd itself counts this invocation's calls, matching the other stages' convention.
     """
+    refine_profile = refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")
+    if refine_profile not in ("best", "fast"):
+        raise ValueError("refine_profile must be best or fast")
+    if refine_profile == "fast" and upscale_texture:
+        raise ValueError("fast refinement cannot add upscale-texture passes")
     run = Path(run).resolve()
     output = run / "03-refined.glb"
     pending = run / "03-refined.part.glb"
@@ -185,11 +217,13 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     budget = Budget(client, cap_usd, prior, state=old_budget)
     prior = budget.state["spent_usd_total"]
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
-                    estimate_usd=cost_estimate(upscale_texture=upscale_texture),
-                    estimate_max_samples_usd=cost_estimate(True, upscale_texture),
+                    estimate_usd=cost_estimate(upscale_texture=upscale_texture, refine_profile=refine_profile),
+                    estimate_max_samples_usd=cost_estimate(True, upscale_texture, refine_profile=refine_profile),
                     recipes=[recipe, "RF3H"] + (["RF5U"] if upscale_texture else []),
                     repaint_recipe=recipe, upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
+    if refine_profile == "fast":
+        rec.data["refine_profile"] = "fast"
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
     start = len(client.log.calls)
@@ -197,19 +231,25 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     previous_settle = client.after_api_attempt
 
     def guard(model):
-        budget.before_attempt(model)
-        if previous_guard is not None:
-            previous_guard(model)
-        budget.reserve(model)
-        save(ok=False, status="running")
+        with budget.lock:
+            budget.before_attempt(model)
+            if previous_guard is not None:
+                previous_guard(model)
+            budget.reserve(model)
+            save(ok=False, status="running")
 
     def settle(cost):
-        budget.settle(cost)
-        save(ok=False, status="running")
-        if previous_settle is not None:
-            previous_settle(cost)
+        with budget.lock:
+            budget.settle(cost)
+            save(ok=False, status="running")
+            if previous_settle is not None:
+                previous_settle(cost)
 
     def save(**extra):
+        with budget.lock:
+            return locked_save(**extra)
+
+    def locked_save(**extra):
         rec.data.update(cost_usd=client.log.cost_usd(start), models=client.log.models(start),
                         calls=client.log.calls[start:], budget={**budget.state, "cap_usd": cap_usd,
                                                               "prior_usd": prior,
@@ -268,26 +308,31 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         current = prep / "base.png"
         sequence = [(name, False) for name in REFINE_ORDER] + [(name, True) for name in HAIR_ORDER]
         stopped = False
-        for step, (name, hair) in enumerate(sequence):
-            key = ("hair-" if hair else "") + name
-            current_record = {"accepted": False, "reason": "not attempted: API cap" if stopped else "incomplete",
-                              "tries": 0, "attempts": []}
-            rec.data["views"][key] = current_record
-            if not head_found and name.startswith("head"):
-                current_record.update(reason="head_not_found", note=head_note)
-                continue
-            if stopped:
-                continue
-            save(ok=False, status="running")
-            try:
-                current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe)
-            except BudgetStop as exc:
-                current_record.update(accepted=False, reason=str(exc))
-                rec.data["stop_reason"] = str(exc)
-                rec.note(str(exc))
-                stopped = True
-            save(ok=False, status="running")
+        if refine_profile == "fast":
+            from .fast import waves
+            current, stopped = waves(client, prep, current, tex, cams, work, rec.data, timeout,
+                                     cover, head_found, recipe, save, budget.lock)
+        else:
+            for step, (name, hair) in enumerate(sequence):
+                key = ("hair-" if hair else "") + name
+                current_record = {"accepted": False, "reason": "not attempted: API cap" if stopped else "incomplete",
+                                  "tries": 0, "attempts": []}
+                rec.data["views"][key] = current_record
+                if not head_found and name.startswith("head"):
+                    current_record.update(reason="head_not_found", note=head_note)
+                    continue
+                if stopped:
+                    continue
+                save(ok=False, status="running")
+                try:
+                    current = _view(client, prep, current, tex, cams[name], hair, work / key,
+                                    current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe)
+                except BudgetStop as exc:
+                    current_record.update(accepted=False, reason=str(exc))
+                    rec.data["stop_reason"] = str(exc)
+                    rec.note(str(exc))
+                    stopped = True
+                save(ok=False, status="running")
         if upscale_texture:
             # Close-ups render and gate against the refined atlas after all twenty original views.
             if any(v["accepted"] for v in rec.data["views"].values()) and (I.EXPOSURE_SOLVE or I.CLOSEUP_FEATHER):
