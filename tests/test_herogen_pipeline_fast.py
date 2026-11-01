@@ -235,6 +235,8 @@ class FastPipelineTests(unittest.TestCase):
             code = blender_main(["run", "--run", str(self.root), "--stages", "4,6,5", "--fast"])
         self.assertEqual(code, 0)
         s4.assert_called_once()
+        # Fast mode keeps stage 4's cut search: unsearched joint cuts often have no shared rim to measure.
+        self.assertNotIn("cut_search", s4.call_args.kwargs)
         s6.assert_called_once()
         for n in (4, 6):
             rec = json.loads((self.root / f"stage-{n}.json").read_text())

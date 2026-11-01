@@ -46,7 +46,7 @@ def run(a, stages):
     from herogen.pipeline.results import stage5_results
 
     steps = [("4", "game body", lambda: run_stage4(a.run, a.height, timeout=a.timeout,
-                                                   profile=a.profile, cut_search=False, fast=True)),
+                                                   profile=a.profile, fast=True)),
              ("6", "roblox export", lambda: run_export(a.run / "04-body", a.run / "06-roblox")),
              ("5", "results", lambda: stage5_results(folder))]
     for stage, name, fn in steps:
