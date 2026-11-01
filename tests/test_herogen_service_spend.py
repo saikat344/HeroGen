@@ -128,6 +128,20 @@ class SpendGuardTest(TempDirCase):
 
 
 class GuestHTTPTest(WebCase):
+    def test_retired_public_account_session_must_open_guest_access(self):
+        browser = Browser(self.app)
+        browser.session()
+        email = 'retired@example.com'
+        token, session = self.svc.signer.new_token(), self.svc.signer.new_token()
+        self.store.login_token_create(self.svc.signer.hash('login', token), email, 600)
+        self.store.login_complete(self.svc.signer.hash('login', token), self.svc.signer.hash('session', session),
+                                  admin_emails=(email,), session_ttl_s=3600)
+        browser.c.cookies.set('hg_session', session, domain='testserver.local', path='/')
+        self.assertFalse(browser.session()['signed_in'])
+        opened = browser.post('/api/demo/access', json={})
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(browser.session()['user']['kind'], 'guest')
+
     def test_guest_double_submit_and_admin_only_email(self):
         guest = Browser(self.app); guest.session()
         r = guest.post('/api/demo/access', json={})
