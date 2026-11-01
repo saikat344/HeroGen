@@ -150,20 +150,35 @@ when every stage passed, 2 when a gate failed, 3 when the input was rejected and
 ## Fast lane (speed/demo)
 
 `python3 -m herogen.pipeline run --fast` and `python3 -m herogen.blender run --fast` opt into a
-single-pass demonstration path. `HEROGEN_FAST_LANE=1` selects the same behavior for callers that pass the
-environment through. This mode favors speed; a completed fast run is not a quality approval. Normal mode's
+single-pass product path. `HEROGEN_FAST_LANE=1` selects the same behavior for callers that pass the
+environment through. A completed fast run is not a quality approval. Normal mode's
 prompts, thresholds, retries and acceptance rules are unchanged.
 
-- Stage p requests the design and full-body sketch once each. It skips figure and identity model checks.
-- Stage 0 records local input checks as informational. Stage 1 requests the cover once, skipping photo,
-  input-part and cover-mask model checks. Stage 2 requests one sheet and one top view, retaining local
+- Stage p requests the design and full-body sketch once each. It skips identity model checks; stage 1
+  checks the full-body sketch copied by stage 0 before accepting the cover.
+- Stage 0 records local input checks as informational. Stage 1 segments `character` and `feet` once each,
+  concurrently. Exactly one non-empty character instance is required, including small extra figures.
+  At least `prompt_sketch.FEET_MIN` feet must be in its lower half, and the figure must clear the top and
+  bottom edges by more than `prompt_sketch.edge_tolerance_px(height)`. No person, foot, boot, shoe, leg,
+  face, head or identity requests are made for this step.
+  Uploads also run the existing real-person photo judge concurrently with segmentation. No cover edit
+  starts until that judge and the figure checks pass. A prompt sketch skips the photo judge only when
+  the passing stage-p and stage-0 provenance records exist and its pixels match `p-full-body.png`; its
+  cover edit runs concurrently with both segmentation calls. A rejection discards the speculative edit
+  and removes any stale cover. All submitted calls finish before recording or raising an error.
+  Necessary check failures write `input_rejected` with plain messages and measured checks, without a retry.
+  `sketch_characters_found` records the exact instance count. `sketch_feet_on_figure` records a boolean
+  conjunction of the three full-body measurements (threshold 1); `feet_in_lower_half`, `figure_top_gap_px`
+  and `figure_bottom_gap_px` retain their counts, gaps and original thresholds as diagnostic checks.
+  These existing rejection names preserve the service's plain character and full-body messages.
+  Other input and cover quality checks remain skipped or informational.
+  Stage 2 requests one sheet and one top view, retaining local
   diagnostics without gating, ranking alternatives or selecting a replacement top on quality. Required
   figure masks still use segmentation, with one concept request rather than a second concept fallback.
   Unusable model output (for example, no four figures to extract) is a recorded error, never a regeneration.
 - Stage 2's front face and head mask requests run concurrently after the front image is ready. Both
   requests finish before the stage writes its record; a failure propagates in face/head prompt order,
-  and every failed request retains its receipt. The design/full-body and sketch/cover dependencies in
-  stages p and 1 remain sequential; neither stage has independent segmentation calls in fast mode.
+  and every failed request retains its receipt. Stage p's design and full-body image requests remain sequential.
 - Stages 2h (held-out views) and 2f (face close-ups) are skipped, including explicit requests for them.
 - Stage 3 requests the configured shape and joints sources once each (by default SAM 3D Objects and
   SAM 3D Body). No carve or silhouette fallback is attempted. Structural and silhouette checks are
@@ -179,8 +194,10 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   `03-refined.glb`, else `03-source.glb`, else the sectioned high body if available. Completion succeeds when
   a model is available, even if a local export failed; inspect the stage records for those failures. A stage
   3 or 3f model/construction error stops that invocation with a nonzero exit and a loud record and log.
-- The image/segmentation client's transport retry policy is limited to at most two attempts; each attempt,
-  including a zero-cost HTTP refusal, is recorded. Transport retries are distinct from quality retries.
+- The image/segmentation client's transport policy allows exactly one attempt per request, including
+  photo judging. HTTP refusals and model failures are recorded and propagated without automatic retries.
+  Fast transport errors also disable the exception's caller-retry flag, so the service does not requeue
+  the stage automatically after a normally transient HTTP or network failure.
 
 Fast Model API attempts use a rolling 60-second request budget per model and API key: 140 RPM for
 `muse-image-1.0`, 60 RPM each for `sam-3.1` and `muse-spark-1.3`. All models share a 32-call in-flight
