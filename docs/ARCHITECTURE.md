@@ -2265,6 +2265,30 @@ from Git. Missing illustrations are hidden; uploads and text remain usable.
 show their recorded reason; saved outputs remain inspectable. Developer mode remains read-only and
 uses the owner-checked Lab API. No separate quality-review section is present.
 
+The job response includes content-versioned `images`, an ordered `models` list (first shape has `n: 0`), and
+`refinement`. `03-source.glb` is available once stage 3 passes, while the job is still running. Numbered
+`03-refined-v<n>.glb` models are offered only when the atomically published `stage-3f-progress.json` lists
+them. Its contract is `{"versions": [{"n": 1, "glb": "03-refined-v1.glb", "accepted": ["front"],
+"rejected": [], "pending": ["back"], "time": "2026-11-01T12:00:00Z"}], "done": false}`. Version numbers
+must increase, filenames must match their number, view lists must contain plain names, and timestamps must
+be ISO dates. A missing or invalid contract returns no versions and `done: false`; listed files that have
+not arrived are omitted. The service only reads this contract. The producer owns the gates and publishes
+`03-refined.glb` equal to its last numbered model when done. Completed runs without a progress contract
+retain their gated final-model fallback.
+
+These files use the existing owner-checked `/runs/r1/<job>/<path>` route. The GLB attachment route also
+works before job success, and supports an `artifact` query naming an offered model. Both routes validate
+supplied content-hash `v` tokens and retain private, no-store responses. Unlisted numbered GLBs and an
+unpassed final refinement are refused. Gallery routes continue to serve only configured public inputs.
+
+The workbench labels the first model “First 3D shape” and explains that its texture is still being refined.
+An untouched viewer follows new versions; pointer, wheel or keyboard interaction keeps the chosen version
+until “Sharper version ready - Update” is clicked. Updating preserves camera position, orbit target and zoom.
+The existing job poll supplies progress, with no separate progress-file polling; background tabs stop job
+polling and refresh on return. Running stages show elapsed seconds. Finished stages show recorded duration
+and cost; typical-time hints use the analytics seven-day stage medians only after three measured finishes.
+Missing timings and costs remain absent. No percentage is inferred from elapsed time.
+
 `theme.js` keeps light/dark/system choice usable with blocked storage. `landing.js` and `preview.js`
 render published GLBs with textured, clay and wire shading, dispose replaced resources, and expose
 retry controls on load failure. Gallery routes require no session and never dispatch work.
@@ -2276,6 +2300,10 @@ by CSRF, origin and request limits. A tab-scoped random visitor id lives only in
 Analytics never stores IP addresses, raw User-Agent, email, prompt, character name, filenames or image
 bytes. Global Privacy Control suppresses event collection. Migration 9's analytics table and retention
 remain unchanged.
+
+Progressive display records `model_first_shown`, `refined_version_shown` with a positive version `n`, and
+`update_clicked` with `n`. A shown event follows a successful viewer load; version numbers are the only
+additional event data. The same allow-list, CSRF, origin, privacy and batching rules apply.
 
 The admin Analytics tab displays daily visitors/page views, the creation funnel, remaining refusal
 codes, final job states, per-stage timing/cost totals, separate time-to-model and time-to-export metrics, gallery engagement and device split over 1–90

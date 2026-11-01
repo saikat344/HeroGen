@@ -1,5 +1,5 @@
 // Presentation follows reported model and export stage states.
-import { trackOnce } from './analytics.js';
+import { track, trackOnce } from './analytics.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
   0: ['Prepare input', 'Preparing your image', 'Check the input before creating the character artwork.'],
@@ -35,13 +35,65 @@ export function generationState(job) {
       status: s.state === 'pending' && TERMINAL.has(job.state) ? (job.state === 'succeeded' && ['4', '6', '5'].includes(s.key) && job.export_state === 'running' ? 'Waiting' : 'Not reached') : STATE[s.state] || s.state || 'Not reported' })) };
 }
 const IMAGES = [['sketch', 'Starting image'], ['cover', 'Artwork'], ['turnaround', 'Character views'],
-  ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right']];
+  ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']];
+const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
+  ...Object.keys(job?.images || {}).filter(k => !IMAGES.some(([known]) => known === k)).map(k => [k, k.replaceAll('_', ' ')])];
+export function stageTiming(s) {
+  const parts = [];
+  if (s.state === 'running' && Number.isFinite(s.elapsed_seconds)) parts.push(`${Math.floor(s.elapsed_seconds)} s elapsed`);
+  else if (Number.isFinite(s.seconds)) parts.push(`${s.seconds.toFixed(1)} s recorded`);
+  if (s.state !== 'running' && Number.isFinite(s.cost_usd)) parts.push(`$${s.cost_usd.toFixed(4)} recorded`);
+  if (Number.isFinite(s.typical_seconds)) {
+    const seconds = Math.max(1, Math.round(s.typical_seconds));
+    parts.push(`usually about ${seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${seconds} s`}`);
+  }
+  return parts.join(' · ');
+}
 const text = (e, value) => { if (e.textContent !== value) e.textContent = value; };
 function node(tag, content, cls) {
   const n = document.createElement(tag); if (content != null) n.textContent = content; if (cls) n.className = cls; return n;
 }
 export function generationView($, select3D) {
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
+  let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null;
+  const models = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
+  const latestModel = () => models().at(-1);
+  function modelCopy() {
+    const first = chosenModel?.n === 0;
+    text($('#modelTab'), first ? 'First 3D shape' : '3D preview');
+    if (model) text($('#artifactLabel'), first ? 'First 3D shape' : chosenModel?.n ? `Refined version ${chosenModel.n}` : '3D preview');
+    $('#modelNote').hidden = !model || !first;
+    text($('#modelNote'), first ? 'The texture is still being refined.' : '');
+    const latest = latestModel();
+    const newer = latest && chosenModel && latest.url !== chosenModel.url &&
+      (latest.n == null || latest.n > (chosenModel.n ?? -1));
+    $('#modelUpdate').hidden = !model || !newer;
+    const added = (latest?.accepted || []).filter(v => !(chosenModel?.accepted || []).includes(v)).length;
+    text($('#modelUpdateNote'), added ? `${added} more ${added === 1 ? 'view' : 'views'} added` : 'A sharper texture is ready to inspect.');
+  }
+  function loadModel(forced = false) {
+    if (!chosenModel || loading === chosenModel.url || shownUrl === chosenModel.url) return;
+    const candidate = chosenModel, id = jobId, token = ++modelRequest;
+    loading = candidate.url;
+    Promise.resolve(select3D(candidate.url, {preserveCamera: shownUrl !== null, canReplace: () => forced || !touched})).then(loaded => {
+      if (token !== modelRequest || id !== jobId || !model) return;
+      if (loaded === false) {
+        if (shownModel) { chosenModel = shownModel; modelCopy(); }
+        return;
+      }
+      shownUrl = candidate.url; shownModel = candidate;
+      if (candidate.n === 0) trackOnce(`model_first_shown:${id}`, 'model_first_shown');
+      else if (candidate.n) trackOnce(`refined_version_shown:${id}:${candidate.n}`, 'refined_version_shown', {n: String(candidate.n)});
+    }).finally(() => { if (token === modelRequest) loading = null; });
+  }
+  const interact = () => { if (model) touched = true; };
+  for (const type of ['pointerdown', 'wheel', 'keydown']) $('#preview').addEventListener(type, interact, {passive: true});
+  $('#updateModel').addEventListener('click', () => {
+    const latest = latestModel();
+    if (!latest || latest.url === chosenModel?.url) return;
+    if (latest.n) track('update_clicked', {n: String(latest.n)});
+    chosenModel = latest; modelCopy(); loadModel(true);
+  });
   function pick(key, chosen = false, retry = false) {
     selected = key; manual = chosen; model = key === 'model';
     $('#previewWrap').hidden = !model;
@@ -51,10 +103,10 @@ export function generationView($, select3D) {
     $('#artTab').setAttribute('aria-pressed', String(!model));
     if (model) {
       $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
-      text($('#artifactLabel'), '3D preview'); select3D(job.downloads.glb.url);
+      modelCopy(); loadModel();
     }
     else {
-      const image = IMAGES.find(([k]) => k === key);
+      const image = imageChoices(job).find(([k]) => k === key);
       if (image) {
         const url = job.images[key];
         if (retry || $('#artboardImage').getAttribute('src') !== url) { $('#imageError').hidden = true; $('#artboardImage').src = url; }
@@ -62,15 +114,16 @@ export function generationView($, select3D) {
         $('#artboardImage').alt = `${image[1]} for ${job.name || 'your hero'}`;
         text($('#artifactLabel'), image[1]);
       } else { $('#artboardImage').removeAttribute('src'); text($('#artifactLabel'), 'Your character workbench'); }
-      select3D(null);
+      ++modelRequest; loading = null; shownUrl = null; select3D(null);
     }
+    modelCopy();
     for (const b of $('#images').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.image === key));
   }
   $('#artTab').addEventListener('click', () => {
-    const available = IMAGES.filter(([k]) => job?.images?.[k]);
+    const available = imageChoices(job);
     pick(available.at(-1)?.[0] || null, true);
   });
-  $('#modelTab').addEventListener('click', () => { if (job?.downloads?.glb?.available) pick('model', true); });
+  $('#modelTab').addEventListener('click', () => { if (latestModel()) pick('model', true); });
   $('#artboardImage').addEventListener('error', () => {
     if (model || !selected || $('#artboardImage').getAttribute('src') !== job?.images?.[selected]) return;
     $('#artboardImage').hidden = true; $('#imageError').hidden = false;
@@ -82,8 +135,11 @@ export function generationView($, select3D) {
   return {
     update(next) {
       const changed = jobId !== next.id;
-      if (changed) { $('#imageError').hidden = true; selected = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id; }
+      if (changed) { $('#imageError').hidden = true; selected = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
+        chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest; }
       job = next;
+      const latest3D = latestModel();
+      if (!chosenModel || !touched && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
       const state = generationState(job);
       if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
       text($('#generationTitle'), state.title); text($('#generationSubtitle'), state.subtitle);
@@ -98,7 +154,8 @@ export function generationView($, select3D) {
           if (s.state === 'running') li.setAttribute('aria-current', 'step');
           li.append(node('span', s.state === 'passed' ? '✓' : String(i + 1).padStart(2, '0'), 'stage-number'),
             node('b', s.title), node('span', s.status, 'step-status'));
-          if (typeof s.seconds === 'number' && Number.isFinite(s.seconds)) li.append(node('small', `${s.seconds.toFixed(1)} s recorded`, 'step-duration'));
+          const timing = stageTiming(s);
+          if (timing) li.append(node('small', timing, 'step-duration'));
           return li;
         }));
       }
@@ -119,7 +176,7 @@ export function generationView($, select3D) {
       $('#exportStatus').hidden = !exportNote;
       $('#stageIssues').replaceChildren(...issues.map((s) => node('p', s.message || `${s.title} was skipped.`)));
       $('#stageIssues').hidden = !issues.length;
-      const available = IMAGES.filter(([k]) => job.images?.[k]);
+      const available = imageChoices(job);
       const nextSignature = JSON.stringify(available.map(([k]) => [k, job.images[k]]));
       if (signature !== nextSignature) {
         signature = nextSignature;
@@ -138,6 +195,6 @@ export function generationView($, select3D) {
       text($('#artboardEmptyText'), state.terminal ? 'No images were saved for this job.' : 'Your first image will appear here when it is ready.');
       return state;
     },
-    reset() { jobId = null; job = null; selected = null; signature = ''; select3D(null); }
+    reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null); }
   };
 }

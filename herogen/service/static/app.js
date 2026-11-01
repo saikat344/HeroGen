@@ -18,7 +18,7 @@ function setScreen(next) {
   $('#app').classList.toggle('generation-screen', next === 'generation');
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
-const generation = generationView($, (url) => preview(url));
+const generation = generationView($, (url, options) => preview(url, options));
 function returnToEntry() {
   ++S.revision; clearTimeout(S.timer); S.current = null;
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
@@ -164,21 +164,25 @@ function renderJob(j) {
 }
 
 let previewUrl = null, previewRequest = 0, previewModule = null;
-async function preview(url) {
-  if (url && screen !== 'generation') return;
+async function preview(url, options) {
+  if (url && screen !== 'generation') return false;
   if (!url) { ++previewRequest; previewUrl = null; previewModule?.hide(); show('#orbitHint', false); show('#previewError', false); return; }
-  if (previewUrl === url) return;
+  if (previewUrl === url) return true;
+  const previousUrl = previewUrl;
   previewUrl = url;
   const token = ++previewRequest;
   show('#previewError', false); show('#orbitHint', false);
   try {
     previewModule ||= await import('/assets/preview.js');
-    if (token !== previewRequest) return;
-    await previewModule.show($('#preview'), url);
-    if (token === previewRequest) show('#orbitHint');
+    if (token !== previewRequest) return false;
+    const replaced = await previewModule.show($('#preview'), url, options);
+    if (token !== previewRequest) return false;
+    if (replaced === false) { previewUrl = previousUrl; show('#orbitHint', Boolean(previousUrl)); return false; }
+    show('#orbitHint'); return true;
   } catch {
-    if (token !== previewRequest) return;
+    if (token !== previewRequest) return false;
     previewUrl = null; show('#previewError');
+    return false;
   }
 }
 
@@ -201,8 +205,13 @@ function followJob(j, reveal = false) {
     show('#heroLibrary', false); $('#showLibrary').setAttribute('aria-expanded', 'false');
     window.scrollTo({ top: 0, behavior: 'auto' }); $('#detail').focus({ preventScroll: true });
   }
-  if (polls(j)) S.timer = setTimeout(() => openJob(j.id).then(refreshList).catch((e) => banner(e.message)), 3000);
+  if (polls(j) && !document.hidden) S.timer = setTimeout(() => openJob(j.id)
+    .then(() => { if (!document.hidden) return refreshList(); }).catch((e) => banner(e.message)), 3000);
 }
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(S.timer);
+  if (!document.hidden && S.current && screen === 'generation') openJob(S.current).catch(e => banner(e.message));
+});
 async function openJob(id, reveal = false) {
   const revision = ++S.revision;
   clearTimeout(S.timer);

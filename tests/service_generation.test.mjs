@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { SourceTextModule } from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generationState } from '../herogen/service/static/generation.js';
+import { generationState, stageTiming } from '../herogen/service/static/generation.js';
 const stage = (key, state, side=false) => ({key, state, side, label:`Stage ${key}`});
 test('prompt and uploaded inputs use only the supplied pipeline, in its real order', () => {
   const stages=[stage('p','passed'),stage('0','passed'),stage('1','running'),stage('6','pending'),stage('5','pending')];
@@ -33,4 +33,13 @@ test('the entry and admin browser modules parse as ES modules', () => {
     const source = readFileSync(new URL(`../herogen/service/static/${name}.js`, import.meta.url), 'utf8');
     assert.doesNotThrow(() => new SourceTextModule(source));
   }
+});
+test('stage timing reports running elapsed, finished measurements and supplied medians only',()=>{
+  assert.equal(stageTiming({state:'running',elapsed_seconds:65.9}),'65 s elapsed');
+  assert.equal(stageTiming({state:'passed',seconds:120,cost_usd:.125,typical_seconds:119}),
+    '120.0 s recorded · $0.1250 recorded · usually about 2 min');
+  assert.equal(stageTiming({state:'passed',seconds:0,cost_usd:0}),'0.0 s recorded · $0.0000 recorded');
+  assert.equal(stageTiming({state:'pending'}),'');
+  assert.equal(stageTiming({state:'running',seconds:10,cost_usd:.1,elapsed_seconds:12,typical_seconds:60}),
+    '12 s elapsed · usually about 60 s');
 });

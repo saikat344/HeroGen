@@ -324,6 +324,96 @@ class TestServicePage(ServiceBrowserCase):
             gate.set()
         self.tab.wait("document.querySelector('#exportStatus').textContent === 'Roblox files: ready'", timeout=30)
 
+    def test_progressive_shape_versions_interaction_camera_and_hidden_polling(self):
+        shape, version_one, version_two = (threading.Event() for _ in range(3))
+        publish, refine = self.runner.publish_version, self.runner._stage_3f
+        waiting = threading.Event()
+        def stage(ctx, run):
+            (run / 'stage-3f-progress.json').write_text('{')
+            waiting.set()
+            if not shape.wait(60):
+                raise RuntimeError('shape publication gate timed out')
+            return refine(ctx, run)
+        def version(run, versions, n, accepted):
+            publish(run, versions, n, accepted)
+            if not (version_one if n == 1 else version_two).wait(60):
+                raise RuntimeError('version publication gate timed out')
+        self.runner._stage_3f = stage
+        self.runner.publish_version = version
+        self.runner.gate.set()
+        try:
+            self.signin()
+            t = self.tab
+            t.eval("""(() => {
+                window.modelReads=[];const original=window.fetch;
+                window.fetch=(url, options)=>{const path=typeof url==='string'?url:url.url;
+                    if(path?.includes('.glb')) window.modelReads.push(path);return original(url,options);};
+            })()""")
+            self.make_hero('A hero taking shape')
+            self.assertTrue(waiting.wait(15))
+            t.wait("!document.querySelector('#modelTab').hidden && document.querySelector('#artifactLabel').textContent === 'First 3D shape'")
+            t.wait("!document.querySelector('#orbitHint').hidden", timeout=45)
+            self.assertEqual(t.eval("document.querySelector('#modelNote').textContent"), 'The texture is still being refined.')
+            self.assertTrue(t.eval("document.querySelector('#modelUpdate').hidden"))
+            self.assertIn('elapsed', t.eval("document.querySelector('[data-stage=\"3f\"] .step-duration').textContent"))
+            self.screenshot('progressive-first-shape.png')
+            shape.set()
+            t.wait("document.querySelector('#artifactLabel').textContent === 'Refined version 1' && !document.querySelector('#orbitHint').hidden")
+            t.wait("window.modelReads.some(u=>u.includes('03-refined-v1.glb'))")
+            self.screenshot('progressive-version-1.png')
+            box = t.eval("(() => {const b=document.querySelector('#preview').getBoundingClientRect();return {x:b.x+b.width/2,y:b.y+b.height/2};})()")
+            t.call('Input.dispatchMouseEvent', type='mousePressed', x=box['x'], y=box['y'], button='left', buttons=1, clickCount=1)
+            t.call('Input.dispatchMouseEvent', type='mouseMoved', x=box['x'] + 90, y=box['y'] + 35, button='left', buttons=1)
+            t.call('Input.dispatchMouseEvent', type='mouseReleased', x=box['x'] + 90, y=box['y'] + 35, button='left', buttons=0)
+            version_one.set()
+            t.wait("!document.querySelector('#modelUpdate').hidden")
+            self.assertEqual(t.eval("document.querySelector('#artifactLabel').textContent"), 'Refined version 1')
+            self.assertFalse(t.eval("window.modelReads.some(u=>u.includes('03-refined-v2.glb'))"))
+            self.assertEqual(t.eval("document.querySelector('#modelUpdateNote').textContent"), '2 more views added')
+            self.screenshot('progressive-update-ready.png')
+            self.count_polls()
+            # Simulate a hidden document and exercise the same visibility handler used by a background tab.
+            t.eval("Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))")
+            t.eval(f'new Promise(r=>setTimeout(r,{int((POLL_S + .5) * 1000)}))')
+            self.assertEqual(t.eval('window.__polls'), 0)
+            t.eval("delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))")
+            t.wait('window.__polls > 0')
+            camera = t.eval("import('/assets/preview.js').then(p=>p.view())")
+            t.eval("document.querySelector('#updateModel').click()")
+            t.wait("document.querySelector('#artifactLabel').textContent === 'Refined version 2' && !document.querySelector('#orbitHint').hidden")
+            t.wait("window.modelReads.some(u=>u.includes('03-refined-v2.glb'))")
+            updated_camera = t.eval("import('/assets/preview.js').then(p=>p.view())")
+            for key in ('position', 'target'):
+                for before, after in zip(camera[key], updated_camera[key]):
+                    self.assertAlmostEqual(before, after, delta=.001)  # OrbitControls may finish damping.
+            self.assertEqual(camera['zoom'], updated_camera['zoom'])
+            t.eval("import('/assets/analytics.js').then(a=>a.flush())")
+            recorded = self.store._all("SELECT event,prop_val FROM analytics_events WHERE event IN ('model_first_shown','refined_version_shown','update_clicked')")
+            self.assertCountEqual([(r['event'], r['prop_val']) for r in recorded],
+                                  [('model_first_shown', ''), ('refined_version_shown', '1'),
+                                   ('refined_version_shown', '2'), ('update_clicked', '2')])
+            version_two.set()
+            t.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=30)
+            self.assertEqual(t.eval("document.querySelector('#artifactLabel').textContent"), 'Refined version 2')
+            self.assertTrue(t.eval("document.querySelector('#modelUpdate').hidden"))
+            self.assertEqual(t.errors, [])
+        finally:
+            shape.set(); version_one.set(); version_two.set()
+
+    def test_typical_stage_hints_appear_only_after_three_finished_runs(self):
+        self.runner.gate.set()
+        self.signin()
+        t = self.tab
+        for n in range(1, 4):
+            self.make_hero(f'Measured hero {n}')
+            t.wait("document.querySelector('#exportStatus').textContent === 'Roblox files: ready'", timeout=30)
+            timing = t.eval("document.querySelector('[data-stage=\"1\"] .step-duration').textContent")
+            self.assertIn('recorded', timing)
+            self.assertIn('$0.0125', timing)
+            self.assertEqual('usually about' in timing, n >= 3)
+            if n < 3:
+                t.eval("document.querySelector('#backToIdeas').click()")
+
     def test_entry_rejects_excess_prompt_and_focuses_how_section(self):
         t = self.tab
         t.goto(self.url + '/')
