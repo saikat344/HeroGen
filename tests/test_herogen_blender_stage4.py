@@ -234,13 +234,24 @@ class TestEndToEndBlender(SyntheticBase):
                                                        "shape_views": ["front"]}))
         R = sam3d_mesh.rotation(71, 13, -8)
         centre = np.array([.1, -.2, 2.7])
-        raw_verts = (verts - centre) @ R.T / 5.5
+        # Invert a perspective correction plus a smooth warp, keeping the NPZ in the carved body's frame.
+        unwarped = verts.copy()
+        unwarped[:, 0] -= .06 * np.sin(verts[:, 2])
+        k = 11 / (11 + unwarped[:, 1])
+        unwarped[:, 0] /= k
+        unwarped[:, 2] = 2.75 + (unwarped[:, 2] - 2.75) / k
+        raw_verts = (unwarped - centre) @ R.T / 5.5
         stream = io.BytesIO()
         Image.new("RGB", (16, 16), "green").save(stream, format="PNG")
         glb.write_glb(run / "03-source.glb", [("raw", raw_verts, faces, np.full((len(verts), 2), .5))],
                       texture_png=stream.getvalue())
         raw = sam3d_mesh.load_source(run / "03-source.glb")
-        np.savez(work / "03-source-uv.npz", verts=raw.verts @ R * 5.5 + centre,
+        target = sam3d_mesh.perspective_to_ortho(raw.verts @ R * 5.5 + centre, 2, .5, 5.5)
+        target[:, 0] += .06 * np.sin(target[:, 2])
+        design = np.c_[raw.verts, np.ones(len(raw.verts))]
+        affine, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
+        self.assertGreater(np.linalg.norm(design @ affine - target, axis=1).max(), 100 * 5.5e-6)
+        np.savez(work / "03-source-uv.npz", verts=target,
                  faces=raw.faces, corner_uv=raw.corner_uv)
         Image.new("RGB", (16, 16), "green").save(work / "03-source-texture.png")
         # A real 4096 image; every triangle has its own corners and its own region's constant UV.
@@ -250,8 +261,9 @@ class TestEndToEndBlender(SyntheticBase):
         image.save(stream, format="PNG")
         uv = np.where((verts[faces].mean(axis=1)[:, 2] > 4.4)[:, None, None], [.25, .5], [.75, .5])
         uv = np.broadcast_to(uv, (len(faces), 3, 2)).reshape(-1, 2).copy()
-        glb.write_glb(run / "03-refined.glb", [("refined", raw_verts[faces].reshape(-1, 3),
-                                                np.arange(len(faces) * 3).reshape(-1, 3), uv)],
+        glb.write_glb(run / "03-refined.glb", [("refined", raw_verts[faces[::-1]].reshape(-1, 3),
+                                                np.arange(len(faces) * 3).reshape(-1, 3),
+                                                uv.reshape(-1, 3, 2)[::-1].reshape(-1, 2))],
                       texture_png=stream.getvalue())
         source_sha = hashlib.sha256((run / "03-source.glb").read_bytes()).hexdigest()
         (run / "stage-3f.json").write_text(json.dumps({"status": "complete", "source_sha256": source_sha}))
@@ -269,8 +281,11 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertEqual(info["refined"]["stage3f_source_sha256"], source_sha)
         self.assertEqual(info["refined"]["refined_glb_sha256"],
                          hashlib.sha256((run / "03-refined.glb").read_bytes()).hexdigest())
-        self.assertLess(info["refined"]["frame_fit"]["max"], info["refined"]["threshold_studs"])
-        self.assertLess(info["refined"]["surface_distance"]["max"], info["refined"]["threshold_studs"])
+        check = info["refined"]["source_correspondence"]
+        self.assertNotIn("frame_fit", info["refined"])
+        self.assertEqual(check["method"], "piecewise-linear source correspondence")
+        self.assertLess(check["geometry_distance_raw"]["max"], check["threshold_raw"])
+        self.assertLess(check["placement_distance_studs"]["max"], 1e-9)
         self.assertIn("Head texture takes the refined texture", recorded["notes"])
         self.assertIn("close-ups were not applied", recorded["notes"])
         self.assertEqual(info["closeups"]["used"], [])
