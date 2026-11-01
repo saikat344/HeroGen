@@ -94,14 +94,22 @@ class Pass:
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
                body_cam, recipe, persistence_lock, user_note=""):
-        from . import _view
+        from . import _attempt_cancelled, _view
+
+        def attempt(*args, **kwargs):
+            token = _attempt_cancelled.set(self.cancelled)
+            try:
+                return _view(*args, **kwargs)
+            finally:
+                _attempt_cancelled.reset(token)
+
         for index in range(ATTEMPTS):
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
             private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
             folder = self.folder / f'attempt-{index}'
-            future = pool.submit(_view, child, prep, frozen, tex, cam, self.hair, folder, private,
+            future = pool.submit(attempt, child, prep, frozen, tex, cam, self.hair, folder, private,
                                  timeout, cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=rendered, apply=lambda *args: 0,
                                  attempts=1, attempt_start=index, cancelled=self.cancelled, user_note=user_note)
