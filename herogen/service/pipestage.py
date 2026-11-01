@@ -1,18 +1,19 @@
 """Per-stage adapter: `python3 -m herogen.service.pipestage p|1|2 --run-id <id> --runs <root> --cache <cache>`.
 
 Stage p reads the description as UTF-8 on stdin and calls the pipeline's stagep_prompt, which owns the prompt
-versions, checks, images and stage-p.json. No description or model error text is printed: API errors may echo
-the description. Stage p exit codes: 0 passed, 1 permanent error, 2 argparse usage error, 3 input rejected,
+versions, checks, images and stage-p.json. No user text or model error text is printed: API errors may echo
+descriptions and appearance notes. Stage p exit codes: 0 passed, 1 permanent error, 2 argparse usage error, 3 input rejected,
 4 content policy, 5 transient model error, 6 gate failed. Gate failures add status "gate_failed" to the pipeline
 record; input rejection has status "input_rejected" and an error, policy refusal status "error" and an error.
-The runner requires matching records for rejections. Exception messages never decide these codes. Stage 1 of
-description jobs uses the same isolated output and exit codes because its cover prompt includes the description.
+The runner requires matching records for rejections. Exception messages never decide these codes. Cover and turnaround use the same isolated
+output and structured exit codes because their prompts can include descriptions and appearance notes.
 
 The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service runs 2h beside the
 rest of the job instead (see `worker.run_heldout`), so it starts stage 2 through the same public functions the
 CLI's `run_pipeline` uses (`RunFolder`, `ModelClient` in live mode with the given cache, `stage2_turnaround`),
-which write the same files and the same `stage-2.json`. Stage 2 exit codes: 0 passed, 1 error, 2 gate failed
-or argparse usage error, 3 input rejected. For either stage, argparse help exits 0 without running the pipeline.
+which write the same files and the same `stage-2.json`. Stage 1 calls `stage1_cover` through this adapter too.
+Stages 1/2 use the same exit codes as stage p except that gate failures use 2; the runner requires a matching
+gate-failed record to distinguish them from usage errors. Argparse help exits 0 without running the pipeline.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from pathlib import Path
 
 
 def prompt_error_exit(error: BaseException | None) -> int:
-    """Inspect structured API errors, including stage p's PromptStageError exception causes."""
+    """Inspect explicit exception causes, including stage p's PromptStageError wrapper."""
     from herogen.pipeline.client import ApiError
 
     seen = set()
@@ -50,7 +51,6 @@ def main(argv: list[str] | None = None) -> int:
     from herogen.pipeline.stages import GateFailed, InputRejected, stage1_cover, stage2_turnaround
 
     run = RunFolder(runs_root(a.runs), a.run_id)
-    isolated = a.stage in ("p", "1")
     try:
         client = ModelClient(a.cache, mode="live")
         if a.stage == "p":
@@ -60,18 +60,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rec = stage2_turnaround(run, client)
     except GateFailed as e:
-        if isolated:
-            run.write_stage({**e.record, "status": "gate_failed"})
-        print(f"stage {a.stage}: gate failed; stopping" if isolated else f"stage 2: {e}; stopping",
-              file=sys.stderr)
-        return 6 if isolated else 2
+        run.write_stage({**e.record, "status": "gate_failed"})
+        print(f"stage {a.stage}: gate failed; stopping", file=sys.stderr)
+        return 6 if a.stage == "p" else 2
     except InputRejected:
         print(f"stage {a.stage}: input rejected; stopping", file=sys.stderr)
         return 3
     except Exception as e:  # noqa: BLE001  (one line for the runner; the record holds the rest)
-        print(f"stage {a.stage}: error; stopping" if isolated else f"stage 2: error: {type(e).__name__}: {e}; stopping",
-              file=sys.stderr)
-        return prompt_error_exit(e) if isolated else 1
+        print(f"stage {a.stage}: error; stopping", file=sys.stderr)
+        return prompt_error_exit(e)
     print(f"stage {a.stage} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
     return 0
 

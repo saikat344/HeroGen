@@ -103,15 +103,19 @@ class FakeRunner:
         run = ctx.run_dir
         run.mkdir(parents=True, exist_ok=True)
         getattr(self, f"_stage_{spec.key}")(ctx, run)
+        code = 0
         if mode == "reject":
             rec = json.loads((run / spec.record).read_text())
             rec["ok"] = False
             rec["checks"] = [{"name": "height_agreement_4_views", "value": 0.81, "threshold": 0.95, "op": ">=",
                               "pass": False, "gate": True}]
+            if spec.key in ("p", "1", "2"):
+                rec["status"] = "gate_failed"
+                code = 6 if spec.key == "p" else 2
             write_record(run, rec)
         from herogen.service.runner import CliRunner
 
-        return CliRunner.outcome(spec, ctx, 0.01, 0, "", "", False)
+        return CliRunner.outcome(spec, ctx, 0.01, code, "", "", False)
 
     def _stage_p(self, ctx: StageContext, run: Path) -> None:
         from herogen import prompts
