@@ -2427,9 +2427,16 @@ a painted ear or face replacing hair merely because its colour resembles the ori
 Accepted repaints are matched to the current SAM-derived palette by a regularised quadratic fit, dropping the
 worst 15% of residuals and refitting; a masked low-frequency correction restores the remaining tone difference.
 Projection uses the nearest surface in a 3-pixel depth window, facing squared times pixel density, and a smooth
-ramp against the best quality already written. Outline and depth-jump feathers suppress seams. Hair has a 2x
-quality bonus to replace softer earlier passes. Every later camera renders the updated texture. Texels no
-accepted camera sees retain SAM's colour. No geometry generation or geometry replacement occurs in 3f.
+ramp against the best quality already written, tracking unrefined SAM base coverage separately from refined view
+coverage so feathered close-up borders blend directly into body repaints rather than revealing unrefined base
+texels. Outline and depth-jump feathers suppress silhouette seams, and head and hair close-up cameras multiply
+that feather by a 96-pixel raised cosine (per 1024 render pixels) along frame borders where the silhouette is
+cut by the image edge. Hair has a 2x quality bonus to replace softer earlier passes. Every later camera renders
+the updated texture. Before final texture bake (and before optional close-ups), accepted cameras solve a global
+per-camera scalar exposure gain (or optional affine gain and offset) over shared 3D surface positions in
+`pos.exr`, anchored to preserve the area-weighted mean luminance of accepted non-hair repaints, and re-project
+coarse-to-fine onto the atlas. Texels no accepted camera sees retain SAM's colour. No geometry generation or
+geometry replacement occurs in 3f.
 
 `--upscale-texture` (Python: `upscale_texture=True`) optionally adds sixteen RF5U close-up repaints after
 those twenty views. It is off by default. Four 1920-by-1280-pixel bands cover the chest, waist/belt, thighs

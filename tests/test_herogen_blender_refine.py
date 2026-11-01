@@ -298,6 +298,170 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(count, 0)
         np.testing.assert_array_equal(tex.T, .2)
 
+    def test_closeup_feather_scales_with_resolution_and_spares_uncut_silhouettes(self):
+        self.assertEqual(refine.closeup_border_px((512, 512), 96), 48)
+        self.assertEqual(refine.closeup_border_px((1024, 1024), 96), 96)
+        self.assertEqual(refine.closeup_border_px((1536, 1024), 96), 144)
+        self.assertEqual(refine.closeup_border_px((2048, 2048), 96), 192)
+        for bad in (0, -8, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                refine.closeup_border_px((128, 128), bad)
+        fig = np.zeros((128, 128), bool)
+        # Uncut crown/nose 4 px from top and left borders; cut neck touching bottom border.
+        fig[4:, 4:100] = True
+        f = refine.closeup_feather(fig, 96)  # w = 12 px at 128
+        self.assertEqual(float(f[-1, 20]), 0.0)
+        self.assertAlmostEqual(float(f[-1 - 6, 20]), 0.5, delta=0.02)
+        self.assertEqual(float(f[-1 - 12, 20]), 1.0)
+        # Uncut top/left silhouette pixels near empty frame borders retain full weight 1.0.
+        self.assertEqual(float(f[4, 4]), 1.0)
+        self.assertEqual(float(f[10, 4]), 1.0)
+
+    def test_closeup_projection_blends_into_body_without_base_bleed(self):
+        # Vertical front-facing plate spanning x in [-0.2, 0.2], z in [0.3, 0.85]; head camera cuts at z = 0.55.
+        xs, zs = np.meshgrid(np.linspace(-0.2, 0.2, 32), np.linspace(0.3, 0.85, 48))
+        pos = np.stack([xs, np.zeros_like(xs), zs], -1)
+        nrm = np.broadcast_to(np.array([0.0, -1.0, 0.0]), pos.shape).copy()
+        cov = np.ones((48, 32), bool)
+        base = np.full((48, 32, 3), 0.05, np.float32)  # dark SAM base must never bleed into the feather strip
+        body_cam = cameras.camera("body+0", [0.0, 0.0, 0.5], 0, 1.0, (128, 128))
+        head_cam = cameras.camera("head+0", [0.0, 0.0, 0.75], 0, 0.4, (128, 128))
+        body_rgb = np.full((128, 128, 3), 0.40, np.float32)
+        head_rgb = np.full((128, 128, 3), 0.80, np.float32)
+        valid = np.ones((128, 128), bool)
+        depth_b = np.full((128, 128), 2.0, np.float32)
+        depth_h = np.full((128, 128), 0.8, np.float32)
+        fig_h = np.zeros((128, 128), bool)
+        fig_h[16:, 16:112] = True  # cut along bottom edge only (plate top z=0.85 projects to row 32, inside fig_h)
+        f_head = refine.closeup_feather(fig_h, 96)  # 12 px ramp at bottom border
+        ones = np.ones((128, 128), np.float32)
+
+        with mock.patch.object(character, "BODY_RES", (128, 128)):
+            tex_seq = refine.Texture.from_arrays(pos, nrm, cov, base, 1.0)
+            tex_seq.apply(head_cam, head_rgb, f_head, depth_h, valid, fig_h.astype(np.float32))
+            tex_seq.apply(body_cam, body_rgb, ones, depth_b, valid, ones)
+
+            tex_c2f = refine.Texture.from_arrays(pos, nrm, cov, base, 1.0)
+            tex_c2f.apply(body_cam, body_rgb, ones, depth_b, valid, ones)
+            tex_c2f.apply(head_cam, head_rgb, f_head, depth_h, valid, fig_h.astype(np.float32))
+
+        np.testing.assert_allclose(tex_seq.T, tex_c2f.T, atol=1e-5)
+        col = tex_seq.T[:, 16, 0]
+        # Below z = 0.55 (outside head frame): pure body 0.40; deep inside head frame: pure head 0.80.
+        self.assertAlmostEqual(float(col[4]), 0.40, places=3)
+        self.assertAlmostEqual(float(col[-4]), 0.80, places=3)
+        # Every texel across the transition strip stays strictly within [0.40, 0.80] (no 0.05 base bleed)
+        # and rises monotonically from body to head.
+        self.assertGreaterEqual(float(col.min()), 0.40 - 1e-4)
+        self.assertLessEqual(float(col.max()), 0.80 + 1e-4)
+        self.assertTrue(np.all(np.diff(col) >= -1e-4))
+
+    def test_solve_exposure_recovers_drift_preserves_artwork_anchor_and_ignores_bg(self):
+        shape = (128, 128)
+        cam_b0 = cameras.camera("body+0", [0.0, 0.0, 0.5], 0, 1.0, shape)
+        cam_b45 = cameras.camera("body+45", [0.0, 0.0, 0.5], 45, 1.0, shape)
+        cam_h0 = cameras.camera("head+0", [0.0, 0.0, 0.65], 0, 0.45, shape)
+
+        def make_cyl_view(cam, drift, *, hair=False, closeup=False, outlier=False):
+            # Project each pixel ray of `cam` onto cylindrical front shell x^2 + y^2 = 0.22^2.
+            right, up, fwd = cameras.axes(cam)
+            centre = np.asarray(cam["centre"], float)
+            ortho = float(cam["ortho"])
+            xs = ((np.arange(shape[1]) + 0.5) - shape[1] / 2.0) * (ortho / max(shape))
+            ys = (shape[0] / 2.0 - (np.arange(shape[0]) + 0.5)) * (ortho / max(shape))
+            gx, gy = np.meshgrid(xs, ys)
+            p0 = centre + gx[..., None] * right + gy[..., None] * up
+            # Ray p0 + t * fwd intersects x^2 + y^2 = R^2
+            r2 = 0.22 ** 2
+            a = fwd[0] ** 2 + fwd[1] ** 2
+            b = 2.0 * (p0[..., 0] * fwd[0] + p0[..., 1] * fwd[1])
+            c = p0[..., 0] ** 2 + p0[..., 1] ** 2 - r2
+            disc_v = b * b - 4.0 * a * c
+            hit = (disc_v > 0) & (p0[..., 2] >= 0.1) & (p0[..., 2] <= 0.9)
+            t = (-b - np.sqrt(np.maximum(disc_v, 0.0))) / (2.0 * a)
+            pos = (p0 + t[..., None] * fwd).astype(np.float32)
+            # Smooth true albedo varying across z and azimuth (not linked to any SAM base render).
+            theta = np.arctan2(pos[..., 0], -pos[..., 1])
+            albedo = (0.42 + 0.12 * np.sin(5.0 * pos[..., 2]) + 0.06 * np.cos(2.0 * theta)).astype(np.float32)
+            rgb = np.full((*shape, 3), character.BG, np.float32)
+            base_col = np.stack([albedo * 1.05, albedo, albedo * 0.90], -1)
+            rgb[hit] = np.clip(base_col[hit] * drift, 0.0, 1.0)
+            if outlier:
+                patch = hit & (np.abs(gx) < 0.04) & (np.abs(gy) < 0.04)
+                rgb[patch] = 0.92  # localized repaint ornament difference must not skew exposure
+            return {
+                "key": ("hair-" if hair else "") + cam["name"],
+                "cam": cam,
+                "hair": hair,
+                "closeup": closeup,
+                "alpha": hit.astype(np.float32),
+                "pos": pos,
+                "valid": hit,
+                "depth": t.astype(np.float32),
+                "refined": rgb,
+                "weight": hit.astype(np.float32),
+            }
+
+        drifts = {"body+0": 0.90, "body+45": 1.10, "head+0": 0.86}
+        views = [
+            make_cyl_view(cam_b0, drifts["body+0"]),
+            make_cyl_view(cam_b45, drifts["body+45"], outlier=True),
+            make_cyl_view(cam_h0, drifts["head+0"], closeup=True),
+            make_cyl_view(cam_h0, 0.72, hair=True, closeup=True),
+        ]
+        solved = refine.solve_exposure(views, 1.0, mode="scalar")
+        # Relative product `gain * drift` is equalised across all three non-hair views within 1.5%.
+        corr = [solved[k][0] * d for k, d in drifts.items()]
+        self.assertLess(max(corr) / min(corr) - 1.0, 0.015)
+
+        # Anchored mean luminance matches the accepted non-hair views (hair pass cannot drag anchor).
+        solved_no_hair = refine.solve_exposure(views[:3], 1.0, mode="scalar")
+        for k in drifts:
+            self.assertAlmostEqual(solved[k][0], solved_no_hair[k][0], delta=0.008)
+
+        # Exterior background pixels remain untouched by apply_exposure.
+        adjusted = refine.apply_exposure(views[0]["refined"], views[0]["alpha"] > 0.5, 1.15, 0.02)
+        np.testing.assert_allclose(adjusted[~views[0]["valid"]], character.BG, atol=1e-6)
+
+        # Affine mode, single-view / disconnected fallbacks, and invalid mode check.
+        aff = refine.solve_exposure(views[:3], 1.0, mode="affine")
+        self.assertTrue(all(len(v) == 2 for v in aff.values()))
+        self.assertEqual(refine.solve_exposure(views[:1], 1.0), {"body+0": (1.0, 0.0)})
+        cam_back = cameras.camera("body+180", [0.0, 0.0, 0.5], 180, 1.0, shape)
+        disc_views = [views[0], make_cyl_view(cam_back, 1.12)]
+        self.assertEqual(refine.solve_exposure(disc_views, 1.0), {"body+0": (1.0, 0.0), "body+180": (1.0, 0.0)})
+        with self.assertRaises(ValueError):
+            refine.solve_exposure(views[:2], 1.0, mode="quadratic")
+
+    def test_rebake_views_coarse_to_fine_and_hair_atlas_agreement(self):
+        xs, zs = np.meshgrid(np.linspace(-0.2, 0.2, 32), np.linspace(0.3, 0.85, 48))
+        pos = np.stack([xs, np.zeros_like(xs), zs], -1)
+        nrm = np.broadcast_to(np.array([0.0, -1.0, 0.0]), pos.shape).copy()
+        cov = np.ones((48, 32), bool)
+        base = np.full((48, 32, 3), 0.10, np.float32)
+        body_cam = cameras.camera("body+180", [0.0, 0.0, 0.5], 0, 1.0, (128, 128))
+        upper_cam = cameras.camera("upper+180", [0.0, 0.0, 0.6], 0, 0.6, (128, 128))
+        valid = np.ones((128, 128), bool)
+        depth = np.full((128, 128), 1.0, np.float32)
+        body_rgb = np.full((128, 128, 3), 0.55, np.float32)
+        # Hair pass agrees in top half (0.56) where hair texture lives, but carries a stale dark band (0.18) lower down.
+        hair_rgb = np.full((128, 128, 3), 0.56, np.float32)
+        hair_rgb[72:96, :] = 0.18
+        views = [
+            {"key": "body+180", "cam": body_cam, "hair": False, "closeup": False,
+             "alpha": np.ones((128, 128), np.float32), "pos": np.zeros((128, 128, 3), np.float32),
+             "valid": valid, "depth": depth, "refined": body_rgb, "weight": np.ones((128, 128), np.float32)},
+            {"key": "hair-upper+180", "cam": upper_cam, "hair": True, "closeup": True,
+             "alpha": np.ones((128, 128), np.float32), "pos": np.zeros((128, 128, 3), np.float32),
+             "valid": valid, "depth": depth, "refined": hair_rgb, "weight": np.ones((128, 128), np.float32)},
+        ]
+        with mock.patch.object(character, "BODY_RES", (128, 128)):
+            tex = refine.Texture.from_arrays(pos, nrm, cov, base, 1.0)
+            gains = refine.rebake_views(tex, views=views, solve=False)
+        self.assertEqual(gains, {"body+180": 1.0, "hair-upper+180": 1.0})
+        # Stale dark band (0.18 vs 0.55 > AGREE_TOL[1]) is suppressed, keeping body colour ~0.55 everywhere.
+        self.assertGreater(float(tex.T[..., 0].min()), 0.50)
+
 
 class BudgetTests(unittest.TestCase):
     def test_cap_boundary_and_prior_spend(self):
@@ -927,6 +1091,51 @@ class StageTests(unittest.TestCase):
         rec = stage.run_stage3f(self.run, self.client)
         self.assertEqual(rec["reason"], "no SAM source mesh")
         self.assertEqual(rec["cost_usd"], 0)
+
+    def test_head_frame_cut_feather_and_exposure_switches(self):
+        cams = character.cameras_for(self.info)
+        cam_h180 = {**cams["head+180"], "res": [256, 256]}
+
+        def cut_head_render(mode, args, *unused, **kwargs):
+            folder = Path(args["out"])
+            folder.mkdir(parents=True, exist_ok=True)
+            rgba = np.zeros((256, 256, 4), np.uint8)
+            rgba[32:, 56:200] = (70, 90, 110, 255)  # neck touches bottom border, crown stays uncut
+            Image.fromarray(rgba).save(folder / (args["cams"][0]["name"] + ".png"))
+
+        with mock.patch("herogen.blender.refine.backend.blender", side_effect=cut_head_render), \
+                mock.patch.object(cameras, "read_exr", return_value=np.ones((256, 256, 4), np.float32)):
+            rec_on = {"attempts": []}
+            stage._view(self.client, self.run / "prep", self.run / "base.png", self.tex, cam_h180, False,
+                        self.run / "h180_on", rec_on, 900, Image.new("RGB", (256, 256)), body_cam=cams["body+0"])
+            f_on = self.tex.apply.call_args.args[2]
+            self.assertEqual(float(f_on[-1, 128]), 0.0)
+            # At 256px, CLOSEUP_FEATHER_PX=96 gives a 24px ramp, attenuating row -18 where FEATHER_PX=14 is already 1.0.
+            self.assertLess(float(f_on[-18, 128]), 0.88)
+            self.assertGreater(float(f_on[64, 128]), 0.99)
+
+            with mock.patch.object(refine, "CLOSEUP_FEATHER", False):
+                rec_off = {"attempts": []}
+                stage._view(self.client, self.run / "prep", self.run / "base.png", self.tex, cam_h180, False,
+                            self.run / "h180_off", rec_off, 900, Image.new("RGB", (256, 256)), body_cam=cams["body+0"])
+                f_off = self.tex.apply.call_args.args[2]
+                self.assertEqual(float(f_off[-18, 128]), 1.0)
+
+        with mock.patch.object(refine, "rebake_views", return_value={"body+0": 0.97, "body+45": 1.03}) as rebake:
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertEqual(rebake.call_count, 1)
+        self.assertEqual(rec["exposure_gains"], {"body+0": 0.97, "body+45": 1.03})
+        self.assertEqual(rec["thresholds"]["closeup_feather_px"], refine.CLOSEUP_FEATHER_PX)
+        self.assertEqual(rec["thresholds"]["exposure_mode"], refine.EXPOSURE_MODE)
+
+        with mock.patch.object(refine, "CLOSEUP_FEATHER", False), \
+                mock.patch.object(refine, "EXPOSURE_SOLVE", False), \
+                mock.patch.object(refine, "rebake_views") as rebake_off:
+            rec_disabled = stage.run_stage3f(self.run, self.client)
+        rebake_off.assert_not_called()
+        self.assertNotIn("exposure_gains", rec_disabled)
+        self.assertEqual(rec_disabled["thresholds"]["closeup_feather_px"], 0)
+        self.assertEqual(rec_disabled["thresholds"]["exposure_mode"], "off")
 
 
 class ConsumerTests(unittest.TestCase):
