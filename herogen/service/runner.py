@@ -393,8 +393,20 @@ class CliRunner:
             if spec.key == "3f":
                 argv += ["--refine", "live", "--refine-cache", str(ctx.cache_dir), "--profile", ctx.profile,
                          "--refine-cap-usd", str(ctx.refine_cap_usd) if ctx.refine_cap_usd is not None else "none"]
-                if ctx.refine_profile != "best":
-                    argv += ["--refine-profile", ctx.refine_profile]
+                # Settings.refine_profile (HEROGEN_SERVICE_REFINE_PROFILE) is the one source; the fast lane, the
+                # only product lane, refines fast unless a non-default profile was configured.
+                refine_profile = ctx.refine_profile
+                if refine_profile == "best" and env.get("HEROGEN_FAST_LANE") == "1":
+                    refine_profile = "fast"
+                if refine_profile != "best" and "--refine-profile" in help_text:
+                    argv += ["--refine-profile", refine_profile]
+                if "--refine-note" in help_text:
+                    from herogen.pipeline.redo import note_for
+                    from herogen.pipeline.runfolder import RunFolder
+
+                    note = note_for(RunFolder(ctx.runs_root, ctx.job_id), "3f")
+                    if note:
+                        argv += ["--refine-note", note]
             return argv, None
         if spec.key == "6":
             # With --out a run's 06-roblox folder, the export writes stage-6.json at the run root, its
