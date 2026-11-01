@@ -223,7 +223,7 @@ class ModelClient:
         self.fast = enabled(fast)
         self.policy = policy or retry.RetryPolicy()
         if self.fast:
-            self.policy = replace(self.policy, max_attempts=min(2, self.policy.max_attempts))
+            self.policy = replace(self.policy, max_attempts=1)
         self.limiter = limiter
         # Optional caller-owned budget check; cache hits never reach it, retries always do.
         self.before_api_attempt = before_api_attempt
@@ -474,7 +474,7 @@ class ModelClient:
             slot, slot_wait = limiter.acquire(policy.wall() + (deadline - policy.clock()))
             if slot is None:
                 raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "
-                               f"(attempt {attempt}; last: {last})", transient=True)
+                               f"(attempt {attempt}; last: {last})", transient=not self.fast)
             started = policy.clock()
             began = datetime.now().astimezone().isoformat(timespec="microseconds")
             status: int | None = None
@@ -578,13 +578,16 @@ class ModelClient:
         if not retry.retryable(status, paid_edit=paid_edit):
             raise ApiError(f"{endpoint} failed: {last} (not retried)", http_status=status, error_code=error_code)
         if attempt == policy.max_attempts:
+            # Callers use this flag to requeue whole stages. Fast failures require an explicit retry
+            # even when the underlying HTTP status would normally be transient.
             raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}", http_status=status,
-                           error_code=error_code, transient=True)
+                           error_code=error_code, transient=not self.fast)
         if left <= 0.0:
             raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the {deadline_s:g} s deadline "
-                           f"has passed", http_status=status, error_code=error_code, transient=True)
+                           f"has passed", http_status=status, error_code=error_code, transient=not self.fast)
         raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the next wait would pass the "
-                       f"{deadline_s:.0f} s deadline", http_status=status, error_code=error_code, transient=True)
+                       f"{deadline_s:.0f} s deadline", http_status=status, error_code=error_code,
+                       transient=not self.fast)
 
     def _ledger(self, row: dict[str, Any]) -> None:
         """Append one attempt to the cache's ledger (under an exclusive lock, so parallel runs never interleave)."""
