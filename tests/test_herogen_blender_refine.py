@@ -72,6 +72,46 @@ class GateTests(unittest.TestCase):
         got = refine.figure_mask(img)
         self.assertGreater((got & m).sum() / (got | m).sum(), 0.97)
 
+    def test_shifted_neutral_background_preserves_aligned_outline(self):
+        fig = disc((192, 192), 96, 96, 54)
+        for background in (0.58, 0.82):
+            with self.subTest(background=background):
+                rgb = np.full((192, 192, 3), background, np.float32)
+                rgb[fig] = (0.2, 0.3, 0.25)
+                measured = refine.figure_mask(rgb, render_figure=fig)
+                passed, checks = refine.outline_gate(fig, measured)
+                self.assertTrue(passed, checks)
+                self.assertGreater(checks["iou"], 0.99)
+
+    def test_shifted_figure_still_fails_with_calibrated_background(self):
+        fig = disc((192, 192), 96, 96, 54)
+        moved = disc((192, 192), 118, 96, 54)
+        rgb = np.full((192, 192, 3), 0.58, np.float32)
+        rgb[moved] = (0.2, 0.3, 0.25)
+        measured = refine.figure_mask(rgb, render_figure=fig)
+        passed, checks = refine.outline_gate(fig, measured)
+        self.assertFalse(passed)
+        self.assertGreater((measured & moved).sum() / (measured | moved).sum(), 0.99)
+        self.assertGreater(checks["median_px"], checks["median_limit"])
+
+    def test_small_background_drift_keeps_near_grey_surface(self):
+        fig = disc((192, 192), 96, 96, 54)
+        rgb = np.full((192, 192, 3), 0.46, np.float32)
+        rgb[fig] = 0.525
+        measured = refine.figure_mask(rgb, render_figure=fig)
+        passed, checks = refine.outline_gate(fig, measured)
+        self.assertTrue(passed, checks)
+        self.assertGreater(checks["iou"], 0.99)
+
+    def test_background_calibration_requires_uniform_neutral_exterior(self):
+        fig = disc((128, 128), 64, 64, 30)
+        coloured = np.full((128, 128, 3), (0.8, 0.2, 0.2), np.float32)
+        self.assertEqual(refine._background_colour(coloured, fig), refine.C.BG)
+        nonuniform = np.full((128, 128, 3), 0.8, np.float32)
+        nonuniform[:64] = 0.2
+        self.assertEqual(refine._background_colour(nonuniform, fig), refine.C.BG)
+        self.assertEqual(refine._background_colour(coloured, np.ones_like(fig)), refine.C.BG)
+
     def test_part_gate_rejects_a_face_painted_where_the_render_has_none(self):
         fig = disc((100, 100), 50, 50, 45)
         none = {"face": np.zeros_like(fig)}
@@ -216,6 +256,87 @@ class RegistrationTests(unittest.TestCase):
         affine = np.array(rec["affine_render_to_edit"])
         np.testing.assert_allclose(affine[:, 2], (4, -3), atol=0.7)
         self.assertLess(np.abs(warped[mask] - (render[mask] * 0.9 + 0.03)).mean(), 0.01)
+
+    def test_narrow_repaint_does_not_collapse_when_luminance_contrast_reverses(self):
+        h, w = 384, 256
+        yy, _ = np.indices((h, w))
+        fig = np.zeros((h, w), bool)
+        fig[10:75, 112:150] = True
+        fig[70:202, 112:145] = True
+        fig[190:365, 114:138] = True
+        fig[358:374, 114:155] = True
+        render = np.full((h, w, 3), character.BG, np.float32)
+        render[fig & (yy < 75)] = 0.7
+        shirt = fig & (yy >= 75) & (yy < 202)
+        render[shirt] = (0.25, 0.10, 0.3)
+        render[fig & (yy >= 202)] = (0.3, 0.32, 0.33)
+        edit = render.copy()
+        edit[shirt] = (0.65, 0.52, 0.7)
+
+        _, _, warped, rec = refine.register(render, fig.astype(float), edit)
+        affine = np.array(rec["affine_render_to_edit"])
+        np.testing.assert_allclose(affine[:, :2], np.eye(2), atol=0.02)
+        np.testing.assert_allclose(affine[:, 2], 0, atol=2)
+        passed, checks = refine.outline_gate(fig, refine.figure_mask(warped, render_figure=fig))
+        self.assertTrue(passed, checks)
+
+    def test_registration_does_not_hide_a_displaced_limb(self):
+        shape = (256, 192)
+        fig = disc(shape, 96, 48, 30)
+        fig[74:178, 66:126] = True
+        fig[88:160, 40:66] = True
+        fig[88:160, 126:152] = True
+        fig[174:244, 68:90] = True
+        fig[174:244, 102:124] = True
+        moved = fig.copy()
+        moved[88:160, 40:66] = False
+        moved[88:160, 18:44] = True
+        render = np.full((*shape, 3), character.BG, np.float32)
+        edit = render.copy()
+        render[fig] = (0.2, 0.25, 0.3)
+        edit[moved] = (0.2, 0.25, 0.3)
+        _, _, warped, _ = refine.register(render, fig.astype(float), edit)
+        passed, checks = refine.outline_gate(fig, refine.figure_mask(warped, render_figure=fig))
+        self.assertFalse(passed, checks)
+        self.assertLess(checks["iou"], refine.GATE["iou_min"])
+
+    def test_registration_measures_uniform_scale_for_the_hair_gate(self):
+        import cv2
+        yy, xx = np.indices((128, 128))
+        fig = disc((128, 128), 64, 64, 38)
+        render = np.full((128, 128, 3), character.BG, np.float32)
+        render[fig] = np.stack([0.15 + xx[fig] / 700, 0.2 + yy[fig] / 600,
+                                0.25 + np.sin(xx[fig] / 8) / 12], axis=-1)
+        transform = cv2.getRotationMatrix2D((64, 64), 3, 1.14)
+        edit = cv2.warpAffine(render, transform, (128, 128), borderMode=cv2.BORDER_REPLICATE)
+        _, _, _, rec = refine.register(render, fig.astype(float), edit)
+        self.assertAlmostEqual(rec["scale"], 1.14, delta=0.01)
+        self.assertGreater(abs(rec["scale"] - 1), refine.HAIR_GATE["scale_max_change"])
+        np.testing.assert_allclose(np.array(rec["affine_render_to_edit"]), transform, atol=0.7)
+
+    def test_registration_does_not_hide_nonuniform_figure_resize(self):
+        import cv2
+        fig = disc((192, 192), 96, 96, 54)
+        render = np.full((192, 192, 3), character.BG, np.float32)
+        render[fig] = (0.2, 0.25, 0.3)
+        edit = cv2.warpAffine(render, np.float32([[1.3, 0, -28.8], [0, 0.85, 14.4]]),
+                              (192, 192), borderMode=cv2.BORDER_REPLICATE)
+        _, _, warped, _ = refine.register(render, fig.astype(float), edit)
+        passed, checks = refine.outline_gate(fig, refine.figure_mask(warped, render_figure=fig))
+        self.assertFalse(passed, checks)
+
+    def test_repaint_detail_does_not_rotate_a_matching_outline(self):
+        fig = disc((192, 128), 64, 96, 50)
+        fig[80:170, 44:84] = True
+        render = np.full((192, 128, 3), character.BG, np.float32)
+        render[fig] = (0.2, 0.25, 0.3)
+        edit = render.copy()
+        yy, xx = np.indices(fig.shape)
+        edit[fig & (np.abs(xx - yy / 3 - 28) < 5)] = 0.9
+        _, _, warped, rec = refine.register(render, fig.astype(float), edit)
+        np.testing.assert_allclose(np.array(rec["affine_render_to_edit"]), [[1, 0, 0], [0, 1, 0]], atol=0.1)
+        passed, checks = refine.outline_gate(fig, refine.figure_mask(warped, render_figure=fig))
+        self.assertTrue(passed, checks)
 
     def test_empty_colour_overlap_is_finite(self):
         rgb = np.ones((16, 16, 3), np.float32) * 0.2
