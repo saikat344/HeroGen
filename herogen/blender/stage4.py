@@ -42,12 +42,12 @@ TEX_SSIM_GATE = 0.70
 # copies: python -m herogen.blender run --run <copy> --stages 4 --profile roblox-ingame --force
 # Reference: placed 03-refined.glb, identical contract cameras/resolution, existing compare() inset intersection.
 # A stage passes every view: equivalently max(error) <= limit and min(SSIM) >= limit. Correct runs' worst
-# error / SSIM: 11.37 / 0.6050. View-bake and quarter-UV-shift controls' nearest max-error / min-SSIM
-# boundaries: 30.32 / 0.4727. Midpoints give margins 9.475 / 0.06615 on both sides of those stage boundaries.
+# error / SSIM: 11.52 / 0.6004. View-bake and quarter-UV-shift controls' nearest max-error / min-SSIM
+# boundaries: 30.32 / 0.4727. Midpoints give margins 9.4 / 0.06385 on both sides of those stage boundaries.
 # All seven correct transfers pass; all fourteen controls fail (both aggregate metrics), without overlap.
 # These limits apply only to the new reference; the turnaround limits above are unchanged.
-TRANSFER_ERROR_GATE = 20.845
-TRANSFER_SSIM_GATE = 0.53885
+TRANSFER_ERROR_GATE = 20.92
+TRANSFER_SSIM_GATE = (0.6004 + 0.4727) / 2
 # Cap resolution per LOD (rings, first-ring points). On the synthetic body the caps cost about 3.0k of the
 # high LOD's 23.9k triangles and 1.3k of the low LOD's 5.8k.
 DOME = {"high": (2, 12), "low": (1, 8)}
