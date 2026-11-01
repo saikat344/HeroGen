@@ -79,13 +79,13 @@ GROUP_MARGIN_S = 1800
 def group_timeout(group: str) -> int:
     from herogen.service.runner import PLAN
 
-    per = DEPLOY.blender_timeout_s if group == "blender" else DEPLOY.stage_timeout_s
+    per = DEPLOY.blender_timeout_s if group in ("blender", "body") else DEPLOY.stage_timeout_s
     return sum(1 for s in PLAN if s.group == group) * per + GROUP_MARGIN_S
 
 
-TIMEOUTS = {g: group_timeout(g) for g in ("model", "blender", "export")}
-# The orchestrator waits for all three main groups.
-JOB_TIMEOUT = sum(TIMEOUTS[g] for g in ("model", "blender", "export")) + GROUP_MARGIN_S
+TIMEOUTS = {g: group_timeout(g) for g in ("model", "blender", "body", "export")}
+# The orchestrator waits for model generation and the background export phase.
+JOB_TIMEOUT = sum(TIMEOUTS[g] for g in ("model", "blender", "body", "export")) + GROUP_MARGIN_S
 if JOB_TIMEOUT > 24 * HOUR:
     raise RuntimeError(f"stage timeouts add up to {JOB_TIMEOUT / HOUR:.1f} h per job, over Modal's 24 h limit")
 
@@ -310,7 +310,7 @@ def run_job(job_id: str) -> str | None:
     from herogen.service.worker import run_job as orchestrate
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    groups = {"model": model_stages, "blender": blender_stages, "export": export_stages}
+    groups = {"model": model_stages, "blender": blender_stages, "body": body_stages, "export": export_stages}
 
     def execute(job, attempt, group, resume):
         return GroupResult(**groups[group].remote(job, attempt, resume))
@@ -342,7 +342,7 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
                        lambda: store.job_current(job["id"], attempt),
                        still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)
     runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group in ("model", "blender") else "")
-    return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s(group), TIMEOUTS[group]).to_dict()
+    return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s("blender" if group == "body" else group), TIMEOUTS[group]).to_dict()
 
 
 @app.function(image=web_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["model"][0],
@@ -357,6 +357,13 @@ def model_stages(job: dict, attempt: int, resume: int) -> dict:
               max_containers=20)
 def blender_stages(job: dict, attempt: int, resume: int) -> dict:
     return _group(job, attempt, resume, "blender")
+
+
+@app.function(image=blender_image, volumes={DATA: data_vol}, cpu=WORKERS["blender"][0],
+              memory=WORKERS["blender"][1], timeout=TIMEOUTS["body"], nonpreemptible=True,
+              single_use_containers=True, max_containers=20)
+def body_stages(job: dict, attempt: int, resume: int) -> dict:
+    return _group(job, attempt, resume, "body")
 
 
 @app.function(image=web_image, volumes={DATA: data_vol}, cpu=WORKERS["export"][0], memory=WORKERS["export"][1],

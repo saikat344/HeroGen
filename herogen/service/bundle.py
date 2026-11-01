@@ -42,6 +42,17 @@ def glb_path(run_dir: Path, lod: str = "high") -> Path | None:
     if lod == "high":
         from herogen.blender.final_model import final_model
 
+        # The website always keeps the model that was ready before the game export phase.
+        for name in ('03-refined.glb', '03-source.glb', '03-mesh.glb'):
+            if name == '03-refined.glb':
+                try:
+                    if json.loads((run_dir / 'stage-3f.json').read_text()).get('ok') is not True:
+                        continue
+                except (OSError, ValueError, AttributeError):
+                    continue
+            p = _inside(run_dir, name)
+            if p is not None:
+                return p
         return final_model(run_dir)
     p = run_dir / "04-body" / f"{lod}.glb"
     try:

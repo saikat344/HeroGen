@@ -78,7 +78,7 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         store = Store(db_path, clock=clock)
         try:
             ver = store.db.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(ver, 11)
+            self.assertEqual(ver, 13)
             self.assertEqual(store.db.execute("SELECT email FROM allowlist").fetchone()[0], "ops@example.com")
 
             store.analytics_record(VID_A, "desktop", [("page_view", "page", "landing")])
@@ -339,6 +339,10 @@ class TestAnalyticsAndAdminBrowser(ServiceBrowserCase):
         self.assertEqual(t.eval("location.hash"), "#settings")
         self.assertEqual(t.eval("document.querySelector('#tab-settings').getAttribute('aria-selected')"), "true")
 
+        self.assertEqual(t.eval("document.querySelector('#spendLimitsStatus').textContent"), 'Spend limits: off (no spending checks)')
+        self.assertTrue(t.eval("document.querySelector('#spendLimitFields').hidden"))
+        t.eval("document.querySelector('#spendLimitsEnabled').click()")
+        self.assertFalse(t.eval("document.querySelector('#spendLimitFields').hidden"))
         t.eval(
             "document.querySelector('#modeAccepting').checked = true;"
             "document.querySelector('#limitUsd').value = '10';"
@@ -346,7 +350,12 @@ class TestAnalyticsAndAdminBrowser(ServiceBrowserCase):
             "document.querySelector('#maxRunning').value = '1';"
             "document.querySelector('#budgetForm').requestSubmit();"
         )
-        t.wait("document.querySelector('#budgetSentence').textContent.includes('Accepting heroes now: up to 1 at a time, $0.00 of $10 spent')")
+        t.wait("document.querySelector('#budgetSentence').textContent === 'Accepting heroes now: up to 1 at a time'")
+        self.assertTrue(self.store.generation_get()['spend_limits_enabled'])
+        t.eval("document.querySelector('#spendLimitsEnabled').click(); document.querySelector('#budgetForm').requestSubmit()")
+        t.wait("document.querySelector('#budgetFormMsg').textContent.includes('Saved')")
+        self.assertFalse(self.store.generation_get()['spend_limits_enabled'])
+        self.assertTrue(t.eval("document.querySelector('#spendLimitFields').hidden"))
 
         self.screenshot('admin-settings.png')
 

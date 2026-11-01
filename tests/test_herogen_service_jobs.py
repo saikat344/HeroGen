@@ -198,7 +198,7 @@ class TestJobFlow(JobCase):
             job = self.new_job()
             self.assertEqual(self.go(job), "succeeded", mode)
             six = self.stages(job)["6"]
-            self.assertEqual(six["state"], {"reject": "rejected", "error": "failed"}[mode])
+            self.assertEqual(six["state"], "skipped")
             self.assertIn("Roblox rig", six["message"])
             self.assertEqual(self.stages(job)["5"]["state"], "passed", "the stages after it still run")
 
@@ -247,20 +247,6 @@ class TestLeases(JobCase):
                 _time.sleep(0.005)
             self.store.reconcile_stale(self.s.max_attempts)
             check()
-
-    def heldout(self, job, runner=None, workdir=None):
-        from herogen.service.snapshot import LocalVolume
-        from herogen.service.worker import HeldoutWorkdir, run_heldout
-
-        ctx = make_context(self.s, self.storage, job)
-
-        def workdir_for(claim):
-            cls = workdir or HeldoutWorkdir
-            return cls(ctx, self.tmp / "h" / job["id"], LocalVolume(),
-                       lambda: self.store.side_live(job["id"], "2h", claim))
-
-        return run_heldout(self.store, self.s, job, runner or self.runner, workdir_for)
-
 
     def test_a_long_gap_between_groups_does_not_cost_the_job_its_lease(self):
         test, job = self, self.new_job()

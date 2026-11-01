@@ -26,44 +26,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from herogen.service.migrations import SCHEMA as ADMISSION_SCHEMA, LEGACY_SCHEMA as LEGACY_ADMISSION_SCHEMA, PHASE_MIGRATION
-from herogen.service.generation import GenerationStore, SCHEMA as GENERATION_SCHEMA
-from herogen.service.analytics import AnalyticsStore, SCHEMA as ANALYTICS_SCHEMA, PUBLIC as ANALYTICS_PUBLIC
+from herogen.service.migrations import SCHEMA, SCHEMA_VERSION, MIGRATIONS
+from herogen.service.generation import GenerationStore
+from herogen.service.analytics import AnalyticsStore, PUBLIC as ANALYTICS_PUBLIC
 
-SCHEMA_VERSION = 12
-# Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
-MIGRATIONS = {
-    11: ("ALTER TABLE generation_settings ADD COLUMN spend_limits_enabled INTEGER NOT NULL DEFAULT 0",),
-    6: ("ALTER TABLE admission_work ADD COLUMN process TEXT NOT NULL DEFAULT ''",
-        next(s.strip() for s in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_calls' in s),
-        next(s.strip() for s in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_processes' in s)),
-    1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
-    2: ("ALTER TABLE job_stages ADD COLUMN claim TEXT", "ALTER TABLE job_stages ADD COLUMN lease_until REAL"),
-    3: ("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL)",),
-    4: ("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'account'",
-        "ALTER TABLE jobs ADD COLUMN budget_required INTEGER NOT NULL DEFAULT 0",
-        *tuple(s.strip() for s in LEGACY_ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '').split(';')
-               if s.strip() and 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)),
-    5: ("UPDATE users SET kind='guest' WHERE kind='judge'",
-        "DROP TABLE IF EXISTS judge_workspaces", "DROP TABLE IF EXISTS judge_codes",
-        "ALTER TABLE admissions RENAME TO admissions_old",
-        next(stmt.strip() for stmt in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admissions (' in stmt),
-        "INSERT INTO admissions SELECT job_id,user_id,client_key,amount_micro,cost_signature,actual_micro,main_done,side_required,side_done,closed,created_at,evidence FROM admissions_old",
-        "DROP TABLE admissions_old",
-        next(stmt.strip() for stmt in LEGACY_ADMISSION_SCHEMA.split(';') if 'CREATE TABLE IF NOT EXISTS budget_overhead' in stmt)),
-    7: ("ALTER TABLE jobs ADD COLUMN parent_job TEXT",
-        "ALTER TABLE jobs ADD COLUMN from_stage TEXT",
-        "ALTER TABLE jobs ADD COLUMN note TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE jobs ADD COLUMN stop_after TEXT",
-        "ALTER TABLE jobs ADD COLUMN continued_after INTEGER NOT NULL DEFAULT 0"),
-    8: PHASE_MIGRATION,
-    10: (*tuple(f"ALTER TABLE {name} RENAME TO legacy_{name}" for name in (
-        'admissions', 'admission_work', 'admission_calls', 'admission_processes',
-        'admission_policy', 'budget_overhead', 'refine_budgets')),
-        GENERATION_SCHEMA.strip(),
-        "INSERT INTO generation_settings(id,max_running) VALUES (1, 5)"),
-    9: tuple(s.strip() for s in ANALYTICS_SCHEMA.split(';') if s.strip()),
-}
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
 TERMINAL_STATES = ("succeeded", "rejected", "failed", "canceled", "stopped")
@@ -82,59 +48,6 @@ DISPATCH_GRACE_S = 300.0    # a queued job dispatched this recently is taken to 
 SEEN_EVERY_S = 300.0        # how often a session's last-seen time is written
 DAY_S = 86400.0
 
-SCHEMA = """
-CREATE TABLE users (
-  id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
-  created_at REAL NOT NULL, invite_id TEXT, terms_version TEXT, terms_accepted_at REAL, adult_confirmed_at REAL,
-  quota_daily INTEGER, quota_total INTEGER, last_login_at REAL, deleted_at REAL, kind TEXT NOT NULL DEFAULT 'account'
-);
-CREATE TABLE allowlist (email TEXT PRIMARY KEY, added_at REAL NOT NULL, note TEXT NOT NULL DEFAULT '');
-CREATE TABLE invites (
-  id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, expires_at REAL NOT NULL,
-  max_uses INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, email TEXT, note TEXT NOT NULL DEFAULT '',
-  revoked_at REAL
-);
-CREATE TABLE login_tokens (
-  hash TEXT PRIMARY KEY, email TEXT NOT NULL, invite_id TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL,
-  used_at REAL
-);
-CREATE INDEX login_tokens_email ON login_tokens(email);
-CREATE TABLE sessions (
-  hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
-  last_seen_at REAL NOT NULL, revoked_at REAL
-);
-CREATE INDEX sessions_user ON sessions(user_id);
-CREATE TABLE jobs (
-  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, client_key TEXT NOT NULL, kind TEXT NOT NULL,
-  input_sha TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
-  profile TEXT NOT NULL, state TEXT NOT NULL, created_at REAL NOT NULL, dispatched_at REAL, call_id TEXT,
-  started_at REAL, finished_at REAL, attempts INTEGER NOT NULL DEFAULT 0, lease_until REAL, stage TEXT,
-  error_code TEXT, error_stage TEXT, error_message TEXT, counts_quota INTEGER NOT NULL DEFAULT 1,
-  seconds REAL, cost_usd REAL, cost_detail TEXT, code_commit TEXT NOT NULL DEFAULT '', bytes INTEGER,
-  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,
-  deleted_at REAL, refunded_at REAL, budget_required INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, client_key)
-);
-CREATE INDEX jobs_user ON jobs(user_id, created_at);
-CREATE INDEX jobs_state ON jobs(state);
-CREATE TABLE job_stages (
-  job_id TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL,
-  started_at REAL, seconds REAL, cost_usd REAL, message TEXT NOT NULL DEFAULT '', claim TEXT, lease_until REAL,
-  PRIMARY KEY (job_id, stage)
-);
-CREATE TABLE job_runs (
-  job_id TEXT NOT NULL, attempt INTEGER NOT NULL, grp TEXT NOT NULL, entries INTEGER NOT NULL,
-  PRIMARY KEY (job_id, attempt, grp)
-);
-CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);
-CREATE TABLE audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
-  subject TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX audit_at ON audit(at);
-"""
-
-
-SCHEMA += ADMISSION_SCHEMA + ANALYTICS_SCHEMA
 
 
 class StoreError(Exception):
@@ -206,7 +119,7 @@ class Store(GenerationStore, AnalyticsStore):
         "job_create", "job_get", "jobs_list", "job_dispatch", "job_claim", "job_current", "job_stage_set",
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
-        "job_renew",
+        "job_renew", "job_model_ready", "job_export_finish",
         "job_continue", "job_versions",
         "guest_open", "generation_get",
     }) | ANALYTICS_PUBLIC
@@ -264,14 +177,15 @@ class Store(GenerationStore, AnalyticsStore):
                         for stmt in MIGRATIONS[v]:
                             self.db.execute(stmt)
                 if version == 0:
-                    for v in (10, 11):
+                    for v in (10, 11, 12):
                         for stmt in MIGRATIONS[v]:
                             self.db.execute(stmt)
                     self.db.execute("UPDATE generation_settings SET enabled=1 WHERE id=1")
                 if version <= 11:
                     self.db.execute("UPDATE generation_settings SET spend_limits_enabled=? WHERE id=1",
                                     (int(self.default_spend_limits),))
-                self.db.execute('UPDATE generation_settings SET max_running=? WHERE id=1', (self.default_max_running,))
+                if version <= 10:
+                    self.db.execute('UPDATE generation_settings SET max_running=? WHERE id=1', (self.default_max_running,))
                 self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 self.db.execute("COMMIT")
             except BaseException:
@@ -627,7 +541,9 @@ class Store(GenerationStore, AnalyticsStore):
 
     def _current(self, c: sqlite3.Connection, job_id: str, attempt: int) -> sqlite3.Row | None:
         job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if job is None or job["state"] != "running" or job["attempts"] != attempt or job["deleted_at"] is not None:
+        if (job is None or (job["state"] != "running" and not
+                            (job["state"] == "succeeded" and job["export_state"] == "running"))
+                or job["attempts"] != attempt or job["deleted_at"] is not None):
             return None
         return job
 
@@ -668,7 +584,7 @@ class Store(GenerationStore, AnalyticsStore):
         return n <= max_entries
 
     def job_stage_set(self, job_id: str, attempt: int, stage: str, state: str, *, seconds: float | None = None,
-                      cost_usd: float | None = None, message: str = "", lease_s: float | None = None) -> bool:
+                      cost_usd: float | None = None, message: str = "", lease_s: float | None = None, mesh_saved: bool = False) -> bool:
         if state not in STAGE_STATES:
             raise StoreError(f"bad stage state {state!r}")
         now = self.clock()
@@ -682,8 +598,9 @@ class Store(GenerationStore, AnalyticsStore):
                       "seconds=COALESCE(excluded.seconds, job_stages.seconds), "
                       "cost_usd=COALESCE(excluded.cost_usd, job_stages.cost_usd), message=excluded.message",
                       (job_id, stage, state, attempt, now, seconds, cost_usd, message[:2000]))
-            c.execute("UPDATE jobs SET stage=?, lease_until=COALESCE(?, lease_until) WHERE id=?",
-                      (stage, now + lease_s if lease_s else None, job_id))
+            c.execute("UPDATE jobs SET stage=?, lease_until=COALESCE(?, lease_until), cost_usd=?, "
+                      "mesh_saved=MAX(mesh_saved,?) WHERE id=?",
+                      (stage, now + lease_s if lease_s else None, self._recorded_cost(c, job_id), int(mesh_saved), job_id))
         return True
 
     def job_finish(self, job_id: str, attempt: int, state: str, *, error_code: str | None = None,
@@ -703,6 +620,40 @@ class Store(GenerationStore, AnalyticsStore):
                             bytes=bytes_, lease_until=None)
             self._audit(c, "system", f"job_{state}", job_id, {"stage": error_stage, "code": error_code,
                                                                "attempt": attempt})
+        return True
+
+    def job_model_ready(self, job_id: str, attempt: int, *, bytes_: int) -> bool:
+        """Publish the website model and free its generation slot while exports retain the attempt lease."""
+        with self._tx() as c:
+            job = self._current(c, job_id, attempt)
+            if job is None:
+                return False
+            if job['state'] == 'succeeded':
+                return True
+            now = self.clock()
+            self._set_state(c, job, 'succeeded', model_ready_at=now, finished_at=now,
+                            seconds=round(now - job['started_at'], 2),
+                            bytes=bytes_, cost_usd=self._recorded_cost(c, job_id),
+                            export_state='running', export_started_at=now)
+            self._audit(c, 'system', 'job_model_ready', job_id, {'attempt': attempt})
+        return True
+
+    def job_export_finish(self, job_id: str, attempt: int, *, state: str, message: str = '',
+                          cost_detail=None, bytes_: int | None = None) -> bool:
+        """Finish the export phase without changing visitor success or time-to-model."""
+        if state not in ('ready', 'unavailable'):
+            raise StoreError('bad export state')
+        with self._tx() as c:
+            job = self._current(c, job_id, attempt)
+            if job is None or job['state'] != 'succeeded':
+                return False
+            self._end_stages(c, job_id, 'skipped')
+            c.execute("UPDATE jobs SET export_state=?,export_message=?,export_finished_at=?,export_seconds=?,"
+                      "cost_usd=?,cost_detail=?,bytes=COALESCE(?,bytes),lease_until=NULL WHERE id=?",
+                      (state, message, self.clock(), round(self.clock() - job['export_started_at'], 2),
+                       self._recorded_cost(c, job_id),
+                       json.dumps(cost_detail) if cost_detail is not None else None, bytes_, job_id))
+            self._audit(c, 'system', 'job_exports_finished', job_id, {'state': state})
         return True
 
     def job_requeue(self, job_id: str, attempt: int, max_attempts: int, error_code: str, error_stage: str | None,
@@ -737,13 +688,41 @@ class Store(GenerationStore, AnalyticsStore):
 
     def _recorded_cost(self, c: sqlite3.Connection, job_id: str) -> float:
         """Cumulative main-stage spending, including on retry or worker loss."""
-        return round(c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM job_stages WHERE job_id=? AND stage!='2h'", (job_id,)).fetchone()[0], 6)
+        return round(c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM job_stages WHERE job_id=?", (job_id,)).fetchone()[0], 6)
 
     def _expire_leases(self, c):
         out = []
         for job in c.execute("SELECT * FROM jobs WHERE state='running' AND lease_until<=?", (self.clock(),)).fetchall():
-            self._fail_ours(c, job, 'worker_lost', job['stage'], 'The worker stopped responding. Please create another hero.')
-            out.append((job['id'], 'failed'))
+            if job['mesh_saved']:
+                reason = 'The worker stopped responding after saving the 3D shape.'
+                self._end_stages(c, job['id'], 'skipped')
+                now = self.clock()
+                self._set_state(c, job, 'succeeded', model_ready_at=now, finished_at=now,
+                                seconds=round(now - job['started_at'], 2), export_state='unavailable',
+                                export_message=reason, cost_usd=self._recorded_cost(c, job['id']), lease_until=None)
+                for stage in ('3f', '4', '6', '5'):
+                    c.execute("INSERT INTO job_stages(job_id,stage,state,attempt,message) VALUES (?,?,'skipped',?,?) "
+                              "ON CONFLICT(job_id,stage) DO UPDATE SET state='skipped',message=excluded.message "
+                              "WHERE job_stages.state IN ('pending','running','skipped')",
+                              (job['id'], stage, job['attempts'], reason))
+                self._audit(c, 'system', 'job_model_recovered', job['id'])
+                out.append((job['id'], 'succeeded'))
+            else:
+                self._fail_ours(c, job, 'worker_lost', job['stage'], 'The worker stopped responding. Please create another hero.')
+                out.append((job['id'], 'failed'))
+        for job in c.execute("SELECT * FROM jobs WHERE state='succeeded' AND export_state='running' "
+                             "AND lease_until<=?", (self.clock(),)).fetchall():
+            reason = 'The export worker stopped responding.'
+            for stage in ('4', '6', '5'):
+                c.execute("INSERT INTO job_stages(job_id,stage,state,attempt,message) VALUES (?,?,'skipped',?,?) "
+                          "ON CONFLICT(job_id,stage) DO UPDATE SET state='skipped',message=excluded.message "
+                          "WHERE job_stages.state IN ('pending','running')",
+                          (job['id'], stage, job['attempts'], reason))
+            c.execute("UPDATE jobs SET export_state='unavailable',export_message=?,export_finished_at=?,"
+                      "export_seconds=?,lease_until=NULL,cost_usd=? WHERE id=?",
+                      (reason, self.clock(), self.clock() - job['export_started_at'],
+                       self._recorded_cost(c, job['id']), job['id']))
+            out.append((job['id'], 'succeeded'))
         return out
 
     def reconcile_stale(self, max_attempts):

@@ -1389,6 +1389,8 @@ class ConsumerTests(unittest.TestCase):
             for name in ("04-body/high.glb", "03-source.glb", "03-refined.glb"):
                 (run / name).write_bytes(b"synthetic")
             self.assertEqual(final_model(run).name, "03-refined.glb")
+            self.assertEqual(glb_path(run).name, "03-source.glb", "unrecorded refinement is not published")
+            (run / "stage-3f.json").write_text('{"ok":true,"status":"complete","outputs":["03-refined.glb"]}')
             self.assertEqual(glb_path(run).name, "03-refined.glb")
             body = bodies(run)[0]
             self.assertEqual(body["high"], "03-refined.glb")
@@ -1396,6 +1398,7 @@ class ConsumerTests(unittest.TestCase):
             (run / "stage-4.json").write_text('{"profile":{"name":"roblox-ingame"}}')
             self.assertEqual(final_model(run).relative_to(run).as_posix(), "04-body/high.glb")
             self.assertEqual(bodies(run)[0]["high"], "04-body/high.glb")
+            self.assertEqual(glb_path(run).name, "03-refined.glb", "website model is independent of game export")
             self.assertIn("3f", [s.key for s in plan_for("sketch", "best")])
             for profile in ("best", "roblox-ingame", "roblox-avatar"):
                 for kind in ("sketch", "prompt"):

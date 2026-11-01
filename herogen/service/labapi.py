@@ -77,10 +77,10 @@ def _files(run: Path) -> dict[str, dict[str, Any]]:
 
 
 def _minimal_detail(run: Path, run_id: str) -> dict[str, Any]:
-    from herogen.blender.final_model import final_model
+    from herogen.service.bundle import glb_path
 
     stages = [_stage(run, k, label) for k, label in STAGES]
-    high = final_model(run)
+    high = glb_path(run)
     glbs = ([high.relative_to(run).as_posix()] if high else [])
     if (run / "04-body/low.glb").is_file():
         glbs.append("04-body/low.glb")
@@ -165,11 +165,22 @@ def run_detail(runs_root: Path, job_id: str) -> dict[str, Any] | None:
     if kind == "workspace":
         from herogen.lab.workspace import Workspace
 
-        return Workspace([runs_root], labels=[ROOT_LABEL]).run_detail(run_id)
-    if kind == "runindex":
+        detail = Workspace([runs_root], labels=[ROOT_LABEL]).run_detail(run_id)
+    elif kind == "runindex":
         from herogen.lab import runindex
 
         detail = runindex.run_detail(run)
         detail.update({"id": run_id, "root": ROOT_KEY, "name": job_id, "path": f"{ROOT_LABEL}/{job_id}"})
-        return detail
-    return _minimal_detail(run, run_id)
+    else:
+        return _minimal_detail(run, run_id)
+    from herogen.service.bundle import glb_path
+
+    model = glb_path(run)
+    if detail is not None and model is not None:
+        body = next((b for b in detail['bodies'] if b['dir'] == '04-body'), None)
+        if body is None:
+            body = {'name': 'website model', 'dir': '04-body', 'low': None, 'glb': {},
+                    'sections': None, 'stage4_ok': None, 'files': [], 'front_render': None}
+            detail['bodies'].insert(0, body)
+        body['high'] = model.relative_to(run).as_posix()
+    return detail

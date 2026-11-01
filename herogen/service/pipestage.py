@@ -8,9 +8,8 @@ record; input rejection has status "input_rejected" and an error, policy refusal
 The runner requires matching records for rejections. Exception messages never decide these codes. Cover and turnaround use the same isolated
 output and structured exit codes because their prompts can include descriptions and appearance notes.
 
-The pipeline's CLI always follows a passing stage 2 with the held-out views (2h). The service omits 2h and starts stage 2 through the same public functions the
-CLI's `run_pipeline` uses (`RunFolder`, `ModelClient` in live mode with the given cache, `stage2_turnaround`),
-which write the same files and the same `stage-2.json`. Stage 1 calls `stage1_cover` through this adapter too.
+The service calls `stage2_turnaround` and `stage1_cover` directly through this adapter, so only the
+requested image stage runs and writes its record.
 Stages 1/2 use the same exit codes as stage p except that gate failures use 2; the runner requires a matching
 gate-failed record to distinguish them from usage errors. Argparse help exits 0 without running the pipeline.
 """
