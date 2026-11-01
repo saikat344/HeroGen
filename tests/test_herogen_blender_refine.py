@@ -242,6 +242,109 @@ class HairModeTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
+class AffineDegeneracyTests(unittest.TestCase):
+    def setUp(self):
+        self.figure = np.zeros((128, 96), bool)
+        self.figure[16:48, 32:64] = True
+        self.centroid = np.array([48.0, 32.0])
+
+    def matrix(self, linear, shift=(0, 0)):
+        linear = np.asarray(linear, float)
+        return np.column_stack([linear, self.centroid - linear @ self.centroid + shift])
+
+    def reasons(self, matrix):
+        return refine._affine_degeneracy(matrix, self.figure)["reasons"]
+
+    def test_ordinary_nonuniform_affine_is_retained(self):
+        self.assertEqual(self.reasons(self.matrix([[0.944, -0.009], [-0.004, 0.971]])), [])
+        self.assertEqual(self.reasons(self.matrix([[0.911, 0.003], [0.003, 1.004]])), [])
+
+    def test_failed_nonfinite_reflected_and_collapsed_fits(self):
+        self.assertEqual(self.reasons(None), ["fit_failed"])
+        for value in (np.nan, np.inf, -np.inf):
+            with self.subTest(value=value):
+                self.assertEqual(self.reasons(np.full((2, 3), value)), ["nonfinite"])
+        for linear in ([[0.002, 0], [0, 1]], [[0, 0], [0, 1]], [[-1, 0], [0, 1]]):
+            with self.subTest(linear=linear):
+                self.assertIn("determinant", self.reasons(self.matrix(linear)))
+
+    def test_directional_scale_bounds(self):
+        for scale in (0.85, 1.25):
+            self.assertEqual(self.reasons(self.matrix([[scale, 0], [0, 1]])), [])
+        for scale in (0.85 - 1e-6, 1.25 + 1e-6):
+            self.assertIn("scale", self.reasons(self.matrix([[scale, 0], [0, 1]])))
+        # Both column lengths are ordinary, but their near-parallel directions collapse area.
+        self.assertIn("scale", self.reasons(self.matrix([[0.71, 0.70], [0.70, 0.71]])))
+
+    def test_area_shrinkage_without_single_axis_collapse(self):
+        for area, expected in ((0.8 - 1e-6, ["determinant"]), (0.8 + 1e-6, [])):
+            with self.subTest(area=area):
+                self.assertEqual(self.reasons(self.matrix(np.eye(2) * np.sqrt(area))), expected)
+
+    def test_shear_bound_uses_normalized_column_angle(self):
+        for shear, expected in ((0.15 - 1e-6, []), (0.15 + 1e-6, ["shear"])):
+            with self.subTest(shear=shear):
+                linear = [[1, shear], [0, np.sqrt(1 - shear ** 2)]]
+                self.assertEqual(self.reasons(self.matrix(linear)), expected)
+
+    def test_rotation_bound_about_silhouette_centroid(self):
+        for angle, expected in ((4.999, []), (-4.999, []), (5.001, ["rotation"]), (-5.001, ["rotation"])):
+            with self.subTest(angle=angle):
+                a = np.radians(angle)
+                linear = [[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]
+                self.assertEqual(self.reasons(self.matrix(linear)), expected)
+
+    def test_centroid_displacement_includes_linear_map_and_translation(self):
+        # Rotation and scaling about this off-centre silhouette do not move its centroid.
+        linear = [[0.98, -0.02], [0.02, 0.98]]
+        self.assertEqual(self.reasons(self.matrix(linear, (16, 0))), [])
+        self.assertEqual(self.reasons(self.matrix(linear, (16.001, 0))), ["centroid"])
+        self.assertEqual(self.reasons(self.matrix(linear, (0, -16.001))), ["centroid"])
+        scaled = self.matrix(linear, (16, 0))
+        scaled[:, 2] *= 2
+        figure = np.repeat(np.repeat(self.figure, 2, axis=0), 2, axis=1)
+        self.assertEqual(refine._affine_degeneracy(scaled, figure)["reasons"], [])
+
+    def test_empty_silhouette_is_explicit(self):
+        record = refine._affine_degeneracy(self.matrix(np.eye(2)), np.zeros_like(self.figure))
+        self.assertEqual(record["reasons"], ["empty_figure"])
+        self.assertIsNone(record["centroid_displacement"])
+
+    def test_rejected_outline_does_not_invoke_fallback_for_valid_affine(self):
+        figure = disc((128, 128), 64, 64, 35)
+        render = np.full((128, 128, 3), character.BG, np.float32)
+        render[figure] = 0.2
+        edit = np.full_like(render, character.BG)
+        primary = np.array([[0.95, 0.01, 10], [0, 0.98, -4]])
+        with mock.patch.object(refine, "refine_affine", return_value=primary), \
+                mock.patch.object(refine, "_register_similarity") as fallback:
+            _, _, warped, rec = refine.register(render, figure.astype(float), edit)
+        fallback.assert_not_called()
+        expected = primary.copy()
+        expected[:, 2] /= 4  # 512 work pixels to 128 render pixels
+        np.testing.assert_allclose(rec["affine_render_to_edit"], expected)
+        self.assertEqual(rec["method"], "affine")
+        self.assertEqual(rec["affine_diagnostics"]["reasons"], [])
+        passed, _ = refine.outline_gate(figure, refine.figure_mask(warped, render_figure=figure))
+        self.assertFalse(passed)
+
+    def test_degenerate_primary_invokes_fallback_once_before_gates(self):
+        figure = disc((128, 128), 64, 64, 35)
+        render = np.full((128, 128, 3), character.BG, np.float32)
+        render[figure] = 0.2
+        identity = np.array([[1., 0, 0], [0, 1., 0]])
+        for primary in (None, np.array([[0.002, 0, 255], [0, 1., 0]])):
+            with self.subTest(primary=primary), \
+                    mock.patch.object(refine, "refine_affine", return_value=primary), \
+                    mock.patch.object(refine, "_register_similarity", return_value=identity) as fallback:
+                _, _, warped, rec = refine.register(render, figure.astype(float), render)
+            fallback.assert_called_once()
+            self.assertEqual(rec["method"], "similarity_fallback")
+            self.assertTrue(rec["affine_diagnostics"]["reasons"])
+            np.testing.assert_array_equal(warped, render)
+
+
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class RegistrationTests(unittest.TestCase):
     def test_affine_recovers_a_translation_and_brightness_change(self):
         import cv2
