@@ -64,6 +64,26 @@ class SpendGuardTest(TempDirCase):
                 next_job, _ = self.create()
                 self.store.job_cancel(next_job['id'], self.user['id'])
 
+    def test_generation_reads_persist_only_when_a_lease_expires(self):
+        job, _ = self.create()
+        self.store.job_claim(job['id'], 'call', 10, 2)
+        self.store.job_stage_set(job['id'], 1, '1', 'running', cost_usd=.2)
+        persists, statements = [], []
+        self.store.persist = lambda db: persists.append(db.total_changes)
+        self.store.db.set_trace_callback(statements.append)
+        for _ in range(5):
+            self.assertEqual(self.store.generation_get()['active'], 1)
+        self.assertEqual(persists, [])
+        self.assertFalse(any(sql.startswith('BEGIN') for sql in statements))
+        self.clock.advance(10)
+        self.assertEqual(self.store.generation_get()['spent_usd'], .2)
+        self.assertEqual(len(persists), 1)
+        self.assertEqual(self.store.job_get(job['id'])['state'], 'failed')
+        for _ in range(5):
+            self.assertEqual(self.store.generation_get()['active'], 0)
+        self.assertEqual(len(persists), 1)
+        self.assertEqual(sum(sql.startswith('BEGIN') for sql in statements), 1)
+
     def test_expired_lease_releases_estimate_before_sweep(self):
         job, _ = self.create()
         self.store.job_claim(job['id'], 'call', 10, 2)
@@ -137,6 +157,38 @@ class SpendGuardTest(TempDirCase):
 
 
 class GuestHTTPTest(WebCase):
+    def test_status_gets_do_not_persist_unchanged_state(self):
+        admin = self.signin('ops@example.com')
+        anonymous, guest = Browser(self.app), Browser(self.app)
+        anonymous.session()
+        guest.session()
+        self.assertEqual(guest.post('/api/demo/access', json={}).status_code, 200)
+        guest.session()
+        response = self.make_job(guest)
+        self.assertEqual(response.status_code, 201, response.text)
+        job = response.json()
+        self.store.job_claim(job['id'], 'call', 10, 2)
+        persists, statements = [], []
+        self.store.persist = lambda db: persists.append(db.total_changes)
+        self.store.db.set_trace_callback(statements.append)
+        def read_status():
+            for browser in (anonymous, guest, admin):
+                self.assertEqual(browser.get('/api/session').status_code, 200)
+            for endpoint in ('/api/admin/generation', '/api/admin/analytics'):
+                self.assertEqual(admin.get(endpoint).status_code, 200)
+        for _ in range(3):
+            read_status()
+        self.assertEqual(persists, [])
+        self.assertFalse(any(sql.startswith('BEGIN') for sql in statements))
+        self.clock.advance(10)
+        read_status()
+        self.assertEqual(len(persists), 1)
+        self.assertEqual(self.store.job_get(job['id'])['state'], 'failed')
+        for _ in range(3):
+            read_status()
+        self.assertEqual(len(persists), 1)
+        self.assertEqual(sum(sql.startswith('BEGIN') for sql in statements), 1)
+
     def test_session_exposes_only_public_generation_status(self):
         self.store.generation_update(actor='operator', enabled=True, limit_usd=123.45,
                                      running_estimate_usd=1.75, max_running=6)
