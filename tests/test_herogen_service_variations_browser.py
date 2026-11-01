@@ -131,3 +131,111 @@ class TestTextureNotesBrowser(ServiceBrowserCase):
         self.assertIn('Weathered brass', t.eval("document.querySelector('#recipePanel').textContent"))
         self.assertIsNone(t.eval("document.querySelector('#recipePanel input, #recipePanel textarea, #recipePanel select')"))
         self.assertEqual(t.errors, [])
+
+
+@unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, 'set E2E_CDP_PORT and install requirements-dev.txt')
+class TestWorkbenchPresentation(ServiceBrowserCase):
+    service_settings = {'texture_notes': True}
+
+    def assert_layout(self):
+        t = self.tab
+        self.assertTrue(t.eval("""(() => {
+          const b=document.querySelector('.workbench-breadcrumb').getBoundingClientRect();
+          const e=document.querySelector('.generation-heading .eyebrow').getBoundingClientRect();
+          return b.bottom <= e.top && b.height > 0 && e.height > 0;
+        })()"""), 'Breadcrumb and eyebrow must occupy separate lines')
+        self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'), 'Page must fit the viewport')
+        self.assertEqual(t.eval("""[...document.querySelectorAll('#detail *')].filter(e => {
+          const r=e.getBoundingClientRect(); if (!r.width || !r.height || getComputedStyle(e).position==='absolute') return false;
+          for(let p=e.parentElement;p;p=p.parentElement) if (['auto','scroll','hidden'].includes(getComputedStyle(p).overflowX)) return false;
+          return r.left < -1 || r.right > innerWidth+1;
+        }).map(e=>e.id||e.className)"""), [])
+
+    def capture_matrix(self, state, panel='live'):
+        t = self.tab
+        for width, height, size in [(1586,1000,'desktop'),(375,812,'375px')]:
+            t.call('Emulation.setDeviceMetricsOverride',width=width,height=height,deviceScaleFactor=1,mobile=width==375)
+            for theme in ['light','dark']:
+                t.eval(f"document.querySelector('#themePreference').value='{theme}';document.querySelector('#themePreference').dispatchEvent(new Event('change'))")
+                t.eval(f"document.querySelector('#{panel}Tab').click();window.scrollTo(0,0)")
+                t.eval('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+                self.assert_layout()
+                self.screenshot(f'workbench-{state}-{theme}-{size}.png')
+
+    def test_running_finished_tree_and_compare_fit_both_themes_and_sizes(self):
+        import threading
+        stage_gate = threading.Event()
+        original = self.runner.run
+        def run(spec, ctx):
+            if spec.key == '2':
+                stage_gate.wait(45)
+            return original(spec, ctx)
+        self.runner.run = run
+        self.runner.gate.set()
+        try:
+            self.signin(); self.make_hero('Clockwork gardener'); t = self.tab
+            t.wait("document.querySelector('#stages .st-running')?.dataset.stage === '2'")
+            t.wait("document.querySelector('#stageLog').textContent.includes('started')")
+            self.assertFalse(t.eval("document.querySelector('#cancelJob').hidden"))
+            self.assertFalse(t.eval("document.querySelector('.top').contains(document.querySelector('#developerMode'))"))
+            self.assertEqual(t.eval("document.querySelector('#who').textContent"),'Private workspace')
+            self.capture_matrix('running')
+        finally:
+            stage_gate.set()
+        t.wait("document.querySelector('#state').textContent === 'succeeded' && !document.querySelector('#refineVersion').disabled",timeout=45)
+        t.wait("!document.querySelector('#orbitHint').hidden",timeout=45)
+        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"),'Your hero. Your next idea.')
+        self.assertTrue(t.eval("document.querySelector('#cancelJob').hidden"))
+        self.assertFalse(t.eval("document.querySelector('.progress-disclosure').open"))
+        t.eval("document.querySelector('.progress-disclosure').open=true")
+        self.assertTrue(t.eval("[...document.querySelectorAll('#stages li')].every(e=>e.textContent.includes('$') && e.querySelector('a[target=\"_blank\"]'))"))
+        t.eval("document.querySelector('.progress-disclosure').open=false")
+        self.capture_matrix('finished')
+        t.eval("Object.defineProperty(navigator.clipboard,'writeText',{value:async text=>{window.copiedStageLog=text;},configurable:true});document.querySelector('#copyLog').click()")
+        t.wait("document.querySelector('#logStatus').textContent === 'Log copied'")
+        self.assertIn('Refined version 1 ready',t.eval('window.copiedStageLog'))
+        self.assertIn('started',t.eval('window.copiedStageLog'))
+        root = t.eval("document.querySelector('#versionSelect').value")
+        t.eval("document.querySelector('#refineNote').value='Weathered brass';document.querySelector('#refineForm').requestSubmit()")
+        t.wait("document.querySelector('#versionSelect').options.length === 2 && !document.querySelector('#refineVersion').disabled")
+        t.wait("!document.querySelector('#compareVersions').disabled")
+        self.assertEqual(t.eval("document.querySelectorAll('.production-node').length"),2)
+        self.assertEqual(t.eval("document.querySelector('.branch-edge').textContent"),'Refine')
+        t.eval(f"document.querySelector('#versionSelect').value='{root}';document.querySelector('#versionSelect').dispatchEvent(new Event('change'))")
+        t.wait(f"location.hash === '#job={root}' && !document.querySelector('#detail').hidden && document.querySelector('#versionSelect').value === '{root}' && !document.querySelector('#retryVersion').disabled")
+        t.eval("document.querySelector('#retryVersion').click()")
+        t.wait("document.querySelector('#versionSelect').options.length === 3 && !document.querySelector('#retryVersion').disabled")
+        self.assertEqual(t.eval("document.querySelectorAll('.version-list > li > .version-children > li').length"),2)
+        self.assertEqual(t.eval("[...document.querySelectorAll('.branch-edge')].map(e=>e.textContent)"),['Refine','Retry'])
+        self.capture_matrix('branches','branches')
+        t.call('Emulation.setDeviceMetricsOverride',width=1586,height=1000,deviceScaleFactor=1,mobile=False)
+        before = t.eval("document.querySelector('.generation-notes').getBoundingClientRect().width")
+        t.eval("document.querySelector('#expandTree').click()")
+        self.assertGreater(t.eval("document.querySelector('.generation-notes').getBoundingClientRect().width"),before)
+        self.assertEqual(t.eval("document.querySelector('#expandTree').getAttribute('aria-pressed')"),'true')
+        t.eval("document.querySelector('#expandTree').click()")
+        for width, height, size in [(1586,1000,'desktop'),(375,812,'375px')]:
+            t.call('Emulation.setDeviceMetricsOverride',width=width,height=height,deviceScaleFactor=1,mobile=width==375)
+            for theme in ['light','dark']:
+                t.eval(f"document.querySelector('#themePreference').value='{theme}';document.querySelector('#themePreference').dispatchEvent(new Event('change'));document.querySelector('#compareVersions').click()")
+                t.wait("document.querySelector('#compareStatus').textContent === 'Cameras linked' || !document.querySelector('#compareError').hidden")
+                self.assertEqual(t.eval("document.querySelector('#compareStatus').textContent"),'Cameras linked', t.eval("document.querySelector('#compareError').textContent"))
+                self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'))
+                self.assertTrue(t.eval("[...document.querySelectorAll('#compareDialog canvas')].every(e=>{const r=e.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth})"))
+                self.screenshot(f'workbench-compare-{theme}-{size}.png',viewport=True)
+                t.eval("document.querySelector('#closeCompare').click()")
+        self.runner.fail['1'] = 'error'
+        t.eval(f"document.querySelector('#versionSelect').value='{root}';document.querySelector('#versionSelect').dispatchEvent(new Event('change'))")
+        t.wait(f"location.hash === '#job={root}' && !document.querySelector('#detail').hidden && document.querySelector('#versionSelect').value === '{root}' && !document.querySelector('#retryVersion').disabled")
+        t.eval("document.querySelector('#retryVersion').click()")
+        t.wait("!document.querySelector('#variationFailure').hidden && document.querySelector('#state').textContent === 'failed'")
+        self.capture_matrix('failed-variation','branches')
+        self.assertIn('previous result is saved',t.eval("document.querySelector('#variationFailure').textContent"))
+        self.assertEqual(self.store.job_get(root)['state'],'succeeded')
+        t.eval(f"document.querySelector('#versionSelect').value='{root}';document.querySelector('#versionSelect').dispatchEvent(new Event('change'))")
+        t.wait(f"location.hash === '#job={root}' && !document.querySelector('#detail').hidden && document.querySelector('#versionSelect').value === '{root}' && !document.querySelector('#retryVersion').disabled")
+        t.eval("document.querySelector('#expandPreview').click()")
+        self.assertTrue(t.eval("document.querySelector('#detail').classList.contains('expanded-viewer')"))
+        t.eval("document.querySelector('#expandPreview').click();document.querySelector('#previewLighting').click()")
+        self.assertEqual(t.eval("document.querySelector('#previewLighting').getAttribute('aria-pressed')"),'true')
+        self.assertEqual(t.errors, [])
