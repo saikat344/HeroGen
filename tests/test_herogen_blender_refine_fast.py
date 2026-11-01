@@ -1,5 +1,5 @@
 """Frozen-wave concurrency, accounting, cache isolation and opt-in plumbing."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 import json
 from pathlib import Path
 import tempfile
@@ -11,7 +11,7 @@ from PIL import Image
 
 from herogen.blender import refine as stage
 from herogen.blender.refine import fast
-from herogen.pipeline.client import ApiError, IMAGE_MODEL, ModelClient
+from herogen.pipeline.client import ApiError, IMAGE_MODEL, SAM_MODEL, PRICE_PER_IMAGE_USD, ModelClient
 from tests import test_herogen_blender_refine as fixture
 from tests.test_herogen_blender_refine import FakeClient, HAVE_REFINE
 
@@ -85,6 +85,158 @@ class FastStageTests(unittest.TestCase):
         import numpy as np
         self.tex.render_view.return_value = (np.zeros((64, 64, 3)), np.zeros((64, 64), bool))
     identity = staticmethod(fixture.StageTests.identity)
+
+    def test_waiting_limiter_allows_settle_sam_and_selection_to_cancel_before_payment(self):
+        waiting, release, first_started = (threading.Event() for _ in range(3))
+        paid, settled = [], []
+        count = 0
+        count_lock = threading.Lock()
+
+        def limiter(model):
+            nonlocal count
+            if model == IMAGE_MODEL:
+                with count_lock:
+                    count += 1
+                    number = count
+                if number == 2:
+                    waiting.set()
+                    if not release.wait(5):
+                        raise RuntimeError('test limiter timed out')
+
+        self.client.before_api_attempt = limiter
+        self.client.after_api_attempt = settled.append
+
+        def view(child, prep, current, tex, cam, hair, folder, record, *args, attempt_start=0, **kwargs):
+            if attempt_start:
+                self.assertTrue(first_started.wait(5))
+            child.before_api_attempt(IMAGE_MODEL)
+            paid.append((attempt_start, IMAGE_MODEL))
+            if not attempt_start:
+                first_started.set()
+                self.assertTrue(waiting.wait(5))
+            child.after_api_attempt(PRICE_PER_IMAGE_USD[IMAGE_MODEL])
+            child.before_api_attempt(SAM_MODEL)
+            paid.append((attempt_start, SAM_MODEL))
+            child.after_api_attempt(PRICE_PER_IMAGE_USD[SAM_MODEL])
+            folder.mkdir(parents=True, exist_ok=True)
+            record.update(accepted=True, reason='accepted', attempts=[{'try': attempt_start + 1}])
+
+        def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe,
+                  save, state_lock, **kwargs):
+            job = fast.Pass('body+0', 'body+0', False, {'attempts': []}, work / 'body+0')
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    job.submit(pool, client, prep, current, tex, cams['body+0'], work, timeout,
+                               cover, head_found, cams['body+0'], recipe, threading.Lock())
+                    self.assertTrue(waiting.wait(5))
+                    # First settlement and the independent SAM quota must finish with the limiter still blocked.
+                    job.tasks[0][0].result(timeout=2)
+                    with state_lock:
+                        job.collect(0)
+                    self.assertTrue(job.cancelled.is_set())
+                    self.assertEqual(paid, [(0, IMAGE_MODEL), (0, SAM_MODEL)])
+                    self.assertFalse(release.is_set())
+                finally:
+                    release.set()
+                with self.assertRaises(CancelledError):
+                    job.tasks[1][0].result(timeout=2)
+                self.assertEqual(paid, [(0, IMAGE_MODEL), (0, SAM_MODEL)])
+                # Reusing the same worker must not retain the cancelled attempt's context.
+                self.assertIsNone(pool.submit(stage._attempt_cancelled.get).result(timeout=2))
+            return current, False
+
+        with mock.patch.object(stage, '_view', side_effect=view), mock.patch.object(fast, 'waves', side_effect=waves):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(settled, [PRICE_PER_IMAGE_USD[IMAGE_MODEL], PRICE_PER_IMAGE_USD[SAM_MODEL], 0])
+        self.assertEqual(rec['budget']['pending_attempt_usd'], 0)
+        self.assertEqual(rec['budget']['spent_usd_total'], sum(settled))
+
+    def test_paired_limiter_hooks_release_without_holding_the_budget_lock(self):
+        slot = threading.Semaphore(1)
+        waiting = threading.Event()
+        count = 0
+        count_lock = threading.Lock()
+
+        def acquire(model):
+            nonlocal count
+            with count_lock:
+                count += 1
+                number = count
+            if number == 2:
+                waiting.set()
+            if not slot.acquire(timeout=3):
+                raise RuntimeError('paired limiter deadlocked')
+
+        def release(cost):
+            slot.release()
+
+        self.client.before_api_attempt = acquire
+        self.client.after_api_attempt = release
+
+        def waves(client, prep, current, *args, **kwargs):
+            entered = threading.Event()
+            def attempt(index):
+                if index:
+                    self.assertTrue(entered.wait(3))
+                client.before_api_attempt(IMAGE_MODEL)
+                if not index:
+                    entered.set()
+                    self.assertTrue(waiting.wait(3))
+                client.after_api_attempt(0)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first, second = pool.submit(attempt, 0), pool.submit(attempt, 1)
+                first.result(timeout=4)
+                second.result(timeout=4)
+            return current, False
+
+        with mock.patch.object(fast, 'waves', side_effect=waves):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(rec['budget']['pending_attempt_usd'], 0)
+        self.assertTrue(slot.acquire(blocking=False))
+        self.assertFalse(slot.acquire(blocking=False))
+
+    def test_previous_settle_can_wait_without_blocking_state_changes(self):
+        entered, release = threading.Event(), threading.Event()
+        def settle(cost):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('settle hook timed out')
+        self.client.after_api_attempt = settle
+
+        def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe,
+                  save, state_lock, **kwargs):
+            def attempt():
+                client.before_api_attempt(IMAGE_MODEL)
+                client.after_api_attempt(0)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(attempt)
+                try:
+                    self.assertTrue(entered.wait(3))
+                    acquired = state_lock.acquire(timeout=2)
+                    self.assertTrue(acquired)
+                    if acquired:
+                        state_lock.release()
+                finally:
+                    release.set()
+                future.result(timeout=2)
+            return current, False
+
+        with mock.patch.object(fast, 'waves', side_effect=waves):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(rec['budget']['pending_attempt_usd'], 0)
+
+    def test_limiter_failure_releases_reservation_and_stays_loud(self):
+        self.client.before_api_attempt = mock.Mock(side_effect=ApiError('limiter failed'))
+        self.client.after_api_attempt = mock.Mock()
+        def waves(client, prep, current, *args, **kwargs):
+            client.before_api_attempt(IMAGE_MODEL)
+        with mock.patch.object(fast, 'waves', side_effect=waves), self.assertRaisesRegex(ApiError, 'limiter failed'):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        rec = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(rec['status'], 'error')
+        self.assertEqual(rec['budget']['pending_attempt_usd'], 0)
+        self.assertEqual(rec['budget']['spent_usd_total'], 0)
+        self.client.after_api_attempt.assert_not_called()
 
     def render_many(self, mode, args, log, **kw):
         if mode == 'render':
