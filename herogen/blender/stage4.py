@@ -1,5 +1,8 @@
-"""Stage 4: joints, R15 sections and profile LODs, coloured from a validated refined source or the view bake,
-with a pose test. Refined colour supplies both the shared atlas and the Head texture of every built LOD."""
+"""Stage 4: joints, R15 sections, textured profile LODs and a pose test.
+
+Refined colour supplies every LOD and gates against same-frame refined rest renders. View bakes retain
+their turnaround gates; refined-primary turnaround comparisons are diagnostics.
+"""
 from __future__ import annotations
 
 import colorsys
@@ -27,7 +30,7 @@ GAP_GATE = 0.15
 # and reported, not gated.
 UNGATED_POSES = {"twist_turn"}
 JOINT_ERROR_GATE = 0.10        # synthetic runs only: worst joint error vs the known truth, studs
-# Texture gates, per observed colour view, textured rest body rendered flat vs the view inside both silhouettes.
+# View-bake texture gates, per observed colour view, flat rest body vs the turnaround inside both silhouettes.
 # Synthetic painted humanoid (known colours): mean abs error 1.9-5.2 (0-255), SSIM 0.80-0.87. Controls on the
 # same renders: a flat mean colour gives error 65-67; the opposite view mirrored 18.7-79.6; the render shifted
 # 6 px (about 0.075 studs) 18.8-30.9 and SSIM 0.51-0.70. Error <= 12 sits between the worst good view and the
@@ -35,6 +38,16 @@ JOINT_ERROR_GATE = 0.10        # synthetic runs only: worst joint error vs the k
 # >= 0.70 passes every good view (synthetic min 0.80, pencil sketch 0.80) and fails the 6 px shift.
 TEX_ERROR_GATE = 12.0
 TEX_SSIM_GATE = 0.70
+# Refined transfer calibration: s001, s009, s018, s029, s033, s035, s036, full Stage 4 on matching best-run
+# copies: python -m herogen.blender run --run <copy> --stages 4 --profile roblox-ingame --force
+# Reference: placed 03-refined.glb, identical contract cameras/resolution, existing compare() inset intersection.
+# A stage passes every view: equivalently max(error) <= limit and min(SSIM) >= limit. Correct runs' worst
+# error / SSIM: 11.37 / 0.6050. View-bake and quarter-UV-shift controls' nearest max-error / min-SSIM
+# boundaries: 30.32 / 0.4727. Midpoints give margins 9.475 / 0.06615 on both sides of those stage boundaries.
+# All seven correct transfers pass; all fourteen controls fail (both aggregate metrics), without overlap.
+# These limits apply only to the new reference; the turnaround limits above are unchanged.
+TRANSFER_ERROR_GATE = 20.845
+TRANSFER_SSIM_GATE = 0.53885
 # Cap resolution per LOD (rings, first-ring points). On the synthetic body the caps cost about 3.0k of the
 # high LOD's 23.9k triangles and 1.3k of the low LOD's 5.8k.
 DOME = {"high": (2, 12), "low": (1, 8)}
@@ -79,6 +92,10 @@ UV_GUTTER_PX = 2
 # a 1024 px Head texture is within all three, and the profiles' `texture_max_px` check counts it.
 HEAD_SECTION = "Head"
 HEAD_TEXTURE = dict(ATLAS)
+# At 1024, s009's frontal-island scale 2 brings close-up gradient energy from 0.889 to 0.960 of the refined
+# reference (0 degrees), 0.655 to 0.677 at held-out 40 degrees. Exact UV lookup removes the dominant mosaic.
+# The view bake keeps its existing packing. The fixed-size texture and its 2-pixel gutter are unchanged.
+HEAD_FRONT_DENSITY = 2.0
 # Comparison variant only (atlas-high-side-trust.png): weight of a side view that did not shape the mesh. On the
 # pencil figure's hybrid (the pinned runners' results, in-game high body, numpy flat renders, colour error front /
 # left): 1.0 10.0 / 13.4, 0.3 8.7 / 15.7, 0.1 7.8 / 17.8, 0.03 7.2 / 20.0.
@@ -271,6 +288,31 @@ def _rest_iou_checks(vs, shape_views: set[str], mesh_source: str, rest_silhouett
         checks.append(check(f"rest_iou_with_covers_{v}", values[v], IOU_GATE, gate=not derived,
                             reference="stage3_mesh" if unseen else "turnaround"))
     return values, checks
+
+
+def _texture_checks(metrics: dict, error_max: float, ssim_min: float, reference: str,
+                    diagnostic: bool = False) -> list[dict]:
+    """The same metrics with explicit reference and gating status; diagnostics retain the view limits."""
+    prefix = "texture_turnaround" if diagnostic else "texture"
+    checks = []
+    for view, row in metrics.items():
+        checks.append(check(f"{prefix}_colour_error_{view}", row["mean_abs_error"], error_max,
+                            passed=row["mean_abs_error"] <= error_max, rule="<=", gate=not diagnostic,
+                            reference=reference))
+        checks.append(check(f"{prefix}_ssim_{view}", row["ssim"], ssim_min, gate=not diagnostic,
+                            reference=reference))
+    return checks
+
+
+def _texture_source_checks(turnaround: dict, transfer: dict | None, expected_views: set[str]) -> list[dict]:
+    """Select gates by colour source; an empty refined reference must fail rather than select the views."""
+    if transfer is None:
+        return _texture_checks(turnaround, TEX_ERROR_GATE, TEX_SSIM_GATE, "turnaround")
+    checks = [check("texture_transfer_views", len(transfer), len(expected_views),
+                    passed=bool(expected_views) and set(transfer) == expected_views, rule="==",
+                    reference="refined", expected_views=sorted(expected_views), measured_views=sorted(transfer))]
+    return (checks + _texture_checks(transfer, TRANSFER_ERROR_GATE, TRANSFER_SSIM_GATE, "refined")
+            + _texture_checks(turnaround, TEX_ERROR_GATE, TEX_SSIM_GATE, "turnaround", diagnostic=True))
 
 
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
@@ -480,6 +522,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                "out": {k: str(uv_paths[k].resolve()) for k in lods},
                                "margin": {k: UV_GUTTER_PX / atlas_size[k] for k in lods},
                                "separate": [HEAD_SECTION],
+                               "head_front_density": HEAD_FRONT_DENSITY if primary is not None else 1.0,
                                "separate_margin": {k: UV_GUTTER_PX / HEAD_TEXTURE[k] for k in lods}}]},
                    work, "stage4-uv", timeout=timeout)
 
@@ -584,6 +627,16 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         reference_dir.mkdir(exist_ok=True)
         reference_tasks.append({"task": "silhouettes", "mesh": str(mesh_src.resolve()),
                                 "cameras": reference_cams, "out_dir": str(reference_dir.resolve())})
+    if primary is not None:
+        refined_dir = body / "rest-renders" / "refined"
+        refined_dir.mkdir(exist_ok=True)
+        refined_mesh, refined_image = work / "04-refined-reference.npz", work / "04-refined-reference.png"
+        np.savez(refined_mesh, verts=primary.verts, faces=primary.faces, corner_uv=primary.corner_uv)
+        Image.fromarray(primary.texture.astype(np.uint8)).save(refined_image)
+        reference_tasks.append({"task": "textured_mesh", "mesh": str(refined_mesh.resolve()),
+                                "uv_origin": "top",
+                                "texture": str(refined_image.resolve()), "cameras": rest_cams,
+                                "out_dir": str(refined_dir.resolve())})
     pivots = {n: s.pivot for n, s in lod_secs["high"].items()}
     pose_jobs = [{"name": name, "matrices": {n: m.tolist() for n, m in pose.world_matrices(loc, pivots).items()}}
                  for name, loc in poses.items()]
@@ -597,7 +650,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         "rest_cameras": rest_cams, "rest_dir": str((body / "rest-renders").resolve())}]},
         work, "stage4-body", timeout=timeout)
     bres = res["results"][-1]
-    stage3_silhouettes = res["results"][0]["renders"] if reference_tasks else {}
+    stage3_silhouettes = res["results"][0]["renders"] if reference_cams else {}
+    refined_renders = res["results"][-2] if primary is not None else None
 
     # Checks.
     hi, lo = lod_secs["high"], lod_secs.get("low")
@@ -673,18 +727,25 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                            stage3_silhouettes)
     for c in rest_checks:
         rec.add(c)
-    # Texture: the textured rest body rendered flat from each observed colour view against that view.
-    tex_metrics = {}
+    # Keep turnaround agreement for both sources; refined-primary gates measure transfer of its painting.
+    tex_metrics, transfer_metrics = {}, {}
     for v, path in bres["rest_textured"].items():
-        if v not in colour_views:
+        if v not in texture.COLOUR_VIEWS:
             continue
         with Image.open(path) as im:
             rend = np.asarray(im.convert("RGB"), dtype=np.float64)
         rmask = load_mask(Path(bres["rest_silhouettes"][v]))
-        tex_metrics[v] = texture.compare(rend, rmask, colour_views[v][1], vs.views[v].mask)
-        rec.add(check(f"texture_colour_error_{v}", tex_metrics[v]["mean_abs_error"], TEX_ERROR_GATE,
-                      passed=tex_metrics[v]["mean_abs_error"] <= TEX_ERROR_GATE, rule="<="))
-        rec.add(check(f"texture_ssim_{v}", tex_metrics[v]["ssim"], TEX_SSIM_GATE))
+        if v in colour_views:
+            tex_metrics[v] = texture.compare(rend, rmask, colour_views[v][1], vs.views[v].mask)
+        if refined_renders is not None:
+            with Image.open(refined_renders["textured"][v]) as im:
+                reference = np.asarray(im.convert("RGB"), dtype=np.float64)
+            transfer_metrics[v] = texture.compare(rend, rmask, reference,
+                                                 load_mask(Path(refined_renders["silhouettes"][v])))
+    expected_texture_views = {c["view"] for c in rest_cams if c["view"] in texture.COLOUR_VIEWS}
+    for c in _texture_source_checks(tex_metrics, transfer_metrics if primary is not None else None,
+                                    expected_texture_views):
+        rec.add(c)
     if not colour_views and primary is None:
         rec.note("no observed colour views: body left untextured")
     sheet = _comparison_sheet(colour_views, bres["rest_textured"], body / "textured-vs-views.png")
@@ -754,10 +815,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                     "source_fallback": primary is None and source is not None, "refined": refined_info,
                     "atlases": {k: str(v.relative_to(run)) for k, v in atlas_paths.items()},
                     "head_texture_sizes": {lod: HEAD_TEXTURE[lod] for lod in builds},
+                    "head_front_island_scale": HEAD_FRONT_DENSITY if primary is not None else 1.0,
                     "head_textures": {k: v.relative_to(run).as_posix() for k, v in head_paths.items()},
                     "closeups": closeup_info,
                     "colour_views": sorted(colour_views), "bake": tex_stats, "rest_metrics": tex_metrics,
-                    "gates": {"mean_abs_error_max": TEX_ERROR_GATE, "ssim_min": TEX_SSIM_GATE}},
+                    "transfer_metrics": transfer_metrics,
+                    "comparison_mask": "intersection with the existing two-pixel inset",
+                    "gates": {"reference": "refined" if primary is not None else "turnaround",
+                              "mean_abs_error_max": TRANSFER_ERROR_GATE if primary is not None else TEX_ERROR_GATE,
+                              "ssim_min": TRANSFER_SSIM_GATE if primary is not None else TEX_SSIM_GATE}},
         "rest_iou_with_covers": rest_iou,
         "joint_error_synthetic": joint_err,
         "checks": rec.data["checks"],
