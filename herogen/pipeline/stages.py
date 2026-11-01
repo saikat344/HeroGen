@@ -277,7 +277,7 @@ def stage1_cover(run: RunFolder, client: ModelClient) -> dict[str, Any]:
     return _stopping_on_client_error(lambda: _stage1(st, run, client), st)
 
 
-def cover_prompt(run: RunFolder) -> tuple[str, bool]:
+def _cover_brief_prompt(run: RunFolder) -> tuple[str, bool]:
     """Restore the prompt sketch's colour brief; uploads retain the exact original prompt for replay."""
     record = run.read_stage("p") or {}
     source = run.read_stage(0) or {}
@@ -297,6 +297,31 @@ def cover_prompt(run: RunFolder) -> tuple[str, bool]:
             f"«{brief}». "
             "No halo, no glow, no rings, circles or symbols around or behind the head, "
             "even if present in the sketch.", True)
+
+
+def cover_prompt(run: RunFolder) -> tuple[str, bool]:
+    prompt, brief_used = _cover_brief_prompt(run)
+    from herogen.pipeline.redo import note_for
+
+    note = note_for(run, 1)
+    if note:
+        version = prompt_registry.selected("cover_redo")
+        # The frozen cover base must match the legacy prompt used by the brief slot.
+        if version.step("cover")["prompt"] != COVER_PROMPT:
+            raise prompt_registry.RegistryError("the cover redo base differs from the cover prompt")
+        prompt += version.data["note_slot"].replace("{note}", note)
+    return prompt, brief_used
+
+
+def turnaround_prompt(run: RunFolder):
+    from herogen.pipeline.redo import note_for
+
+    note = note_for(run, 2)
+    version = prompt_registry.selected("turnaround_redo" if note else "turnaround")
+    prompt = version.step("sheet")["prompt"]
+    if note:
+        prompt += version.data["note_slot"].replace("{note}", note)
+    return prompt, version
 
 
 def _sketch_part_checks(client: ModelClient, sketch: Image.Image,
@@ -335,6 +360,9 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     prompt, brief_used = cover_prompt(run)
     prompt_details = {"prompt": prompt, "brief_slot_used": brief_used,
                       "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
+    from herogen.pipeline.redo import note_for
+    if note_for(run, 1):
+        prompt_details["prompt_version"] = prompt_registry.selected("cover_redo").ref()
     st.details = dict(prompt_details)
     # The input checks run first: a sketch they reject costs no paid edit. The photo check comes before every
     # other model call, so no other model (no SAM 3.1 face or head prompt) ever sees a photo of a real person.
@@ -359,7 +387,8 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     st.details = {**prompt_details, "mask_method": {"sketch": sketch_method}, "sam_texts": list(SAM_TEXTS),
                   "sam_instances": {"sketch": len(sketch_inst)}, "input": input_details}
     _finish_input_checks(st)
-    cover = client.edit_image(prompt, [sketch], size=f"{w}x{h}")
+    reference = _load(run, "redo/parent-cover.png") if run.exists("redo/parent-cover.png") else sketch
+    cover = client.edit_image(prompt, [reference], size=f"{w}x{h}")
     st.save_image("01-cover.png", cover)
     # An empty cover mask (SAM found nothing in the cover) fails the gated cover_mask_area_frac check.
     cover_mask, cover_method, n_c = sam_figure_mask(client, cover)
@@ -635,9 +664,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
 
 def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int
             ) -> dict[str, Any]:
-    version = prompt_registry.selected("turnaround")
+    prompt, version = turnaround_prompt(run)
     step = version.step("sheet")
-    prompt = step["prompt"]
     st.details = {"prompt_version": version.ref(), "prompt": prompt}
     cover = _load(run, "01-cover.png")
     tried = []
