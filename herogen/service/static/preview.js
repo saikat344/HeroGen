@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 function release(model) {
   const geometries = new Set(), materials = new Set(), textures = new Set();
@@ -48,7 +49,7 @@ export function createPreview({damping = true} = {}) {
     ++request;
     if (!state) return;
     state.renderer.setAnimationLoop(null); restore(); release(state.model);
-    state.observer.disconnect(); state.controls.dispose(); state.grid.geometry.dispose();
+    state.observer.disconnect(); state.controls.dispose(); state.scene.environment?.dispose(); state.grid.geometry.dispose();
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => m.dispose()); state.renderer.dispose();
     document.removeEventListener('hg:theme', theme); state = null;
   }
@@ -59,9 +60,13 @@ export function createPreview({damping = true} = {}) {
       const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: true});
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.0;
       const scene = new THREE.Scene();
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
-      const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(3, 6, 4); scene.add(sun);
+      // Room lighting: a neutral studio room as image-based light, so every side of the model is lit evenly.
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture; pmrem.dispose();
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 0.6));
+      const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(3, 6, 4); scene.add(sun);
       const grid = new THREE.GridHelper(8, 16, 0x8899aa, 0xccd5de); grid.visible = false; scene.add(grid);
       const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
       const controls = new OrbitControls(camera, canvas); controls.enableDamping = damping;
@@ -120,7 +125,7 @@ export function createPreview({damping = true} = {}) {
     state.camera.zoom = value.zoom; state.camera.updateProjectionMatrix();
     render(); syncing = false;
   }
-  function lighting(on) { if (state) { state.sun.intensity = on ? 3.2 : 1.6; render(); } }
+  function lighting(on) { if (state) { state.sun.intensity = on ? 2.4 : 1.2; state.renderer.toneMappingExposure = on ? 1.2 : 1.0; render(); } }
   return {show, pause, resume, dispose, shading, lighting, snapshot, view, setView,
     onView(callback) { viewListener = callback; }};
 }
