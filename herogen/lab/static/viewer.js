@@ -11,6 +11,11 @@ import { R15_PARENT, SECTIONS, boneDirs, poseLibrary, worldMatrices } from './po
 // 0.160.0's nearest equivalent is ACESFilmic: the soft studio roll-off the RoomEnvironment rig was tuned around.
 const TONE_MAPPING = THREE.ACESFilmicToneMapping;
 
+// The bucket of meshes under no R15 section node. The best profile's refined and SAM-source bodies are one mesh
+// named for the whole body ('body'), and such a mesh is the body on screen: it is no section (no pivot, no pose,
+// nothing to isolate) but the shading and lighting controls and the triangle count must reach it all the same.
+export const WHOLE = 'body';
+
 const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
 const loader = new GLTFLoader();
 const cache = new Map(); // url -> Promise<gltf>
@@ -57,6 +62,18 @@ export function instance(gltf, info = {}) {
   const root = gltf.scene.clone(true);
   root.updateMatrixWorld(true);
   const nodes = {}; const meshes = {}; const rest = {}; const pivots = {}; const tris = {};
+  // Triangles of one mesh: its index count, else its positions, over three. No geometry: nothing to count.
+  const tri = (o) => {
+    const g = o.geometry;
+    return g ? (g.index ? g.index.count : g.attributes.position.count) / 3 : 0;
+  };
+  const claimed = new Set(); // meshes already in a bucket, so none is registered or counted twice
+  const register = (bucket, o) => {
+    o.userData.section = bucket === WHOLE ? null : bucket;
+    o.userData.orig = o.material;
+    meshes[bucket].push(o);
+    tris[bucket] += tri(o);
+  };
   for (const n of SECTIONS) {
     const node = root.getObjectByName(n);
     if (!node) continue;
@@ -66,14 +83,18 @@ export function instance(gltf, info = {}) {
     meshes[n] = [];
     tris[n] = 0;
     node.traverse((o) => {
-      if (!o.isMesh) return;
-      o.userData.section = n;
-      o.userData.orig = o.material;
-      meshes[n].push(o);
-      const g = o.geometry;
-      tris[n] += (g.index ? g.index.count : g.attributes.position.count) / 3;
+      if (!o.isMesh || claimed.has(o)) return;
+      claimed.add(o);
+      register(n, o);
     });
   }
+  meshes[WHOLE] = [];
+  tris[WHOLE] = 0;
+  root.traverse((o) => {
+    if (!o.isMesh || claimed.has(o)) return;
+    register(WHOLE, o);
+  });
+  if (!meshes[WHOLE].length) { delete meshes[WHOLE]; delete tris[WHOLE]; }
   const parent = {};
   for (const n of Object.keys(nodes)) parent[n] = (info.parents && info.parents[n] !== undefined ? info.parents[n] : R15_PARENT[n]) || null;
   const box = new THREE.Box3().setFromObject(root);
@@ -189,6 +210,9 @@ export class Viewer {
     };
     this.secMat = Object.fromEntries(SECTIONS.map((n) => [n, new THREE.MeshStandardMaterial({
       color: new THREE.Color(sectionColours[n] || '#888888'), roughness: 0.7, side: THREE.DoubleSide })]));
+    // The per-section view has no section to colour on a whole-body mesh: one neutral material, the same the
+    // section materials use for a name with no colour, shows the body as the single piece it is.
+    this.secMat[WHOLE] = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.7, side: THREE.DoubleSide });
     this.inst = null;
     this.shading = 'textured';
     this.lighting = 'lit'; // how a textured body is shown: studio-lit, or its paint unlit

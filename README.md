@@ -157,18 +157,22 @@ when unset). Runs are named `<root>/<run>`, the root being `r1`, `r2`, ... in th
   the default is the newest run with a body and scores.
 - **Pipeline.** Sketch, artwork, turnaround views, held-out views and the 3D body, each with its stage's status
   and gate count (a stage with no gates never shows as passed); clicking one shows it in the viewer.
-- **3D viewer.** The run's `04-body/high.glb` or `low.glb`: textured, clay, wireframe or per-section colours, and
-  beside them a Light toggle, Lit or Art. Lit (the default) lights the body with three's RoomEnvironment through a
-  PMREM environment plus one gentle key light, tone mapped with an exposure slider (0.5–2.0); Art shows the base
-  colour texture unlit through a MeshBasicMaterial, exactly as painted and with no tone mapping, so the two views
-  separate studio presentation from the paint itself. Clay, wireframe and per-section colours keep working under
-  both. The seven test poses of `herogen/blender/pose.py`, each section turned about its pivot; click a section, or
-  pick it from the list or the legend, to isolate it and see its triangles, pivot and joint; front, 3/4, side and
-  back cameras, orbit, and an axis gizmo. "Side by side" puts the body beside a turnaround view through that view's
-  own orthographic camera (its pixels per stud from `views/meta.json`, framed on the view's mask), or beside the
-  sketch or artwork, scaled to the figure there (approximate). The compare view lights both bodies the same way.
-  Tone mapping is ACESFilmic: Khronos PBR Neutral only reached three.js in r162, after the pinned 0.160.0, and
-  ACESFilmic is that version's nearest equivalent for the soft studio look.
+- **3D viewer.** The run's final body GLB — `03-refined.glb`, then `03-source.glb`, then `04-body/high.glb` for
+  the best profile; the sectioned `04-body/high.glb` for the Roblox profiles — or its `low.glb`: textured, clay,
+  wireframe or per-section colours, and beside them a Light toggle, Lit or Art. Lit (the default) lights the body
+  with three's RoomEnvironment through a PMREM environment plus one gentle key light, tone mapped with an exposure
+  slider (0.5–2.0); Art shows the base colour texture unlit through a MeshBasicMaterial, exactly as painted and
+  with no tone mapping, so the two views separate studio presentation from the paint itself. Clay, wireframe and
+  per-section colours keep working under both. A refined or SAM-source body is one mesh with no R15 sections: it
+  answers every one of these controls too (one neutral colour for the per-section view, nothing to pose or
+  isolate) and its triangles are counted. The seven test poses of `herogen/blender/pose.py`, each section turned
+  about its pivot; click a section, or pick it from the list or the legend, to isolate it and see its triangles,
+  pivot and joint; front, 3/4, side and back cameras, orbit, and an axis gizmo. "Side by side" puts the body
+  beside a turnaround view through that view's own orthographic camera (its pixels per stud from
+  `views/meta.json`, framed on the view's mask), or beside the sketch or artwork, scaled to the figure there
+  (approximate). The compare view lights both bodies the same way. Tone mapping is ACESFilmic: Khronos PBR
+  Neutral only reached three.js in r162, after the pinned 0.160.0, and ACESFilmic is that version's nearest
+  equivalent for the soft studio look.
 - **Quality.** Every check of stages 0 to 4 in plain words, grouped into artwork, views, body, texture and
   held-out, with the failing gates first. "Show me" turns the body to the worst joint gap's pose and isolates the
   joint (from the pose test's gap table), puts a texture failure's view beside the body, or opens the held-out
