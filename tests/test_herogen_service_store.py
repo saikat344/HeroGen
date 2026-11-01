@@ -182,7 +182,9 @@ class TestJobs(StoreCase):
 
     def test_daily_and_total_quota(self):
         for i in range(3):
-            self.create(key=f"key-{i:04d}")
+            job, _ = self.create(key=f"key-{i:04d}")
+            claim = self.store.job_claim(job["id"], "quota", 60, 2)
+            self.store.job_finish(job["id"], claim["attempt"], "succeeded")
         with self.assertRaises(QuotaExceeded) as cm:
             self.create(key="key-0003")
         self.assertIn("24 hours", str(cm.exception))
@@ -190,7 +192,9 @@ class TestJobs(StoreCase):
         self.assertEqual((u["jobs_today"], u["jobs_total"]), (3, 3))
         self.assertAlmostEqual(u["next_daily_slot_at"], self.clock.t + 86400)
         self.clock.advance(86401)
-        self.create(key="key-0004")
+        job, _ = self.create(key="key-0004")
+        claim = self.store.job_claim(job["id"], "quota", 60, 2)
+        self.store.job_finish(job["id"], claim["attempt"], "succeeded")
         self.create(key="key-0005")
         with self.assertRaises(QuotaExceeded) as cm:
             self.create(key="key-0006")
@@ -258,20 +262,20 @@ class TestJobs(StoreCase):
             self.create(key="key-0009")
         self.assertIn("all 3", str(cm.exception))
 
-    def test_parallel_creates_never_exceed_the_quota(self):
+    def test_parallel_creates_never_exceed_one_active_job(self):
         import concurrent.futures as cf
 
         def one(i):
             try:
                 return self.create(key=f"race-{i:04d}", job_id=new_id("j"))[1]
-            except QuotaExceeded:
-                return "quota"
+            except Conflict:
+                return "active"
 
         with cf.ThreadPoolExecutor(16) as ex:
             got = list(ex.map(one, range(16)))
-        self.assertEqual(got.count(True), 3)
-        self.assertEqual(got.count("quota"), 13)
-        self.assertEqual(len(self.store.jobs_list(self.user["id"])), 3)
+        self.assertEqual(got.count(True), 1)
+        self.assertEqual(got.count("active"), 15)
+        self.assertEqual(len(self.store.jobs_list(self.user["id"])), 1)
 
     def test_storage_limit(self):
         j, _ = self.create(key="key-0000", storage_max_bytes=100)
@@ -492,7 +496,8 @@ class TestJobs(StoreCase):
         self.assertEqual(self.store.jobs_list(other["id"]), [])
 
     def test_dispatch_respects_running_cap_and_grace(self):
-        jobs = [self.create(key=f"key-{i:04d}")[0] for i in range(3)]
+        jobs = [self.create(key=f"key-{i:04d}", user_id=make_user(self.store, f"user{i}@example.com")["id"])[0]
+                for i in range(3)]
         due = self.store.jobs_to_dispatch(2)
         self.assertEqual([d["id"] for d in due], [jobs[0]["id"], jobs[1]["id"]])
         for d in due:
@@ -571,12 +576,27 @@ class TestSessions(StoreCase):
 
 class TestSchema(TempDirCase):
     def old_database(self, version: int) -> Path:
-        """A database made with the schema of an older version, holding one job."""
+        """A database made with the schema of an older version, holding one job and its reservation."""
         from herogen.service import store as store_mod
 
         schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '')
-        schema = schema.replace(", kind TEXT NOT NULL DEFAULT 'account'", '')
-        schema = schema.replace(', budget_required INTEGER NOT NULL DEFAULT 0', '')
+        schema = schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, "
+                                "note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n", "")
+        if version < 5:
+            schema = schema.replace(", kind TEXT NOT NULL DEFAULT 'account'", '')
+            schema = schema.replace(', budget_required INTEGER NOT NULL DEFAULT 0', '')
+        else:
+            admission = store_mod.ADMISSION_SCHEMA
+            if version < 7:
+                admission = admission.replace(", process TEXT NOT NULL DEFAULT ''", '')
+                admission = ';'.join(stmt for stmt in admission.split(';')
+                                     if 'CREATE TABLE admission_calls' not in stmt
+                                     and 'CREATE TABLE admission_processes' not in stmt)
+            if version == 5:
+                admission = admission.replace('user_id TEXT NOT NULL, client_key',
+                                              'user_id TEXT NOT NULL, code_id TEXT, client_key')
+                admission = ';'.join(stmt for stmt in admission.split(';') if 'budget_overhead' not in stmt)
+            schema += admission
         if version < 4:
             schema = schema.replace("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL);", "")
         if version < 3:
@@ -591,6 +611,13 @@ class TestSchema(TempDirCase):
                     "VALUES ('j_x', 'u_x', 'k', 'sketch', 'best', 'succeeded', 1.0)")
         con.execute("INSERT INTO job_stages(job_id, stage, state, attempt, cost_usd) VALUES ('j_x', '1', 'passed', 1, "
                     "0.02)")
+        if version >= 5:
+            code_col = ",code_id" if version == 5 else ""
+            code_val = ",'code'" if version == 5 else ""
+            con.execute(f"INSERT INTO admissions(job_id,user_id{code_col},client_key,amount_micro,cost_signature,"
+                        f"created_at) VALUES ('j_x','u_x'{code_val},'k',123,'signature',1.0)")
+            con.execute("INSERT INTO admission_work(token,job_id,kind,state,created_at) "
+                        "VALUES ('w1','j_x','modal','sent',1.0)")
         con.execute(f"PRAGMA user_version={version}")
         con.commit()
         con.close()
@@ -599,19 +626,28 @@ class TestSchema(TempDirCase):
     def test_older_databases_are_upgraded_keeping_their_rows(self):
         from herogen.service import store as store_mod
 
-        for version in (1, 2, 3, 4):
+        for version in range(1, store_mod.SCHEMA_VERSION):
             st = Store(self.old_database(version))
             self.assertEqual(st.db.execute("PRAGMA user_version").fetchone()[0], store_mod.SCHEMA_VERSION)
+            self.assertIsNone(st.job_get("j_x")["parent_job"])
+            self.assertEqual(st.job_get("j_x")["note"], "")
             self.assertIsNone(st.job_get("j_x")["refunded_at"], "existing rows keep their data")
             self.assertEqual(st.job_stages("j_x")[0]["cost_usd"], 0.02)
             cols = [r[1] for r in st.db.execute("PRAGMA table_info(job_stages)")]
             self.assertIn("claim", cols)
+            if version >= 5:
+                kept = st.db.execute("SELECT amount_micro, closed, cost_signature FROM admissions "
+                                     "WHERE job_id='j_x'").fetchone()
+                self.assertEqual(tuple(kept), (123, 0, 'signature'), f"v{version} keeps its reservation")
+                work = st.db.execute("SELECT state, process FROM admission_work WHERE token='w1'").fetchone()
+                self.assertEqual(tuple(work), ('sent', ''), f"v{version} keeps its work ledger")
             st.close()
 
     def test_v4_reservations_and_private_history_survive_simplification(self):
         from herogen.service import store as module
         path=self.tmp/'v4.db'
         schema=module.SCHEMA.replace(module.ADMISSION_SCHEMA,'')
+        schema=schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n",'')
         old_admission=module.ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '')
         old_admission=';'.join(s for s in old_admission.split(';') if 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)
         old_admission=old_admission.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')

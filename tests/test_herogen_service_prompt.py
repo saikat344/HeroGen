@@ -267,6 +267,7 @@ class PromptJobTest(JobCase):
                 self.assertNotIn(self.description, "\n".join(logs.output))
                 self.assertEqual(self.record(job, "p")["status"], "error")
                 self.assertGreater(self.stages(job)["p"]["cost_usd"], 0, "the design already spent money")
+                self.store.job_cancel(job["id"], self.user["id"])
 
     def test_exhausted_transient_failure_retains_stage_p_cost(self):
         self.api = StructuredAPI(fail="images/edits", error=ApiError(

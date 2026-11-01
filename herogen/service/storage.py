@@ -200,6 +200,21 @@ class Storage:
                     out.append((udir.name, p.stem, p))
         return out
 
+    def runs_before(self, cutoff: float) -> list[tuple[str, str, Path]]:
+        """Prepared run folders old enough to check for an unconfirmed job creation."""
+        out = []
+        users = self.root / "users"
+        if not users.is_dir():
+            return out
+        for udir in users.iterdir():
+            runs = udir / "runs"
+            if not valid_id(udir.name, "u") or udir.is_symlink() or not runs.is_dir() or runs.is_symlink():
+                continue
+            for run in runs.iterdir():
+                if valid_id(run.name, "j") and run.is_dir() and not run.is_symlink() and run.stat().st_mtime < cutoff:
+                    out.append((udir.name, run.name, run))
+        return out
+
     def purge_caches(self, cutoff: float) -> int:
         """Delete every user's cache entries (model and remote-model caches) written before `cutoff` (epoch
         seconds); returns how many files went."""
