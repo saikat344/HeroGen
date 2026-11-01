@@ -182,8 +182,9 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         old = json.loads(record_path.read_text())
         prior = float((old.get("budget") or {}).get("spent_usd_total", old.get("cost_usd") or 0.0))
         old_budget = old.get("budget")
-    budget = Budget(client, cap_usd, prior, state=old_budget)
-    prior = budget.state["spent_usd_total"]
+    budget = Budget(client, cap_usd, prior, state=old_budget) if cap_usd is not None else None
+    if budget is not None:
+        prior = budget.state["spent_usd_total"]
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(upscale_texture=upscale_texture),
                     estimate_max_samples_usd=cost_estimate(True, upscale_texture),
@@ -211,13 +212,15 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
 
     def save(**extra):
         rec.data.update(cost_usd=client.log.cost_usd(start), models=client.log.models(start),
-                        calls=client.log.calls[start:], budget={**budget.state, "cap_usd": cap_usd,
-                                                              "prior_usd": prior,
-                                                              "spent_usd_total": budget.spent()})
+                        calls=client.log.calls[start:])
+        if budget is not None:
+            rec.data["budget"] = {**budget.state, "cap_usd": cap_usd, "prior_usd": prior,
+                                  "spent_usd_total": budget.spent()}
         return rec.finish(extra)
 
-    client.before_api_attempt = guard
-    client.after_api_attempt = settle
+    if budget is not None:
+        client.before_api_attempt = guard
+        client.after_api_attempt = settle
     current_record = None
     try:
         save(ok=False, status="running")
@@ -340,6 +343,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         save(ok=False, status="error", error=error_text(exc, run))
         raise
     finally:
-        client.before_api_attempt = previous_guard
-        client.after_api_attempt = previous_settle
+        if budget is not None:
+            client.before_api_attempt = previous_guard
+            client.after_api_attempt = previous_settle
         pending.unlink(missing_ok=True)

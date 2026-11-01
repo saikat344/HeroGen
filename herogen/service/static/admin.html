@@ -53,15 +53,18 @@
         <div id="budgetKpis" class="kpi-grid"></div><div id="budgetBarWrap" class="budget-meter-wrap"></div>
       </section>
       <section class="card"><h2>Generation settings</h2>
-        <p class="small muted">Queued and running heroes count at the running estimate until they finish. Finished heroes count at their recorded cost.</p>
+        <p id="spendLimitsStatus" role="status">Spend limits: off (no spending checks)</p>
         <form id="budgetForm">
           <fieldset><legend>Live generation</legend>
             <label><input type="radio" name="budgetMode" id="modeAccepting"> Accepting heroes</label>
             <label><input type="radio" name="budgetMode" id="modePaused" checked> Paused</label>
           </fieldset>
-          <div class="admin-form-grid">
+          <label><input type="checkbox" id="spendLimitsEnabled" role="switch"> Enable spend limits</label>
+          <div id="spendLimitFields" class="admin-form-grid" hidden>
             <div><label for="limitUsd">Total limit (USD)</label><input id="limitUsd" type="number" min="0" step="0.000001" required></div>
             <div><label for="runningEstimateUsd">Running estimate per hero (USD)</label><input id="runningEstimateUsd" type="number" min="0" step="0.000001" required></div>
+          </div>
+          <div class="admin-form-grid">
             <div><label for="maxRunning">Max running (1–32)</label><input id="maxRunning" type="number" min="1" max="32" step="1" required></div>
           </div>
           <div class="row admin-submit-row"><button type="submit" id="saveBudgetBtn" class="primary">Save settings</button><p id="budgetFormMsg" class="msg small" role="status" aria-live="polite"></p></div>

@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="3, 3f (texture refine), 4; 3,4 also includes 3f under best and both Roblox profiles")
     r.add_argument("--refine", choices=("replay", "live"), default="replay", help="texture-refine model calls")
     r.add_argument("--refine-cache", type=Path, default=None, help="default: <run parent>/_cache-model")
-    r.add_argument("--refine-cap-usd", type=float, default=0.80, help="per-run texture-refine API cap")
+    r.add_argument("--refine-cap-usd", type=lambda value: None if value == "none" else float(value), default=0.80, help="per-run texture-refine API cap")
     r.add_argument("--refine-recipe", choices=("RF2R", "RF2W"), default="RF2R",
                    help="frozen normal-pass recipe (RF2W preserves artwork wear)")
     r.add_argument("--upscale-texture", action="store_true", help="add close-up texture passes after the 20 refine views")

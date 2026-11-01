@@ -253,13 +253,13 @@ class CopyWorkdir:
         shutil.rmtree(self.local_root, ignore_errors=True)
 
 
-def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> StageContext:
+def make_context(settings: Settings, storage: Storage, job: dict[str, Any], *, spend_limits_enabled=False) -> StageContext:
     uid, jid = job["user_id"], job["id"]
     return StageContext(job_id=jid, kind=job["kind"], profile=job["profile"], name=job["name"], prompt=job["prompt"],
                         run_dir=storage.run_dir(uid, jid), input_path=storage.input_path(uid, jid),
                         cache_dir=storage.cache_dir(uid), remote_cache_dir=storage.remote_cache_dir(uid),
                         stage3_args=stage3_args(settings.stage3_args), timeout_s=settings.stage_timeout_s,
-                        blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd)
+                        blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd if spend_limits_enabled else None)
 
 
 def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
@@ -479,7 +479,8 @@ class ThreadBackend:
         self.n = 0
 
     def execute(self, job: dict[str, Any], attempt: int, group: str, resume: int) -> GroupResult:
-        ctx = make_context(self.settings, self.storage, job)
+        ctx = make_context(self.settings, self.storage, job,
+                           spend_limits_enabled=self.store.generation_get()["spend_limits_enabled"])
         return run_group(self.store, self.settings, job, attempt, group, resume, self.runner, InPlaceWorkdir(ctx))
 
     def submit(self, job_id: str) -> str:

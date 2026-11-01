@@ -48,18 +48,23 @@ class GenerationStore:
         row = dict(c.execute('SELECT * FROM generation_settings WHERE id=1').fetchone())
         row.pop('id')
         row['enabled'] = bool(row['enabled'])
+        row['spend_limits_enabled'] = bool(row['spend_limits_enabled'])
         spent = c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM jobs WHERE state NOT IN ('queued','running')").fetchone()[0]
         active = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
         running = round(active * row['running_estimate_usd'], 6)
         reason = ('generation_paused' if not row['enabled'] else 'generation_budget_exhausted'
-                  if Decimal(str(round(spent, 6))) + Decimal(str(running)) + Decimal(str(row['running_estimate_usd'])) > Decimal(str(row['limit_usd']))
+                  if row['spend_limits_enabled'] and self._spend_exhausted(row, spent, running)
                   else 'available')
         return {**row, 'spent_usd': round(spent, 6), 'running_usd': running, 'active': active,
                 'remaining_usd': max(0, round(row['limit_usd'] - spent - running, 6)),
                 'accepting': reason == 'available', 'reason': reason,
-                'sentence': (f"Accepting heroes now: up to {row['max_running']} at a time, ${spent:.2f} of ${row['limit_usd']:g} spent"
+                'sentence': (f"Accepting heroes now: up to {row['max_running']} at a time"
                              if reason == 'available' else 'Live generation is paused right now.'
                              if reason == 'generation_paused' else 'The live-generation budget is used up for now.')}
+
+    @staticmethod
+    def _spend_exhausted(row, spent, running):
+        return Decimal(str(round(spent, 6))) + Decimal(str(running)) + Decimal(str(row['running_estimate_usd'])) > Decimal(str(row['limit_usd']))
 
     def generation_get(self):
         with self.lock:
@@ -71,12 +76,13 @@ class GenerationStore:
                     return self._generation(c)
             return self._generation(self.db)
 
-    def generation_update(self, *, actor, enabled=None, limit_usd=None, running_estimate_usd=None, max_running=None):
+    def generation_update(self, *, actor, enabled=None, spend_limits_enabled=None, limit_usd=None, running_estimate_usd=None, max_running=None):
         changes = {}
-        if enabled is not None:
-            if type(enabled) is not bool:
-                raise ValueError('Enabled must be true or false.')
-            changes['enabled'] = int(enabled)
+        for key, value in (('enabled', enabled), ('spend_limits_enabled', spend_limits_enabled)):
+            if value is not None:
+                if type(value) is not bool:
+                    raise ValueError(f'{key} must be true or false.')
+                changes[key] = int(value)
         for key, value in (('limit_usd', limit_usd), ('running_estimate_usd', running_estimate_usd)):
             if value is not None:
                 changes[key] = amount(value)

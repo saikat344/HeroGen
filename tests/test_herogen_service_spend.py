@@ -18,12 +18,44 @@ class SpendGuardTest(TempDirCase):
         self.store = Store(self.tmp / 'guard.db', clock=self.clock, max_running=2)
         self.addCleanup(self.store.close)
         self.user = make_user(self.store)
-        self.store.generation_update(actor=self.user['id'], limit_usd=3)
+        self.store.generation_update(actor=self.user['id'], limit_usd=3, spend_limits_enabled=True)
 
     def create(self, key=None, store=None, commit='a'*40):
         return (store or self.store).job_create(job_id=new_id('j'), user_id=self.user['id'],
             client_key=key or new_id('j'), kind='prompt', profile='best', prompt='A knight',
             storage_max_bytes=100000, code_commit=commit)
+
+    def test_gate_off_never_checks_spend_and_still_records_cost(self):
+        from unittest.mock import patch
+        self.store.generation_update(actor=self.user['id'], spend_limits_enabled=False, limit_usd=0)
+        with patch.object(self.store, '_spend_exhausted', side_effect=AssertionError('spend checked')):
+            for _ in range(5):
+                job, _ = self.create()
+                self.store.job_claim(job['id'], 'call', 60, 2)
+                self.store.job_finish(job['id'], 1, 'succeeded', cost_usd=10)
+            self.assertEqual(self.store.generation_get()['spent_usd'], 50)
+
+    def test_fresh_store_accepts_without_settings(self):
+        fresh = Store(self.tmp / 'fresh.db')
+        self.addCleanup(fresh.close)
+        guest = fresh.guest_open('session', 600, 600)
+        self.assertTrue(fresh.generation_get()['enabled'])
+        self.assertFalse(fresh.generation_get()['spend_limits_enabled'])
+        job, created = fresh.job_create(job_id=new_id('j'), user_id=guest['id'], client_key='fresh',
+            kind='prompt', profile='best', prompt='A knight', storage_max_bytes=100000)
+        self.assertTrue(created)
+        self.assertEqual(job['state'], 'queued')
+
+    def test_env_sets_initial_gate_and_saved_switch_survives_restart(self):
+        from unittest.mock import patch
+        with patch.dict('os.environ', HEROGEN_SERVICE_SPEND_LIMITS='true'):
+            fresh = Store(self.tmp / 'env.db')
+            self.assertTrue(fresh.generation_get()['spend_limits_enabled'])
+            fresh.generation_update(actor='admin', spend_limits_enabled=False)
+            fresh.close()
+            fresh = Store(self.tmp / 'env.db')
+            self.addCleanup(fresh.close)
+            self.assertFalse(fresh.generation_get()['spend_limits_enabled'])
 
     def test_exact_refusals_and_running_estimate(self):
         self.store.generation_update(actor=self.user['id'], enabled=False)
@@ -148,8 +180,9 @@ class SpendGuardTest(TempDirCase):
 
     def test_cli_partial_updates_and_audit_actor(self):
         signer = Signer(b'k'*48)
-        result = json.loads(run('generation-settings --pause --limit-usd 12 --running-estimate-usd 2 --max-running 3', self.store, signer))
+        result = json.loads(run('generation-settings --pause --spend-limits false --limit-usd 12 --running-estimate-usd 2 --max-running 3', self.store, signer))
         self.assertFalse(result['enabled'])
+        self.assertFalse(result['spend_limits_enabled'])
         self.assertEqual((result['limit_usd'], result['running_estimate_usd'], result['max_running']), (12,2,3))
         self.assertEqual(json.loads(run('generation-settings', self.store, signer)), result)
         self.store.generation_update(actor=self.user['id'], enabled=True)
@@ -247,6 +280,6 @@ class GuestHTTPTest(WebCase):
         stranger = ops.post('/api/auth/request', json={'email':'stranger@example.com'})
         self.assertEqual(stranger.json(), admin_response.json())
         self.assertEqual(len(self.sender.sent), count)
-        self.assertEqual(ops.post('/api/admin/generation', json={'enabled':False}, csrf=False).status_code,403)
-        self.assertEqual(ops.post('/api/admin/generation', json={'enabled':False}).status_code,200)
+        self.assertEqual(ops.post('/api/admin/generation', json={'spend_limits_enabled':True}, csrf=False).status_code,403)
+        self.assertEqual(ops.post('/api/admin/generation', json={'spend_limits_enabled':True}).status_code,200)
         self.assertEqual(self.store.audit_list(1)[0]['actor'], self.store.users_list()[-1]['id'])

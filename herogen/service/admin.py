@@ -33,6 +33,7 @@ def parser() -> argparse.ArgumentParser:
     mode = p.add_mutually_exclusive_group()
     mode.add_argument('--enable', action='store_true')
     mode.add_argument('--pause', action='store_true')
+    p.add_argument('--spend-limits', choices=('true', 'false'))
     p.add_argument('--limit-usd')
     p.add_argument('--running-estimate-usd')
     p.add_argument('--max-running', type=int)
@@ -59,8 +60,9 @@ def run(argv: list[str] | str, store, signer: Signer, snapshots: tuple | None = 
     a = parser().parse_args(shlex.split(argv) if isinstance(argv, str) else argv)
     out: list[str] = []
     if a.cmd == 'generation-settings':
-        if a.enable or a.pause or any(v is not None for v in (a.limit_usd, a.running_estimate_usd, a.max_running)):
+        if a.enable or a.pause or any(v is not None for v in (a.spend_limits, a.limit_usd, a.running_estimate_usd, a.max_running)):
             result = store.generation_update(actor='admin', enabled=True if a.enable else False if a.pause else None,
+                spend_limits_enabled=None if a.spend_limits is None else a.spend_limits == 'true',
                 limit_usd=a.limit_usd, running_estimate_usd=a.running_estimate_usd, max_running=a.max_running)
         else:
             result = store.generation_get()

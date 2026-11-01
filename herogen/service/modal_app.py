@@ -336,7 +336,8 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     s = _settings()
     store = RemoteStore()
-    ctx = make_context(s, Storage(Path(DATA)), job)
+    ctx = make_context(s, Storage(Path(DATA)), job,
+                       spend_limits_enabled=store.generation_get()["spend_limits_enabled"])
     work = CopyWorkdir(ctx, Path("/tmp/herogen-work") / job["id"], data_vol,
                        lambda: store.job_current(job["id"], attempt),
                        still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)

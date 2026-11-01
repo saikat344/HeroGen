@@ -75,6 +75,7 @@ class Settings:
     default_profile: str = "best"
     profiles: tuple[str, ...] = PROFILES
     stage3_args: str = "--mesh-source sam3d-objects --joints sam3d-body --remote live"
+    spend_limits_enabled: bool = False
     refine_cap_usd: float = 0.80
     stage_timeout_s: int = 3600
     blender_timeout_s: int = 3 * 3600
@@ -157,6 +158,7 @@ ENV = {
     "default_profile": "HEROGEN_SERVICE_PROFILE",
     "profiles": "HEROGEN_SERVICE_PROFILES",
     "stage3_args": "HEROGEN_SERVICE_STAGE3_ARGS",
+    "spend_limits_enabled": "HEROGEN_SERVICE_SPEND_LIMITS",
     "refine_cap_usd": "HEROGEN_SERVICE_REFINE_CAP_USD",
     "stage_timeout_s": "HEROGEN_SERVICE_STAGE_TIMEOUT",
     "blender_timeout_s": "HEROGEN_SERVICE_BLENDER_TIMEOUT",
