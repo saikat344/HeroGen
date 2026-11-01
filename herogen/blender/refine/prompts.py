@@ -1,5 +1,7 @@
 """Frozen Muse Image prompts for repainting renders of our own mesh. A change is a new name, never an edit in place."""
 
+from herogen.pipeline.redo import clean_note
+
 RF2R = (
     "Turn the first image, a render of a 3D character {view}, into a crisp, high-detail, high-resolution "
     "render of the same character from exactly the same viewpoint. Keep everything in the first image exactly "
@@ -93,6 +95,7 @@ def prompt(name, angle, user_note=""):
     An empty note returns exactly the frozen text, so requests and outputs stay byte-identical to a run
     without this parameter.
     """
+    user_note = clean_note(user_note, allow_empty=True)
     text = PROMPTS[name]
     body = text.format(view=VIEWS[abs((int(angle) + 180) % 360 - 180)]) if "{view}" in text else text
     if user_note:
