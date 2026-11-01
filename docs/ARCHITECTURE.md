@@ -1680,7 +1680,11 @@ function is `nonpreemptible`. Instead:
   requeue or failure), the store closes that stage in the same write: "pending" when the job is queued again,
   "canceled" when it was canceled, "failed" otherwise. Only the live attempt may write a stage, so nothing else
   would, and the stage would show as running for good.
-- Errors are sorted three ways. A failed gate rejects the job, with the stage's reason. A timeout, a network
+- Errors are sorted three ways. A failed gate rejects the job, with the stage's reason; so does a rejected
+  input (a stage-0 or stage-1 record with status `input_rejected`), whose message leads with one plain sentence
+  per failed input check (the model-judged stage-1 checks get the service's own sentence, so the judging model
+  and the photo probability stay in the record and the logs, and only the measured checks are echoed there).
+  A timeout, a network
   error, or the model or GPU service answering HTTP 429 or 5xx queues another attempt. Anything else (a 4xx, a bad
   response, a bug) fails the job.
 - A failed job gives its quota back only if it spent nothing (the recorded cost of its stages, model calls and
