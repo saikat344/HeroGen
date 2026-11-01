@@ -66,7 +66,11 @@ export function entryPage($, onChange) {
     });
     $('#templates').append(button);
   }
-  $('#howButton').addEventListener('click', () => $('#howDialog').showModal());
+  $('#howButton').addEventListener('click', () => {
+    if ($('#entry').hidden) { $('#howDialog').showModal(); return; }
+    $('#howHeading').tabIndex = -1; $('#howHeading').focus({preventScroll: true});
+    $('#howItWorks').scrollIntoView({block: 'start'});
+  });
   $('#closeHow').addEventListener('click', () => $('#howDialog').close());
   return { setFile, file: () => selected || $('#sketch').files[0] || null };
 }

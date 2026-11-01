@@ -3,7 +3,8 @@
 import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { draftStore } from '/assets/draft.js';
-import { publicGallery } from '/assets/public-gallery.js';
+import { landingGallery } from '/assets/landing.js';
+let landing;
 import { generationView } from '/assets/generation.js';
 
 const $ = (s) => document.querySelector(s);
@@ -12,6 +13,7 @@ let entry;
 let screen = 'entry';
 function setScreen(next) {
   screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation');
+  landing?.setVisible(next === 'entry');
   $('#app').classList.toggle('generation-screen', next === 'generation');
 }
 const generation = generationView($, (url) => preview(url));
@@ -384,7 +386,7 @@ async function signedIn() {
   $('#who').textContent = guest ? 'Private guest workspace' : S.session.user.email; show('#who'); show('#signOut', !guest);
   show('#accountSettings', !guest);
   updateAccessSummary();
-  show('#headerSignIn', false); show('#developerMode'); show('#app');
+  show('#headerSignIn'); show('#developerMode'); show('#app');
   renderQuota(S.session.usage);
   const jobs = await refreshList();
   const want = new URLSearchParams(location.hash.slice(1)).get('job');
@@ -402,8 +404,8 @@ function expireAccess() {
   if (S.session) S.session.signed_in = false;
   returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
   $('#heroLibrary').hidden = true; $('#jobs').replaceChildren();
-  show('#guestAccessSummary', false); show('#headerSignIn');
-  $('#jobMsg').textContent = 'Your access has expired. Your draft is kept in this browser. Open your guest workspace to continue.';
+  show('#guestAccessSummary', false); show('#headerSignIn', false);
+  $('#jobMsg').textContent = 'Your access has expired. Your draft is kept in this browser. Create your hero to reopen guest access.';
 }
 async function refreshAccess() {
   await loadSession();
@@ -438,8 +440,8 @@ function initGuestAccess() {
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
-  $('#headerSignIn').textContent = 'Open workspace';
-  initSignin(); initJobs(); initGuestAccess(); publicGallery();
+  $('#headerSignIn').textContent = ['/signin', '/admin/signin'].includes(location.pathname) ? 'Sign in' : 'Your heroes';
+  initSignin(); initJobs(); initGuestAccess();
   $('#backToIdeas').addEventListener('click', () => {
     history.pushState(null, '', '/'); returnToEntry();
     $('#entryH').tabIndex = -1; $('#entryH').focus();
@@ -458,7 +460,8 @@ async function boot() {
   });
   $('#headerSignIn').addEventListener('click', async () => {
     try { if (!['/signin','/admin/signin'].includes(location.pathname)) await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
-    signIn();
+    if (S.session?.signed_in) { await refreshList(); show('#app'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true'); $('#heroLibrary').scrollIntoView({block:'start'}); }
+    else signIn();
   });
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
   $('#signOut').addEventListener('click', async () => {
@@ -466,10 +469,12 @@ async function boot() {
     catch (e) { banner(e.message); }
   });
   $('#headerSignIn').disabled = false;
+  show('#headerSignIn', !!S.session.signed_in || ['/signin', '/admin/signin'].includes(location.pathname));
   if (location.pathname === '/signin') { show('#loading', false); return initVerify(); }
   if (location.pathname === '/admin/signin') { show('#loading', false); signIn(); return; }
   await restoreDraft();
   show('#loading', false); show('#entry');
+  landing = landingGallery();
   if (S.session.signed_in) await signedIn();
   if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'});
   window.addEventListener('focus', async () => {
