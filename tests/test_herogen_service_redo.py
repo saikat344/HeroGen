@@ -44,7 +44,7 @@ class TestVersions(WebCase):
         rows = {r["stage"]: r for r in self.store.job_stages(j["id"])}
         self.assertEqual(rows["0"]["cost_usd"], 0)
         self.assertAlmostEqual(self.store.job_get(j["id"])["cost_usd"], .0125)
-        used = self.b.get("/api/quota").json()["jobs_total"]
+
         r = self.b.post(f"/api/jobs/{j['id']}/continue")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["stop_after"], None)
@@ -52,7 +52,7 @@ class TestVersions(WebCase):
         self.assertEqual(self.finish(j["id"], runner), "succeeded")
         self.assertEqual(runner.calls, ["2", "3", "3f", "4", "6", "5"])
         self.assertAlmostEqual(self.store.job_get(j["id"])["cost_usd"], .0375)
-        self.assertEqual(self.b.get("/api/quota").json()["jobs_total"], used)
+
         self.assertEqual(self.svc.storage.run_dir(self.uid, self.parent).joinpath("01-cover.png").read_bytes(), before)
 
     def test_turnaround_redo_reuses_cover_and_regenerates_whole_sheet(self):
@@ -112,7 +112,7 @@ class TestVersions(WebCase):
         self.finish(first)
         second = self.redo(key="redo-key-0002").json()["id"]
         self.finish(second)
-        self.store.user_set_quota("alice@example.com", 8, 8)
+
         child = self.b.post(f"/api/jobs/{first}/redo", json={"stage": "cover", "note": "blue coat"},
                             headers={"Idempotency-Key": "redo-key-0003"}).json()["id"]
         for target in (self.parent, first, second, child):
@@ -160,26 +160,6 @@ class TestVersions(WebCase):
             self.assertEqual(self.redo(stage=stage).status_code, 400)
         self.assertEqual(self.redo(key="short").status_code, 400)
 
-    def test_daily_total_and_storage_admission(self):
-        for daily, total, expected in ((1, 5, "24 hours"), (5, 1, "all 1")):
-            self.store.user_set_quota("alice@example.com", daily, total)
-            r = self.redo()
-            self.assertEqual(r.status_code, 429, r.text)
-            self.assertIn(expected, r.json()["error"]["message"])
-        self.store.user_set_quota("alice@example.com", 5, 5)
-        self.store.db.execute("UPDATE jobs SET bytes=? WHERE id=?", (self.s.user_storage_max_bytes, self.parent))
-        self.assertEqual(self.redo().status_code, 429)
-        self.assertEqual(len(list(self.svc.storage.runs_root(self.uid).iterdir())), 1, "no refused copies left")
-
-    def test_active_generation_blocks_redo_and_continue_and_normal_create(self):
-        child = self.redo().json()["id"]
-        self.assertEqual(self.redo(key="redo-key-0002").status_code, 409)
-        self.assertEqual(self.make_job(self.b, key="normal-key-0002").status_code, 409)
-        self.finish(child)
-        other = self.redo(key="redo-key-0002").json()["id"]
-        self.assertEqual(self.b.post(f"/api/jobs/{child}/continue").status_code, 409)
-        self.store.job_cancel(other, self.uid)
-        self.assertEqual(self.b.post(f"/api/jobs/{child}/continue").status_code, 200)
 
     def test_continue_is_idempotent_and_storage_checked(self):
         child = self.redo().json()["id"]
@@ -230,19 +210,5 @@ class TestVersions(WebCase):
             groups.append(group)
             return run_group(self.store, self.s, job, attempt, group, resume, runner,
                              InPlaceWorkdir(make_context(self.s, self.svc.storage, job)))
-        self.assertEqual(run_job(self.store, self.s, self.svc.storage, child, "stop", execute,
-                                 heldout=side.append), "stopped")
+        self.assertEqual(run_job(self.store, self.s, self.svc.storage, child, "stop", execute), "stopped")
         self.assertEqual((groups, side), (["model"], []))
-
-    def test_parallel_redos_admit_only_one_job(self):
-        parent = self.store.job_get(self.parent)
-        def create(i):
-            try:
-                return self.store.job_create(job_id=new_id("j"), user_id=self.uid, client_key=f"parallel-{i}",
-                       kind=parent["kind"], profile=parent["profile"], input_sha=parent["input_sha"],
-                       prompt=parent["prompt"], name=parent["name"], parent_job=self.parent, from_stage="1",
-                       note="green coat", jobs_per_day=10, jobs_total=10, storage_max_bytes=10**10)[1]
-            except Conflict:
-                return False
-        with ThreadPoolExecutor(8) as pool:
-            self.assertEqual(sum(pool.map(create, range(8))), 1)

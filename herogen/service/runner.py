@@ -2,7 +2,7 @@
 
 Each stage runs as the same command a person would type (`python3 -m herogen.pipeline run ...`,
 `python3 -m herogen.blender run ...`), in a subprocess with a timeout and an environment holding only what that
-stage needs (the Model API key reaches the model stages, stage 3 and held-out views). Its outcome is read from the stage record it
+stage needs (the Model API key reaches the model stages, stage 3 and texture refinement). Its outcome is read from the stage record it
 writes (`stage-<n>.json`, docs/ARCHITECTURE.md): ok means passed, a record with a failed gate or a rejected
 input means the pipeline refused the sketch (shown to the user as one plain reason; an input rejection keeps the
 measured checks in the logs), and no record means an error (logged in full, shown as one sentence). Stages p and 1
@@ -58,11 +58,8 @@ PLAN = (
     StageSpec("4", "game body", "blender", "stage-4.json"),
     StageSpec("6", "Roblox rig", "export", "stage-6.json", optional=True),
     StageSpec("5", "results page", "export", "stage-5.json", optional=True),
-    # Beside the job, never part of it: started once stage 2 passes, it decides, delays and refunds nothing.
-    StageSpec("2h", "quality check (held-out views)", "heldout", "stage-2h.json", optional=True),
 )
-HELDOUT = next(s for s in PLAN if s.key == "2h")
-GROUPS = ("model", "blender", "export")      # the job's own path, in order; "heldout" runs beside it
+GROUPS = ("model", "blender", "export")
 STAGE_LABELS = {s.key: s.label for s in PLAN}
 INPUT_LABELS = {"sketch": "uploaded sketch", "prompt": "sketch drawn from a description"}
 
@@ -128,8 +125,6 @@ class StageContext:
     blender_timeout_s: float = 3 * 3600.0
     env: dict[str, str] = field(default_factory=dict)
     refine_cap_usd: float = 0.80
-    refine_budget: Callable | None = None
-    accounting: Callable | None = None
 
     @property
     def runs_root(self) -> Path:
@@ -374,10 +369,8 @@ class CliRunner:
             return pipe + [str(src), *common, "--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
         if spec.key == "1":
             return [py, "-m", "herogen.service.pipestage", "1", *common], None
-        if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which runs beside the job
+        if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which the service omits
             return [py, "-m", "herogen.service.pipestage", "2", *common], None
-        if spec.key == "2h":
-            return pipe + common + ["--stages", "2h", "--live"], None
         if spec.key == "5":
             return pipe + common + ["--stages", "5"], None
         if spec.key in ("3", "3f", "4"):
@@ -408,24 +401,10 @@ class CliRunner:
         if why:
             return Outcome("skipped", message=why, code="not_available")
         extra = dict(ctx.env)
-        if (spec.group in ("model", "heldout") or spec.key in ("3", "3f")) and self._model_key:
+        if (spec.group == "model" or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
-        from herogen.service.refine_budget import budget_bridge, inherited_fds
-        from herogen.pipeline.ledger import BRIDGE
-        from herogen.service.processes import identity, stage_process
-        import threading
-        registered = threading.Event()
-        registration_ok = False
-        def acknowledge(action, **kwargs):
-            if not registered.wait(120) or not registration_ok:
-                raise RuntimeError('Stage process registration timed out')
-            if action == 'stage_ready':
-                return {}
-            return ctx.accounting(action, **kwargs)
-        bridge = budget_bridge(ctx.refine_budget) if spec.key == "3f" and ctx.refine_budget else nullcontext({})
-        call_bridge = budget_bridge(acknowledge, BRIDGE) if ctx.accounting else nullcontext({})
-        with bridge as budget_env, call_bridge as call_env, tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
-            env = base_env({"HOME": home, **extra, **budget_env, **call_env})
+        with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
+            env = base_env({"HOME": home, **extra})
             argv, stdin = self.command(spec, ctx, env, Path(home))
             for stale in (spec.record, *spec.extra):
                 p = ctx.run_dir / stale
@@ -435,35 +414,14 @@ class CliRunner:
             t0 = time.monotonic()
             timed_out = False
             try:
-                if ctx.accounting is None:
-                    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
-                                      timeout=timeout, env=env,
-                                      cwd=home, **inherited_fds(budget_env))
-                    out, err, code = proc.stdout, proc.stderr, proc.returncode
-                else:
-                    # All descendants inherit the containment. Failed stages must leave no child running.
-                    with stage_process(argv, stdin=subprocess.PIPE if stdin is not None else None,
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                          encoding="utf-8", env=env, cwd=home,
-                                          **inherited_fds({**budget_env, **call_env})) as (proc, stop):
-                        process = {**identity(), 'pid': proc.pid}
-                        try:
-                            ctx.accounting('process_start', **process)
-                            registration_ok = True
-                            registered.set()
-                            out, err = proc.communicate(stdin, timeout=timeout)
-                            code = proc.returncode
-                        finally:
-                            registered.set()
-                            if stop():
-                                ctx.accounting('process_stopped', **process)
+                proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                                      timeout=timeout, env=env, cwd=home)
+                out, err, code = proc.stdout, proc.stderr, proc.returncode
             except subprocess.TimeoutExpired as e:
                 timed_out = True
                 out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
                 err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
                 code = -1
-            finally:
-                registered.set()
             seconds = round(time.monotonic() - t0, 2)
         return self.outcome(spec, ctx, seconds, code, out, err, timed_out)
 

@@ -28,7 +28,7 @@
   <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
   <div class="spacer"></div>
   <nav aria-label="Main"><button type="button" class="link" id="howButton">How it works</button><a href="/#gallery">Gallery</a><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
-  <button type="button" id="headerSignIn" disabled hidden>Your heroes</button>
+  <button type="button" id="headerSignIn" disabled hidden>This workspace</button>
   <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
@@ -37,16 +37,14 @@
 <main>
   <p id="loading" class="muted">Loading…</p>
 
-  <dialog id="guestDialog" aria-labelledby="guestH"><button type="button" id="closeGuest" class="dialog-close" aria-label="Close guest access">×</button><p class="eyebrow">A private place to create</p><h2 id="guestH">Your guest workspace</h2><p id="accessIntro">No account needed. One active generation per workspace.</p><form id="guestForm"><button id="guestGo" class="primary" type="submit">Open my workspace →</button></form><p id="guestMsg" role="status" class="small msg"></p><p class="small muted">Your history is private to this browser. Keep its cookies to return to your heroes.</p></dialog>
+  <dialog id="guestDialog" aria-labelledby="guestH"><button type="button" id="closeGuest" class="dialog-close" aria-label="Close guest access">×</button><p class="eyebrow">A private place to create</p><h2 id="guestH">Your guest workspace</h2><p id="accessIntro">No account needed. Extra heroes wait for a free worker.</p><form id="guestForm"><button id="guestGo" class="primary" type="submit">Open my workspace →</button></form><p id="guestMsg" role="status" class="small msg"></p><p class="small muted">Your history is private to this browser. Keep its cookies to return to your heroes.</p></dialog>
   <div id="guestAccessSummary" class="access-summary" hidden><span id="guestAccessText"></span><button type="button" id="checkAvailability" class="link">Check availability</button></div>
   <dialog id="signinDialog"><button type="button" class="dialog-close" id="closeSignin" aria-label="Close sign in">×</button><section id="signin" class="card narrow" hidden aria-labelledby="signinH">
     <h1 id="signinH">Sign in</h1>
-    <p class="muted">HeroGen is invite-only during the beta. We email you a link; there is no password.</p>
+    <p class="muted">Administrator access only. We email you a link; there is no password.</p>
     <form id="signinForm" novalidate>
       <label for="email">Email address</label>
       <input id="email" name="email" type="email" autocomplete="email" required maxlength="254">
-      <label for="invite">Invite code <span class="muted">(first sign-in only)</span></label>
-      <input id="invite" name="invite" type="text" autocomplete="off" maxlength="40" placeholder="XXXX-XXXX-XXXX-XXXX">
       <button type="submit" class="primary">Email me a sign-in link</button>
     </form>
     <p id="signinMsg" class="msg" role="status"></p>
@@ -58,10 +56,7 @@
     <h1 id="verifyH">Finish signing in</h1>
     <p id="verifyWho"></p>
     <form id="verifyForm" novalidate>
-      <div id="terms" hidden>
-        <label class="check"><input type="checkbox" id="adult"> I am 18 or older.</label>
-        <label class="check"><input type="checkbox" id="accept"> I accept the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
-      </div>
+
       <button type="submit" class="primary" id="verifyBtn">Sign in</button>
     </form>
     <p id="verifyMsg" class="msg" role="status"></p>
@@ -87,7 +82,7 @@
           <label class="upload-button" for="sketch"><span class="upload-icon" aria-hidden="true">↥</span><span>Or upload your own image<small>Sketch, illustration, or photo · PNG, JPEG, WebP</small></span></label>
           <input class="sr" id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp">
           <details class="creation-options"><summary>Name &amp; export target</summary><div class="options-grid"><div><label for="name">Hero name (optional)</label><input id="name" name="name" type="text" maxlength="60"></div><div><label for="profile">Target</label><select id="profile" name="profile"></select></div></div></details>
-          <p id="jobMsg" class="msg" role="status"></p><p id="quota" class="muted small"></p>
+          <p id="jobMsg" class="msg" role="status"></p>
         </form>
       </div>
       <section class="landing-gallery" id="gallery" aria-label="Explore previously generated heroes">
@@ -117,11 +112,11 @@
   <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>
 
   <section id="app" hidden>
-    <div class="workspace-heading row"><button type="button" id="backToIdeas" class="link">← Back to ideas</button><div class="spacer"></div><button type="button" id="showLibrary" class="link" aria-expanded="false" aria-controls="heroLibrary">Your heroes</button></div>
+    <div class="workspace-heading row"><button type="button" id="backToIdeas" class="link">← Back to ideas</button><div class="spacer"></div><button type="button" id="showLibrary" class="link" aria-expanded="false" aria-controls="heroLibrary">This workspace</button></div>
     <p id="jobLoading" role="status" hidden>Opening your hero…</p>
     <div id="heroLibrary" class="grid" hidden>
       <section class="card" aria-labelledby="listH">
-        <h2 id="listH">Your heroes</h2>
+        <h2 id="listH">This workspace</h2>
         <ul id="jobs" class="jobs"></ul>
         <p id="noJobs" class="muted" hidden>None yet.</p>
       </section>
@@ -140,7 +135,6 @@
         </section>
         <aside class="generation-notes">
           <section class="work-note"><p class="note-label">On the workbench</p><h2 id="currentStep"></h2><p id="stepDescription"></p><p id="stepMessage" class="small"></p><p class="work-note-foot">Every new result appears here as it becomes available.</p></section>
-          <section id="qualityReview" class="quality-note" aria-labelledby="qualityH"><p class="note-label">A second look</p><h3 id="qualityH">Quality review</h3><p id="qualityStatus"></p><p id="qualityNote" class="small muted"></p></section>
           <section class="generation-facts"><h2 id="detailH"></h2><p id="detailSub" class="muted small"></p></section>
         </aside>
       </div>
@@ -154,12 +148,7 @@
 
     <section id="developerPanel" class="card developer" aria-labelledby="developerH" hidden></section>
 
-    <details id="accountSettings" class="card account"><summary>Account</summary>
-      <p class="muted small">Heroes and their files are deleted <span id="retention"></span> days after they finish. Deleting your account removes them all now.</p>
-      <label for="confirmDelete">Type <code>delete my account</code> to confirm</label>
-      <input id="confirmDelete" type="text" autocomplete="off">
-      <button type="button" id="deleteAccount" class="danger">Delete my account</button>
-    </details>
+
   </section>
 </main>
 <footer class="foot"><span>Your idea. Your character. Your game.</span><span class="footer-rule"></span><span>Built with Meta AI <span aria-hidden="true">∞</span></span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></footer>

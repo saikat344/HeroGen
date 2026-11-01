@@ -165,148 +165,36 @@ function bootAdmin() {
 
   function renderBudgetMeterInto(wrap, b) {
     wrap.replaceChildren();
-    if (!b || !b.configured || typeof b.limit_usd !== 'number') {
+    if (!b || typeof b.limit_usd !== 'number') {
       wrap.append(el('p', { cls: 'empty-note muted small', text: 'No live-generation budget has been configured yet.' }));
       return;
     }
     wrap.append(
-      svgBudgetMeter(b.limit_usd, b.used_usd || 0, b.reserved_usd || 0),
+      svgBudgetMeter(b.limit_usd, b.spent_usd || 0, b.running_usd || 0),
       el('div', { cls: 'meter-legend small muted' },
-        el('span', { cls: 'legend-item' }, el('i', { cls: 'dot-swatch swatch-accent', 'aria-hidden': 'true' }), `Used ${formatUsd(b.used_usd || 0)}`),
-        el('span', { cls: 'legend-item' }, el('i', { cls: 'dot-swatch swatch-warn', 'aria-hidden': 'true' }), `Reserved ${formatUsd(b.reserved_usd || 0)}`),
+        el('span', { cls: 'legend-item' }, el('i', { cls: 'dot-swatch swatch-accent', 'aria-hidden': 'true' }), `Spent ${formatUsd(b.spent_usd || 0)}`),
+        el('span', { cls: 'legend-item' }, el('i', { cls: 'dot-swatch swatch-warn', 'aria-hidden': 'true' }), `Running ${formatUsd(b.running_usd || 0)}`),
         el('span', { cls: 'legend-item' }, el('i', { cls: 'dot-swatch swatch-track', 'aria-hidden': 'true' }), `Remaining ${formatUsd(b.remaining_usd || 0)}`))
     );
   }
 
   function populateBudgetForm(b) {
-    if (!b) return;
-    if (b.configured) {
-      $(b.enabled ? '#modeAccepting' : '#modePaused').checked = true;
-      $('#limitUsd').value = b.limit_usd != null ? String(b.limit_usd) : '';
-      $('#reserveUsd').value = b.reserve_usd != null ? String(b.reserve_usd) : '';
-      $('#maxActive').value = b.max_active != null ? String(b.max_active) : '1';
-      const remDays = typeof b.expires_at === 'number' && b.expires_at > b.now
-        ? Math.max(0.5, Math.round(((b.expires_at - b.now) / 86400) * 10) / 10)
-        : 14;
-      $('#durationDays').value = String(remDays);
-      $('#boundNote').value = b.bound_note || '';
-    } else {
-      $('#modePaused').checked = true;
-      $('#limitUsd').value = '10';
-      $('#reserveUsd').value = '3';
-      $('#maxActive').value = '1';
-      $('#durationDays').value = '14';
-      $('#boundNote').value = '';
-    }
-    $('#confirmProviderCaps').checked = false;
+    $(b.enabled ? '#modeAccepting' : '#modePaused').checked = true;
+    $('#limitUsd').value = String(b.limit_usd);
+    $('#runningEstimateUsd').value = String(b.running_estimate_usd);
+    $('#maxRunning').value = String(b.max_running);
     state.formDirty = false;
   }
 
   function renderSettings(b) {
     state.budget = b;
-    const card = $('#budgetStateCard');
-    card.classList.remove('tone-ok', 'tone-warn', 'tone-bad');
-    if (b.accepting) card.classList.add('tone-ok');
-    else if (!b.configured || !b.enabled || b.expired) card.classList.add('tone-warn');
-    else card.classList.add('tone-bad');
-
     $('#budgetSentence').textContent = b.sentence;
-    const demoNote = $('#budgetDemoNote');
-    demoNote.hidden = Boolean(b.public_demo);
-    demoNote.textContent = b.public_demo
-      ? ''
-      : 'Note: HEROGEN_SERVICE_PUBLIC_DEMO is currently false; public guest sessions are closed regardless of budget.';
-
-    const pauseBtn = $('#quickPauseBtn');
-    pauseBtn.hidden = !(b.configured && b.enabled);
-
+    $('#quickPauseBtn').textContent = b.enabled ? 'Pause now' : 'Resume';
     $('#budgetKpis').replaceChildren(
-      kpiCard('Total limit', b.configured ? formatUsd(b.limit_usd) : 'Not set'),
-      kpiCard('Per-hero reserve', b.configured ? formatUsd(b.reserve_usd) : 'Not set'),
-      kpiCard('Max active', b.configured ? `${b.active_reservations} / ${b.max_active}` : '—', 'active / cap'),
-      kpiCard('Used', formatUsd(b.used_usd || 0), b.overhead_usd ? `incl. ${formatUsd(b.overhead_usd)} overhead` : 'closed + overhead'),
-      kpiCard('Reserved', formatUsd(b.reserved_usd || 0), `${b.active_reservations} open`),
-      kpiCard('Remaining', b.configured ? formatUsd(b.remaining_usd) : '—')
-    );
-
+      kpiCard('Spent', formatUsd(b.spent_usd)),
+      kpiCard('Running', formatUsd(b.running_usd), `${b.active} queued or running`),
+      kpiCard('Remaining', formatUsd(b.remaining_usd)));
     renderBudgetMeterInto($('#budgetBarWrap'), b);
-
-    const facts = $('#policyFacts');
-    facts.replaceChildren();
-    const expiryNode = el('span', {},
-      formatLocalTime(b.expires_at),
-      b.configured ? ' ' : null,
-      b.configured ? (b.expired ? badge('Expired', 'bad') : badge('Active window', 'ok')) : null);
-    for (const [dtText, ddContent] of [
-      ['Admission status', el('span', {}, badge(b.accepting ? 'Accepting' : (b.reason || 'paused'), b.accepting ? 'ok' : 'warn'))],
-      ['Expires (local time)', expiryNode],
-      ['Bound note', el('span', { text: b.bound_note || '—' })],
-      ['Alerts', b.alerts && b.alerts.length
-        ? el('span', { cls: 'badge-group' }, ...b.alerts.map((a) => badge(a, 'warn')))
-        : el('span', { cls: 'muted', text: 'None' })],
-    ]) {
-      facts.append(el('dt', { text: dtText }), el('dd', {}, ddContent));
-    }
-
-    const vFacts = $('#verifyFacts');
-    vFacts.replaceChildren();
-    const runCommit = b.running?.code_commit || 'Not set (dev)';
-    const commitBadge = !b.running?.commit_valid
-      ? badge('Invalid / missing 40-hex SHA', 'bad')
-      : !b.configured
-        ? badge('Ready to bind on save', 'neutral')
-        : b.commit_matches
-          ? badge('Matches policy', 'ok')
-          : badge('Mismatch', 'bad');
-    const sigBadge = !b.configured
-      ? badge('Ready to bind on save', 'neutral')
-      : b.cost_signature_matches
-        ? badge('Matches policy', 'ok')
-        : badge('Mismatch', 'bad');
-
-    const vRows = [
-      ['Running commit', el('div', { cls: 'code-status' }, el('code', { cls: 'mono-wrap', text: runCommit }), commitBadge)],
-      ['Policy commit', el('code', { cls: 'mono-wrap', text: b.policy_commit || '—' })],
-      ['Cost signature', el('div', { cls: 'code-status' }, el('code', { cls: 'mono-wrap', text: b.running?.cost_signature || '—' }), sigBadge)],
-    ];
-    if (b.configured && !b.cost_signature_matches && b.policy_cost_signature) {
-      vRows.push(['Policy signature', el('code', { cls: 'mono-wrap', text: b.policy_cost_signature })]);
-    }
-    for (const [dtText, ddNode] of vRows) {
-      vFacts.append(el('dt', { text: dtText }), el('dd', {}, ddNode));
-    }
-
-    const openList = b.open_reservations || [];
-    $('#openResCount').textContent = `${openList.length} open`;
-    const openBody = $('#openResBody');
-    openBody.replaceChildren();
-    if (!openList.length) {
-      openBody.append(el('p', { cls: 'empty-note muted', text: 'No open reservations.' }));
-    } else {
-      const tbody = el('tbody');
-      for (const r of openList) {
-        const flags = [];
-        if (r.uncertain) flags.push(badge('Uncertain work', 'bad'));
-        flags.push(badge(r.main_done ? 'Main done' : 'Main active', r.main_done ? 'ok' : 'warn'));
-        flags.push(badge(r.side_done ? 'Side done' : 'Side pending', r.side_done ? 'ok' : 'neutral'));
-        tbody.append(el('tr', {},
-          el('td', {}, el('code', { cls: 'mono-wrap', text: r.job_id })),
-          el('td', { text: formatAge(r.age_seconds) }),
-          el('td', { text: formatLocalTime(r.created_at) }),
-          el('td', { cls: 'num', text: formatUsd(r.amount_usd, { precise: true }) }),
-          el('td', {}, el('span', { cls: 'badge-group' }, ...flags))));
-      }
-      openBody.append(el('div', { cls: 'admin-table-wrap' },
-        el('table', { cls: 'checks admin-table' },
-          el('thead', {}, el('tr', {},
-            el('th', { scope: 'col', text: 'Job ID' }),
-            el('th', { scope: 'col', text: 'Age' }),
-            el('th', { scope: 'col', text: 'Reserved at' }),
-            el('th', { scope: 'col', cls: 'num', text: 'Reserved' }),
-            el('th', { scope: 'col', text: 'State' }))),
-          tbody)));
-    }
-
     if (!state.formDirty) populateBudgetForm(b);
   }
 
@@ -469,15 +357,14 @@ function bootAdmin() {
         jt.mean_cost_usd != null ? `mean ${formatUsd(jt.mean_cost_usd, { precise: true })}` : 'estimated USD')
     );
     renderStageTable($('#mainStagesWrap'), rep.stages?.main || []);
-    renderStageTable($('#sideStagesWrap'), rep.stages?.side || []);
 
     // (f) Live-generation budget
     const b = rep.budget || {};
     $('#analyticsBudgetKpis').replaceChildren(
-      kpiCard('Total limit', b.configured ? formatUsd(b.limit_usd) : 'Not set'),
-      kpiCard('Used', formatUsd(b.used_usd || 0)),
-      kpiCard('Reserved', formatUsd(b.reserved_usd || 0), `${b.active_reservations ?? 0} open`),
-      kpiCard('Remaining', b.configured ? formatUsd(b.remaining_usd) : '—')
+      kpiCard('Total limit', formatUsd(b.limit_usd)),
+      kpiCard('Spent', formatUsd(b.spent_usd || 0)),
+      kpiCard('Running', formatUsd(b.running_usd || 0), `${b.active ?? 0} queued or running`),
+      kpiCard('Remaining', formatUsd(b.remaining_usd))
     );
     renderBudgetMeterInto($('#analyticsBudgetBar'), b);
 
@@ -541,7 +428,7 @@ function bootAdmin() {
   }
 
   async function loadBudget() {
-    const b = await api('/api/admin/generation-budget');
+    const b = await api('/api/admin/generation');
     renderSettings(b);
     return b;
   }
@@ -603,7 +490,7 @@ function bootAdmin() {
     $('#saveBudgetBtn').disabled = true;
     $('#quickPauseBtn').disabled = true;
     try {
-      const updated = await api('/api/admin/generation-budget', { method: 'POST', json: payload });
+      const updated = await api('/api/admin/generation', { method: 'POST', json: payload });
       state.formDirty = false;
       renderSettings(updated);
       if (state.analytics) {
@@ -611,7 +498,7 @@ function bootAdmin() {
         renderAnalytics(state.analytics);
       }
       msg.className = 'msg small ok-msg';
-      msg.textContent = updated.enabled ? 'Saved — live generation admission is active.' : 'Saved — live generation admission is paused.';
+      msg.textContent = updated.enabled ? 'Saved — live generation is active.' : 'Saved — live generation is paused.';
     } catch (e) {
       msg.className = 'msg small err';
       msg.textContent = e.message;
@@ -629,43 +516,16 @@ function bootAdmin() {
 
     $('#budgetForm').addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      const enabled = $('#modeAccepting').checked;
-      const confirmCaps = $('#confirmProviderCaps').checked;
-      const msg = $('#budgetFormMsg');
-      if (enabled && !confirmCaps) {
-        msg.className = 'msg small err';
-        msg.textContent = 'Confirm that provider spending caps are set before enabling live generation.';
-        $('#confirmProviderCaps').focus();
-        return;
-      }
-      const maxActive = Number.parseInt($('#maxActive').value, 10);
-      const days = Number.parseFloat($('#durationDays').value);
       await saveBudgetPayload({
-        enabled,
+        enabled: $('#modeAccepting').checked,
         limit_usd: $('#limitUsd').value.trim(),
-        reserve_usd: $('#reserveUsd').value.trim(),
-        max_active: Number.isNaN(maxActive) ? 0 : maxActive,
-        days: Number.isNaN(days) ? 0 : days,
-        bound_note: $('#boundNote').value,
-        confirm_provider_caps: confirmCaps,
+        running_estimate_usd: $('#runningEstimateUsd').value.trim(),
+        max_running: Number($('#maxRunning').value),
       });
     });
 
     $('#quickPauseBtn').addEventListener('click', async () => {
-      const b = state.budget;
-      if (!b || !b.configured) return;
-      const remDays = typeof b.expires_at === 'number' && b.expires_at > b.now
-        ? Math.max(0.5, Math.round(((b.expires_at - b.now) / 86400) * 10) / 10)
-        : 14;
-      await saveBudgetPayload({
-        enabled: false,
-        limit_usd: String(b.limit_usd),
-        reserve_usd: String(b.reserve_usd),
-        max_active: b.max_active,
-        days: remDays,
-        bound_note: b.bound_note || 'Paused by administrator',
-        confirm_provider_caps: false,
-      });
+      await saveBudgetPayload({ enabled: !state.budget.enabled });
     });
 
     $('#refreshBudgetBtn').addEventListener('click', async () => {
@@ -710,7 +570,7 @@ function bootAdmin() {
       $('#forbiddenMsg').textContent = `${session.user.email} is signed in, but is not listed in HEROGEN_SERVICE_ADMIN_EMAILS.`;
       $('#adminSignInLink').hidden = true;
     } else {
-      $('#forbiddenMsg').textContent = 'Sign in with an allowlisted administrator email to access live-generation settings and first-party analytics.';
+      $('#forbiddenMsg').textContent = 'Sign in with an administrator email to access live-generation settings and first-party analytics.';
       $('#adminSignInLink').hidden = false;
     }
   }

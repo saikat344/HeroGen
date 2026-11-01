@@ -1,4 +1,4 @@
-"""Sign-in: keyed hashes, addresses, invite codes, magic-link expiry and reuse, invite-only accounts, terms, email."""
+"""Admin sign-in: keyed hashes, addresses, magic-link expiry and reuse, sessions and email."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from test_herogen_service_support import Clock, TempDirCase, make_user
 
-from herogen.service.auth import Signer, mask_email, new_invite_code, normalize_email, normalize_invite
+from herogen.service.auth import Signer, mask_email, normalize_email
 from herogen.service.emailer import EmailError, FileSender, ResendSender, signin_message
 from herogen.service.store import Store
 
@@ -54,16 +54,6 @@ class TestSigner(TempDirCase):
         self.assertEqual(mask_email("alice@example.com"), "a***e@example.com")
         self.assertEqual(mask_email("al@example.com"), "a***@example.com")
 
-    def test_invite_codes(self):
-        codes = {new_invite_code() for _ in range(200)}
-        self.assertEqual(len(codes), 200)
-        c = next(iter(codes))
-        self.assertRegex(c, r"^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$")
-        self.assertEqual(normalize_invite(c.lower().replace("-", " ")), c.replace("-", ""))
-        self.assertEqual(normalize_invite("oooo-iiii-llll-0000"), "0000111111110000")
-        for bad in ("", "abc", "XXXX-XXXX-XXXX-XXXU", None, 7, "X" * 17):
-            self.assertIsNone(normalize_invite(bad), repr(bad))
-
 
 class TestMagicLinks(TempDirCase):
     def setUp(self) -> None:
@@ -76,108 +66,55 @@ class TestMagicLinks(TempDirCase):
         self.store.close()
         super().tearDown()
 
-    def link(self, email: str, invite_id=None, ttl=900) -> str:
+    def link(self, email: str, ttl=900) -> str:
         t = self.s.new_token()
-        self.store.login_token_create(self.s.hash("login", t), email, ttl, invite_id)
+        self.store.login_token_create(self.s.hash("login", t), email, ttl)
         return t
 
     def use(self, t: str, accept=True, adult=True, terms="t1"):
         return self.store.login_complete(self.s.hash("login", t), self.s.hash("session", self.s.new_token()),
-                                         terms_version=terms, accept_terms=accept, adult=adult, session_ttl_s=3600)
+                                         admin_emails=("alice@example.com", "bob@example.com"), session_ttl_s=3600)
 
     def test_link_is_single_use(self):
-        self.store.allow_add("alice@example.com")
+
         t = self.link("alice@example.com")
         self.assertEqual(self.use(t)["status"], "ok")
         self.assertEqual(self.use(t)["status"], "invalid", "a used link never works again")
-        self.assertIsNone(self.store.login_token_info(self.s.hash("login", t), "t1"))
+        self.assertIsNone(self.store.login_token_info(self.s.hash("login", t)))
 
     def test_link_expires(self):
-        self.store.allow_add("alice@example.com")
+
         t = self.link("alice@example.com", ttl=900)
         self.clock.advance(899)
-        self.assertIsNotNone(self.store.login_token_info(self.s.hash("login", t), "t1"))
+        self.assertIsNotNone(self.store.login_token_info(self.s.hash("login", t)))
         self.clock.advance(2)
-        self.assertIsNone(self.store.login_token_info(self.s.hash("login", t), "t1"))
+        self.assertIsNone(self.store.login_token_info(self.s.hash("login", t)))
         self.assertEqual(self.use(t)["status"], "invalid")
 
     def test_using_one_link_kills_the_others(self):
-        self.store.allow_add("alice@example.com")
+
         t1, t2 = self.link("alice@example.com"), self.link("alice@example.com")
         self.assertEqual(self.use(t2)["status"], "ok")
         self.assertEqual(self.use(t1)["status"], "invalid")
 
     def test_unknown_or_forged_tokens(self):
-        self.store.allow_add("alice@example.com")
+
         t = self.link("alice@example.com")
         self.assertEqual(self.use(self.s.new_token())["status"], "invalid")
         other = Signer(b"z" * 48)
-        res = self.store.login_complete(other.hash("login", t), "x" * 64, terms_version="t1", accept_terms=True,
-                                        adult=True, session_ttl_s=60)
+        res = self.store.login_complete(other.hash("login", t), "x" * 64, admin_emails=("alice@example.com",), session_ttl_s=60)
         self.assertEqual(res["status"], "invalid", "a token hashed with another key does not match")
 
-    def test_terms_and_age_are_required_for_a_new_account(self):
-        self.store.allow_add("alice@example.com")
-        t = self.link("alice@example.com")
-        info = self.store.login_token_info(self.s.hash("login", t), "t1")
-        self.assertEqual((info["new_account"], info["needs_terms"]), (True, True))
-        self.assertEqual(self.use(t, accept=False)["status"], "needs_terms")
-        self.assertEqual(self.use(t, adult=False)["status"], "needs_terms")
-        self.assertEqual(self.use(t, terms="")["status"], "needs_terms", "no published terms, no accounts")
-        self.assertEqual(self.use(t)["status"], "ok", "the link survives a needs_terms answer")
-        user = self.store.users_list()[0]
-        self.assertEqual(user["terms_version"], "t1")
-
-    def test_new_terms_version_must_be_accepted_again(self):
-        make_user(self.store, terms="t1")
-        t = self.link("alice@example.com")
-        self.assertTrue(self.store.login_token_info(self.s.hash("login", t), "t2")["needs_terms"])
-        self.assertEqual(self.use(t, accept=False, terms="t2")["status"], "needs_terms")
-        self.assertEqual(self.use(t, terms="t2")["status"], "ok")
-        t = self.link("alice@example.com")
-        self.assertFalse(self.store.login_token_info(self.s.hash("login", t), "t2")["needs_terms"])
-        self.assertEqual(self.use(t, accept=False, terms="t2")["status"], "ok")
-
-    def test_invite_only(self):
-        elig = self.store.signin_eligibility("stranger@example.com", None)
-        self.assertFalse(elig["eligible"])
-        # A link made anyway (it never is for an ineligible address) still cannot create an account.
-        t = self.link("stranger@example.com")
-        self.assertEqual(self.use(t)["status"], "not_invited")
-        self.assertEqual(self.store.users_list(), [])
-
-    def test_invite_codes_are_counted_and_bound(self):
-        code = normalize_invite(new_invite_code())
-        inv = self.store.invite_create(self.s.hash("invite", code), max_uses=1, ttl_s=3600)
-        e = self.store.signin_eligibility("bob@example.com", self.s.hash("invite", code))
-        self.assertTrue(e["eligible"])
-        self.assertEqual(e["invite_id"], inv["id"])
-        self.assertTrue(self.store.signin_eligibility("bob@example.com", self.s.hash("invite", "0" * 16))["invalid_invite"])
-        t_bob = self.link("bob@example.com", inv["id"])
-        t_cat = self.link("cat@example.com", inv["id"])
-        self.assertEqual(self.use(t_bob)["status"], "ok")
-        self.assertEqual(self.use(t_cat)["status"], "not_invited", "the single use is spent")
-        self.assertEqual(self.store.invite_list()[0]["uses"], 1)
-        bound = self.store.invite_create(self.s.hash("invite", "1" * 16), 5, 3600, email="dan@example.com")
-        self.assertFalse(self.store.signin_eligibility("eve@example.com", self.s.hash("invite", "1" * 16))["eligible"])
-        self.assertTrue(self.store.signin_eligibility("dan@example.com", self.s.hash("invite", "1" * 16))["eligible"])
-        self.store.invite_revoke(bound["id"])
-        self.assertFalse(self.store.signin_eligibility("dan@example.com", self.s.hash("invite", "1" * 16))["eligible"])
-
-    def test_expired_invite(self):
-        self.store.invite_create(self.s.hash("invite", "2" * 16), 5, 60)
-        self.clock.advance(61)
-        self.assertFalse(self.store.signin_eligibility("bob@example.com", self.s.hash("invite", "2" * 16))["eligible"])
 
     def test_disabled_users_cannot_sign_in(self):
         make_user(self.store)
         self.store.user_set_status("alice@example.com", "disabled")
-        self.assertFalse(self.store.signin_eligibility("alice@example.com", None)["eligible"])
+
         t = self.link("alice@example.com")
-        self.assertEqual(self.use(t)["status"], "disabled")
+        self.assertEqual(self.use(t)["status"], "invalid")
 
     def test_audit_holds_no_address_or_token(self):
-        self.store.allow_add("alice@example.com")
+
         t = self.link("alice@example.com")
         self.use(t)
         rows = [r for r in self.store.audit_list(100) if r["action"] != "allow_add"]

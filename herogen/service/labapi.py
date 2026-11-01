@@ -16,11 +16,10 @@ from typing import Any
 
 ROOT_KEY = "r1"
 ROOT_LABEL = "Your heroes"
-STAGES = [("0", "input"), ("1", "cover art"), ("2", "turnaround"), ("2h", "held-out view"), ("3", "base mesh"), ("3f", "texture refine"),
+STAGES = [("0", "input"), ("1", "cover art"), ("2", "turnaround"), ("3", "base mesh"), ("3f", "texture refine"),
           ("4", "game body"), ("5", "results")]
 IMAGES = {"sketch": "00-sketch.png", "cover": "01-cover.png", "turnaround": "02-turnaround.png",
-          "front": "views/front.png", "back": "views/back.png", "left": "views/left.png", "right": "views/right.png",
-          "heldout": "heldout/front-left-34.png"}
+          "front": "views/front.png", "back": "views/back.png", "left": "views/left.png", "right": "views/right.png"}
 PROFILES = ["best", "roblox-ingame", "roblox-avatar"]
 
 

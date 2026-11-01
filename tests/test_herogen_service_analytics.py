@@ -19,7 +19,7 @@ from test_herogen_service_web import Browser, WebCase
 from tests.test_herogen_service_e2e import CDP_PORT, HAVE_WEB, ServiceBrowserCase, uvicorn
 
 from herogen.service import admin, config
-from herogen.service.analytics import MAIN_STAGE_ORDER, SIDE_STAGE_ORDER
+from herogen.service.analytics import MAIN_STAGE_ORDER
 from herogen.service.auth import Signer
 from herogen.service.fakes import box_glb
 from herogen.service.storage import Storage
@@ -78,8 +78,8 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         store = Store(db_path, clock=clock)
         try:
             ver = store.db.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(ver, 10)
-            self.assertEqual([r["email"] for r in store.allow_list()], ["ops@example.com"])
+            self.assertEqual(ver, 11)
+            self.assertEqual(store.db.execute("SELECT email FROM allowlist").fetchone()[0], "ops@example.com")
 
             store.analytics_record(VID_A, "desktop", [("page_view", "page", "landing")])
             clock.advance(6 * 86400)
@@ -187,130 +187,39 @@ class TestEventsApiAndPrivacy(WebCase):
 
 class TestAdminAuthSettingsAndAnalyticsReport(WebCase):
     def test_default_empty_admin_emails_grants_nobody(self):
-        b = self.signin("alice@example.com")
+        b = Browser(self.app)
+        b.session()
         self.assertFalse(b.session()["is_admin"])
-        for path in ("/admin", "/api/admin/analytics", "/api/admin/generation-budget"):
+        for path in ("/admin", "/api/admin/analytics", "/api/admin/generation"):
             self.assertEqual(b.get(path).status_code, 403, path)
-        self.assertEqual(b.post("/api/admin/generation-budget", json={}).status_code, 403)
+        self.assertEqual(b.post("/api/admin/generation", json={}).status_code, 403)
 
-    def test_admin_allowlist_budget_save_and_report_parity(self):
-        self.store.close()
-        commit = "c" * 40
-        self.build(
-            public_demo=True,
-            code_commit=commit,
-            admin_emails=("ops@example.com",),
-            max_running_jobs=5,
-        )
 
-        # 1. Signed-out visitor -> 403
-        anon = Browser(self.app)
-        anon.session()
-        self.assertEqual(anon.get("/admin").status_code, 403)
-        self.assertEqual(anon.get("/api/admin/analytics").status_code, 403)
-        self.assertEqual(anon.get("/api/admin/generation-budget").status_code, 403)
-
-        # 2. Guest workspace -> never admin (403)
-        guest = Browser(self.app)
-        guest.session()
-        rg = guest.post("/api/demo/access", json={})
-        self.assertEqual(rg.status_code, 200)
-        guest.csrf = rg.json()["csrf"]
-        self.assertFalse(guest.session()["is_admin"])
-        self.assertEqual(guest.get("/admin").status_code, 403)
-        self.assertEqual(guest.get("/api/admin/analytics").status_code, 403)
-        self.assertEqual(guest.post("/api/admin/generation-budget", json={}).status_code, 403)
-
-        # 3. Non-admin signed-in email -> 403
-        member = self.signin("member@example.com")
-        self.assertFalse(member.session()["is_admin"])
-        self.assertEqual(member.get("/admin").status_code, 403)
-        self.assertEqual(member.get("/api/admin/analytics").status_code, 403)
-
-        # 4. Allowlisted admin email -> 200
-        ops = self.signin("ops@example.com")
-        self.assertTrue(ops.session()["is_admin"])
-        admin_page = ops.get("/admin")
-        self.assertEqual(admin_page.status_code, 200)
-        self.assertNotIn("unsafe-inline", admin_page.headers["content-security-policy"])
-        self.assertIn("style-src 'self'", admin_page.headers["content-security-policy"])
-
-        # Empty-state report works cleanly before any jobs/events/budget
-        empty_rep = ops.get("/api/admin/analytics").json()
-        self.assertEqual(empty_rep["daily"]["visitors"], 0)
-        self.assertEqual(empty_rep["refusals"], [])
-        self.assertEqual([s["stage"] for s in empty_rep["stages"]["main"]], list(MAIN_STAGE_ORDER))
-        self.assertEqual([s["stage"] for s in empty_rep["stages"]["side"]], list(SIDE_STAGE_ORDER))
-        self.assertFalse(empty_rep["budget"]["configured"])
-
-        # Days validation (1..90)
-        for bad_days in ("0", "91", "-3", "abc"):
-            self.assertEqual(ops.get(f"/api/admin/analytics?days={bad_days}").status_code, 400)
-        self.assertEqual(ops.get("/api/admin/analytics?days=90").status_code, 200)
-
-        # Initial unconfigured budget view
-        b0 = ops.get("/api/admin/generation-budget").json()
-        self.assertFalse(b0["configured"])
-        self.assertIn("Paused", b0["sentence"])
-
-        # Inline validation errors on POST /api/admin/generation-budget
-        for bad_body, needle in (
-            ({"enabled": True, "limit_usd": "10", "reserve_usd": "3", "max_active": 1, "days": 7,
-              "bound_note": "note", "confirm_provider_caps": False}, "provider spending caps"),
-            ({"enabled": True, "limit_usd": "2", "reserve_usd": "3", "max_active": 1, "days": 7,
-              "bound_note": "note", "confirm_provider_caps": True}, "at least"),
-            ({"enabled": True, "limit_usd": "10", "reserve_usd": "3", "max_active": 33, "days": 7,
-              "bound_note": "note", "confirm_provider_caps": True}, "1 to 32"),
-            ({"enabled": True, "limit_usd": "10", "reserve_usd": "3", "max_active": 1, "days": 0,
-              "bound_note": "note", "confirm_provider_caps": True}, "Duration"),
-            ({"enabled": True, "limit_usd": "10", "reserve_usd": "3", "max_active": 1, "days": 7,
-              "bound_note": "   ", "confirm_provider_caps": True}, "bound note"),
-        ):
-            r_bad = ops.post("/api/admin/generation-budget", json=bad_body)
-            self.assertEqual((r_bad.status_code, r_bad.json()["error"]["code"]), (400, "invalid_budget"))
-            self.assertIn(needle, r_bad.json()["error"]["message"])
-
-        # Save valid budget; verify spoofed client commit/signature are ignored and actor is admin's user id
-        r_save = ops.post("/api/admin/generation-budget", json={
-            "enabled": True,
-            "limit_usd": "10",
-            "reserve_usd": "3",
-            "max_active": 1,
-            "days": 14,
-            "bound_note": "Measured stage bound",
-            "confirm_provider_caps": True,
-            "code_commit": "f" * 40,
-            "cost_signature": "0" * 64,
-        })
-        self.assertEqual(r_save.status_code, 200, r_save.text)
-        b1 = r_save.json()
-        self.assertEqual(b1["sentence"], "Accepting heroes now: one at a time, up to $3 each, $10 in total")
-        self.assertEqual(b1["policy_commit"], commit)
-        self.assertEqual(b1["policy_cost_signature"], self.s.cost_signature)
-        self.assertTrue(b1["commit_matches"])
-        self.assertTrue(b1["cost_signature_matches"])
-
-        ops_user = next(u for u in self.store.users_list() if u["email"] == "ops@example.com")
-        audit_entry = next(a for a in self.store.audit_list(20) if a["action"] == "generation_budget_configured")
-        self.assertEqual(audit_entry["actor"], ops_user["id"])
-
-        # Seed jobs, stages, open reservation and events to verify full analytics report & CLI parity
-        j_done = self.make_job(member, key="key-member-01").json()
-        self.assertEqual(self.finish(j_done["id"]), "succeeded")
-        self.store.admission_side_done(j_done["id"], unavailable_message="synthetic heldout skip")
-
-        j_open = self.make_job(guest, key="key-guest-01").json()
-        self.clock.advance(45)
-
-        b_open = ops.get("/api/admin/generation-budget").json()
-        self.assertEqual(b_open["active_reservations"], 1)
-        self.assertEqual(b_open["open_reservations"][0]["job_id"], j_open["id"])
-        self.assertAlmostEqual(b_open["open_reservations"][0]["age_seconds"], 45.0, places=1)
-        self.assertEqual(b_open["used_usd"], 3.0)
-        self.assertEqual(b_open["reserved_usd"], 3.0)
-        self.assertEqual(b_open["remaining_usd"], 4.0)
-        self.assertIn("generation_capacity", b_open["sentence"])
-
+    def test_admin_settings_report_and_cli_parity(self):
+        ops = self.signin('ops@example.com')
+        for bad in ({}, {'enabled': None}, {'enabled': 'yes'}, {'limit_usd': -1},
+                    {'running_estimate_usd': 'NaN'}, {'limit_usd': True}, {'max_running': 0},
+                    {'max_running': 33}, {'max_running': True}, {'code_commit': 'spoof'}):
+            self.assertEqual(ops.post('/api/admin/generation', json=bad).status_code, 400, bad)
+        for days in ('0','91','-3','abc'):
+            self.assertEqual(ops.get('/api/admin/analytics?days='+days).status_code, 400)
+        self.assertEqual(ops.get('/api/admin/analytics?days=90').status_code, 200)
+        saved = ops.post('/api/admin/generation', json={'enabled':True, 'limit_usd':10,
+            'running_estimate_usd':1.5, 'max_running':1})
+        self.assertEqual(saved.status_code, 200)
+        admin_user = next(u for u in self.store.users_list() if u['email']=='ops@example.com')
+        self.assertEqual(self.store.audit_list(1)[0]['actor'], admin_user['id'])
+        guest = Browser(self.app); guest.session()
+        guest.csrf = guest.post('/api/demo/access', json={}).json()['csrf']
+        self.assertEqual(guest.get('/api/admin/generation').status_code,403)
+        done = self.make_job(guest, key='done-job-key').json()
+        self.assertEqual(self.finish(done['id']), 'succeeded')
+        queued = self.make_job(guest, key='queued-job-key')
+        self.assertEqual(queued.status_code,201)
+        budget = ops.get('/api/admin/generation').json()
+        self.assertAlmostEqual(budget['spent_usd'], .0375)
+        self.assertEqual(budget['running_usd'],1.5)
+        self.assertAlmostEqual(budget['remaining_usd'],8.4625)
         # Record client events across desktop & mobile
         self.store.analytics_record(VID_A, "desktop", [
             ("page_view", "page", "landing"),
@@ -329,7 +238,7 @@ class TestAdminAuthSettingsAndAnalyticsReport(WebCase):
         self.store.analytics_record(VID_B, "mobile", [
             ("page_view", "page", "landing"),
             ("create_clicked", "", ""),
-            ("create_result", "result", "generation_capacity"),
+            ("create_result", "result", "generation_budget_exhausted"),
         ])
 
         http_report = ops.get("/api/admin/analytics?days=7").json()
@@ -350,14 +259,12 @@ class TestAdminAuthSettingsAndAnalyticsReport(WebCase):
                 ("download", 1),
             ],
         )
-        self.assertEqual(http_report["refusals"], [{"reason": "generation_capacity", "count": 1}])
+        self.assertEqual(http_report["refusals"], [{"reason": "generation_budget_exhausted", "count": 1}])
         self.assertEqual(http_report["jobs"]["total"], 2)
         self.assertEqual(http_report["jobs"]["by_final_state"]["succeeded"], 1)
         self.assertEqual(http_report["jobs"]["active"]["queued"], 1)
-        self.assertEqual(http_report["jobs"]["by_user_kind"], {"account": 1, "guest": 1})
+        self.assertEqual(http_report["jobs"]["by_user_kind"], {"account": 0, "guest": 2})
         self.assertEqual([s["stage"] for s in http_report["stages"]["main"]], list(MAIN_STAGE_ORDER))
-        self.assertEqual([s["stage"] for s in http_report["stages"]["side"]], list(SIDE_STAGE_ORDER))
-        self.assertEqual(http_report["stages"]["side"][0]["unavailable"], 1)
         self.assertIsNotNone(http_report["stages"]["job_totals"]["median_seconds"])
         self.assertEqual(http_report["gallery"]["picker_selections"], [{"id": "woodland-scout", "count": 1}])
         self.assertEqual(http_report["gallery"]["shade_toggles"]["clay"], 1)
@@ -365,21 +272,12 @@ class TestAdminAuthSettingsAndAnalyticsReport(WebCase):
         self.assertEqual(http_report["devices"]["desktop"]["visitors"], 1)
         self.assertEqual(http_report["devices"]["mobile"]["visitors"], 1)
 
-        # Pause without provider-caps checkbox
-        r_pause = ops.post("/api/admin/generation-budget", json={
-            "enabled": False,
-            "limit_usd": "10",
-            "reserve_usd": "3",
-            "max_active": 1,
-            "days": 14,
-            "bound_note": "Paused for maintenance",
-            "confirm_provider_caps": False,
-        })
-        self.assertEqual(r_pause.status_code, 200)
-        self.assertEqual(r_pause.json()["sentence"], "Paused")
-
+        self.assertNotIn('side', http_report['stages'])
+        self.assertEqual(http_report['budget'], budget)
+        paused = ops.post('/api/admin/generation', json={'enabled':False})
+        self.assertEqual(paused.json()['sentence'], 'Paused')
         with self.assertRaises(SystemExit):
-            admin.run(["analytics-report", "--days", "0"], self.store, self.svc.signer)
+            admin.run(['analytics-report', '--days', '0'], self.store, self.svc.signer)
 
 
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, "set E2E_CDP_PORT")
@@ -441,25 +339,16 @@ class TestAnalyticsAndAdminBrowser(ServiceBrowserCase):
         self.assertEqual(t.eval("location.hash"), "#settings")
         self.assertEqual(t.eval("document.querySelector('#tab-settings').getAttribute('aria-selected')"), "true")
 
-        # Missing provider-caps confirmation shows inline error
         t.eval(
             "document.querySelector('#modeAccepting').checked = true;"
             "document.querySelector('#limitUsd').value = '10';"
-            "document.querySelector('#reserveUsd').value = '3';"
-            "document.querySelector('#maxActive').value = '1';"
-            "document.querySelector('#durationDays').value = '14';"
-            "document.querySelector('#boundNote').value = 'Verified synthetic bound';"
-            "document.querySelector('#confirmProviderCaps').checked = false;"
+            "document.querySelector('#runningEstimateUsd').value = '1.5';"
+            "document.querySelector('#maxRunning').value = '1';"
             "document.querySelector('#budgetForm').requestSubmit();"
         )
-        t.wait("document.querySelector('#budgetFormMsg').textContent.includes('provider spending caps')")
+        t.wait("document.querySelector('#budgetSentence').textContent.includes('Accepting heroes now: up to 1 at a time, $0.00 of $10 spent')")
 
-        # Confirming provider caps saves and updates plain-English sentence
-        t.eval(
-            "document.querySelector('#confirmProviderCaps').checked = true;"
-            "document.querySelector('#budgetForm').requestSubmit();"
-        )
-        t.wait("document.querySelector('#budgetSentence').textContent.includes('Accepting heroes now: one at a time, up to $3 each, $10 in total')")
+        self.screenshot('admin-settings.png')
 
         # Keyboard ArrowRight moves to #analytics tab and updates URL hash
         t.eval("document.querySelector('#tab-settings').focus(); document.querySelector('#tab-settings').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}))")
@@ -474,6 +363,20 @@ class TestAnalyticsAndAdminBrowser(ServiceBrowserCase):
         t.wait("!document.querySelector('#panel-settings').hidden && location.hash === '#settings'")
         self.assertTrue(t.eval("document.documentElement.scrollWidth <= innerWidth"))
         self.assertEqual(self.tab.errors, [])
+
+    def test_admin_replaces_invalid_link_in_the_same_tab(self):
+        t = self.tab
+        t.goto(self.url + '/admin/signin#t=' + 'x'*43)
+        t.wait("/expired/.test(document.querySelector('#verifyWho').textContent)")
+        self.assertTrue(t.eval("document.querySelector('#verifyForm').hidden"))
+        t.eval("document.querySelector('#headerSignIn').click(); document.querySelector('#email').value='ops@example.com'; document.querySelector('#signinForm').requestSubmit()")
+        t.wait("/link/.test(document.querySelector('#signinMsg').textContent)")
+        token = __import__('re').search(r'/signin#t=([A-Za-z0-9_-]{43})', self.sender.sent[-1].text).group(1)
+        t.goto(self.url + '/admin/signin#t=' + token)
+        t.wait("/Sign in as/.test(document.querySelector('#verifyWho').textContent) && !document.querySelector('#verifyForm').hidden")
+        t.eval("document.querySelector('#verifyForm').requestSubmit()")
+        t.wait("location.pathname === '/admin' && !document.querySelector('#adminShell').hidden")
+        self.assertEqual(t.errors, [])
 
     def test_global_privacy_control_sends_zero_client_events(self):
         t = self.tab

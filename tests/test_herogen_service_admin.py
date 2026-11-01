@@ -14,51 +14,8 @@ sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 from test_herogen_service_support import TempDirCase
 
 from herogen.service import admin
-from herogen.service.auth import Signer, normalize_invite
+from herogen.service.auth import Signer
 from herogen.service.store import Store
-
-
-class TestAdmin(TempDirCase):
-    def test_invites_allowlist_users_quota(self):
-        store = Store(self.tmp / "meta.db")
-        signer = Signer(b"k" * 48)
-        out = admin.run("invite --count 2 --uses 3 --days 7 --note friends", store, signer)
-        codes = [line.split()[0] for line in out.splitlines()]
-        self.assertEqual(len(codes), 2)
-        e = store.signin_eligibility("bob@example.com", signer.hash("invite", normalize_invite(codes[0])))
-        self.assertTrue(e["eligible"])
-        self.assertNotIn(codes[0], json.dumps(store.invite_list()), "codes are stored only as hashes")
-        self.assertIn("0/3 used", admin.run("invites", store, signer))
-        self.assertIn("allowed carol@example.com", admin.run("allow Carol@Example.com", store, signer))
-        self.assertIn("carol@example.com", admin.run("allowlist", store, signer))
-        with self.assertRaises(SystemExit):
-            admin.run("allow nonsense", store, signer)
-        from test_herogen_service_support import make_user
-
-        make_user(store, "carol@example.com")
-        self.assertIn("carol@example.com", admin.run("users", store, signer))
-        q = json.loads(admin.run("quota carol@example.com --daily 1 --total default", store, signer))
-        self.assertEqual((q["quota_daily"], q["quota_total"]), (1, None))
-        self.assertIn("disabled", admin.run("disable carol@example.com", store, signer))
-        self.assertIn("active", admin.run("enable carol@example.com", store, signer))
-        self.assertIn("allow_add", admin.run("audit --limit 50", store, signer))
-        iid = store.invite_list()[0]["id"]
-        self.assertEqual(admin.run(f"revoke-invite {iid}", store, signer), "revoked")
-        store.close()
-
-    def test_budget_commands_require_verification_and_report_alerts(self):
-        from herogen.service.config import Settings
-        store=Store(self.tmp/'meta.db'); self.addCleanup(store.close); signer=Signer(b'k'*48)
-        args=['generation-budget','--limit-usd','1000','--reserve-usd','10','--commit','a'*40,
-              '--cost-signature',Settings().cost_signature,'--bound-note','Synthetic fixture']
-        with self.assertRaises(ValueError): admin.run(args,store,signer)
-        admin.run(args+['--paused'],store,signer)
-        report=json.loads(admin.run('generation-budget-report',store,signer))
-        self.assertEqual(report['policy']['max_active'],5); self.assertEqual(report['policy']['enabled'],0)
-        admin.run(args+['--confirm-provider-caps'],store,signer)
-        admin.run(['generation-overhead','--actual-usd','500','--evidence','Synthetic charges'],store,signer)
-        report=json.loads(admin.run('generation-budget-report',store,signer))
-        self.assertIn('budget_50_percent',report['summary']['alerts'])
 
 
 class TestSnapshotCommands(TempDirCase):
@@ -70,7 +27,7 @@ class TestSnapshotCommands(TempDirCase):
         snap.acquire()
         snap.restore()
         store = Store(snap.local, persist=snap.save)
-        store.allow_add("bob@example.com")
+        store.audit_add("fixture", "snapshot_test")
         store.close()
         signer = Signer(b"k" * 48)
         where = (meta, LocalVolume())
@@ -97,7 +54,7 @@ class TestSnapshotCommands(TempDirCase):
 
 class TestDevMode(TempDirCase):
     def test_dev_services_are_local_and_private(self):
-        from herogen.service.__main__ import _first_start, dev_services
+        from herogen.service.__main__ import dev_services
         from herogen.service.fakes import FakeRunner
 
         try:
@@ -110,8 +67,5 @@ class TestDevMode(TempDirCase):
         key = self.tmp / "dev" / "dev-session-key"
         self.assertEqual(oct(key.stat().st_mode & 0o777), "0o600")
         self.assertEqual((self.tmp / "dev" / ".gitignore").read_text(), "*\n")
-        with contextlib.redirect_stderr(io.StringIO()):
-            _first_start(svc)
-        self.assertEqual([r["email"] for r in svc.store.allow_list()], ["dev@example.com"])
-        self.assertEqual(len(svc.store.invite_list()), 1)
+        self.assertFalse(svc.store.generation_get()["enabled"])
         svc.store.close()

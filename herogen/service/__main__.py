@@ -5,7 +5,7 @@ Dev mode keeps everything under `--data` (default `service-data/`, git-ignored b
 metadata database, the data folder, a generated signing key (mode 0600) and `outbox.jsonl`, where sign-in emails
 are written instead of being sent; each link is also printed. `--runner fake` (default) makes every stage
 instantly with synthetic files; `--runner local` runs the real stage CLIs on this machine (Blender and
-MODEL_API_KEY needed). On first start it allowlists dev@example.com and prints an invite code.
+MODEL_API_KEY needed). Admin links are sent only to configured administrator addresses.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
                         meta_path=data / "meta.db", outbox_path=data / "outbox.jsonl", signing_key=_dev_key(data),
                         email_provider="file", terms_version=os.environ.get("HEROGEN_SERVICE_TERMS_VERSION", "dev"),
                         allowed_hosts=("127.0.0.1", "localhost"))
-    store = Store(settings.meta_path)
+    store = Store(settings.meta_path, max_running=settings.max_running_jobs)
     storage = Storage(settings.data_dir)
     if runner_kind == "fake":
         runner = FakeRunner(delay_s=delay)
@@ -75,17 +75,6 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
                    sender=EchoSender(settings.outbox_path), sanitize=lambda b: sanitize(b, limits),
                    submit=backend.submit)
     return svc, backend
-
-
-def _first_start(svc) -> None:
-    from herogen.service.admin import run as admin
-
-    if svc.store.allow_list() or svc.store.invite_list():
-        return
-    svc.store.allow_add("dev@example.com", "dev mode")
-    print("[dev] allowlisted dev@example.com", file=sys.stderr)
-    print("[dev] invite code: " + admin("invite --count 1 --uses 5 --note dev", svc.store, svc.signer).split()[0],
-          file=sys.stderr, flush=True)
 
 
 def _sweeper(svc, backend, stop: threading.Event) -> None:
@@ -121,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         from herogen.service.store import Store
 
         if not a.args:
-            ap.error("give an admin command, e.g. `invite --count 3`")
+            ap.error("give an admin command, e.g. `generation-settings`")
         store = Store(a.data / "meta.db")
         print(admin(a.args, store, Signer(_dev_key(a.data))))
         return 0
@@ -134,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
     from herogen.service.web import create_app
 
     svc, backend = dev_services(a.data, a.port, a.runner, a.delay)
-    _first_start(svc)
     stop = threading.Event()
     threading.Thread(target=_sweeper, args=(svc, backend, stop), daemon=True).start()
     print(f"[dev] HeroGen service on {svc.settings.base_url} (runner: {a.runner}; emails in "
