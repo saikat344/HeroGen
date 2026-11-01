@@ -201,10 +201,8 @@ class ServiceBrowserCase(TempDirCase):
         port = free_port()
         self.url = f"http://127.0.0.1:{port}"
         self.s = settings(self.tmp, base_url=self.url, allowed_hosts=("127.0.0.1",), **getattr(self, "service_settings", {}))
-        self.store = Store(self.s.meta_path)
-        if self.s.public_demo:
-            self.store.budget_configure(1_000_000_000, 10_000_000, 5, time.time()+86400*14, self.s.code_commit,
-                'Synthetic browser fixture; no paid work', self.s.cost_signature, provider_caps_verified=True)
+        self.store = Store(self.s.meta_path, max_running=self.s.max_running_jobs)
+        self.store.generation_update(actor='fixture', enabled=True, limit_usd=1000, max_running=self.s.max_running_jobs)
         self.sender = FakeSender()
         self.runner = GatedRunner()
         storage = Storage(self.s.data_dir)
@@ -234,7 +232,14 @@ class ServiceBrowserCase(TempDirCase):
 
     def signin(self, email: str = "alice@example.com") -> None:
         t = self.tab
-        self.store.allow_add(email)
+
+        if email not in self.s.admin_emails:
+            t.goto(self.url + '/')
+            t.wait("!document.querySelector('#entry').hidden && !document.querySelector('#headerSignIn').disabled")
+            t.eval("fetch('/api/session').then(r=>r.json()).then(s=>fetch('/api/demo/access',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:'{}'})).then(r=>r.json())")
+            t.goto(self.url + '/')
+            t.wait("!document.querySelector('#app').hidden")
+            return
         t.goto(self.url + "/admin/signin")
         t.wait("document.querySelector('#signinDialog').open")
         t.eval(f"document.querySelector('#email').value = {json.dumps(email)}; "
@@ -244,13 +249,23 @@ class ServiceBrowserCase(TempDirCase):
         while not self.sender.sent and time.monotonic() < deadline:   # the email may go out after the answer
             time.sleep(0.05)
         token = re.search(r"/signin#t=([A-Za-z0-9_-]{43})", self.sender.sent[-1].text).group(1)
-        t.goto(f"{self.url}/signin#t={token}")
+        t.goto(f"{self.url}/admin/signin#t={token}")
         t.wait("!document.querySelector('#verify').hidden && /HeroGen account|Sign in as/"
                ".test(document.querySelector('#verifyWho').textContent)")
-        t.eval("document.querySelector('#adult').checked = true; document.querySelector('#accept').checked = true; "
-               "document.querySelector('#verifyForm').requestSubmit()")
-        t.wait(f"location.href === {json.dumps(self.url + '/')} && document.readyState === 'complete' && "
-               "!document.querySelector('#app').hidden")
+        t.eval("document.querySelector('#verifyForm').requestSubmit()")
+        t.wait(f"location.href === {json.dumps(self.url + '/admin#settings')} && document.readyState === 'complete' && "
+               "!document.querySelector('#adminShell').hidden")
+
+    def screenshot(self, name):
+        folder = os.environ.get('HEROGEN_TEST_SHOTS')
+        if folder:
+            from pathlib import Path
+            target = Path(folder)
+            target.mkdir(parents=True, exist_ok=True)
+            metrics = self.tab.call('Page.getLayoutMetrics')['cssContentSize']
+            shot = self.tab.call('Page.captureScreenshot', format='png', captureBeyondViewport=True,
+                                 clip={**metrics, 'scale':1})
+            (target / name).write_bytes(base64.b64decode(shot['data']))
 
     def make_hero(self, name: str) -> None:
         """Fill the form with a sketch and a name and press Make (the page then opens the new job)."""
@@ -267,37 +282,6 @@ class ServiceBrowserCase(TempDirCase):
         self.tab.wait(f"document.querySelector('#detailH').textContent === {json.dumps(name)}")
 
 class TestServicePage(ServiceBrowserCase):
-    def test_public_entry_preserves_image_draft_through_signin(self):
-        t = self.tab
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        self.assertTrue(t.eval("document.querySelector('#app').hidden"))
-        t.eval("document.querySelector('[data-idea=forest]').click()")
-        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
-        data = base64.b64encode(png(400, 600)).decode()
-        t.eval(f"""(() => {{
-            const bytes = Uint8Array.from(atob('{data}'), c => c.charCodeAt(0));
-            const dt = new DataTransfer();
-            dt.items.add(new File([bytes], 'draft.png', {{type:'image/png'}}));
-            document.querySelector('#sketch').files = dt.files;
-            document.querySelector('#sketch').dispatchEvent(new Event('change'));
-            document.querySelector('#name').value = 'Saved draft';
-            document.querySelector('#jobForm').requestSubmit();
-        }})()""")
-        t.wait("document.querySelector('#guestDialog').open")
-        self.assertTrue(t.eval("/saved/.test(document.querySelector('#jobMsg').textContent)"))
-        self.signin()
-        t.wait("document.querySelector('#uploadName').textContent === 'draft.png'")
-        self.assertEqual(t.eval("document.querySelector('#name').value"), 'Saved draft')
-        self.assertTrue(t.eval("document.querySelector('#promptIn').hidden"))
-        t.eval("document.querySelector('#jobForm').requestSubmit()")
-        # The library list refreshes after the detail view opens, so under load it can still be empty here.
-        # Wait for it to render, then require exactly one entry: the draft must not create a second hero.
-        t.wait("document.querySelector('#detailH')?.textContent === 'Saved draft' "
-               "&& document.querySelectorAll('#jobs li').length > 0")
-        self.assertEqual(t.eval("document.querySelectorAll('#jobs li').length"), 1)
-        self.assertEqual(len(t.eval("fetch('/api/jobs').then(r => r.json()).then(b => b.jobs)")), 1)
-        self.assertTrue(t.eval("document.activeElement.id === 'detail'"))
 
     def test_entry_rejects_excess_prompt_and_focuses_how_section(self):
         t = self.tab
@@ -313,62 +297,6 @@ class TestServicePage(ServiceBrowserCase):
         self.assertTrue(t.eval("document.activeElement.id === 'howHeading'"))
         self.assertFalse(t.eval("document.querySelector('#howDialog').open"))
 
-    def test_signout_clears_the_saved_draft(self):
-        t = self.tab
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#guestDialog').open")
-        self.signin()
-        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
-        t.eval("document.querySelector('#signOut').click()")
-        t.wait("!document.querySelector('#entry').hidden && !document.querySelector('#headerSignIn').disabled && document.querySelector('#signOut').hidden")
-        self.assertEqual(t.eval("document.querySelector('#prompt').value"), '')
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        self.assertEqual(t.eval("document.querySelector('#prompt').value"), '')
-
-    def test_uncertain_request_restores_current_input_and_retires_conflicted_key(self):
-        t = self.tab
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        t.eval("document.querySelector('#prompt').value='Original idea'; document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#guestDialog').open")
-        self.signin()
-        t.eval("""(() => {
-            const original=window.fetch;
-            window.fetch=(url, options) => url === '/api/jobs' && options?.method === 'POST'
-                ? Promise.resolve(new Response(JSON.stringify({error:{message:'Busy'}}), {status:503}))
-                : original(url,options);
-            document.querySelector('#prompt').value='Revised emerald knight';
-            document.querySelector('#jobForm').requestSubmit();
-        })()""")
-        t.wait("/busy/.test(document.querySelector('#jobMsg').textContent)")
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        self.assertEqual(t.eval("document.querySelector('#prompt').value"), 'Revised emerald knight')
-        self.assertTrue(t.eval("/not confirmed/.test(document.querySelector('#jobMsg').textContent)"))
-        t.eval("""(() => {
-            const original=window.fetch;
-            window.fetch=(url, options) => url === '/api/jobs' && options?.method === 'POST'
-                ? Promise.resolve(new Response(JSON.stringify({error:{message:'Conflict'}}), {status:409}))
-                : original(url,options);
-            document.querySelector('#jobForm').requestSubmit();
-        })()""")
-        t.wait("/Check Your heroes/.test(document.querySelector('#jobMsg').textContent)")
-        t.goto(self.url + '/')
-        t.wait("!document.querySelector('#entry').hidden")
-        self.assertIsNone(t.eval("sessionStorage.getItem('hg-pending-job')"))
-        self.assertEqual(t.eval("document.querySelector('#prompt').value"), 'Revised emerald knight')
-
-    def test_signin_page_header_can_request_another_link(self):
-        t = self.tab
-        t.goto(self.url + '/signin')
-        t.wait("/incomplete/.test(document.querySelector('#verifyWho').textContent)")
-        t.eval("document.querySelector('#headerSignIn').click()")
-        t.wait("document.querySelector('#signinDialog').open")
-        t.eval("document.querySelector('#closeSignin').click(); document.querySelector('#howButton').click()")
-        self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
 
     def test_generation_navigation_artifact_selection_and_developer_mode(self):
         self.signin()
@@ -432,7 +360,7 @@ class TestServicePage(ServiceBrowserCase):
             };
         })()""")
         self.make_hero('Saved despite refresh')
-        t.wait("/Your hero is saved/.test(document.querySelector('#banner').textContent)")
+        t.wait("/Library temporarily unavailable/.test(document.querySelector('#banner').textContent)")
         self.assertTrue(t.eval("document.querySelector('#entry').hidden"))
         self.assertEqual(t.eval('window.submittedJobs'),1)
         self.assertIsNone(t.eval("sessionStorage.getItem('hg-pending-job')"))
@@ -478,17 +406,6 @@ class TestServicePage(ServiceBrowserCase):
         self.assertTrue(t.eval("document.querySelector('#imageError').hidden"))
         self.assertIsNone(t.eval("document.querySelector('#artboardImage').getAttribute('src')"))
 
-    def test_unavailable_quality_review_is_flagged_beside_successful_job(self):
-        self.runner.fail['2h']='reject'
-        self.runner.gate.set()
-        self.signin()
-        self.make_hero('Review warning')
-        t = self.tab
-        t.wait("document.querySelector('#state').textContent === 'succeeded'",timeout=60)
-        t.wait("/Unavailable/.test(document.querySelector('#qualityStatus').textContent)",timeout=60)
-        self.assertTrue(t.eval("document.querySelector('#qualityReview').classList.contains('review-attention')"))
-        self.assertIn('attention',t.eval("document.querySelector('#generationSubtitle').textContent"))
-        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"),'Meet your hero.')
 
     def count_polls(self) -> None:
         """From now on, count the page's reads of one job (GET /api/jobs/<id>) in window.__polls."""
@@ -532,7 +449,7 @@ class TestServicePage(ServiceBrowserCase):
         self.tab.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
         self.tab.wait("!document.querySelector('.st-running')", timeout=60)
         states = self.stage_states()
-        self.assertIn("Passed", self.tab.eval("document.querySelector('#qualityStatus').textContent"))
+        self.assertIsNone(self.tab.eval("document.querySelector('#qualityReview')"))
         self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some((a) => "
                                       "a.textContent === 'Download GLB')"))
         time.sleep(POLL_S + 1.5)
@@ -548,7 +465,7 @@ class TestPublicLivePage(ServiceBrowserCase):
 
     def test_create_opens_guest_and_starts_without_an_account_or_code(self):
         t=self.tab; t.goto(self.url+'/')
-        t.wait("document.querySelector('#headerSignIn').textContent === 'Your heroes' && !document.querySelector('#headerSignIn').disabled")
+        t.wait("!document.querySelector('#headerSignIn').disabled")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit(); document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
         self.assertEqual(len(self.store.users_list()),1)
@@ -565,17 +482,52 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.assertEqual(len(self.store.jobs_admin_list()),2)
         self.assertEqual(self.tab.errors,[])
 
+    def test_queue_waiting_state_and_workers_start_in_order(self):
+        self.store.generation_update(actor='fixture', max_running=1)
+        self.signin()
+        self.make_hero('First hero')
+        self.assertTrue(self.runner.waiting.wait(10))
+        self.tab.eval("document.querySelector('#backToIdeas').click()")
+        self.make_hero('Queued hero')
+        self.tab.wait("document.querySelector('#generationTitle').textContent === 'Waiting for a free worker'")
+        self.assertEqual([j['state'] for j in self.store.jobs_admin_list()], ['queued','running'])
+        self.assertIsNone(self.tab.eval("document.querySelector('#qualityReview')"))
+        self.screenshot('queued-workbench.png')
+        self.runner.gate.set()
+        self.tab.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
+        self.assertEqual([j['state'] for j in self.store.jobs_admin_list()], ['succeeded','succeeded'])
+        self.assertEqual(self.tab.errors, [])
+
+    def test_same_click_network_retry_uses_one_key_and_creates_one_hero(self):
+        self.signin()
+        self.tab.eval("""(() => {
+          const original = window.fetch; window.createKeys = [];
+          window.fetch = async (url, options) => {
+            const response = await original(url, options);
+            if (url === '/api/jobs' && options?.method === 'POST') {
+              window.createKeys.push(options.headers['Idempotency-Key']);
+              if (window.createKeys.length === 1) throw new TypeError('Synthetic lost response');
+            }
+            return response;
+          };
+        })()""")
+        self.make_hero('One click')
+        keys = self.tab.eval('window.createKeys')
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(keys[0], keys[1])
+        self.assertEqual(len(self.store.jobs_admin_list()), 1)
+
     def test_public_gallery_fragment_scrolls_after_entry_is_loaded(self):
         t=self.tab; t.goto(self.url+'/#gallery')
         t.wait("!document.querySelector('#headerSignIn').disabled && window.scrollY > 0 && document.querySelector('#gallery').getBoundingClientRect().top < window.innerHeight")
         self.assertEqual(self.store.users_list(),[])
 
     def test_unfunded_public_generation_preserves_draft_with_clear_error(self):
-        self.store.db.execute('UPDATE admission_policy SET enabled=0')
+        self.store.generation_update(actor='fixture', enabled=False)
         t=self.tab; t.goto(self.url+'/')
         t.wait("!document.querySelector('#headerSignIn').disabled")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("/temporarily paused/.test(document.querySelector('#jobMsg').textContent)")
+        t.wait("/paused right now/.test(document.querySelector('#jobMsg').textContent)")
         self.assertEqual(len(self.store.jobs_admin_list()),0)
         self.assertIn('forest courier',t.eval("document.querySelector('#prompt').value"))
 

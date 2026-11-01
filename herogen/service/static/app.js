@@ -1,8 +1,7 @@
-// HeroGen service page: sign in with an emailed link, start a hero from a sketch or a description, follow its
+// HeroGen service page: start a guest hero from a sketch or description, follow its
 // stages, download the GLB and the Roblox bundle. Every value from the server is shown with textContent.
 import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
-import { draftStore } from '/assets/draft.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
 import { generationView } from '/assets/generation.js';
@@ -26,39 +25,13 @@ function returnToEntry() {
   developer.update(null); generation.reset(); setScreen('entry'); show('#jobLoading', false);
 }
 function signIn() {
-  if (location.pathname === '/signin' || location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
+  if (location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
   else {
-    $('#accessIntro').textContent = S.session?.public_demo ? 'No account needed. One active generation per workspace, with up to five globally.' : 'Live guest access is not open yet. You can inspect the public gallery.';
-    $('#guestGo').disabled = !S.session?.public_demo;
+    $('#accessIntro').textContent = 'No account needed. Extra heroes wait for a free worker.';
+    $('#guestGo').disabled = false;
     $('#guestDialog').showModal();
   }
 }
-async function keepDraft(values = null) {
-  const fields = values || { prompt: $('#prompt').value, name: $('#name').value,
-    profile: $('#profile').value, file: entry.file() };
-  const pending = loadPending();
-  if (!fields.prompt.trim() && !fields.name.trim() && !fields.file && !pending) return draftStore('delete');
-  await draftStore('put', { ...fields, pending, saved: Date.now() });
-}
-async function restoreDraft() {
-  try {
-    const d = await draftStore('get');
-    if (!d || Date.now() - d.saved > 24 * 3600 * 1000) { if (d) await draftStore('delete'); return; }
-    const pending = loadPending();
-    // A failed storage write must never restore an older input under a newer request key.
-    if (pending && (!d.pending || d.pending.key !== pending.key || d.pending.hash !== pending.hash || d.pending.revision !== pending.revision)) return;
-    $('#prompt').value = typeof d.prompt === 'string' ? d.prompt : '';
-    $('#name').value = typeof d.name === 'string' ? d.name : '';
-    if (S.session.limits.profiles.includes(d.profile)) $('#profile').value = d.profile;
-    if (d.file instanceof Blob) entry.setFile(d.file);
-    if (d.pending && !loadPending()) savePending(d.pending);
-    $('#prompt').dispatchEvent(new Event('input'));
-    $('#jobMsg').textContent = loadPending()
-      ? 'An earlier hero was not confirmed. Retry this saved input to recover it without starting a second hero.'
-      : 'Your draft is ready. Review it, then create your hero.';
-  } catch { /* A fresh form remains usable without browser storage. */ }
-}
-
 function show(id, on = true) { $(id).hidden = !on; }
 function banner(text) { const b = $('#banner'); b.textContent = text || ''; b.hidden = !text; }
 function el(tag, props = {}, ...kids) {
@@ -72,26 +45,6 @@ function el(tag, props = {}, ...kids) {
 function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; }
 function fmtUsd(v) { return typeof v === 'number' ? `$${v.toFixed(v < 0.1 ? 4 : 2)}` : ''; }
 function fmtSecs(v) { return typeof v === 'number' ? (v < 90 ? `${v.toFixed(1)} s` : `${(v / 60).toFixed(1)} min`) : ''; }
-const PENDING = 'hg-pending-job';
-let memPending = null;   // used when sessionStorage is unavailable (then the key lasts until a reload)
-function loadPending() {
-  let v = memPending;
-  try { v = JSON.parse(sessionStorage.getItem(PENDING) || 'null') || memPending; } catch { /* storage off */ }
-  return v && typeof v.key === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v.key) ? v : null;
-}
-function savePending(v) { memPending = v; try { sessionStorage.setItem(PENDING, JSON.stringify(v)); } catch { /* storage off */ } }
-function clearPending() { memPending = null; try { sessionStorage.removeItem(PENDING); } catch { /* storage off */ } }
-async function formHash(kind, profile, name, prompt, file) {
-  try {
-    const parts = [new TextEncoder().encode(JSON.stringify([kind, profile, name, kind === 'prompt' ? prompt : '']))];
-    if (file) parts.push(new Uint8Array(await file.arrayBuffer()));
-    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-    let at = 0;
-    for (const p of parts) { all.set(p, at); at += p.length; }
-    const d = new Uint8Array(await crypto.subtle.digest('SHA-256', all));
-    return Array.from(d, (x) => x.toString(16).padStart(2, '0')).join('');
-  } catch { return ''; }
-}
 function idemKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, (x) => x.toString(16).padStart(2, '0')).join(''); }
 
 async function api(path, { method = 'GET', json, form, headers = {} } = {}) {
@@ -128,42 +81,36 @@ function initSignin() {
     const msg = $('#signinMsg');
     msg.textContent = 'Sending…';
     try {
-      const r = await api('/api/auth/request', { method: 'POST', json: { email: $('#email').value, invite_code: $('#invite').value } });
+      const r = await api('/api/auth/request', { method: 'POST', json: { email: $('#email').value } });
       msg.textContent = r.message;
     } catch (e) { msg.textContent = e.message; }
   });
 }
 
 async function initVerify() {
+  $('#signinDialog').close();
   const token = new URLSearchParams(location.hash.slice(1)).get('t');
-  history.replaceState(null, '', '/signin');   // the token leaves the address bar and history
+  history.replaceState(null, '', '/admin/signin');   // the token leaves the address bar and history
   show('#verify');
   if (!token) { $('#verifyWho').textContent = 'This sign-in link is incomplete. Ask for a new one.'; show('#verifyForm', false); return; }
   let info;
   try { info = await api('/api/auth/link', { method: 'POST', json: { token } }); }
   catch (e) { $('#verifyWho').textContent = e.message; show('#verifyForm', false); return; }
-  $('#verifyWho').textContent = info.new_account ? `Create the HeroGen account for ${info.email}.` : `Sign in as ${info.email}.`;
-  show('#terms', info.needs_terms);
-  if (!info.terms_ready) { $('#verifyMsg').textContent = 'Sign-in is not open yet: the terms have not been published.'; $('#verifyBtn').disabled = true; }
-  $('#verifyForm').addEventListener('submit', async (ev) => {
+  $('#verifyWho').textContent = `Sign in as ${info.email}.`;
+  show('#verifyForm');
+  $('#verifyMsg').textContent = '';
+  $('#verifyForm').onsubmit = async (ev) => {
     ev.preventDefault();
     try {
-      const r = await api('/api/auth/verify', { method: 'POST', json: { token, accept_terms: $('#accept').checked, adult: $('#adult').checked } });
+      const r = await api('/api/auth/verify', { method: 'POST', json: { token } });
       S.csrf = r.csrf;
       setCsrf(S.csrf);
-      location.replace('/');
+      location.replace('/admin');
     } catch (e) { $('#verifyMsg').textContent = e.message; }
-  });
+  };
 }
 
 // ---- jobs ----------------------------------------------------------------------------------------------
-
-function renderQuota(u) {
-  // Guests have no daily count to show; the server's refusal says when this workspace already has a hero running.
-  if (S.session?.user?.kind === 'guest') { $('#quota').textContent = ''; return; }
-  if (!u) return;
-  $('#quota').textContent = `${u.jobs_today} of ${u.jobs_per_day} heroes in the last 24 hours, ${u.jobs_total} of ${u.jobs_total_limit} in total.`;
-}
 
 async function refreshList() {
   const { jobs } = await api('/api/jobs');
@@ -235,11 +182,9 @@ async function preview(url) {
   }
 }
 
-// Keep polling while the job is queued or running, and after it only while a stage beside it (the quality check)
-// still runs. A job's own stage never keeps a finished job polling: one that shows as running there is a stale
-// row, and polling would never end.
+// Poll while the job is queued or running.
 function polls(j) {
-  return j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.side && s.state === 'running');
+  return j.state === 'queued' || j.state === 'running';
 }
 
 function followJob(j, reveal = false) {
@@ -295,15 +240,6 @@ function initJobs() {
   const names = { 'roblox-ingame': 'Roblox in-game', 'roblox-avatar': 'Roblox avatar', best: 'Best quality (GLB only)' };
   sel.replaceChildren(...S.session.limits.profiles.map((p) => el('option', { value: p, text: names[p] || p })));
   sel.value = S.session.limits.default_profile;
-  $('#retention').textContent = String(S.session.limits.retention_days);
-  // One Idempotency-Key per hero, kept in this tab's sessionStorage (with a hash of the form) from before the
-  // request is sent until the server gives a definite answer for that key: the job (201 started, 200 already
-  // saved) or a 409 (the key belongs to a saved job with a different form). On anything else (503 busy, another
-  // 5xx, a lost connection, 401, 429, a refused upload) the earlier attempt may still have been saved, so the same
-  // key is sent with the next attempt from this tab, also after a reload, and the server returns that job instead
-  // of starting a second one. Other tabs and devices make their own keys.
-  const pending = loadPending();
-  if (pending) $('#jobMsg').textContent = 'An earlier hero from this tab was not confirmed. Make it again: if it was saved, you get that hero, not a second one.';
   $('#jobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if ($('#go').disabled) return;
@@ -325,49 +261,27 @@ function initJobs() {
       if (Array.from(prompt.value).length > limit) { track('create_result', { result: 'prompt_too_long' }); msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
       fd.append('prompt', prompt.value);
     }
-    const values = { prompt: prompt.value, name: $('#name').value, profile: sel.value, file };
     $('#go').disabled = true;
-    if (!S.session.signed_in) {
-      try { await keepDraft(values); msg.textContent = 'Your draft is saved.'; }
-      catch { msg.textContent = 'Keep this tab open to preserve your draft.'; }
-      if (!S.session.public_demo) { track('create_result', { result: 'signin_required' }); $('#go').disabled = false; signIn(); return; }
-      $('#go').disabled = true;
-      try { await openGuestWorkspace(); await signedIn(); }
-      catch(e) { track('create_result', { result: knownCreateResult(e.code, e.status) }); msg.textContent = e.message; $('#go').disabled = false; return; }
-    }
-    $('#go').disabled = true; msg.textContent = 'Starting…';
-    const hash = await formHash(kind, values.profile, values.name, values.prompt, file);
-    const earlier = loadPending();
-    const key = earlier ? earlier.key : idemKey();
-    savePending({ key, hash: earlier ? earlier.hash : hash, revision: idemKey() });
-    await keepDraft(values).catch(() => banner('Your retry draft could not be saved. Keep this tab open until your hero is confirmed.'));
+    const key = idemKey();
     try {
-      const j = await api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
+      if (!S.session.signed_in) { await openGuestWorkspace(); await signedIn(); }
+    } catch (e) { msg.textContent = e.message; $('#go').disabled = false; return; }
+    msg.textContent = 'Starting…';
+    try {
+      const submit = () => api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
+      let j;
+      try { j = await submit(); }
+      catch (e) {
+        if (e instanceof TypeError || e.code === 'busy') j = await submit();
+        else throw e;
+      }
       track('create_result', { result: 'accepted' });
-      clearPending(); ++S.revision; followJob(j, true);
-      await draftStore('delete').catch(() => {});
+      ++S.revision; followJob(j, true);
       msg.textContent = '';
-      await Promise.all([refreshList(), loadSession().then((session) => { renderQuota(session.usage); updateAccessSummary(); })])
-        .catch((e) => banner(`Your hero is saved. Could not refresh account or library details: ${e.message}`));
+      refreshList().catch((e) => banner(e.message));
     } catch (e) {
       track('create_result', { result: knownCreateResult(e.code, e.status) });
-      if (e.status === 409 && (!e.code || e.code === 'conflict')) {
-        clearPending();
-        await keepDraft(values).catch(() => draftStore('delete').catch(() => {}));
-        msg.textContent = earlier && earlier.hash !== hash
-          ? 'Your earlier, unconfirmed hero from this tab was saved, so this different one was not started: check Your heroes, then make it again.'
-          : `${e.message} Check Your heroes.`;
-        refreshList().catch(() => {});
-      } else if (e.status === 503 && (!e.code || e.code === 'busy')) {
-        msg.textContent = 'The service is busy and could not confirm your hero. Make it again in a moment from this tab: if it was saved, you get that hero, not a second one.';
-      } else {
-        msg.textContent = e.message;
-        if (e.status === 401) {
-          S.session.signed_in = false;
-          try { await keepDraft(values); } catch { msg.textContent += ' Keep this tab open to preserve your draft.'; }
-          signIn();
-        }
-      }
+      msg.textContent = e.message;
     }
     finally { $('#go').disabled = false; }
   });
@@ -393,19 +307,14 @@ function initJobs() {
       await refreshList();
     } catch (e) { banner(e.message); if (S.current === id) openJob(id); }
   });
-  $('#deleteAccount').addEventListener('click', async () => {
-    try { await api('/api/account', { method: 'DELETE', json: { confirm: $('#confirmDelete').value } }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
-    catch (e) { banner(e.message); }
-  });
+
 }
 
 async function signedIn() {
   const guest = S.session.user.kind === 'guest';
   $('#who').textContent = guest ? 'Private guest workspace' : S.session.user.email; show('#who'); show('#signOut', !guest);
-  show('#accountSettings', !guest);
   updateAccessSummary();
-  show('#headerSignIn'); show('#developerMode'); show('#app');
-  renderQuota(S.session.usage);
+  show('#developerMode'); show('#app');
   const jobs = await refreshList();
   const want = new URLSearchParams(location.hash.slice(1)).get('job');
   if (want) await openJob(want, true);
@@ -416,9 +325,8 @@ function updateAccessSummary() {
   const refused = guest && S.session.generation?.accepting === false;
   show('#guestAccessSummary', refused);
   if (!refused) return;
-  // Say only why generation is closed right now; the per-workspace rule is the server's workspace_active refusal.
-  const reasons = { generation_paused: 'Live generation is paused right now.', cost_bound_unverified: 'Live generation is paused while its cost bound is verified.',
-    generation_budget_exhausted: 'The live-generation budget is used up for now.', generation_capacity: 'Every live-generation slot is busy. Try again in a moment.' };
+  const reasons = { generation_paused: 'Live generation is paused right now.',
+    generation_budget_exhausted: 'The live-generation budget is used up for now.' };
   $('#guestAccessText').textContent = `${reasons[S.session.generation.reason] || reasons.generation_paused} You can still explore the generated heroes.`;
 }
 function expireAccess() {
@@ -426,11 +334,11 @@ function expireAccess() {
   returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
   $('#heroLibrary').hidden = true; $('#jobs').replaceChildren();
   show('#guestAccessSummary', false); show('#headerSignIn', false);
-  $('#jobMsg').textContent = 'Your access has expired. Your draft is kept in this browser. Create your hero to reopen guest access.';
+  $('#jobMsg').textContent = 'Your workspace session has expired. Create your hero to open guest access.';
 }
 async function refreshAccess() {
   await loadSession();
-  if (S.session.signed_in) { updateAccessSummary(); renderQuota(S.session.usage); return; }
+  if (S.session.signed_in) { updateAccessSummary(); return; }
   expireAccess();
 }
 let guestOpening = null;
@@ -461,8 +369,8 @@ function initGuestAccess() {
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
-  const signinRoute = ['/signin', '/admin/signin'].includes(location.pathname);
-  $('#headerSignIn').textContent = signinRoute ? 'Sign in' : 'Your heroes';
+  const signinRoute = ['/admin/signin'].includes(location.pathname);
+  $('#headerSignIn').textContent = 'Admin sign in';
   initSignin(); initJobs(); initGuestAccess();
   bindOrbitDrag($('#preview'), 'workbench');
   document.querySelectorAll('a[href="/terms"],a[href="/privacy"]').forEach((link) => link.addEventListener('click', () => track('page_view', { page: 'legal' }, { flush: true })));
@@ -484,28 +392,18 @@ async function boot() {
     const id = new URLSearchParams(location.hash.slice(1)).get('job');
     if (id) openJob(id, true); else { returnToEntry(); if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'}); }
   });
-  $('#headerSignIn').addEventListener('click', async () => {
-    if (['/signin', '/admin/signin'].includes(location.pathname)) { signIn(); return; }
-    try { await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
-    if (!S.session?.signed_in) { signIn(); return; }
-    try {
-      await refreshList();
-      if (!S.session?.signed_in) return;
-      banner('');
-      show('#app'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
-      $('#heroLibrary').scrollIntoView({block:'start'});
-    } catch (e) { banner(e.message); }
-  });
+  $('#headerSignIn').addEventListener('click', signIn);
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
   $('#signOut').addEventListener('click', async () => {
-    try { await api('/api/auth/logout', { method: 'POST', json: {} }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
+    try { await api('/api/auth/logout', { method: 'POST', json: {} }); location.replace('/'); }
     catch (e) { banner(e.message); }
   });
   $('#headerSignIn').disabled = false;
-  show('#headerSignIn', !!S.session.signed_in || signinRoute);
-  if (location.pathname === '/signin') { show('#loading', false); return initVerify(); }
-  if (location.pathname === '/admin/signin') { show('#loading', false); signIn(); return; }
-  await restoreDraft();
+  show('#headerSignIn', signinRoute);
+  window.addEventListener('hashchange', () => {
+    if (location.pathname === '/admin/signin' && location.hash.startsWith('#t=')) initVerify().catch(e => banner(e.message));
+  });
+  if (location.pathname === '/admin/signin') { show('#loading', false); if (location.hash) return initVerify(); signIn(); return; }
   show('#loading', false); show('#entry');
   trackOnce('page:landing', 'page_view', { page: 'landing' });
   landing = landingGallery();

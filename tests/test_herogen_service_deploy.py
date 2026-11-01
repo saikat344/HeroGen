@@ -128,7 +128,7 @@ class TestModalApp(TempDirCase):
         mod, fake = self.load()
         f = fake.functions
         self.assertEqual(set(f), {"StoreService", "sanitize_image", "web", "run_job", "model_stages", "blender_stages",
-                                  "export_stages", "heldout_stages", "sweep", "retention", "admin_command",
+                                  "export_stages", "sweep", "retention", "admin_command",
                                   "selfcheck_report"})
         for name, kw in f.items():
             self.assertNotIn("retries", kw, f"{name}: retries are the store's job, never Modal's")
@@ -139,17 +139,17 @@ class TestModalApp(TempDirCase):
         self.assertNotIn("secrets", san)
         self.assertNotIn("volumes", san)
         secrets = {n: [s.name for s in kw.get("secrets", [])] for n, kw in f.items()}
-        self.assertEqual(secrets["web"], ["herogen-service-web"])
+        self.assertEqual(secrets["web"], ["herogen-service-web", "herogen-service-admin"])
         self.assertEqual(secrets["model_stages"], ["herogen-service-model"])
-        self.assertEqual(secrets["heldout_stages"], ["herogen-service-model"])
+
         self.assertEqual(secrets["blender_stages"], ["herogen-service-model"])
-        self.assertEqual(f["heldout_stages"]["max_containers"], 2, "held-out views yield to the jobs' own work")
+
         self.assertEqual(secrets["admin_command"], ["herogen-service-web", "herogen-service-admin"])
         self.assertEqual(secrets["StoreService"], ["herogen-service-admin"])
         for n in ("export_stages", "run_job", "sweep", "retention"):
             self.assertEqual(secrets[n], [], f"{n} holds no secret")
-        self.assertNotIn("herogen-service-admin", secrets["web"])
-        for n in ("run_job", "model_stages", "blender_stages", "export_stages", "heldout_stages"):
+        self.assertIn("herogen-service-admin", secrets["web"])
+        for n in ("run_job", "model_stages", "blender_stages", "export_stages"):
             self.assertTrue(f[n]["nonpreemptible"], n)
             self.assertTrue(f[n]["single_use_containers"], n)
         self.assertEqual(f["sweep"]["schedule"][0], "period")
@@ -166,13 +166,13 @@ class TestModalApp(TempDirCase):
 
     def test_staging_app_has_its_own_resources_and_no_secrets_in_image(self):
         mod, fake = self.load({**PROD, "HEROGEN_SERVICE_APP": "herogen-service-staging", "HEROGEN_SESSION_KEY": "s" * 40,
-                               "HEROGEN_EMAIL_API_KEY": "e" * 40, "HEROGEN_SERVICE_JOBS_PER_DAY": "9"})
+                               "HEROGEN_EMAIL_API_KEY": "e" * 40, "HEROGEN_SERVICE_MAX_RUNNING": "9"})
         self.assertEqual(mod.APP_NAME, "herogen-service-staging")
         f = fake.functions
-        self.assertEqual([s.name for s in f["web"]["secrets"]], ["herogen-service-staging-web"])
+        self.assertEqual([s.name for s in f["web"]["secrets"]], ["herogen-service-staging-web", "herogen-service-staging-admin"])
         self.assertEqual(sorted(v.name for v in f["web"]["volumes"].values()),
                          ["herogen-service-staging-data", "herogen-service-staging-legal"])
-        self.assertEqual(mod.IMAGE_ENV["HEROGEN_SERVICE_JOBS_PER_DAY"], "9")
+        self.assertEqual(mod.IMAGE_ENV["HEROGEN_SERVICE_MAX_RUNNING"], "9")
         self.assertNotIn("HEROGEN_SESSION_KEY", mod.IMAGE_ENV)
         self.assertNotIn("HEROGEN_EMAIL_API_KEY", mod.IMAGE_ENV)
         envs = [k for name, a, k in fake.image_log if name == "env"] + [a[0] for name, a, k in fake.image_log
@@ -222,7 +222,7 @@ class TestModalApp(TempDirCase):
         self.assertGreater(f["run_job"]["timeout"], sum(f[n]["timeout"] for n in ("model_stages", "blender_stages",
                                                                                "export_stages")))
         self.assertLessEqual(f["run_job"]["timeout"], 24 * 3600)
-        self.assertGreater(f["heldout_stages"]["timeout"], mod.DEPLOY.stage_timeout_s)
+        self.assertNotIn("heldout_stages", f)
         with self.assertRaises(RuntimeError):
             self.load({**PROD, "HEROGEN_SERVICE_BLENDER_TIMEOUT": str(12 * 3600)})
 
@@ -232,24 +232,24 @@ class TestModalApp(TempDirCase):
         mod, _ = self.load()
         svc = mod.StoreService()
         svc.store = Store(self.tmp / "m.db")
-        self.assertEqual(svc.call("usage", ("u_x", 1, 1), {})["jobs_today"], 0)
+        self.assertEqual(svc.call("generation_get", (), {})["active"], 0)
         with self.assertRaises(StoreError) as cm:
-            svc.call("allow_add", ("eve@example.com",), {})
+            svc.call("generation_update", (), {})
         self.assertEqual(cm.exception.code, "bad_method")
         key = "k" * 48
         os.environ["HEROGEN_ADMIN_KEY"] = key
         try:
             for bad in ("", "x" * 48, None):
                 with self.assertRaises(StoreError) as cm:
-                    svc.admin_call(bad, "allow_add", ("eve@example.com",), {})
+                    svc.admin_call(bad, "generation_update", (), {})
                 self.assertEqual(cm.exception.code, "forbidden")
             with self.assertRaises(StoreError):
                 svc.admin_call(key, "job_create", (), {})       # the admin path serves admin methods only
-            svc.admin_call(key, "allow_add", ("eve@example.com",), {})
-            self.assertEqual([r["email"] for r in svc.store.allow_list()], ["eve@example.com"])
+            svc.admin_call(key, "generation_update", (), {"actor":"fixture", "enabled":True})
+            self.assertTrue(svc.store.generation_get()["enabled"])
             os.environ["HEROGEN_ADMIN_KEY"] = "short"
             with self.assertRaises(StoreError):
-                svc.admin_call("short", "allow_list", (), {})  # a missing or weak key never opens the path
+                svc.admin_call("short", "generation_get", (), {})  # a missing or weak key never opens the path
         finally:
             del os.environ["HEROGEN_ADMIN_KEY"]
             svc.store.close()
@@ -289,19 +289,19 @@ class TestSettings(TempDirCase):
         self.assertEqual(len(set(config.ENV.values())), len(config.ENV))
 
     def test_parsing(self):
-        s = config.from_env({"HEROGEN_SESSION_KEY": "k" * 40, "HEROGEN_SERVICE_JOBS_PER_DAY": "7",
+        s = config.from_env({"HEROGEN_SESSION_KEY": "k" * 40, "HEROGEN_SERVICE_MAX_RUNNING": "7",
                              "HEROGEN_SERVICE_RATE_AUTH_IP": "3/60", "HEROGEN_SERVICE_HOSTS": "a.example.com, b",
                              "HEROGEN_SERVICE_PROFILES": "roblox-avatar,best", "HEROGEN_SERVICE_PROFILE": "best",
                              "HEROGEN_SERVICE_DATA": "/data"})
-        self.assertEqual((s.jobs_per_day, s.rate_auth_ip, s.allowed_hosts), (7, (3, 60), ("a.example.com", "b")))
+        self.assertEqual((s.max_running_jobs, s.rate_auth_ip, s.allowed_hosts), (7, (3, 60), ("a.example.com", "b")))
         self.assertEqual((s.profiles, s.data_dir), (("roblox-avatar", "best"), Path("/data")))
         self.assertNotIn("k" * 40, repr(s), "secrets stay out of reprs and logs")
 
     def test_validation(self):
         good = {"HEROGEN_SESSION_KEY": "k" * 40}
         bad = [({}, "HEROGEN_SESSION_KEY"), ({"HEROGEN_SESSION_KEY": "short"}, "HEROGEN_SESSION_KEY"),
-               ({**good, "HEROGEN_SERVICE_JOBS_PER_DAY": "x"}, "JOBS_PER_DAY"),
-               ({**good, "HEROGEN_SERVICE_JOBS_PER_DAY": "0"}, "JOBS_PER_DAY"),
+               ({**good, "HEROGEN_SERVICE_MAX_RUNNING": "x"}, "MAX_RUNNING"),
+               ({**good, "HEROGEN_SERVICE_MAX_RUNNING": "0"}, "MAX_RUNNING"),
                ({**good, "HEROGEN_SERVICE_BASE_URL": "https://a.example.com/path"}, "BASE_URL"),
                ({**good, "HEROGEN_SERVICE_PROFILE": "secret"}, "PROFILE"),
                ({**good, "HEROGEN_SERVICE_MODE": "production"}, "https"),
@@ -327,9 +327,9 @@ class TestSettings(TempDirCase):
         self.assertEqual(prod.hosts(), ("h.example.org",))
 
     def test_deploy_env_drops_secrets(self):
-        env = {"HEROGEN_SERVICE_JOBS_TOTAL": "9", "HEROGEN_SESSION_KEY": "s", "HEROGEN_EMAIL_API_KEY": "e",
+        env = {"HEROGEN_SERVICE_MAX_RUNNING": "9", "HEROGEN_SESSION_KEY": "s", "HEROGEN_EMAIL_API_KEY": "e",
                "MODEL_API_KEY": "m", "HOME": "/x", "HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
-        self.assertEqual(config.env_for_deploy(env), {"HEROGEN_SERVICE_JOBS_TOTAL": "9"})
+        self.assertEqual(config.env_for_deploy(env), {"HEROGEN_SERVICE_MAX_RUNNING": "9"})
 
 
 class TestBridge(TempDirCase):

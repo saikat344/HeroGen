@@ -1,4 +1,4 @@
-"""Jobs end to end with the fake runner: success, rejection with its reason, retries within limits, refunds,
+"""Jobs end to end with the fake runner: success, rejection with its reason, retries within limits,
 cancellation, duplicate workers, resuming, the copy-and-fence work folder, the sweep, retention, stage commands."""
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class JobCase(TempDirCase):
         super().setUp()
         self.clock = Clock()
         self.s = settings(self.tmp)
-        self.store = Store(self.s.meta_path, clock=self.clock)
+        self.store = Store(self.s.meta_path, clock=self.clock, max_running=self.s.max_running_jobs)
         self.storage = Storage(self.s.data_dir)
         self.user = make_user(self.store)
         self.runner = FakeRunner()
@@ -61,8 +61,7 @@ class JobCase(TempDirCase):
             self.storage.save_input(self.user["id"], jid, png(400, 600))
         self.n += 1
         job, _ = self.store.job_create(job_id=jid, user_id=self.user["id"], client_key=key or f"key-{self.n:05d}",
-                                       kind=kind, profile="roblox-ingame", jobs_per_day=10, jobs_total=10,
-                                       storage_max_bytes=10 ** 10, prompt="a knight" if kind == "prompt" else "",
+                                       kind=kind, profile="roblox-ingame", storage_max_bytes=10 ** 10, prompt="a knight" if kind == "prompt" else "",
                                        **kw)
         return job
 
@@ -94,9 +93,9 @@ class TestJobFlow(JobCase):
         job = self.new_job()
         self.assertEqual(self.go(job), "succeeded")
         j = self.store.job_get(job["id"])
-        self.assertEqual((j["state"], j["attempts"], j["counts_quota"]), ("succeeded", 1, 1))
+        self.assertEqual((j["state"], j["attempts"]), ("succeeded", 1))
         self.assertGreater(j["bytes"], 0)
-        self.assertAlmostEqual(j["cost_usd"], 0.0375, places=6, msg="the job's own stages; 2h runs beside it")
+        self.assertAlmostEqual(j["cost_usd"], 0.0375, places=6, msg="the job's main stages")
         self.assertIn("basis", json.loads(j["cost_detail"]))
         st = self.stages(job)
         self.assertEqual(set(st), {"0", "1", "2", "3", "3f", "4", "6", "5"})
@@ -114,7 +113,7 @@ class TestJobFlow(JobCase):
         job = self.new_job()
         self.assertEqual(self.go(job), "rejected")
         j = self.store.job_get(job["id"])
-        self.assertEqual((j["error_stage"], j["error_code"], j["counts_quota"]), ("2", "rejected", 1))
+        self.assertEqual((j["error_stage"], j["error_code"]), ("2", "rejected"))
         self.assertIn("turnaround", j["error_message"])
         self.assertIn("height_agreement_4_views measured 0.81, needs >= 0.95", j["error_message"])
         self.assertIn("full body", j["error_message"], "with a tip for the next sketch")
@@ -126,19 +125,9 @@ class TestJobFlow(JobCase):
         job = self.new_job()
         self.assertEqual(self.go(job), "failed")
         j = self.store.job_get(job["id"])
-        self.assertEqual((j["error_code"], j["counts_quota"], j["attempts"]), ("stage_error", 1, 1),
-                         "stages 1-2 spent money: the job counts")
+        self.assertEqual((j["error_code"], j["attempts"]), ("stage_error", 1))
         self.assertNotIn("today's heroes", j["error_message"])
 
-    def test_an_error_before_any_spend_is_refunded(self):
-        self.runner.fail = {"0": "error"}
-        job = self.new_job()
-        self.assertEqual(self.go(job), "failed")
-        j = self.store.job_get(job["id"])
-        self.assertEqual(j["counts_quota"], 0)
-        self.assertIn("does not use up one of today's heroes, but it still counts toward your total",
-                      j["error_message"])
-        self.assertNotIn("Traceback", j["error_message"])
 
     def test_a_crashing_runner_is_recorded_not_raised(self):
         self.runner.fail = {"1": "raise"}
@@ -167,7 +156,7 @@ class TestJobFlow(JobCase):
         self.assertEqual(self.go(job), "queued")
         self.assertEqual(self.go(job, call="call-2"), "failed")
         j = self.store.job_get(job["id"])
-        self.assertEqual((j["attempts"], j["counts_quota"]), (2, 0))
+        self.assertEqual(j["attempts"], 2)
         self.assertIsNone(self.go(job, call="call-3"), "a finished job is never run again")
 
     def test_duplicate_worker_does_nothing(self):
@@ -193,11 +182,6 @@ class TestJobFlow(JobCase):
         self.assertEqual(self.go(job), "canceled")
         self.assertEqual(self.runner.calls, ["0", "1"])
 
-    def test_missing_upload_fails_with_refund(self):
-        job = self.new_job()
-        self.storage.input_path(self.user["id"], job["id"]).unlink()
-        self.assertEqual(self.go(job), "failed")
-        self.assertEqual(self.store.job_get(job["id"])["counts_quota"], 0)
 
     def test_restarted_group_stops_after_the_limit(self):
         job = self.new_job()
@@ -225,138 +209,6 @@ class TestJobFlow(JobCase):
         six = self.stages(job)["6"]
         self.assertEqual(six["state"], "skipped")
         self.assertIn("not part of this version", six["message"])
-
-
-class TestHeldoutBeside(JobCase):
-    """Stage 2h runs beside the job once stage 2 passes; nothing that happens to it fails, delays, retries or
-    refunds the job."""
-
-    def heldout_now(self, runner=None):
-        """A start hook running 2h at once, inside the job's flow (2h finishes before the job)."""
-        def start(job):
-            self.run_heldout(job, runner)
-        return start
-
-    def run_heldout(self, job, runner=None, root=None):
-        from herogen.service.snapshot import LocalVolume
-        from herogen.service.worker import HeldoutWorkdir, run_heldout
-
-        ctx = make_context(self.s, self.storage, job)
-        work = (root or self.tmp / "heldout-work") / job["id"]
-
-        def workdir_for(claim):
-            return HeldoutWorkdir(ctx, work, LocalVolume(), lambda: self.store.side_live(job["id"], "2h", claim))
-
-        return run_heldout(self.store, self.s, job, runner or self.runner, workdir_for)
-
-    def assert_delivered(self, job, attempts=1):
-        j = self.store.job_get(job["id"])
-        self.assertEqual((j["state"], j["error_code"], j["error_message"], j["attempts"], j["counts_quota"],
-                          j["refunded_at"]), ("succeeded", None, None, attempts, 1, None))
-        self.assertTrue((self.storage.run_dir(self.user["id"], job["id"]) / "04-body" / "high.glb").is_file())
-        return j
-
-    def test_every_kind_of_2h_failure_leaves_the_job_delivered(self):
-        class Fails(FakeRunner):
-            def __init__(self, how):
-                super().__init__()
-                self.how = how
-
-            def run(self, spec, ctx):
-                if spec.key == "2h":
-                    self.calls.append("2h")
-                    if self.how == "timeout":
-                        return Outcome("failed", 9.0, 0.0, "slow", "timeout", True, "timed out")
-                    if self.how == "rate_limit":
-                        return Outcome("failed", 1.0, 0.0, "busy", "model_unavailable", True, "HTTP 429: slow down")
-                    if self.how == "api_error":   # the stage stops with status: error in its record
-                        write_record(ctx.run_dir, {"stage": "2h", "name": "heldout", "ok": False,
-                                                   "status": "error", "cost_usd": 0.0025, "checks": []})
-                        return CliRunner.outcome(spec, ctx, 1.0, 1, "", "ClientError", False)
-                    if self.how == "every_view_rejected":
-                        write_record(ctx.run_dir, {"stage": "2h", "name": "heldout", "ok": False, "cost_usd": 0.05,
-                                                   "checks": [{"name": "views_accepted", "value": 0, "threshold": 1,
-                                                               "pass": False}]})
-                        return CliRunner.outcome(spec, ctx, 1.0, 2, "", "", False)
-                    if self.how == "crash":
-                        raise RuntimeError("container lost")
-                    self.calls.pop()       # recorded again by the base class
-                return super().run(spec, ctx)
-
-        for how in ("timeout", "rate_limit", "api_error", "every_view_rejected", "crash"):
-            runner = Fails(how)
-            self.runner = runner
-            job = self.new_job()
-            self.assertEqual(self.go(job, heldout=self.heldout_now(runner)), "succeeded", how)
-            j = self.assert_delivered(job)
-            side = self.stages(job)["2h"]
-            self.assertEqual(side["state"], "unavailable", how)
-            self.assertIn("The hero is not affected.", side["message"], how)
-            self.assertEqual(runner.calls.count("2h"), 1, f"{how}: never retried")
-            if how == "every_view_rejected":
-                self.assertIn("did not accept", side["message"])
-                self.assertAlmostEqual(j["cost_usd"], 0.0375 + 0.05, places=6, msg="its spend still counts")
-
-    def test_the_job_finishes_first_and_2h_attaches_later(self):
-        started = []
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=started.append), "succeeded")
-        j = self.assert_delivered(job)
-        self.assertAlmostEqual(j["cost_usd"], 0.0375, places=6)
-        self.assertEqual(self.stages(job).get("2h"), None, "not started yet: the job did not wait for it")
-        self.assertEqual(self.run_heldout(started[0]), "passed")
-        j = self.assert_delivered(job)
-        self.assertAlmostEqual(j["cost_usd"], 0.05, places=6, msg="2h's cost joins the job's")
-        self.assertAlmostEqual(json.loads(j["cost_detail"])["heldout_usd"], 0.0125, places=6)
-        self.assertTrue((self.storage.run_dir(self.user["id"], job["id"]) / "heldout" / "front-left-34.png").is_file())
-        self.assertIsNone(self.run_heldout(started[0]), "at most once per job")
-
-    def test_2h_finishes_first(self):
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=self.heldout_now()), "succeeded")
-        j = self.assert_delivered(job)
-        self.assertEqual(self.stages(job)["2h"]["state"], "passed")
-        self.assertAlmostEqual(j["cost_usd"], 0.05, places=6)
-
-    def test_canceled_while_2h_runs(self):
-        store, user = self.store, self.user
-
-        class CancelDuring2h(FakeRunner):
-            def run(self, spec, ctx):
-                if spec.key == "2h":
-                    store.job_cancel(ctx.job_id, user["id"])
-                return super().run(spec, ctx)
-
-        self.runner = CancelDuring2h()
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=self.heldout_now()), "canceled")
-        j = self.store.job_get(job["id"])
-        self.assertEqual(j["state"], "canceled", "2h's late finish does not reopen the job")
-        self.assertEqual(self.stages(job)["2h"]["state"], "passed", "its record is still attached")
-        self.assertNotIn("3", self.runner.calls, "the job's own path stopped at the next stage")
-
-    def test_a_lost_2h_worker_is_recorded_as_unavailable(self):
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=lambda j: self.store.side_claim(j["id"], "2h", "lost", 60)), "succeeded")
-        self.clock.advance(61)
-        self.store.reconcile_stale(self.s.max_attempts)
-        self.assertEqual(self.stages(job)["2h"]["state"], "unavailable")
-        self.assert_delivered(job)
-
-    def test_starting_2h_failing_is_not_fatal(self):
-        def broken(job):
-            raise RuntimeError("could not spawn")
-
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=broken), "succeeded")
-        self.assert_delivered(job)
-
-    def test_a_job_rejected_at_stage_2_starts_no_2h(self):
-        self.runner = FakeRunner(fail={"2": "reject"})
-        started = []
-        job = self.new_job()
-        self.assertEqual(self.go(job, heldout=started.append), "rejected")
-        self.assertEqual(started, [])
 
 
 class TestLeases(JobCase):
@@ -409,48 +261,6 @@ class TestLeases(JobCase):
 
         return run_heldout(self.store, self.s, job, runner or self.runner, workdir_for)
 
-    def test_a_long_copy_in_does_not_cost_the_held_out_views_their_lease(self):
-        from herogen.service.worker import HeldoutWorkdir
-
-        job = self.new_job()
-        self.store.job_claim(job["id"], "c", 60, 2)
-        test = self
-        sql = "SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'"
-
-        class SlowOpen(HeldoutWorkdir):
-            def open(self):   # copying the user's whole cache in takes longer than the stage timeout
-                test.outlast(sql, job["id"], check=lambda: test.assertEqual(
-                    test.stages(job)["2h"]["state"], "running", "the sweep took a live 2h's lease"))
-                return super().open()
-
-        self.assertEqual(self.heldout(job, workdir=SlowOpen), "passed")
-        row = self.stages(job)["2h"]
-        self.assertEqual((row["state"], row["cost_usd"]), ("passed", 0.0125), "its result and spend are kept")
-
-    def test_a_dead_held_out_worker_loses_its_lease_within_the_ttl(self):
-        from herogen.service.worker import LEASE_TTL_S
-
-        job = self.new_job()
-        self.store.job_claim(job["id"], "c", 60, 2)
-        test = self
-        sql = "SELECT lease_until FROM job_stages WHERE job_id=? AND stage='2h'"
-
-        class Dies(FakeRunner):
-            def run(self, spec, ctx):
-                test.outlast(sql, job["id"], total_s=LEASE_TTL_S * 2, check=lambda: None)
-                raise SystemExit("the container died")   # nothing after this runs: no record, no more renewals
-
-        with self.assertRaises(SystemExit):
-            self.heldout(job, Dies())
-        until = self.lease(sql, job["id"])
-        self.assertEqual(self.stages(job)["2h"]["state"], "running")
-        self.clock.advance(LEASE_TTL_S - 2)
-        self.store.reconcile_stale(self.s.max_attempts)
-        self.assertEqual(self.lease(sql, job["id"]), until, "nothing renews it any more")
-        self.assertEqual(self.stages(job)["2h"]["state"], "running")
-        self.clock.advance(3)
-        self.store.reconcile_stale(self.s.max_attempts)
-        self.assertEqual(self.stages(job)["2h"]["state"], "unavailable")
 
     def test_a_long_gap_between_groups_does_not_cost_the_job_its_lease(self):
         test, job = self, self.new_job()
@@ -482,7 +292,7 @@ class TestLeases(JobCase):
         self.clock.advance(LEASE_TTL_S - 2)
         self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [])
         self.clock.advance(3)
-        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "queued")])
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "failed")])
 
     def test_a_dead_orchestrator_mid_stage_holds_the_job_until_the_stages_lease_ends(self):
         from herogen.service.worker import LEASE_MARGIN_S, LEASE_TTL_S
@@ -501,55 +311,7 @@ class TestLeases(JobCase):
         self.clock.advance(LEASE_TTL_S + 1)
         self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [], "stage 3's own lease still holds it")
         self.clock.t = started + self.s.blender_timeout_s + LEASE_MARGIN_S + 1
-        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "queued")])
-
-
-class TestHeldoutFiles(JobCase):
-    """The job's own path and 2h never write the same file."""
-
-    def test_the_jobs_copy_back_leaves_2h_files_alone(self):
-        job = self.new_job()
-        claim = self.store.job_claim(job["id"], "c", 60, 2)
-        ctx = make_context(self.s, self.storage, claim["job"])
-        ctx.run_dir.mkdir(parents=True)
-        wd = CopyWorkdir(ctx, self.tmp / "main", LocalVolume(), lambda: True)
-        loc = wd.open()
-        (ctx.run_dir / "heldout").mkdir()                        # 2h writes while the job's stage runs
-        (ctx.run_dir / "heldout" / "front-left-34.png").write_bytes(b"view")
-        (ctx.run_dir / "stage-2h.json").write_text("{}")
-        (loc.run_dir / "stage-3.json").write_text("{}")
-        wd.sync()                                                # mirrors with deletion, except 2h's paths
-        self.assertTrue((ctx.run_dir / "heldout" / "front-left-34.png").is_file())
-        self.assertTrue((ctx.run_dir / "stage-2h.json").is_file())
-        self.assertTrue((ctx.run_dir / "stage-3.json").is_file())
-        wd.close()
-
-    def test_2h_writes_only_its_own_paths_and_never_into_a_deleted_run(self):
-        from herogen.service.worker import HeldoutWorkdir
-
-        job = self.new_job()
-        self.store.job_claim(job["id"], "c", 60, 2)
-        self.assertTrue(self.store.side_claim(job["id"], "2h", "k", 600))
-        ctx = make_context(self.s, self.storage, job)
-        ctx.run_dir.mkdir(parents=True)
-        (ctx.run_dir / "stage-3.json").write_text('{"by": "job"}')
-        wd = HeldoutWorkdir(ctx, self.tmp / "h", LocalVolume(), lambda: self.store.side_live(job["id"], "2h", "k"))
-        loc = wd.open()
-        (loc.run_dir / "heldout").mkdir()
-        (loc.run_dir / "heldout" / "v.png").write_bytes(b"v")
-        (loc.run_dir / "stage-2h.json").write_text("{}")
-        (loc.run_dir / "stage-3.json").write_text('{"by": "2h copy"}')   # a stale copy of the job's file
-        (loc.run_dir / "04-body").mkdir()
-        (loc.run_dir / "04-body" / "high.glb").write_bytes(b"stale")
-        wd.sync()
-        self.assertEqual((ctx.run_dir / "stage-3.json").read_text(), '{"by": "job"}', "the job's file is untouched")
-        self.assertFalse((ctx.run_dir / "04-body").exists())
-        self.assertTrue((ctx.run_dir / "heldout" / "v.png").is_file())
-        self.storage.delete_job(self.user["id"], job["id"])     # the user deletes the hero while 2h runs
-        (loc.run_dir / "heldout" / "w.png").write_bytes(b"w")
-        wd.sync()
-        self.assertFalse(ctx.run_dir.exists(), "a deleted run folder is never brought back")
-        wd.close()
+        self.assertEqual(self.store.reconcile_stale(self.s.max_attempts), [(job["id"], "failed")])
 
 
 class TestDeleteDuringCopyBack(JobCase):
@@ -563,7 +325,7 @@ class TestDeleteDuringCopyBack(JobCase):
 
         self.job = self.new_job()
         self.started = []
-        self.assertEqual(self.go(self.job, heldout=self.started.append), "succeeded")
+        self.assertEqual(self.go(self.job), "succeeded")
         self.shared = self.tmp / "shared"
         shutil.copytree(self.s.data_dir, self.shared)
         self.vol_worker = SimVolume(self.shared, self.tmp / "view-worker")
@@ -584,37 +346,10 @@ class TestDeleteDuringCopyBack(JobCase):
             self.vol_web.commit()
         return act
 
-    def run_2h(self, runner):
-        from herogen.service.worker import HeldoutWorkdir, run_heldout
-
-        ctx = make_context(self.s, self.st_worker, self.started[0])
-        return run_heldout(self.store, self.s, self.started[0], runner, lambda claim: HeldoutWorkdir(
-            ctx, self.tmp / "work", self.vol_worker, lambda: self.store.side_live(self.job["id"], "2h", claim)))
 
     def files(self, under: Path) -> list[str]:
         return sorted(p.relative_to(under).as_posix() for p in under.rglob("*") if p.is_file()) if under.exists() else []
 
-    def test_hero_deleted_while_2h_commits(self):
-        self.vol_worker.before_commit = self.web(delete_account=False)
-        self.run_2h(FakeRunner())
-        run = self.shared / "users" / self.user["id"] / "runs" / self.job["id"]
-        # The simulated Volume commits files, not empty folders, so the check is on files.
-        self.assertEqual(self.files(run), [], "no file of the deleted hero comes back")
-
-    def test_account_deleted_while_2h_commits(self):
-        class AddsCache(FakeRunner):
-            def run(self, spec, ctx):
-                if spec.key == "2h":
-                    ctx.cache_dir.mkdir(parents=True, exist_ok=True)
-                    (ctx.cache_dir / "new-entry.json").write_text("{}")
-                return super().run(spec, ctx)
-
-        self.vol_worker.before_commit = self.web(delete_account=True)
-        self.run_2h(AddsCache())
-        user = self.shared / "users" / self.user["id"]
-        self.assertEqual(self.files(user), [], "no run file and no cache entry comes back")
-        purge(self.store, self.s, Storage(self.shared))
-        self.assertEqual(self.files(user), [])
 
     def test_the_jobs_own_copy_back_is_undone_too(self):
         job = self.new_job()
@@ -639,23 +374,18 @@ class TestDeleteDuringCopyBack(JobCase):
         self.assertEqual(self.files(run), [])
         wd.close()
 
-    def test_nothing_is_undone_when_nothing_was_deleted(self):
-        self.run_2h(FakeRunner())
-        run = self.shared / "users" / self.user["id"] / "runs" / self.job["id"]
-        self.assertIn("stage-2h.json", self.files(run))
-        self.assertIn("heldout/front-left-34.png", self.files(run))
-
 
 class TestSweep(JobCase):
-    def test_dead_worker_is_requeued_and_dispatched(self):
+    def test_dead_worker_ends_and_next_queued_job_dispatches(self):
         job = self.new_job()
-        self.store.job_claim(job["id"], "dead", 60, 2)
+        self.store.job_claim(job['id'], 'dead', 60, 2)
+        next_job = self.new_job()
         self.clock.advance(61)
         sent = []
-        out = reconcile(self.store, self.s, lambda jid: sent.append(jid) or f"call-{len(sent)}")
-        self.assertEqual(out["stale"], [(job["id"], "queued")])
-        self.assertEqual(sent, [job["id"]])
-        self.assertEqual(self.go(job, call="call-1"), "succeeded")
+        result = reconcile(self.store, self.s, lambda jid: sent.append(jid) or 'call-next')
+        self.assertEqual(result['stale'], [(job['id'], 'failed')])
+        self.assertEqual(sent, [next_job['id']])
+        self.assertEqual(self.go(next_job, call='call-next'), 'succeeded')
 
     def test_queue_respects_the_running_cap(self):
         jobs = []
@@ -694,48 +424,6 @@ class TestSweep(JobCase):
 
 
 class TestCopyWorkdir(JobCase):
-    def test_refinement_cap_survives_lost_local_workdir_with_real_subprocess(self):
-        job = self.new_job()
-        self.store.db.execute("UPDATE jobs SET profile='best' WHERE id=?", (job["id"],))
-        claim = self.store.job_claim(job["id"], "worker", 60, 2)
-        job, attempt = claim["job"], claim["attempt"]
-        counts = []
-        script = '''import json, os, sys
-from pathlib import Path
-from herogen.service.refine_budget import remote_budget
-run = Path(sys.argv[1])
-remote_budget("read", cap=.8)
-sent = 0
-for index in range(int(sys.argv[2])):
-    reservation = remote_budget("reserve", token=f"{os.getpid()}-{index}", amount=.01, cap=.8)
-    if not reservation["allowed"]:
-        break
-    sent += 1
-(run / "stage-3f.json").write_text(json.dumps({"ok": True, "sent": sent}))
-'''
-        class Runner(CliRunner):
-            lost = True
-            def command(inner, spec, ctx, env, work):
-                return [sys.executable, "-c", script, str(ctx.run_dir), "60" if inner.lost else "100"], None
-            def run(inner, spec, ctx):
-                if spec.key != "3f":
-                    return Outcome("passed")
-                outcome = super().run(spec, ctx)
-                counts.append(json.loads((ctx.run_dir / "stage-3f.json").read_text())["sent"])
-                if inner.lost:
-                    raise KeyboardInterrupt()
-                return outcome
-        runner = Runner()
-        ctx = make_context(self.s, self.storage, job)
-        def execute():
-            return run_group(self.store, self.s, job, attempt, "blender", 0, runner,
-                             CopyWorkdir(ctx, self.tmp / "local", LocalVolume(), lambda: True))
-        with self.assertRaises(KeyboardInterrupt):
-            execute()
-        self.assertFalse((ctx.run_dir / "stage-3f.json").exists())
-        runner.lost = False
-        self.assertEqual(execute().status, "ok")
-        self.assertEqual(counts, [60, 20])
 
     def test_copies_in_and_out_and_fences_stale_attempts(self):
         job = self.new_job()
@@ -825,9 +513,7 @@ class TestStageCommands(TempDirCase):
         specs = {s.key: s for s in PLAN}
         argv, _ = r.command(specs["2"], ctx, {}, self.tmp)
         self.assertEqual(argv[:4], ["py", "-m", "herogen.service.pipestage", "2"])
-        argv, _ = r.command(specs["2h"], ctx, {}, self.tmp)
-        self.assertEqual(argv[argv.index("--stages") + 1], "2h")
-        self.assertEqual(specs["2h"].group, "heldout")
+        self.assertNotIn("2h", specs)
 
     def test_pipestage_exit_codes(self):
         from unittest import mock

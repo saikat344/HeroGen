@@ -20,7 +20,7 @@ What runs where:
   (`single_use_containers`), so nothing of one job is left where another job runs.
 - `sweep` (every minute): requeues jobs whose worker died and starts queued jobs; `retention` (daily) deletes
   expired files and records.
-- `admin` (local entrypoint): `modal run -m herogen.service.modal_app::admin --args "invite --count 3"`. The
+- `admin` (local entrypoint): `modal run -m herogen.service.modal_app::admin --args "generation-settings"`. The
   `snapshots` and `snapshot-quarantine` commands work on the `<app>-meta` volume directly, so they also work
   while the store cannot start.
 - `selfcheck` (local entrypoint): reports what the worker images hold (Blender version, the stage CLIs' options,
@@ -83,8 +83,8 @@ def group_timeout(group: str) -> int:
     return sum(1 for s in PLAN if s.group == group) * per + GROUP_MARGIN_S
 
 
-TIMEOUTS = {g: group_timeout(g) for g in ("model", "blender", "export", "heldout")}
-# The orchestrator waits for the job's own groups only; the held-out views run beside it in their own function.
+TIMEOUTS = {g: group_timeout(g) for g in ("model", "blender", "export")}
+# The orchestrator waits for all three main groups.
 JOB_TIMEOUT = sum(TIMEOUTS[g] for g in ("model", "blender", "export")) + GROUP_MARGIN_S
 if JOB_TIMEOUT > 24 * HOUR:
     raise RuntimeError(f"stage timeouts add up to {JOB_TIMEOUT / HOUR:.1f} h per job, over Modal's 24 h limit")
@@ -270,7 +270,7 @@ def _submit(job_id: str) -> str:
     return run_job.spawn(job_id).object_id
 
 
-@app.function(image=web_image, secrets=web_secrets, volumes={DATA: data_vol, LEGAL: legal_vol}, min_containers=1,
+@app.function(image=web_image, secrets=[*web_secrets, admin_secret], volumes={DATA: data_vol, LEGAL: legal_vol}, min_containers=1,
               timeout=600)
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app(custom_domains=CUSTOM_DOMAINS or None)
@@ -294,7 +294,7 @@ def web():
             raise UploadRejected(r["message"])
         return r["png"], r["info"]
 
-    svc = Services(settings=s, store=RemoteStore(), signer=Signer(s.signing_key),
+    svc = Services(settings=s, store=RemoteStore(admin_key=os.environ.get("HEROGEN_ADMIN_KEY")), signer=Signer(s.signing_key),
                    storage=Storage(Path(DATA), ModalVolumeView(data_vol)),
                    sender=make_sender(s.email_provider, api_key=s.email_api_key, sender=s.email_from),
                    sanitize=sanitize, submit=_submit)
@@ -321,11 +321,10 @@ def run_job(job_id: str) -> str | None:
 
         dispatch_queued(RemoteStore(), _settings(), _submit)
 
-    def heldout(job: dict) -> None:
-        heldout_stages.spawn(job)   # started, not awaited: the job never waits for the held-out views
-
-    return orchestrate(RemoteStore(), _settings(), Storage(Path(DATA)), job_id, modal.current_function_call_id(),
-                       execute, redispatch=redispatch, volume=data_vol, heldout=heldout)
+    result = orchestrate(RemoteStore(), _settings(), Storage(Path(DATA)), job_id, modal.current_function_call_id(),
+                       execute, redispatch=redispatch, volume=data_vol)
+    redispatch(job_id)
+    return result
 
 
 def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
@@ -364,32 +363,6 @@ def blender_stages(job: dict, attempt: int, resume: int) -> dict:
               timeout=TIMEOUTS["export"], nonpreemptible=True, single_use_containers=True, max_containers=20)
 def export_stages(job: dict, attempt: int, resume: int) -> dict:
     return _group(job, attempt, resume, "export")
-
-
-@app.function(image=web_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["model"][0],
-              memory=WORKERS["model"][1], timeout=TIMEOUTS["heldout"], nonpreemptible=True,
-              single_use_containers=True, max_containers=DEPLOY.heldout_concurrency)
-def heldout_stages(job: dict) -> str | None:
-    """The held-out views (stage 2h) of one job, beside the job's own path; never fatal to it (worker.run_heldout).
-    At most `heldout_concurrency` run at once service-wide, so they yield the Model API to the jobs' own stages;
-    calls beyond that wait in Modal's queue."""
-    import logging
-
-    from herogen.service.runner import CliRunner
-    from herogen.service.storage import Storage
-    from herogen.service.worker import HeldoutWorkdir, make_context, run_heldout
-
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    s = _settings()
-    store = RemoteStore()
-    ctx = make_context(s, Storage(Path(DATA)), job)
-
-    def workdir_for(claim: str):
-        return HeldoutWorkdir(ctx, Path("/tmp/herogen-heldout") / job["id"], data_vol,
-                              lambda: store.side_live(job["id"], "2h", claim))
-
-    return run_heldout(store, s, job, CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "")), workdir_for,
-                       price_per_s("model"), TIMEOUTS['heldout'])
 
 
 @app.function(image=web_image, schedule=modal.Period(minutes=1), timeout=120)

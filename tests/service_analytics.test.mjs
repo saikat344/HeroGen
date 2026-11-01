@@ -55,7 +55,7 @@ test('coarse device detection reports only mobile or desktop', () => {
 });
 
 test('knownCreateResult maps only allow-listed codes and never raw messages', () => {
-  for (const code of ['accepted', 'generation_paused', 'cost_bound_unverified', 'generation_capacity', 'quota']) {
+  for (const code of ['accepted', 'generation_paused', 'generation_budget_exhausted', 'rate_limited', 'storage_full']) {
     assert.equal(knownCreateResult(code, 503), code);
   }
   assert.equal(knownCreateResult('unexpected raw message', 401), 'signed_out');

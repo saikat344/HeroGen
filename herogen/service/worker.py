@@ -5,13 +5,12 @@ attempt and refuses duplicates, then hands each stage group (model, blender, exp
 a function call in this process, on Modal a call to that group's function (`modal_app`). The group runs its
 stages with `run_group`, which before every stage checks that its attempt is still the job's live one (a
 canceled, deleted or superseded attempt stops at the next stage), records the stage as running with a lease
-that covers the stage's timeout, and records the outcome. The orchestrator and the held-out views also renew their
-leases while they run (`LeaseKeeper`).
+that covers the stage's timeout, and records the outcome. The orchestrator also renews its
+lease while they run (`LeaseKeeper`).
 
 Errors are sorted three ways. A rejection (a gate failed) finishes the job as rejected with the stage's reason.
 A transient error (a timeout, the model service answering 429 or 5xx) queues the job for another attempt while
-attempts remain. Anything else, and a job out of attempts, fails it; the store gives the quota back only when the
-job spent nothing, at most a few times a day per user (`store.Store._refund_ok`). A worker that dies without
+attempts remain. Anything else, and a job out of attempts, fails it. A worker that dies without
 reporting is found by `reconcile` once its lease runs out. A retried attempt resumes after the stages that
 already passed, and the per-user model cache makes repeated model calls free.
 """
@@ -33,7 +32,6 @@ from typing import Any, Protocol
 from herogen.service.config import Settings
 from herogen.service.runner import (
     GROUPS,
-    HELDOUT,
     Outcome,
     StageContext,
     StageRunner,
@@ -44,7 +42,6 @@ from herogen.service.runner import (
     stage3_args,
 )
 from herogen.service.storage import Storage
-from herogen.service.processes import identity, stopped
 
 log = logging.getLogger("herogen.service")
 LEASE_MARGIN_S = 600.0
@@ -53,8 +50,8 @@ GROUP_MAX_ENTRIES = 2
 # Heartbeats (`LeaseKeeper`): while a worker lives it renews its lease every RENEW_EVERY_S to at least LEASE_TTL_S
 # ahead, so no copy, stage or copy back outlasts it however long it takes. Renewing never shortens a longer lease:
 # once the orchestrator dies, the job's lease runs out LEASE_TTL_S after the last renewal, or when the running
-# stage's own lease (its timeout plus LEASE_MARGIN_S) ends if that is later. The held-out views hold no other lease,
-# so theirs runs out LEASE_TTL_S after the last renewal. The TTL allows a few renewals in a row to fail (store busy).
+# stage's own lease (its timeout plus LEASE_MARGIN_S) ends if that is later.
+# The TTL allows a few renewals in a row to fail (store busy).
 LEASE_TTL_S = 600.0
 RENEW_EVERY_S = 120.0
 
@@ -133,11 +130,6 @@ class InPlaceWorkdir:
 
     def close(self) -> None:
         pass
-
-
-# What the held-out views write in a run folder, and only they: the job's own path never copies or deletes these, so
-# the two never touch the same file.
-HELDOUT_PATHS = ("heldout", "stage-2h.json")
 
 
 def _excluded(rel: Path, exclude: tuple[str, ...]) -> bool:
@@ -246,7 +238,7 @@ class CopyWorkdir:
         if not self.still_current():
             return
         r, loc = self.remote, self.local
-        written = _mirror(loc.run_dir, r.run_dir, delete=True, exclude=HELDOUT_PATHS)
+        written = _mirror(loc.run_dir, r.run_dir, delete=True, exclude=("heldout", "stage-2h.json"))
         written += _mirror(loc.cache_dir, r.cache_dir, delete=False)
         written += _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
         if loc.input_path.is_file():
@@ -261,34 +253,6 @@ class CopyWorkdir:
         shutil.rmtree(self.local_root, ignore_errors=True)
 
 
-class HeldoutWorkdir(CopyWorkdir):
-    """The held-out views' work folder: a local copy like CopyWorkdir, but its copy back writes only `heldout/`
-    and `stage-2h.json` (plus new cache entries), only into a run folder that still exists, and only while the
-    side stage's claim holds and the job has not been deleted. So it never touches the job's own files, and never
-    brings back the files of a job or account deleted while it ran: a delete that lands between its check and
-    its commit is seen after the commit, and what it wrote is removed again (`_settle`)."""
-
-    def sync(self) -> None:
-        assert self.local is not None
-        r, loc = self.remote, self.local
-        self.volume.reload()
-        if not self.still_current() or not r.run_dir.is_dir():
-            return
-        written: list[Path] = []
-        if (loc.run_dir / "heldout").is_dir():
-            written += _mirror(loc.run_dir / "heldout", r.run_dir / "heldout", delete=True)
-        rec = loc.run_dir / "stage-2h.json"
-        if rec.is_file():
-            part = r.run_dir / "stage-2h.json.part"
-            shutil.copy2(rec, part)
-            os.replace(part, r.run_dir / "stage-2h.json")
-            written.append(r.run_dir / "stage-2h.json")
-        written += _mirror(loc.cache_dir, r.cache_dir, delete=False)
-        written += _mirror(loc.remote_cache_dir, r.remote_cache_dir, delete=False)
-        self.volume.commit()
-        self._settle(written, self.still_wanted or self.still_current)
-
-
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> StageContext:
     uid, jid = job["user_id"], job["id"]
     return StageContext(job_id=jid, kind=job["kind"], profile=job["profile"], name=job["name"], prompt=job["prompt"],
@@ -298,9 +262,9 @@ def make_context(settings: Settings, storage: Storage, job: dict[str, Any]) -> S
                         blender_timeout_s=settings.blender_timeout_s, refine_cap_usd=settings.refine_cap_usd)
 
 
-def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
+def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
               runner: StageRunner, workdir: Workdir, compute_price_per_s: float = 0.0,
-              accounting_token: str | None = None) -> GroupResult:
+              compute_timeout_s: float | None = None) -> GroupResult:
     """Run the stages of one group for one attempt; see the module docstring."""
     jid = job["id"]
     plan = plan_for(job["kind"], job["profile"])
@@ -316,10 +280,6 @@ def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, gro
         return GroupResult("error", mine[0][1].key, "restarts", "A worker was restarted too many times.", False)
     prior = {r["stage"]: r for r in store.job_stages(jid)}
     ctx = workdir.open()
-    if accounting_token:
-        ctx.accounting = lambda action, **kw: store.admission_record(jid, accounting_token, action, **kw)
-    ctx.refine_budget = lambda action, **kwargs: store.job_refine_budget(jid, attempt, action, **{
-        **kwargs, "cap": settings.refine_cap_usd})
     try:
         for index, spec in mine:
             if not store.job_current(jid, attempt):
@@ -364,115 +324,11 @@ def _run_group(store, settings: Settings, job: dict[str, Any], attempt: int, gro
 
 
 GroupExecutor = Callable[[dict[str, Any], int, str, int], GroupResult]
-def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, group: str, resume: int,
-              runner: StageRunner, workdir: Workdir, compute_price_per_s: float = 0.0,
-              compute_timeout_s: float | None = None) -> GroupResult:
-    if not job.get('budget_required'):
-        return _run_group(store, settings, job, attempt, group, resume, runner, workdir, compute_price_per_s)
-    if not store.job_current(job['id'], attempt):
-        return GroupResult('stale')
-    if job.get('code_commit') != settings.code_commit:
-        return GroupResult('error', None, 'version_changed', 'This generation version changed; operator review is required.', False)
-    token = secrets.token_hex(16)
-    process = identity()
-    if compute_price_per_s:
-        if compute_timeout_s is None:
-            raise ValueError('Paid worker accounting requires its function timeout')
-        process.update(compute_timeout_s=compute_timeout_s, compute_price_per_second=compute_price_per_s)
-    store.admission_work_begin(job['id'], token, group, settings.cost_signature, process=process)
-    started = time.monotonic()
-    result = None
-    try:
-        result = _run_group(store, settings, job, attempt, group, resume, runner, workdir, compute_price_per_s, token)
-        return result
-    finally:
-        store.admission_work_end(job['id'], token, bool(result and result.status in ('ok', 'rejected')),
-                                 worker_stopped=True, compute_seconds=time.monotonic() - started)
 
 
-QC_UNAVAILABLE = ("The quality check is unavailable for this hero: the held-out views could not be made. "
-                  "The hero is not affected.")
-QC_NOT_ACCEPTED = ("The quality check did not accept the held-out views (they are kept for review). "
-                   "The hero is not affected.")
-
-
-def run_heldout(store, settings: Settings, job: dict[str, Any], runner: StageRunner,
-                workdir_for: Callable[[str], Workdir], compute_price_per_s: float = 0.0,
-                compute_timeout_s: float | None = None) -> str | None:
-    """The held-out views (stage 2h) for one job, beside the job's own path. They exist only for scoring, so
-    whatever happens here (a failed gate, every view rejected, a Model API error, a timeout, a crash, a lost
-    container, a rate limit) is recorded on the 2h stage as passed or unavailable, and the job's state, error,
-    retries, refund and quota are never touched. At most one run per job (`store.side_claim`), never retried.
-    Returns the stage's state, or None when this call had nothing to do."""
-    jid = job["id"]
-    if job.get('budget_required') and job.get('code_commit') != settings.code_commit:
-        raise ValueError('Held-out generation version changed; no compute was started.')
-    claim = secrets.token_hex(8)
-    if not store.side_claim(jid, "2h", claim, LEASE_TTL_S):
-        event("heldout_skipped", job=jid)
-        return None
-    budget_token = secrets.token_hex(16) if job.get('budget_required') else None
-    certain = False
-    started = time.monotonic()
-    if budget_token:
-        process = identity()
-        if compute_price_per_s:
-            if compute_timeout_s is None:
-                raise ValueError('Paid worker accounting requires its function timeout')
-            process.update(compute_timeout_s=compute_timeout_s, compute_price_per_second=compute_price_per_s)
-        store.admission_work_begin(jid, budget_token, 'heldout', settings.cost_signature, process=process)
-    try:
-        event("heldout_started", job=jid)
-        state, message, seconds, cost = "unavailable", QC_UNAVAILABLE, 0.0, 0.0
-        # The lease is renewed from the claim to the record: the copy in (the user's whole cache), the run and the copy
-        # back all count, and none has a fixed bound. The function's own timeout bounds a container that hangs.
-        with LeaseKeeper(lambda: store.side_renew(jid, "2h", claim, LEASE_TTL_S), f"{jid}/2h"):
-            workdir = workdir_for(claim)
-            try:
-                ctx = workdir.open()
-                if budget_token:
-                    ctx.accounting = lambda action, **kw: store.admission_record(jid, budget_token, action, **kw)
-                out = runner.run(HELDOUT, ctx)
-                certain = out.state in ('passed', 'rejected', 'skipped')
-                seconds, cost = out.seconds, out.cost_usd
-                rec = read_record(ctx.run_dir, HELDOUT.record) or {}
-                if out.state == "passed":
-                    state, message = "passed", ""
-                elif out.state == "rejected" and rec.get("status") != "error":
-                    message = QC_NOT_ACCEPTED
-                elif out.state == "skipped":
-                    message = out.message
-                if out.detail and state != "passed":
-                    log.warning("held-out views of %s: %s; output tail:\n%s", jid, out.state, out.detail)
-                workdir.sync()
-            except Exception:
-                log.exception("held-out views of %s stopped", jid)
-            finally:
-                try:
-                    workdir.close()
-                except Exception:
-                    log.exception("held-out work folder of %s", jid)
-            total = round(cost + seconds * compute_price_per_s, 6)
-            try:
-                store.side_finish(jid, "2h", claim, state, seconds=seconds, cost_usd=total, message=message)
-            except Exception:
-                log.exception("could not record the held-out views of %s", jid)
-        event("heldout_finished", job=jid, state=state, seconds=seconds, cost_usd=total)
-        return state
-    finally:
-        if budget_token:
-            store.admission_work_end(jid, budget_token, certain, worker_stopped=True,
-                                     compute_seconds=time.monotonic() - started)
-            store.admission_side_done(jid)
-
-
-def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
-            redispatch: Callable[[str], None] | None = None, volume=None,
-            heldout: Callable[[dict[str, Any]], None] | None = None) -> str | None:
-    """Orchestrate one attempt of a job; returns the job's state afterwards (None when this worker had nothing
-    to do: a duplicate, or a job that is no longer queued). Once the model group has passed stage 2, `heldout`
-    is called to start the held-out views beside the rest of the job (`run_heldout`); the job never waits for
-    them, and an error starting them is only logged."""
+def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
+            redispatch: Callable[[str], None] | None = None, volume=None) -> str | None:
+    """Claim and execute one attempt, recording its final state or retry."""
     claim = store.job_claim(job_id, call_id, CLAIM_LEASE_S, settings.max_attempts)
     if claim is None:
         event("job_claim_skipped", job=job_id, call=call_id)
@@ -491,7 +347,7 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
                   if attempt > 1 or job.get("parent_job") else 0)
         if (job["kind"] == "sketch" and not job.get("parent_job")
                 and not storage.input_path(job["user_id"], job_id).is_file()):
-            store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0", refund=True,
+            store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0",
                              error_message="The uploaded sketch was not saved.")
             return "failed"
         seconds = cost = compute = 0.0
@@ -509,13 +365,6 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
             compute += res.compute_usd
             recorded = sum(r["cost_usd"] or 0.0 for r in store.job_stages(job_id) if r["stage"] in own_stages)
             carried = max(0.0, recorded - cost - compute)
-            if group == "model" and res.status == "ok" and heldout is not None and not job.get("stop_after"):
-                try:
-                    heldout(job)
-                except Exception:
-                    log.exception("could not start the held-out views of %s", job_id)
-                    if job.get('budget_required'):
-                        store.admission_side_done(job_id, 'The quality check could not be started; the hero is not affected.')
             detail = {"model_and_gpu_usd": round(cost, 6), "compute_usd": round(compute, 6),
                       "previous_work_usd": round(carried, 6),
                       "basis": "estimate: stage records' model and GPU estimates plus wall seconds x the worker's "
@@ -538,7 +387,7 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
                     store.job_finish(job_id, attempt, "failed", error_code=res.code, error_stage=res.stage,
                                      error_message=res.message,
                                      seconds=round(time.monotonic() - t0, 2), cost_usd=round(carried + cost + compute, 6),
-                                     cost_detail=detail, refund=True, bytes_=_bytes(storage, job, volume))
+                                     cost_detail=detail, bytes_=_bytes(storage, job, volume))
                     state = "failed"
                 event("job_finished" if state != "queued" else "job_requeued", job=job_id, attempt=attempt,
                       state=state, stage=res.stage, code=res.code)
@@ -552,20 +401,6 @@ def _run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: 
         event("job_finished", job=job_id, attempt=attempt, state=final_state, seconds=took,
               cost_usd=round(carried + cost + compute, 6))
         return final_state
-
-
-def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
-            redispatch: Callable[[str], None] | None = None, volume=None,
-            heldout: Callable[[dict[str, Any]], None] | None = None) -> str | None:
-    try:
-        return _run_job(store, settings, storage, job_id, call_id, execute, redispatch, volume, heldout)
-    finally:
-        job = store.job_get(job_id)
-        if job and job.get('budget_required') and job['state'] in ('succeeded', 'rejected', 'failed', 'canceled', 'stopped'):
-            stages = store.job_stages(job_id)
-            if job['state'] == 'stopped' or heldout is None or not any(s['stage'] == '2' and s['state'] == 'passed' for s in stages):
-                store.admission_side_done(job_id, continued_after=job['continued_after'])
-            store.admission_main_done(job_id, continued_after=job['continued_after'])
 
 
 def _bytes(storage: Storage, job: dict[str, Any], volume) -> int:
@@ -590,32 +425,10 @@ def dispatch_queued(store, settings: Settings, submit: Callable[[str], str]) -> 
 def reconcile(store, settings: Settings, submit: Callable[[str], str]) -> dict[str, Any]:
     """The periodic sweep: requeue or fail jobs whose worker died, then dispatch queued jobs."""
     stale = store.reconcile_stale(settings.max_attempts)
-    settled = settle_admissions(store)
     started = dispatch_queued(store, settings, submit)
     if stale or started:
         event("reconcile", stale=stale, started=started)
-    return {"stale": stale, "started": started, "auto_settled": settled}
-
-
-def settle_admissions(store, process_stopped=stopped) -> list[str]:
-    """Settle only complete, stopped-process snapshots; an uninspectable process retains its reservation."""
-    settled = []
-    for candidate in store.admission_candidates():
-        jid = candidate['job_id']
-        snapshot = {k: candidate[k] for k in ('phase', 'baseline_micro', 'settled_phase', 'work', 'processes', 'calls')}
-        try:
-            work = snapshot['work']
-            if not work or any(not w['process'] for w in work):
-                continue
-            if any(not json.loads(w['process']).get('stopped') and not process_stopped(json.loads(w['process'])) for w in work):
-                continue
-            if any(not p['stopped'] and not process_stopped(p, group=True) for p in snapshot['processes']):
-                continue
-            if store.admission_auto_settle(jid, snapshot):
-                settled.append(jid)
-        except (ValueError, KeyError, TypeError, OSError):
-            log.exception('Automatic settlement retained reservation for %s: incomplete evidence', jid)
-    return settled
+    return {"stale": stale, "started": started}
 
 
 def purge(store, settings: Settings, storage: Storage, volume=None) -> dict[str, Any]:
@@ -654,40 +467,16 @@ def purge(store, settings: Settings, storage: Storage, volume=None) -> dict[str,
 
 
 class ThreadBackend:
-    """Dev mode: each job runs in a background thread of this process, its groups in-process, and its held-out
-    views in a separate, smaller pool of threads (`heldout_concurrency`), on a local copy like on Modal."""
+    """Dev mode: dispatch jobs to local background threads."""
 
     def __init__(self, store, settings: Settings, storage: Storage, runner: StageRunner) -> None:
         import concurrent.futures
 
         self.store, self.settings, self.storage, self.runner = store, settings, storage, runner
-        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, settings.max_running_jobs),
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=32,
                                                           thread_name_prefix="herogen-job")
-        self.side_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, settings.heldout_concurrency),
-                                                               thread_name_prefix="herogen-heldout")
         self.futures: dict[str, Any] = {}
         self.n = 0
-
-    def start_heldout(self, job: dict[str, Any]) -> None:
-        self.n += 1
-        self.futures[f"heldout-{self.n}"] = self.side_pool.submit(self._heldout, job)
-
-    def _heldout(self, job: dict[str, Any]) -> None:
-        import tempfile
-
-        from herogen.service.snapshot import LocalVolume
-
-        ctx = make_context(self.settings, self.storage, job)
-        root = Path(tempfile.mkdtemp(prefix="herogen-heldout-"))
-
-        def workdir_for(claim: str) -> Workdir:
-            return HeldoutWorkdir(ctx, root / "work", LocalVolume(),
-                                  lambda: self.store.side_live(job["id"], "2h", claim))
-
-        try:
-            run_heldout(self.store, self.settings, job, self.runner, workdir_for)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
 
     def execute(self, job: dict[str, Any], attempt: int, group: str, resume: int) -> GroupResult:
         ctx = make_context(self.settings, self.storage, job)
@@ -702,16 +491,17 @@ class ThreadBackend:
     def _run(self, job_id: str, call_id: str) -> None:
         try:
             run_job(self.store, self.settings, self.storage, job_id, call_id, self.execute,
-                    redispatch=lambda j: dispatch_queued(self.store, self.settings, self.submit),
-                    heldout=self.start_heldout)
+                    redispatch=lambda j: dispatch_queued(self.store, self.settings, self.submit))
         except Exception:
             log.exception("job %s crashed", job_id)
+        finally:
+            dispatch_queued(self.store, self.settings, self.submit)
 
     def wait(self, timeout: float = 30.0) -> None:
         import concurrent.futures
 
         deadline = time.monotonic() + timeout
-        while True:   # waiting can start new futures (held-out views, redispatches): wait until none are left
+        while True:   # completion can dispatch new futures: wait until none are left
             pending = [f for f in list(self.futures.values()) if not f.done()]
             if not pending or time.monotonic() > deadline:
                 return

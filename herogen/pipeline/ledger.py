@@ -12,15 +12,10 @@ import time
 from herogen.pipeline import filelock
 
 LEDGER = "calls-ledger.jsonl"
-BRIDGE = "HEROGEN_CALL_LEDGER"
 
 
 def append(cache_dir: Path, row: dict) -> None:
     row = {"time": datetime.now().astimezone().isoformat(timespec="milliseconds"), **row}
-    # The service acknowledgement is durable even when a stage's local working copy is lost.
-    from herogen.service.refine_budget import bridge_enabled, remote_budget
-    if bridge_enabled(BRIDGE):
-        remote_budget("call", row=row, prefix=BRIDGE)
     cache_dir.mkdir(parents=True, exist_ok=True)
     with open(cache_dir / LEDGER, "a") as stream, filelock.exclusive(stream.fileno()):
         stream.write(json.dumps(row, sort_keys=True) + "\n")

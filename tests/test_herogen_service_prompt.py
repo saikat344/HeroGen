@@ -281,7 +281,6 @@ class PromptJobTest(JobCase):
         self.assertEqual(self.go(job, call="retry"), "failed")
         saved = self.store.job_get(job["id"])
         self.assertAlmostEqual(saved["cost_usd"], first_cost, places=6)
-        self.assertEqual(saved["counts_quota"], 1)
         self.assertEqual(self.api.calls.count("images/generations"), 1)
 
     def test_unexpected_error_output_and_missing_record_never_log_the_description(self):

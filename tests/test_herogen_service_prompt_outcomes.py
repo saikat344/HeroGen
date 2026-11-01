@@ -34,7 +34,7 @@ class TestPromptExitRecords(JobCase):
         self.assertIn(f"exit_code={code}", outcome.detail)
         self.assertNotIn(self.description, outcome.message + outcome.detail)
 
-    def test_real_argparse_error_is_logged_and_refunded_as_an_internal_failure(self):
+    def test_real_argparse_error_is_logged_as_an_internal_failure(self):
         class UsageErrorRunner(CliRunner):
             def command(self, *args):
                 argv, stdin = super().command(*args)
@@ -46,8 +46,7 @@ class TestPromptExitRecords(JobCase):
         self.assertIn("exit_code=2", "\n".join(logs.output))
         self.assertNotIn(self.job["prompt"], "\n".join(logs.output))
         saved = self.store.job_get(self.job["id"])
-        self.assertEqual((saved["error_code"], saved["attempts"], saved["counts_quota"]), ("stage_error", 1, 0))
-        self.assertIsNotNone(saved["refunded_at"])
+        self.assertEqual((saved["error_code"], saved["attempts"]), ("stage_error", 1))
         self.assertEqual(saved["cost_usd"], 0)
         self.assertFalse((self.ctx.run_dir / "stage-p.json").exists())
 

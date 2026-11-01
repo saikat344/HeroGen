@@ -12,7 +12,6 @@ const COPY = {
 };
 const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled']);
 const INTERRUPTED = new Set(['failed', 'rejected', 'canceled']);
-const REVIEW_ISSUES = new Set(['failed', 'rejected', 'unavailable']);
 const STATE = { passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   canceled: 'Cancelled', skipped: 'Skipped', unavailable: 'Unavailable' };
 export function generationState(job) {
@@ -21,24 +20,21 @@ export function generationState(job) {
   const active = main.find((s) => s.state === 'running');
   const focus = active || main.find((s) => s.key === job.stage) || main.find((s) => s.state === 'pending');
   const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
-  const side = stages.filter((s) => s.side);
-  const sideIssue = side.some((s) => REVIEW_ISSUES.has(s.state));
-  const title = { queued: job.error ? 'Waiting to retry' : 'Your hero is in the queue', running: 'Your hero is taking shape.',
+  const title = { queued: 'Waiting for a free worker', running: 'Your hero is taking shape.',
     succeeded: 'Meet your hero.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
-  const subtitle = job.state === 'succeeded' ? (issues.length || sideIssue ? 'Your results are available. Some steps need attention below.' : 'Explore the result and the available downloads.') :
+  const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your results are available. Some steps need attention below.' : 'Explore the result and the available downloads.') :
     job.state === 'queued' ? 'Your job is saved. It will begin when a worker is available.' :
     job.state === 'canceled' ? 'The job has stopped. Any saved images remain available to inspect.' :
     INTERRUPTED.has(job.state) ? 'Review the reported issue below. Saved outputs remain available.' :
     (COPY[focus?.key]?.[1] || focus?.label || 'Following the pipeline');
-  return { title, subtitle, main, side, focus, issues, terminal: TERMINAL.has(job.state),
+  return { title, subtitle, main, focus, issues, terminal: TERMINAL.has(job.state),
     passed: main.filter((s) => s.state === 'passed').length,
-    reviewRunning: side.some((s) => s.state === 'running'),
     steps: main.map((s) => ({ ...s, title: COPY[s.key]?.[0] || s.label || s.key,
       description: COPY[s.key]?.[2] || 'Follow the status reported by the service.',
       status: s.state === 'pending' && TERMINAL.has(job.state) ? 'Not reached' : STATE[s.state] || s.state || 'Not reported' })) };
 }
 const IMAGES = [['sketch', 'Starting image'], ['cover', 'Artwork'], ['turnaround', 'Character views'],
-  ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['heldout', 'Held-out view']];
+  ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right']];
 const text = (e, value) => { if (e.textContent !== value) e.textContent = value; };
 function node(tag, content, cls) {
   const n = document.createElement(tag); if (content != null) n.textContent = content; if (cls) n.className = cls; return n;
@@ -111,14 +107,9 @@ export function generationView($, select3D) {
         if (active) $('#stages').scrollLeft = active.offsetLeft - $('#stages').offsetLeft - ($('#stages').clientWidth - active.clientWidth) / 2;
       }
       const focus = state.steps.find((s) => s.key === state.focus?.key);
-      text($('#currentStep'), state.terminal ? (job.state === 'succeeded' ? 'Your next adventure' : 'What happened') : (focus?.title || 'Waiting for a worker'));
+      text($('#currentStep'), job.state === 'queued' ? 'Waiting for a free worker' : state.terminal ? (job.state === 'succeeded' ? 'Your next adventure' : 'What happened') : (focus?.title || 'Waiting for a worker'));
       text($('#stepDescription'), state.terminal ? (job.state === 'succeeded' ? 'Inspect the model, review the recorded checks, then bring the available files into your game.' : state.subtitle) : (focus?.description || 'Your saved job will start when the service is ready.'));
       text($('#stepMessage'), state.focus?.message || '');
-      const side = state.side.map((s) => `${s.label}: ${s.state === 'pending' && state.terminal ? 'Not started' : STATE[s.state] || s.state}${s.message ? ` — ${s.message}` : ''}`).join('\n');
-      text($('#qualityStatus'), side || 'No separate quality review was reported.');
-      $('#qualityReview').classList.toggle('st-running', state.reviewRunning);
-      $('#qualityReview').classList.toggle('review-attention', state.side.some((s) => REVIEW_ISSUES.has(s.state)));
-      text($('#qualityNote'), state.reviewRunning ? 'This review is still running alongside the main job.' : 'This review runs separately from generation. Its verdict does not change the main job’s status.');
       const issues = state.steps.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
       $('#stageIssues').replaceChildren(...issues.map((s) => node('p', `${s.title} · ${s.status}${s.message ? ` — ${s.message}` : ''}`)));
       $('#stageIssues').hidden = !issues.length;
