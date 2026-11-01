@@ -60,6 +60,19 @@ class TestLandingPage(ServiceBrowserCase):
         self.assertEqual(self.store.users_list(), [])
         self.assertEqual(self.store.jobs_admin_list(), [])
 
+    def test_shading_icons_render_when_studio_static_is_absent(self):
+        from unittest.mock import patch
+
+        with patch('herogen.service.labapi.studio_static', return_value=None):
+            self.ready()
+            self.tab.wait("Array.from(document.querySelectorAll('.shade-switch img')).every(i => i.complete && i.naturalWidth > 0)")
+            imgs = self.tab.eval("[...document.querySelectorAll('.shade-switch img')].map(i => ({src: i.getAttribute('src'), complete: i.complete, naturalWidth: i.naturalWidth}))")
+            self.assertEqual(len(imgs), 3)
+            for img in imgs:
+                self.assertTrue(img['src'].startswith('/assets/icons/hg-shade-'), img)
+                self.assertGreater(img['naturalWidth'], 0, img)
+            self.assertEqual(self.tab.errors, [])
+
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, 'set E2E_CDP_PORT')
 class TestLandingModels(ServiceBrowserCase):
     def setUp(self):

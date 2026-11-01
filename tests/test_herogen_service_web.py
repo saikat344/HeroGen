@@ -227,6 +227,28 @@ class TestHeaders(WebCase):
         self.assertEqual((r.status_code, r.headers["content-type"]), (200, "text/javascript; charset=utf-8"))
         self.assertEqual(b.get("/static/fonts/fonts.css").status_code, 200)
 
+    def test_landing_shading_icons_load_without_studio_static(self):
+        from unittest.mock import patch
+
+        with patch("herogen.service.labapi.studio_static", return_value=None):
+            b = Browser(self.app)
+            page = b.get("/")
+            self.assertEqual(page.status_code, 200)
+            self.assertNotIn("/static/", page.text)
+            srcs = re.findall(r'<button[^>]+data-shade="[^"]+"[^>]*><img src="([^"]+)"', page.text)
+            self.assertEqual(
+                srcs,
+                [
+                    "/assets/icons/hg-shade-textured.svg",
+                    "/assets/icons/hg-shade-clay.svg",
+                    "/assets/icons/hg-shade-wire.svg",
+                ],
+            )
+            for src in srcs:
+                r = b.get(src)
+                self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/svg+xml"), src)
+            self.assertEqual(b.get("/static/icons/hg-shade-textured.svg").status_code, 404)
+
 
 class TestCsrf(WebCase):
     def test_unsafe_requests_need_token_and_origin(self):
