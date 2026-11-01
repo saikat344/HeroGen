@@ -14,6 +14,7 @@ from PIL import Image
 from herogen.blender.record import StageRecord, check
 from herogen.blender.stage3 import error_text
 from herogen.pipeline.client import COST_BASIS, IMAGE_MODEL, SAM_MODEL, PRICE_PER_IMAGE_USD, ModelClient
+from herogen.pipeline.redo import clean_note
 from herogen.refine_budget import BudgetStop, update as update_budget
 
 STAGE = "3f"
@@ -217,12 +218,13 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
     cost_usd itself counts this invocation's calls, matching the other stages' convention.
 
-    ``user_note``: optional user design guidance (the service's Refine note, cleaned upstream) appended to every
+    ``user_note``: optional user design guidance, cleaned with the shared bounded text rules and appended to every
     repaint prompt as quoted data after all rules, so it cannot override framing, outline, silhouette, pose, face
     and feature preservation or the artwork's fixed details. An empty note changes nothing. The note comes only
     from this explicit parameter (or the CLI --refine-note flag). A non-empty note and its hash are recorded
     in stage-3f.json.
     """
+    user_note = clean_note(user_note, allow_empty=True)
     refine_profile = refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")
     if refine_profile not in ("best", "fast"):
         raise ValueError("refine_profile must be best or fast")

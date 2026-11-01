@@ -150,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if "3f" in stages:
         from herogen.pipeline.client import ClientError, ModelClient
+        from herogen.pipeline.redo import clean_note
         from .refine import run_stage3f
         from .stage3 import error_text
 
@@ -157,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
                               profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout,
                               upscale_texture=a.upscale_texture, recipe=a.refine_recipe, refine_profile=a.refine_profile,
-                              user_note=a.refine_note)
+                              user_note=clean_note(a.refine_note, allow_empty=True))
         except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
             return 1
