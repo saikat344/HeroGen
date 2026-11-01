@@ -140,6 +140,42 @@ slot was used and the cover prompt SHA-256 in `stage-1.json`. Sketch uploads kee
 byte for byte. Stage 2 takes colours from the cover. The checks, their thresholds and the measurements behind them are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
 
+Redo the cover or turnaround as a new version, with an optional appearance note:
+
+```bash
+python3 -m herogen.pipeline run --parent my-hero --from-stage 1 --note "make the coat burnt orange" --run-id my-orange-hero --stop-after 1 --live
+python3 -m herogen.pipeline run --parent my-hero --from-stage 2 --note "left view: keep the satchel strap across the chest" --run-id my-satchel-hero --stop-after 2 --live
+python3 -m herogen.pipeline run --run-id my-orange-hero --stages 2,5 --live
+```
+
+`--parent` accepts a run id under `--runs`, or a directory path. The destination must be new. Earlier passing
+stages, their outputs and their records are copied into it at zero new model cost; the parent is never changed.
+A cover redo edits a copy of the parent's cover and still checks its outline against the original sketch.
+A turnaround redo keeps the cover and regenerates the **whole four-view sheet**, even when the note names
+just one view, so the views stay consistent. All existing gates and retries still apply.
+
+The optional note describes changes to the character's colours, materials, gear or character style. It is
+cleaned like the character brief, quoted between `«»`, and limited to 300 characters after cleaning; longer
+notes are refused. The slot says the note cannot instruct the image, layout, number of views or checks.
+`cover-redo-v1` and `turnaround-redo-v1` freeze the note prompts and hashes. Without a note, existing prompt
+bytes and prompt selection stay unchanged. `redo.json` and the stage records identify the parent, redo
+stage and cleaned note. `--stop-after 1|2` also omits later side work; without it the CLI follows its normal
+selected stages, including held-out views and face sources after stage 2.
+
+The signed-in service exposes backend version APIs (the UI is separate):
+
+- `POST /api/jobs/<id>/redo` with JSON `{"stage":"cover","note":"green coat"}` (or `"turnaround"`) and an
+  `Idempotency-Key` creates a new owned job with `parent_job`. It stops after the requested stage.
+- `POST /api/jobs/<id>/continue` continues a stopped version through the remaining stages, using the same
+  job and quota slot. Repeated requests while it is active return that job.
+- `GET /api/jobs/<id>/versions` returns `versions`: the owned parent family, including siblings and
+  descendants, with stage, note, status and `cover_thumbnail_url` (the existing cover image URL, or null).
+
+Unsafe requests need the normal same-origin CSRF token. Daily, lifetime, storage and rate limits apply to
+redos; continuation checks storage and rate limits. Each workspace may have only one queued or running
+generation. Earlier versions must have stopped before branching; deleted versions are omitted from lists.
+
+
 ## Lab
 
 ```bash
