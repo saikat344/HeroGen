@@ -7,7 +7,7 @@ async function setup() {
   const loads=[], scenes=[], renderers=[];
   class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(){} copy(){} setScalar(){} }
   class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);} remove(n){this.models=this.models.filter(v=>v!==n);} }
-  class Renderer { constructor(){this.disposed=false;renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(){} }
+  class Renderer { constructor(){this.disposed=false;this.renders=0;this.lastModels=[];renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(scene){this.renders++;this.lastModels=[...scene.models];} }
   class Camera { constructor(){this.position=new Vector3();} updateProjectionMatrix(){} }
   class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} }
   class Light { constructor(){this.position=new Vector3();this.scale=new Vector3();this.geometry={dispose(){}};this.material={color:{set(){}},dispose(){}};} }
@@ -62,4 +62,23 @@ test('clay and wire restore the original materials and preserve loaded camera',a
   v.shading('wire');assert.equal(clay.disposed,true);assert.equal(mesh.material.wireframe,true);
   v.shading('textured');assert.equal(mesh.material,original);assert.equal(original.disposed,undefined);
   await v.show(s.canvas,'one.glb');assert.equal(s.loads.length,1);v.dispose();assert.equal(original.disposed,true);
+});
+test('failed model switch immediately flushes the cleared scene and recovers on retry',async()=>{
+  const s=await setup(),v=s.api.createPreview(),first=s.model(),second=s.model();
+  const loadFirst=v.show(s.canvas,'first.glb');
+  s.loads[0].done({scene:first}); await loadFirst;
+  assert.equal(s.renderers[0].lastModels.includes(first),true);
+  const rendersBeforeSwitch=s.renderers[0].renders;
+  const loadSecond=v.show(s.canvas,'second.glb');
+  assert.equal(first.disposed,1);
+  assert.equal(s.renderers[0].renders>rendersBeforeSwitch,true);
+  assert.equal(s.renderers[0].lastModels.includes(first),false);
+  s.loads[1].fail(new Error('asset 404'));
+  await assert.rejects(loadSecond,/asset 404/);
+  assert.equal(s.renderers[0].loop,null);
+  assert.equal(s.renderers[0].lastModels.includes(first),false);
+  const retrySecond=v.show(s.canvas,'second.glb');
+  s.loads[2].done({scene:second}); await retrySecond;
+  assert.equal(s.renderers[0].lastModels.includes(second),true);
+  assert.equal(typeof s.renderers[0].loop,'function');
 });
