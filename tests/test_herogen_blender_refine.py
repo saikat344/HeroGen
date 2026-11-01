@@ -93,6 +93,70 @@ class GateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertLess(rec["face"]["iou"], 0.3)
 
+    def test_figure_mask_preserves_grey_armour_cut_by_covered_frame_border(self):
+        h = w = 128
+        render_fig = np.zeros((h, w), bool)
+        render_fig[24:64, 44:84] = True
+        render_fig[60:, 28:100] = True                      # torso armour cut by the bottom border
+        rgb = np.full((h, w, 3), refine.C.BG, np.float32)
+        rgb[24:64, 44:84] = (0.72, 0.56, 0.46)              # head
+        rgb[60:66, 28:100] = (0.20, 0.22, 0.25)             # dark collar
+        rgb[60:, 28:34] = (0.20, 0.22, 0.25)                # dark left shoulder outline
+        rgb[60:, 94:100] = (0.20, 0.22, 0.25)               # dark right shoulder outline
+        rgb[66:, 34:94] = refine.C.BG + 0.02                # grey steel within BG_TOL, touching bottom border
+
+        flooded = refine.figure_mask(rgb)
+        self.assertFalse(flooded[96, 64])
+        self.assertLess((flooded & render_fig).sum() / (flooded | render_fig).sum(), 0.55)
+
+        preserved = refine.figure_mask(rgb, render_figure=render_fig)
+        self.assertTrue(preserved[96, 64])
+        self.assertGreater((preserved & render_fig).sum() / (preserved | render_fig).sum(), 0.98)
+
+        blank = np.full((h, w, 3), refine.C.BG, np.float32)
+        self.assertFalse(refine.figure_mask(blank, render_figure=render_fig).any())
+
+    def test_chamfer_unclipped_keeps_frame_touching_five_px_offset_near_five_px(self):
+        # Left silhouette sits at x=2 (inside default 4 px clip) while bottom is cut by the frame.
+        a = np.zeros((128, 128), bool)
+        a[20:, 2:62] = True
+        b = np.zeros((128, 128), bool)
+        b[20:, 7:67] = True
+        b[-6:] = False                                      # frame-cut difference inside the 16 px cut zone
+        _, old_p90 = refine.chamfer(a, b, unclipped=False)
+        self.assertGreater(old_p90, 20.0)
+        med, p90 = refine.chamfer(a, b, unclipped=True)
+        np.testing.assert_allclose((med, p90), (5.0, 5.0), atol=0.2)
+
+        # Disc directly touching x=0 on `a`, shifted right by 5 px on `b` (normal offset 5*|cos(theta)| <= 5 px).
+        da = disc((128, 128), 50, 64, 50)
+        db = disc((128, 128), 55, 64, 50)
+        self.assertTrue(refine.border_touch(da).any())
+        d_med, d_p90 = refine.chamfer(da, db, unclipped=True)
+        self.assertGreater(d_med, 2.5)
+        self.assertGreaterEqual(d_p90, 4.5)
+        self.assertLessEqual(d_p90, 5.2)
+
+    def test_closeup_gate_caps_allowance_and_rejects_shifted_silhouette(self):
+        body = cameras.camera("body+0", [0, 0, 1], 0, 2.24, (1024, 1536))
+        head = cameras.camera("head+0", [0, 0, 1.8], 0, 0.55, (1024, 1024))
+        self.assertTrue(refine.is_closeup(head, body))
+        self.assertFalse(refine.is_closeup(body, body))
+
+        base = disc((1024, 1024), 512, 512, 340)
+        mild = disc((1024, 1024), 524, 512, 340)            # ~8.5 px median / ~11.4 px p90: > 6/16, <= 10/24 cap
+        passed_default, _ = refine.outline_gate(base, mild, unclipped=True, closeup=False)
+        passed_closeup, checks = refine.outline_gate(base, mild, unclipped=True, closeup=True)
+        self.assertFalse(passed_default)
+        self.assertTrue(passed_closeup)
+        self.assertEqual((checks["median_limit"], checks["p90_limit"]), (10.0, 24.0))
+
+        # 26 px shift keeps IoU > 0.90 and would pass raw PPU scaling (~22.9 / 61.1 px), but exceeds the 10/24 cap.
+        shifted = disc((1024, 1024), 538, 512, 340)
+        passed_shifted, shifted_checks = refine.outline_gate(base, shifted, unclipped=True, closeup=True)
+        self.assertGreater(shifted_checks["iou"], 0.90)
+        self.assertFalse(passed_shifted)
+
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class ColourTests(unittest.TestCase):
@@ -681,6 +745,49 @@ class StageTests(unittest.TestCase):
         self.assertEqual(rec["status"], "complete")
         self.assertEqual(rec["budget"]["cap_usd"], .8)
         self.tex.apply.assert_called()
+
+    def test_closeup_gate_keeps_face_gate_and_back_of_head_protection(self):
+        render_face = disc((64, 64), 30, 34, 6)
+        shifted_face = disc((64, 64), 40, 34, 6)
+        cams = character.cameras_for(self.info)
+
+        def edit_ok(prompt, images, **kwargs):
+            return images[0].copy()
+
+        def segment_shifted_face(image, text):
+            if text != "face":
+                return []
+            # First call on render input gets `render_face`; second call on edit gets `shifted_face`.
+            mask = render_face if segment_shifted_face.calls == 0 else shifted_face
+            segment_shifted_face.calls += 1
+            return [SamInstance(mask, (0, 0, 64, 64))]
+
+        segment_shifted_face.calls = 0
+        self.client.edit_image = edit_ok
+        self.client.segment = segment_shifted_face
+        rec = {"attempts": []}
+        stage._view(self.client, self.run / "prep", self.run / "base.png", self.tex, cams["head+0"], False,
+                    self.run / "head0", rec, 900, Image.new("RGB", (64, 64)),
+                    body_cam=cams["body+0"])
+        self.assertFalse(rec.get("accepted", False))
+        self.assertEqual(rec["reason"], "new face outside the render face")
+
+        # Back-of-head (head+180) with no render face rejects a painted face as well.
+        def segment_back(image, text):
+            if text != "face":
+                return []
+            mask = np.zeros((64, 64), bool) if segment_back.calls == 0 else shifted_face
+            segment_back.calls += 1
+            return [SamInstance(mask, (0, 0, 64, 64))]
+
+        segment_back.calls = 0
+        self.client.segment = segment_back
+        back_rec = {"attempts": []}
+        stage._view(self.client, self.run / "prep", self.run / "base.png", self.tex, cams["head+180"], False,
+                    self.run / "head180", back_rec, 900, Image.new("RGB", (64, 64)),
+                    body_cam=cams["body+0"])
+        self.assertFalse(back_rec.get("accepted", False))
+        self.assertEqual(back_rec["reason"], "new face outside the render face")
 
     def test_no_source_is_skipped(self):
         (self.run / "03-source.glb").unlink()

@@ -2402,8 +2402,11 @@ frame is 1.06 times the height. Hair passes then run head angles 90, 135, 180, 2
 cover the top 55% of the body height.
 
 Each repaint registers back with stage 2f's grey-level affine fit with gain and bias, at 512 working pixels.
-Normal passes allow up to three samples. The unchanged outline thresholds are IoU at least 0.90 and bidirectional
-outline distances at most 6 median / 16 p90 pixels per 1024 render pixels, excluding the image border. A SAM 3.1
+Normal passes allow up to three samples. Body outline thresholds are IoU at least 0.90 and bidirectional outline distances at most
+6 median / 16 p90 pixels per 1024 render pixels. Finer-scale head cameras use the measured capped
+10 median / 24 p90 allowance with the same IoU. Distances use complete contours before excluding
+samples within 16 pixels of frame-cut surfaces. Background flooding starts outside the render figure
+and cannot enter grey armor through a covered frame border. A SAM 3.1
 face occupying at least 0.005 of the figure may have at most 0.25 of its area outside the render's face mask.
 This containment check prevents a new face on a profile or back view without requiring soft and sharp face
 masks to have the same area. These recipe thresholds retain their original measured calibration; they are

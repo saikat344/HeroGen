@@ -16,6 +16,11 @@ BG_TOL = 0.07          # an edit pixel is figure when any channel differs from t
 # Outline gate, per 1024 render pixels: IoU of the figures, median and 90th-percentile distance between their outlines
 # (both directions). Measured values from s001's head views; not tuned on a held-out set.
 GATE = {"iou_min": 0.90, "median_px": 6.0, "p90_px": 16.0}
+EXTERIOR_DILATE = 16   # known exterior background margin outside the render figure, in pixels
+CUT_DILATE = 16        # frame-cut exclusion around border-touching silhouettes when sampling chamfer
+# Bounded close-up outline allowance, per 1024 render pixels: GATE was measured on s001's smooth head views, so
+# close-up cameras use a capped allowance rather than multiplying GATE by the camera zoom ratio.
+CLOSEUP_GATE = {"iou_min": 0.90, "median_px": 10.0, "p90_px": 24.0}
 # Part gate: SAM 3.1 masks of these parts on the render and on the registered repaint. Where the repaint shows a part
 # (more than PART_MIN_AREA of the figure), at most PART_EXTRA_MAX of it may lie outside the render's mask of that
 # part, or the repaint is rejected (a face painted on the back of the head, a profile turned toward the camera).
@@ -52,11 +57,40 @@ def grey(a):
     return a[..., :3] @ np.array([0.299, 0.587, 0.114])
 
 
-def figure_mask(rgb):
+def border_touch(m):
+    """Mask pixels that lie on any of the four image borders."""
+    frame = np.zeros(m.shape, bool)
+    frame[0, :] = frame[-1, :] = frame[:, 0] = frame[:, -1] = True
+    return np.asarray(m, bool) & frame
+
+
+def figure_mask(rgb, *, render_figure=None):
     m = (np.abs(rgb - C.BG) > BG_TOL).any(-1)
-    m = ndimage.binary_opening(m, iterations=2)
-    m = ndimage.binary_closing(m, iterations=3)
-    m = ndimage.binary_fill_holes(m)
+    if render_figure is None:
+        m = ndimage.binary_opening(m, iterations=2)
+        m = ndimage.binary_closing(m, iterations=3)
+        m = ndimage.binary_fill_holes(m)
+    else:
+        render_figure = np.asarray(render_figure, bool)
+        pad = 6
+        closed = ndimage.binary_closing(np.pad(m, pad, mode="edge"), iterations=3)[pad:-pad, pad:-pad]
+        exterior = ~ndimage.binary_dilation(render_figure, iterations=EXTERIOR_DILATE)
+        if not exterior.any():
+            exterior = ~render_figure
+        covered = border_touch(render_figure)
+        walkable = ~closed & ~covered
+        seed = walkable & exterior
+        if seed.any():
+            bg = ndimage.binary_propagation(seed, mask=walkable)
+            bg |= ndimage.binary_dilation(bg, iterations=1) & covered & ~closed
+            m = ~bg
+            if m.any():
+                m = ndimage.binary_opening(np.pad(m, pad, mode="edge"), iterations=2)[pad:-pad, pad:-pad]
+        elif exterior.any():
+            m = np.ones_like(closed)
+        else:
+            m = (ndimage.binary_opening(np.pad(closed, pad, mode="edge"), iterations=2)[pad:-pad, pad:-pad]
+                 if closed.any() else closed)
     lab, n = ndimage.label(m)
     if n > 1:
         sizes = ndimage.sum(m, lab, range(1, n + 1))
@@ -68,19 +102,58 @@ def boundary(m):
     return m & ~ndimage.binary_erosion(m)
 
 
-def chamfer(a, b):
+def chamfer(a, b, *, unclipped=True):
     """Outline distances (median, p90) in pixels, both directions; the image border is not an outline."""
-    def bd(m):
-        e = m & ~ndimage.binary_erosion(m, border_value=1)
-        e[:4], e[-4:], e[:, :4], e[:, -4:] = False, False, False, False
-        return e
-    ba, bb = bd(a), bd(b)
+    if not unclipped:
+        def bd(m):
+            e = m & ~ndimage.binary_erosion(m, border_value=1)
+            e[:4], e[-4:], e[:, :4], e[:, -4:] = False, False, False, False
+            return e
+        ba, bb = bd(a), bd(b)
+        if not ba.any() or not bb.any():
+            return 1e9, 1e9
+        da = ndimage.distance_transform_edt(~ba)
+        db = ndimage.distance_transform_edt(~bb)
+        d = np.concatenate([db[ba], da[bb]])
+        return float(np.median(d)), float(np.quantile(d, 0.9))
+    ba = a & ~ndimage.binary_erosion(a, border_value=0)
+    bb = b & ~ndimage.binary_erosion(b, border_value=0)
     if not ba.any() or not bb.any():
         return 1e9, 1e9
     da = ndimage.distance_transform_edt(~ba)
     db = ndimage.distance_transform_edt(~bb)
-    d = np.concatenate([db[ba], da[bb]])
+    touch = border_touch(a | b)
+    cut = ndimage.binary_dilation(touch, iterations=CUT_DILATE) if touch.any() else touch
+    sa, sb = ba & ~cut, bb & ~cut
+    if not sa.any() or not sb.any():
+        return 1e9, 1e9
+    d = np.concatenate([db[sa], da[sb]])
     return float(np.median(d)), float(np.quantile(d, 0.9))
+
+
+def is_closeup(cam, body_cam):
+    """True when `cam` frames the mesh at finer world scale than `body_cam`."""
+    return px_per_unit(cam) > px_per_unit(body_cam) * 1.05
+
+
+def outline_gate(a, b, *, unclipped=True, closeup=False):
+    """(passed, measures) for the figure outline gate, in render pixels per 1024."""
+    overlap = float((a & b).sum() / max(1, (a | b).sum()))
+    med, p90 = (v * 1024 / max(a.shape) for v in chamfer(a, b, unclipped=unclipped))
+    limits = CLOSEUP_GATE if closeup else GATE
+    measures = {
+        "iou": overlap,
+        "median_px": med,
+        "p90_px": p90,
+        "median_limit": limits["median_px"],
+        "p90_limit": limits["p90_px"],
+    }
+    passed = (
+        overlap >= limits["iou_min"]
+        and med <= limits["median_px"]
+        and p90 <= limits["p90_px"]
+    )
+    return passed, measures
 
 
 def warp_grid(img, mapx, mapy):
@@ -174,10 +247,11 @@ def part_masks_text(client, image, text, mapx, mapy):
                      cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
 
 
-def hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy, face_r):
+def hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy, face_r, *, exterior_mask=True):
     """The weight map of an accepted hair-mode repaint (module notes)."""
     fig_r = alpha > 0.5
-    _, agree, _ = interior_agreement(render_rgb, warped, fig_r, figure_mask(warped))
+    fig_e = figure_mask(warped, render_figure=fig_r if exterior_mask else None)
+    _, agree, _ = interior_agreement(render_rgb, warped, fig_r, fig_e)
     w = cv2.GaussianBlur(agree.astype(np.float32), (0, 0), 2.0)
     if face_r is not None and face_r.any():
         w *= ~ndimage.binary_dilation(face_r, iterations=max(1, round(FACE_KEEP_PX * max(fig_r.shape) / 1024)))
