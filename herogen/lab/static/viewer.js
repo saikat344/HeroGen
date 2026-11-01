@@ -3,8 +3,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { cssToken, reducedMotion } from './dom.js';
 import { R15_PARENT, SECTIONS, boneDirs, poseLibrary, worldMatrices } from './poses.js';
+
+// Tone mapping of the Lit view. Khronos PBR Neutral (three's NeutralToneMapping) first shipped in three r162, so
+// 0.160.0's nearest equivalent is ACESFilmic: the soft studio roll-off the RoomEnvironment rig was tuned around.
+const TONE_MAPPING = THREE.ACESFilmicToneMapping;
 
 const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
 const loader = new GLTFLoader();
@@ -105,6 +110,40 @@ export function lights(scene) {
   const d2 = new THREE.DirectionalLight(0xffffff, 0.6); d2.position.set(-5, 3, -4); scene.add(d2);
 }
 
+// The studio rig of the Lit view, shared by the main viewer and the compare view: image-based light from three's
+// RoomEnvironment through a PMREM (generated on this renderer, which RoomEnvironment needs for its light scale),
+// plus one gentle key light. No hemisphere or second fill: the environment already fills, and both together lit
+// the model twice.
+export function studioLights(scene, renderer) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+  pmrem.dispose();
+  const key = new THREE.DirectionalLight(0xffffff, 0.6);
+  key.position.set(3, 8, 6);
+  scene.add(key);
+}
+
+// The Art view's stand-in for a material: the same base colour (map, and factor when there is no map) unlit, so
+// the texture shows exactly as painted. GLTFLoader already marks base-colour textures sRGB, so the same texture
+// through a MeshBasicMaterial with tone mapping off is a straight passthrough. One stand-in per original
+// material, shared by every instance of that body; the WeakMap drops it with the original.
+const artMaterials = new WeakMap();
+export function artMaterial(orig) {
+  if (Array.isArray(orig)) return orig.map((m) => artMaterial(m));
+  let art = artMaterials.get(orig);
+  if (!art) {
+    art = new THREE.MeshBasicMaterial({
+      map: orig.map || null,
+      color: orig.color ? orig.color.clone() : new THREE.Color(0xffffff),
+      transparent: orig.transparent || false,
+      opacity: orig.opacity === undefined ? 1 : orig.opacity,
+      side: THREE.DoubleSide,
+    });
+    artMaterials.set(orig, art);
+  }
+  return art;
+}
+
 // Camera presets: the direction from the target to the camera. Front is +Z; the character's left is +X.
 export const VIEW_DIRS = {
   front: V3(0, 0.06, 1), q: V3(Math.sin(0.6), 0.22, Math.cos(0.6)), side: V3(1, 0.06, 0), back: V3(0, 0.06, -1),
@@ -129,8 +168,11 @@ export class Viewer {
     this.gizmo = gizmo.getContext('2d');
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = TONE_MAPPING;
+    this.renderer.toneMappingExposure = 1;
     this.scene = new THREE.Scene();
-    lights(this.scene);
+    studioLights(this.scene, this.renderer);
     this.persp = new THREE.PerspectiveCamera(30, 1, 0.05, 200);
     this.ortho = new THREE.OrthographicCamera(-3, 3, 3, -3, 0.05, 200);
     this.cam = this.persp;
@@ -149,6 +191,7 @@ export class Viewer {
       color: new THREE.Color(sectionColours[n] || '#888888'), roughness: 0.7, side: THREE.DoubleSide })]));
     this.inst = null;
     this.shading = 'textured';
+    this.lighting = 'lit'; // how a textured body is shown: studio-lit, or its paint unlit
     this.pose = 'rest';
     this.hot = null; // null: every section; else the set of sections drawn normally
     this.anim = null;
@@ -206,15 +249,32 @@ export class Viewer {
     for (const [n, list] of Object.entries(this.inst.meshes)) {
       for (const m of list) {
         if (this.hot && !this.hot.has(n)) { m.material = this.mat.ghost; continue; }
-        m.material = this.shading === 'textured' ? m.userData.orig : this.shading === 'clay' ? this.mat.clay
-          : this.shading === 'wire' ? this.mat.wire : this.secMat[n];
+        m.material = this.shading === 'textured'
+          ? (this.lighting === 'art' ? artMaterial(m.userData.orig) : m.userData.orig)
+          : this.shading === 'clay' ? this.mat.clay
+            : this.shading === 'wire' ? this.mat.wire : this.secMat[n];
       }
     }
+    this.applyTone();
     this.dirty = true;
   }
 
   setShading(s) { this.shading = s; this.applyShading(); }
+  setLighting(mode) { this.lighting = mode === 'art' ? 'art' : 'lit'; this.applyShading(); }
   setHot(names) { this.hot = names && names.length ? new Set(names) : null; this.applyShading(); }
+
+  // Tone mapping belongs to the view: the flat presentations (wireframe; the textured Art view) show their exact
+  // colours, every lit view rolls its highlights off. Exposure scales the lit views only.
+  applyTone() {
+    const flat = this.shading === 'wire' || (this.shading === 'textured' && this.lighting === 'art');
+    this.renderer.toneMapping = flat ? THREE.NoToneMapping : TONE_MAPPING;
+    this.dirty = true;
+  }
+
+  setExposure(value) {
+    this.renderer.toneMappingExposure = THREE.MathUtils.clamp(Number(value) || 1, 0.5, 2);
+    this.dirty = true;
+  }
 
   setPose(pose, instant = false) {
     this.pose = pose;
@@ -455,12 +515,15 @@ export class CompareView {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = TONE_MAPPING;
+    this.renderer.toneMappingExposure = 1;
     this.renderer.setScissorTest(true);
     this.cam = new THREE.PerspectiveCamera(30, 1, 0.05, 200);
     this.controls = new OrbitControls(this.cam, canvas);
     this.controls.enableDamping = !reducedMotion();
     this.scenes = [new THREE.Scene(), new THREE.Scene()];
-    this.scenes.forEach(lights);
+    this.scenes.forEach((s) => studioLights(s, this.renderer));
     this.items = [null, null];
     this.view = 'q';
     this.alive = true;
