@@ -212,6 +212,109 @@ class TestGuestHTTP(WebCase):
                 self.assertEqual(self.finish(child), 'succeeded')
                 self.assertTrue(self.reservation(child)['closed'])
 
+    def test_stopped_redo_finalizer_cannot_close_queued_continuation(self):
+        self.assert_stale_redo_finalizer('cover', duplicate=False, mid_stage=False)
+
+    def test_duplicate_redo_finalizer_cannot_close_running_continuation(self):
+        self.assert_stale_redo_finalizer('cover', duplicate=True, mid_stage=True)
+
+    def test_stopped_turnaround_finalizer_cannot_close_running_continuation(self):
+        self.assert_stale_redo_finalizer('turnaround', duplicate=False, mid_stage=True)
+
+    def test_duplicate_turnaround_finalizer_cannot_close_queued_continuation(self):
+        self.assert_stale_redo_finalizer('turnaround', duplicate=True, mid_stage=False)
+
+    def assert_stale_redo_finalizer(self, stage, *, duplicate, mid_stage):
+        from unittest.mock import patch
+        from herogen.service.worker import run_heldout
+
+        self.store.db.execute('UPDATE admission_policy SET max_active=1')
+        b = self.enter()
+        parent = self.make_job(b).json()['id']
+        self.assertEqual(self.finish(parent), 'succeeded')
+        child = self.redo(b, parent, stage).json()['id']
+        runner = FakeRunner()
+
+        def execute(job, attempt, group, resume):
+            return run_group(self.store, self.s, job, attempt, group, resume, runner,
+                             InPlaceWorkdir(make_context(self.s, self.svc.storage, job)))
+
+        def heldout(job):
+            return run_heldout(self.store, self.s, job, runner,
+                lambda claim: InPlaceWorkdir(make_context(self.s, self.svc.storage, job)))
+
+        def run():
+            return run_job(self.store, self.s, self.svc.storage, child, 'race', execute,
+                           heldout=heldout)
+
+        if duplicate:
+            self.assertEqual(run(), 'stopped')
+        paused, release = threading.Event(), threading.Event()
+        original_stages = self.store.job_stages
+
+        def pause_finalizer(jid):
+            rows = original_stages(jid)
+            if jid == child and self.store.job_get(jid)['state'] == 'stopped':
+                paused.set()
+                if not release.wait(10):
+                    raise TimeoutError('Stopped finalizer was not released')
+            return rows
+
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            with patch.object(self.store, 'job_stages', pause_finalizer):
+                stale = pool.submit(run)
+                try:
+                    self.assertTrue(paused.wait(10), 'Finalizer did not observe stopped redo')
+                finally:
+                    if not paused.is_set():
+                        release.set()
+            try:
+                self.assertTrue(self.reservation(child)['closed'])
+                old_attempt = self.store.job_get(child)['attempts']
+                r = b.post(f'/api/jobs/{child}/continue')
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(r.json()['state'], 'queued')
+                # A queued continuation has not claimed another attempt yet.
+                self.assertEqual(self.store.job_get(child)['attempts'], old_attempt)
+
+                def release_and_check():
+                    release.set()
+                    self.assertEqual(stale.result(timeout=10), None if duplicate else 'stopped')
+                    row = self.reservation(child)
+                    side_done = int(mid_stage and stage == 'turnaround')
+                    self.assertEqual((row['main_done'], row['side_done'], row['closed']), (0, side_done, 0))
+                    self.assertEqual(row['amount_micro'], 20_000_000)
+                    self.assertIsNone(row['actual_micro'])
+                    self.assertEqual(self.store.budget_report()['summary']['active'], 1)
+                    other = self.make_job(self.enter())
+                    self.assertEqual(other.status_code, 503, other.text)
+                    self.assertEqual(other.json()['error']['code'], 'generation_capacity')
+
+                original_run = runner.run
+                def release_during_stage(spec, ctx):
+                    if spec.key == ('2' if stage == 'cover' else '3'):
+                        self.assertTrue(self.store.budget_report()['work'])
+                        release_and_check()
+                    return original_run(spec, ctx)
+
+                if mid_stage:
+                    with patch.object(runner, 'run', release_during_stage):
+                        result = run()
+                else:
+                    release_and_check()
+                    result = run()
+                self.assertEqual(result, 'succeeded')
+                rows = {row['stage']: row for row in self.store.job_stages(child)}
+                self.assertEqual(rows['2h']['state'], 'passed')
+                self.assertAlmostEqual(rows['2']['cost_usd'], .025)
+                self.assertEqual(self.store.job_get(child)['counts_quota'], 1)
+                self.assertTrue(self.reservation(child)['closed'])
+                self.assertEqual(self.reservation(child)['amount_micro'], 20_000_000)
+                self.assertEqual(self.store.budget_report()['work'], [])
+            finally:
+                release.set()
+                stale.result(timeout=10)
+
     def test_guest_redo_and_continue_refused_by_pause_budget_and_cost_verification(self):
         b = self.enter()
         parent = self.make_job(b).json()['id']

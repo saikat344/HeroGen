@@ -149,8 +149,13 @@ class AdmissionStore:
                       ('closed' if certain else 'uncertain', self.clock(), token, job_id))
             self._close_admission(c, job_id)
 
-    def admission_main_done(self, job_id: str) -> None:
+    def admission_main_done(self, job_id: str, *, continued_after: int | None = None) -> None:
         with self._tx() as c:
+            # Continuing reopens this receipt before another attempt is claimed. A delayed completion
+            # must match the continuation phase, rather than only the attempt number or job id.
+            if continued_after is not None and not c.execute(
+                    'SELECT 1 FROM jobs WHERE id=? AND continued_after=?', (job_id, continued_after)).fetchone():
+                return
             c.execute('UPDATE admissions SET main_done=1 WHERE job_id=?', (job_id,))
             self._close_admission(c, job_id)
 
@@ -158,8 +163,12 @@ class AdmissionStore:
         with self._tx() as c:
             c.execute('UPDATE admissions SET side_required=1 WHERE job_id=? AND closed=0', (job_id,))
 
-    def admission_side_done(self, job_id: str, unavailable_message: str = '') -> None:
+    def admission_side_done(self, job_id: str, unavailable_message: str = '', *,
+                            continued_after: int | None = None) -> None:
         with self._tx() as c:
+            if continued_after is not None and not c.execute(
+                    'SELECT 1 FROM jobs WHERE id=? AND continued_after=?', (job_id, continued_after)).fetchone():
+                return
             if unavailable_message:
                 job = c.execute('SELECT attempts FROM jobs WHERE id=?', (job_id,)).fetchone()
                 if job:
