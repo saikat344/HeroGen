@@ -292,6 +292,75 @@ class CoverBriefTest(_RunsTest):
                 self.assertEqual(run.read_stage("p"), prior)
 
 
+class RedoFlowTest(_RunsTest):
+    def _initial(self):
+        api = FakeAPI()
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: api.post(c, e, b)), \
+                mock.patch.object(client_mod, "decode_sam_output", api.decode):
+            self.assertEqual(run_pipeline(self.sketch, "parent", [0, 1, 2], mode="live", runs=str(self.root),
+                                          stop_after=2), 0)
+        return api
+
+    def _redo(self, stage, note, api, name="child"):
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
+                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: api.post(c, e, b)), \
+                mock.patch.object(client_mod, "decode_sam_output", api.decode):
+            return run_pipeline(None, name, [0, 1, 2], mode="live", runs=str(self.root),
+                                parent="parent", from_stage=stage, note=note, stop_after=stage)
+
+    def test_no_note_turnaround_sends_identical_bytes_and_replays(self):
+        before = self._initial()
+        api = FakeAPI()
+        self.assertEqual(self._redo(2, "", api), 0)
+        # Identical request and cover mean a cache hit: no paid call, including all its SAM masks.
+        self.assertEqual(api.calls, [])
+        parent = RunFolder(self.root, "parent").read_stage(2)
+        child = RunFolder(self.root, "child").read_stage(2)
+        self.assertEqual(parent["details"]["prompt"].encode(), child["details"]["prompt"].encode())
+        self.assertEqual([c["key"] for c in parent["calls"]], [c["key"] for c in child["calls"]])
+        self.assertEqual(child["cost_usd"], 0)
+        self.assertTrue(before.prompts)
+
+    def test_cover_note_edits_parent_cover_and_still_runs_all_gates(self):
+        self._initial()
+        api = FakeAPI()
+        self.assertEqual(self._redo(1, "green coat", api), 0)
+        parent = RunFolder(self.root, "parent").read_stage(1)
+        child = RunFolder(self.root, "child").read_stage(1)
+        self.assertEqual(child["checks"], parent["checks"])
+        self.assertIn("«green coat»", child["details"]["prompt"])
+        self.assertEqual(child["details"]["prompt_version"]["name"], "cover-redo-v1")
+        self.assertEqual(child["parent_run"], "parent")
+
+    def test_different_character_note_cannot_bypass_outline_gate(self):
+        self._initial()
+        class DifferentCover(FakeAPI):
+            def post(self, c, endpoint, body):
+                if endpoint == "images/edits" and body["prompt"].startswith(stages.COVER_PROMPT):
+                    img = Image.new("RGB", (300, 280), "white")
+                    from PIL import ImageDraw
+                    ImageDraw.Draw(img).rectangle((20, 20, 270, 260), fill=(30, 30, 30))
+                    return {"data": [{"b64_json": _b64png(img)}]}
+                return super().post(c, endpoint, body)
+        self.assertEqual(self._redo(1, "replace the courier with a round robot", DifferentCover()), 2)
+        rec = RunFolder(self.root, "child").read_stage(1)
+        outline = next(c for c in rec["checks"] if c["name"] == "silhouette_iou_normalised")
+        self.assertEqual((outline["gate"], outline["pass"]), (True, False))
+        self.assertTrue(RunFolder(self.root, "parent").read_stage(1)["ok"])
+
+    def test_turnaround_note_keeps_existing_gate_thresholds(self):
+        self._initial()
+        api = FakeAPI()
+        self.assertEqual(self._redo(2, "left view: satchel missing", api), 0)
+        before = RunFolder(self.root, "parent").read_stage(2)
+        after = RunFolder(self.root, "child").read_stage(2)
+        self.assertEqual(before["checks"], after["checks"])
+        self.assertIn("«left view: satchel missing»", after["details"]["prompt"])
+        self.assertEqual(after["details"]["prompt_version"]["name"], "turnaround-redo-v1")
+        self.assertEqual(len(after["details"]["attempts"]), 1)
+
+
 class FlowTest(_RunsTest):
     def test_record_then_replay(self):
         api = FakeAPI()

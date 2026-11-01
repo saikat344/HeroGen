@@ -107,9 +107,21 @@ def run_pipeline(
     views: list[str] | None = None,
     prompt: str | None = None,
     prompt_version: str | None = None,
+    parent: str | None = None,
+    from_stage: int | None = None,
+    note: str = "",
+    stop_after: int | None = None,
 ) -> int:
     """Run the stages in order. With ``prompt``, stage p draws the sketch and stage 0 copies its full-body image;
     stage 0 without a sketch path also takes the run's stage p image when stage p passed earlier."""
+    if (parent is None) != (from_stage is None) or (note and parent is None):
+        raise ValueError("--parent and --from-stage are required together; --note needs a parent")
+    if parent is not None and (from_stage not in stages or (stop_after is not None and stop_after < from_stage)):
+        raise ValueError("the requested stages must include the redo point before --stop-after")
+    if parent is not None and (sketch is not None or prompt is not None):
+        raise ValueError("a redo takes its sketch from the parent")
+    if stop_after not in (None, 1, 2):
+        raise ValueError("--stop-after must be 1 or 2")
     if prompt is not None and sketch is not None:
         raise ValueError("give a sketch or a prompt, not both")
     if prompt is not None and PROMPT not in stages:
@@ -118,10 +130,19 @@ def run_pipeline(
         raise ValueError("stage p needs a prompt (--prompt)")
     version = prompts.selected("prompt_sketch", prompt_version) if PROMPT in stages else None
     root = runs_root(runs)
-    run = RunFolder(root, run_id)
+    if parent is not None:
+        from herogen.pipeline.redo import fork_run
+
+        parent_path = Path(parent) if Path(parent).is_absolute() else root / parent
+        run = fork_run(root, run_id, parent_path, from_stage, note)
+        stages = [s for s in stages if _order(s) >= from_stage]
+    else:
+        run = RunFolder(root, run_id)
+    if stop_after is not None:
+        stages = [s for s in stages if _order(s) <= stop_after]
     client = ModelClient(Path(cache) if cache else root / "_cache", mode=mode)
     pipeline = [s for s in stages if s != 5]
-    if 2 in pipeline:  # the held-out views and the face source follow a passing stage 2
+    if 2 in pipeline and stop_after is None:  # the held-out views and the face source follow a passing stage 2
         pipeline += [s for s in (HELDOUT, FACE_SOURCE) if s not in pipeline]
     pipeline.sort(key=_order)
     status = 0
@@ -204,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--stages", default="0-2,5",
                    help="e.g. 0-2,5; 2 is followed by the held-out views 2h and the face source 2f; 2h or 2f "
                         "alone")
+    r.add_argument("--parent", help="parent run id or path; copied, never changed")
+    r.add_argument("--from-stage", type=int, choices=(1, 2))
+    r.add_argument("--note", default="", help="character appearance changes, at most 300 characters")
+    r.add_argument("--stop-after", type=int, choices=(1, 2), help="stop before later stages and side work")
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
@@ -255,10 +280,14 @@ def main(argv: list[str] | None = None) -> int:
             return run_pipeline(
                 a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
                 runs=a.runs, cache=a.cache, label=a.label, views=views, prompt=a.prompt,
-                prompt_version=a.prompt_version,
+                prompt_version=a.prompt_version, parent=a.parent, from_stage=a.from_stage, note=a.note,
+                stop_after=a.stop_after,
             )
         except (ValueError, prompts.RegistryError) as e:
             ap.error(str(e))
+        except OSError:
+            print("run: The run files could not be copied or read. Check the input and destination.", file=sys.stderr)
+            return 1
     if a.cmd == "recheck":
         try:
             rec = recheck_heldout(RunFolder(runs_root(a.runs), a.run_id))
