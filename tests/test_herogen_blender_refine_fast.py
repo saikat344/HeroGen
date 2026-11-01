@@ -343,6 +343,30 @@ class FastStageTests(unittest.TestCase):
         for before, after in zip(progress['versions'], progress['versions'][1:]):
             self.assertLess(set(before['accepted']), set(after['accepted']))
 
+    def test_skipped_fast_runs_finish_empty_progress(self):
+        for missing_source in (False, True):
+            with self.subTest(missing_source=missing_source):
+                if missing_source:
+                    (self.run / '03-source.glb').unlink()
+                record = stage.run_stage3f(self.run, self.client, refine_profile='fast',
+                                          profile='best' if missing_source else 'preview')
+                self.assertEqual(record['status'], 'skipped')
+                progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+                self.assertEqual(progress, {'profile': 'fast', 'versions': [], 'done': True, 'final_n': None})
+        self.assertFalse(self.client.inputs)
+
+    def test_preparation_cap_replaces_stale_progress_with_finished_empty_fallback(self):
+        progress = self.run / 'stage-3f-progress.json'
+        progress.write_text('{"profile":"fast","versions":[{"n":1}],"done":true,"final_n":1}')
+        with mock.patch.object(fixture.character, 'setup',
+                               side_effect=stage.BudgetStop('preparation cap')):
+            record = stage.run_stage3f(self.run, self.client, refine_profile='fast', cap_usd=0)
+        self.assertEqual(record['status'], 'cap_reached')
+        self.assertEqual(json.loads(progress.read_text()),
+                         {'profile': 'fast', 'versions': [], 'done': True, 'final_n': None})
+        self.assertFalse(json.loads((self.run / 'stage-3f-progress-initial.json').read_text())['done'])
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
     def test_bad_profile_and_upscale_combination_fail_before_output_deletion(self):
         final = self.run / '03-refined.glb'
         final.write_bytes(b'keep')
