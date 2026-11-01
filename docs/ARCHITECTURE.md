@@ -2427,11 +2427,18 @@ fields, confines file paths, rejects symlinks and verifies artifact bytes before
 image packages the configured bundle under `/public-gallery`, plus the service's static directory. No
 private run directory is published. Generated binaries remain external deployment inputs, excluded from Git.
 
-`GET /api/gallery`, `GET /api/gallery/{slug}`, `/gallery/{slug}` and `/gallery-assets/{slug}/{kind}` are
-read-only and need no session. Public pages explicitly identify previously generated results, show their
-starting sketch/artwork beside the actual orbitable GLB, and distinguish refinement records from held-out
-quality or game-readiness. Gallery access never dispatches work or grants private-job access. Reference/model
-load failures have retry controls. Saved refinement evidence is available through an optional details panel.
+`theme.js` runs before first paint on `/` and `/gallery/{slug}`, resolving `Auto` (`prefers-color-scheme`),
+`Light` and `Dark` onto `:root[data-theme]`, emitting `hg:theme` for active WebGL scenes and remaining usable
+when `localStorage` is blocked. On `/`, `landing.js` loads `/api/gallery` without credentials, orders
+`woodland-scout` first when published while keeping catalog order for remaining entries, renders an
+independent `createPreview()` scene (`preview.js`) with `Textured`, `Clay` and `Wire` shading modes (using
+service-packaged `/assets/icons/hg-shade-*.svg` icons), snapshots offscreen mesh thumbnails with retry
+recovery, and pauses its WebGL loop while hidden. `GET /api/gallery`, `GET /api/gallery/{slug}`,
+`/gallery/{slug}` and `/gallery-assets/{slug}/{kind}` are read-only and need no session. Public pages
+explicitly identify previously generated results, show their starting sketch/artwork beside the actual
+orbitable GLB, and distinguish refinement records from held-out quality or game-readiness. Gallery access
+never dispatches work or grants private-job access. Reference/model load failures flush stale meshes and
+expose retry controls. Saved refinement evidence is available through an optional details panel.
 
 With `HEROGEN_SERVICE_PUBLIC_DEMO=true`, `POST /api/demo/access` opens a private browser workspace without
 an account or published credential. A valid existing guest session is reused, keeping its history private.

@@ -2,11 +2,9 @@ import { createPreview } from '/assets/preview.js';
 
 export function landingGallery() {
   const $ = s => document.querySelector(s), viewer = createPreview();
-  let items = [], selected = null, revision = 0, visible = true, destroyed = false;
+  let items = [], selected = null, revision = 0, visible = true, destroyed = false, thumbViewer = null, thumbCanvas = null, thumbBusy = false;
   const status = $('#landingStatus'), canvas = $('#landingCanvas'), retry = $('#retryLanding');
-  const thumbViewer = createPreview(), thumbCanvas = document.createElement('canvas');
-  thumbCanvas.className = 'thumbnail-render'; thumbCanvas.setAttribute('aria-hidden', 'true');
-  document.body.append(thumbCanvas);
+  function closeThumbs() { thumbViewer?.dispose(); thumbViewer = null; thumbCanvas?.remove(); thumbCanvas = null; }
   function renderable() { return visible && !document.hidden && !destroyed; }
   async function select(item) {
     selected = item; const current = ++revision;
@@ -23,15 +21,23 @@ export function landingGallery() {
       await viewer.show(canvas, item.assets.model.url);
       if (current !== revision || !renderable()) return;
       status.textContent = 'Drag to rotate · Scroll to zoom';
+      thumbnails();
     } catch {
       if (current !== revision || !renderable()) return;
       status.textContent = '3D could not be loaded. Retry or inspect the saved run.'; retry.hidden = false;
     } finally { if (current === revision) canvas.setAttribute('aria-busy', 'false'); }
   }
   async function thumbnails() {
+    if (thumbBusy || destroyed) return;
+    const pending = items.filter(item => ![...$('#modelPicker').children].find(b => b.dataset.id === item.id)?.querySelector('img'));
+    if (!pending.length) return;
+    thumbBusy = true;
+    thumbViewer = createPreview(); thumbCanvas = document.createElement('canvas');
+    thumbCanvas.className = 'thumbnail-render'; thumbCanvas.setAttribute('aria-hidden', 'true');
+    document.body.append(thumbCanvas);
     // Reuse one temporary renderer, then release its context and all model data.
     try {
-      for (const item of items) {
+      for (const item of pending) {
         if (destroyed) break;
         try {
           await thumbViewer.show(thumbCanvas, item.assets.model.url);
@@ -42,7 +48,7 @@ export function landingGallery() {
           button?.querySelector('.model-thumb').replaceChildren(image);
         } catch { /* The named picker and primary viewer remain available. */ }
       }
-    } finally { thumbViewer.dispose(); thumbCanvas.remove(); }
+    } finally { closeThumbs(); thumbBusy = false; }
   }
   async function catalog() {
     retry.hidden = true; status.textContent = 'Loading the public gallery…';
@@ -72,7 +78,7 @@ export function landingGallery() {
   }));
   function visibility() { if (renderable() && selected) select(selected); else { ++revision; viewer.pause(); } }
   document.addEventListener('visibilitychange', visibility);
-  window.addEventListener('pagehide', () => { destroyed = true; ++revision; viewer.dispose(); thumbViewer.dispose(); thumbCanvas.remove(); });
+  window.addEventListener('pagehide', () => { destroyed = true; ++revision; viewer.dispose(); closeThumbs(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { destroyed = false; visibility(); } });
   catalog();
   return {setVisible(value) { visible = value; visibility(); }};

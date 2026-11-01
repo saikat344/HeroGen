@@ -122,8 +122,9 @@ class TestLandingModels(ServiceBrowserCase):
         t.call('Page.addScriptToEvaluateOnNewDocument', source="const originalFetch=window.fetch; window.fetch=(url,options)=>(url instanceof Request?url.url:String(url)).includes('/model')&&!window.allowModels?Promise.reject(new Error('offline fixture')):originalFetch(url,options);")
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#retryLanding').hidden && document.querySelector('#landingStatus').textContent.includes('could not be loaded')")
+        self.assertEqual(t.eval("document.querySelectorAll('.model-thumb img').length"), 0)
         t.eval("window.allowModels=true;document.querySelector('#retryLanding').click()")
-        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
+        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.model-thumb img').length === 2 && document.querySelector('.thumbnail-render') === null")
         self.assertEqual(self.store.jobs_admin_list(), [])
         self.assertEqual(self.tab.errors, [])
 
