@@ -38,6 +38,7 @@ print("versions found:", ", ".join(names))
 # Every frozen version and its content hash. A frozen version never changes: new text needs a new name, added here.
 FROZEN = {
     "hero-sketch-v1": "ca48ac85c697a97b61865c45cf5886adaffa88f9e71851d0649923e568620624",
+    "hero-sketch-v2": "baea6e678b205dc10dccefa48c1c19d5da394f01870fd1bd9dac8d075b27294c",
     "same-character-v1": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9",
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
 }
@@ -88,6 +89,17 @@ class FrozenVersions(unittest.TestCase):
         self.assertTrue(design["template"].endswith("Monochrome graphite only, no colour, no digital rendering, no text."))
         self.assertTrue(full["prompt"].startswith("Redraw this exact character as a full-body front view."))
 
+    def test_hero_sketch_v2_only_adds_head_negatives(self):
+        v1 = json.loads(json.dumps(prompts.load("hero-sketch-v1").data))
+        v2 = json.loads(json.dumps(prompts.load("hero-sketch-v2").data))
+        negative = " Constraints: no halo, no glow, no rings, circles or symbols around or behind the head."
+        for before, after in zip(v1["steps"], v2["steps"]):
+            key = "template" if "template" in before else "prompt"
+            self.assertEqual(after[key], before[key] + negative)
+            after[key] = before[key]
+        v2["name"], v2["sha256"] = v1["name"], v1["sha256"]
+        self.assertEqual(v2, v1)
+
 
 class Calibration(unittest.TestCase):
     def test_every_calibration_matches_its_frozen_version(self):
@@ -119,7 +131,7 @@ class Calibration(unittest.TestCase):
 
 class Selection(unittest.TestCase):
     def test_defaults(self):
-        self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v1")
+        self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v2")
         self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
 
     def test_env_override_and_explicit(self):

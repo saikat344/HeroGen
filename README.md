@@ -132,8 +132,12 @@ Stage p writes `p-design.png`, `p-full-body.png` and every attempt under `p-atte
 `p-full-body.png` as the sketch. The prompt is limited to 300 characters. The user's text sits in a bounded
 slot of the design prompt, introduced as describing only the character and never how the picture is drawn, and
 the full-body edit never sees it; no check measures the drawing style yet. The prompt text, models and
-parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/` (`hero-sketch-v1` by
-default), recorded in `stage-p.json`. The checks, their thresholds and the measurements behind them are in
+parameters come from a frozen, hashed prompt version in `herogen/prompts/versions/` (`hero-sketch-v2` by
+default), recorded in `stage-p.json`. Both sketch steps exclude halos, glows and rings or symbols around the
+head; the original v1 remains available for replay. Stage 1 restores the recorded brief in a quoted,
+300-character slot for colours, materials and gear, with the same head exclusions. It records whether the
+slot was used and the cover prompt SHA-256 in `stage-1.json`. Sketch uploads keep the original cover prompt
+byte for byte. Stage 2 takes colours from the cover. The checks, their thresholds and the measurements behind them are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#stage-p-prompt-to-sketch).
 
 ## Lab
