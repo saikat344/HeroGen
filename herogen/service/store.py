@@ -30,8 +30,9 @@ from herogen.service.admission import (
     AdmissionStore, SCHEMA as ADMISSION_SCHEMA, LEGACY_SCHEMA as LEGACY_ADMISSION_SCHEMA,
     PHASE_MIGRATION, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN,
 )
+from herogen.service.analytics import AnalyticsStore, SCHEMA as ANALYTICS_SCHEMA, PUBLIC as ANALYTICS_PUBLIC
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     6: ("ALTER TABLE admission_work ADD COLUMN process TEXT NOT NULL DEFAULT ''",
@@ -57,6 +58,7 @@ MIGRATIONS = {
         "ALTER TABLE jobs ADD COLUMN stop_after TEXT",
         "ALTER TABLE jobs ADD COLUMN continued_after INTEGER NOT NULL DEFAULT 0"),
     8: PHASE_MIGRATION,
+    9: tuple(s.strip() for s in ANALYTICS_SCHEMA.split(';') if s.strip()),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -134,7 +136,7 @@ CREATE INDEX audit_at ON audit(at);
 """
 
 
-SCHEMA += ADMISSION_SCHEMA
+SCHEMA += ADMISSION_SCHEMA + ANALYTICS_SCHEMA
 
 
 class StoreError(Exception):
@@ -202,7 +204,7 @@ class RateLimiter:
             return True, 0
 
 
-class Store(AdmissionStore):
+class Store(AdmissionStore, AnalyticsStore):
     # Methods the service's own functions may invoke by name (modal_app.StoreService.call).
     PUBLIC = frozenset({
         "rate_hit", "invite_valid", "signin_eligibility", "login_token_create", "login_token_info",
@@ -212,7 +214,7 @@ class Store(AdmissionStore):
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "side_claim", "side_live", "side_finish", "side_renew", "job_renew",
         "job_refine_budget", "job_continue", "job_versions",
-    }) | ADMISSION_PUBLIC
+    }) | ADMISSION_PUBLIC | ANALYTICS_PUBLIC
     # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
     ADMIN = frozenset({
         "allow_add", "allow_remove", "allow_list", "invite_create", "invite_list", "invite_revoke",
@@ -1081,13 +1083,14 @@ class Store(AdmissionStore):
             self._terminal_admission(c, job_id)
             self._audit(c, "system", "job_purged", job_id)
 
-    def purge_expired(self, audit_retention_s: float) -> dict[str, int]:
+    def purge_expired(self, audit_retention_s: float, analytics_retention_s: float = 30 * DAY_S) -> dict[str, int]:
         now = self.clock()
         with self._tx() as c:
             t = c.execute("DELETE FROM login_tokens WHERE expires_at<? OR used_at<?", (now - DAY_S, now - DAY_S)).rowcount
             s = c.execute("DELETE FROM sessions WHERE expires_at<? OR revoked_at<?", (now, now - DAY_S)).rowcount
             a = c.execute("DELETE FROM audit WHERE at<?", (now - audit_retention_s,)).rowcount
-        return {"login_tokens": t, "sessions": s, "audit": a}
+            ev = c.execute("DELETE FROM analytics_events WHERE at<?", (now - analytics_retention_s,)).rowcount
+        return {"login_tokens": t, "sessions": s, "audit": a, "analytics_events": ev}
 
     def audit_list(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._all("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))

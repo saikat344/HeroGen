@@ -66,6 +66,8 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser('generation-overhead'); p.add_argument('--actual-usd', required=True); p.add_argument('--evidence', required=True)
     p = sub.add_parser('generation-reconcile'); p.add_argument('job_id'); p.add_argument('--actual-usd', required=True)
     p.add_argument('--evidence', required=True); p.add_argument('--work-stopped', action='store_true')
+    p = sub.add_parser('analytics-report', help='print first-party analytics and pipeline report as JSON')
+    p.add_argument('--days', type=int, default=7, help='window in days (1 to 90)')
     return ap
 
 
@@ -174,4 +176,9 @@ def run(argv: list[str] | str, store, signer: Signer, snapshots: tuple | None = 
     elif a.cmd == "audit":
         for e in store.audit_list(a.limit):
             out.append(f"{_when(e['at'])}  {e['actor']}  {e['action']}  {e['subject']}  {e['detail']}".rstrip())
+    elif a.cmd == "analytics-report":
+        from herogen.service.analytics import MAX_DAYS, MIN_DAYS
+        if not (MIN_DAYS <= a.days <= MAX_DAYS):
+            raise SystemExit(f"--days must be {MIN_DAYS} to {MAX_DAYS}")
+        return json.dumps(store.analytics_report(a.days), indent=2)
     return "\n".join(out)
