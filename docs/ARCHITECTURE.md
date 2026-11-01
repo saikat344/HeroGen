@@ -645,7 +645,10 @@ published in pass/attempt order. Copies retain the parent's shared HTTP limiter 
 per-model RPM limits when configured. Transport retry reservations share a lock, while active tokens
 are local to each thread. The lock spans local budget updates and stage-record persistence
 before an HTTP attempt is authorized. An unresolved request stays
-reserved. Cap stops drain submitted work and prohibit another wave. Model errors drain workers,
+reserved. Limiter hooks wait outside that lock; after waiting, authorization rechecks cancellation under
+the lock. Cancelled attempts release their reservation and any acquired hook slot without an HTTP call.
+Settlement hooks also run outside the lock. Cap stops drain submitted work and prohibit another wave.
+Model errors drain workers,
 preserve cache/log evidence, record the failure, and propagate it. Blender renders and exports remain
 serial, with all cameras of a wave batched into one process.
 
