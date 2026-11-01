@@ -6,15 +6,18 @@ import { draftStore } from '/assets/draft.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
 import { generationView } from '/assets/generation.js';
+import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
 const S = { csrf: null, session: null, current: null, timer: null, revision: 0 };
 let entry;
 let screen = 'entry';
 function setScreen(next) {
+  const enteringWorkbench = next === 'generation' && screen !== 'generation';
   screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation');
   landing?.setVisible(next === 'entry');
   $('#app').classList.toggle('generation-screen', next === 'generation');
+  if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
 const generation = generationView($, (url) => preview(url));
 function returnToEntry() {
@@ -110,6 +113,7 @@ async function api(path, { method = 'GET', json, form, headers = {} } = {}) {
 async function loadSession() {
   S.session = await api('/api/session');
   S.csrf = S.session.csrf;
+  setCsrf(S.csrf);
   return S.session;
 }
 
@@ -146,6 +150,7 @@ async function initVerify() {
     try {
       const r = await api('/api/auth/verify', { method: 'POST', json: { token, accept_terms: $('#accept').checked, adult: $('#adult').checked } });
       S.csrf = r.csrf;
+      setCsrf(S.csrf);
       location.replace('/');
     } catch (e) { $('#verifyMsg').textContent = e.message; }
   });
@@ -188,9 +193,21 @@ function renderJob(j) {
   const dl = $('#downloads');
   const items = [];
   const g = j.downloads.glb;
-  items.push(g.available ? el('a', { href: g.url, cls: 'button', download: '' , text: 'Download GLB' }) : el('span', { cls: 'muted small', text: `GLB: ${g.reason}` }));
+  if (g.available) {
+    const glbLink = el('a', { href: g.url, cls: 'button', download: '', text: 'Download GLB' });
+    glbLink.addEventListener('click', () => track('download_click', { format: 'glb' }, { flush: true }));
+    items.push(glbLink);
+  } else {
+    items.push(el('span', { cls: 'muted small', text: `GLB: ${g.reason}` }));
+  }
   const r = j.downloads.roblox;
-  items.push(r.available ? el('a', { href: r.url, cls: 'button', download: '', text: 'Download Roblox bundle (.zip)' }) : el('span', { cls: 'muted small', text: `Roblox bundle: ${r.reason}` }));
+  if (r.available) {
+    const rbxLink = el('a', { href: r.url, cls: 'button', download: '', text: 'Download Roblox bundle (.zip)' });
+    rbxLink.addEventListener('click', () => track('download_click', { format: 'roblox' }, { flush: true }));
+    items.push(rbxLink);
+  } else {
+    items.push(el('span', { cls: 'muted small', text: `Roblox bundle: ${r.reason}` }));
+  }
   dl.replaceChildren(...items);
   show('#studio', r.available);
   $('#readme').textContent = j.roblox_readme || '';
@@ -290,6 +307,7 @@ function initJobs() {
   $('#jobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if ($('#go').disabled) return;
+    track('create_clicked');
     const msg = $('#jobMsg');
     const fd = new FormData();
     const kind = document.querySelector('input[name=kind]:checked').value;
@@ -299,12 +317,12 @@ function initJobs() {
     let file = null;
     if (kind === 'sketch') {
       file = entry.file();
-      if (!file) { msg.textContent = 'Choose an image to upload.'; return; }
-      if (file.size > S.session.limits.upload_max_bytes) { msg.textContent = `Choose an image smaller than ${Math.round(S.session.limits.upload_max_bytes / 1024 / 1024)} MB.`; return; }
+      if (!file) { track('create_result', { result: 'no_file' }); msg.textContent = 'Choose an image to upload.'; return; }
+      if (file.size > S.session.limits.upload_max_bytes) { track('create_result', { result: 'upload_too_large' }); msg.textContent = `Choose an image smaller than ${Math.round(S.session.limits.upload_max_bytes / 1024 / 1024)} MB.`; return; }
       fd.append('sketch', file, 'sketch');
     } else {
-      if (!prompt.value.trim()) { msg.textContent = 'Describe your hero or choose an image to start.'; prompt.focus(); return; }
-      if (Array.from(prompt.value).length > limit) { msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
+      if (!prompt.value.trim()) { track('create_result', { result: 'empty_prompt' }); msg.textContent = 'Describe your hero or choose an image to start.'; prompt.focus(); return; }
+      if (Array.from(prompt.value).length > limit) { track('create_result', { result: 'prompt_too_long' }); msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
       fd.append('prompt', prompt.value);
     }
     const values = { prompt: prompt.value, name: $('#name').value, profile: sel.value, file };
@@ -312,10 +330,10 @@ function initJobs() {
     if (!S.session.signed_in) {
       try { await keepDraft(values); msg.textContent = 'Your draft is saved.'; }
       catch { msg.textContent = 'Keep this tab open to preserve your draft.'; }
-      if (!S.session.public_demo) { $('#go').disabled = false; signIn(); return; }
+      if (!S.session.public_demo) { track('create_result', { result: 'signin_required' }); $('#go').disabled = false; signIn(); return; }
       $('#go').disabled = true;
       try { await openGuestWorkspace(); await signedIn(); }
-      catch(e) { msg.textContent = e.message; $('#go').disabled = false; return; }
+      catch(e) { track('create_result', { result: knownCreateResult(e.code, e.status) }); msg.textContent = e.message; $('#go').disabled = false; return; }
     }
     $('#go').disabled = true; msg.textContent = 'Starting…';
     const hash = await formHash(kind, values.profile, values.name, values.prompt, file);
@@ -325,12 +343,14 @@ function initJobs() {
     await keepDraft(values).catch(() => banner('Your retry draft could not be saved. Keep this tab open until your hero is confirmed.'));
     try {
       const j = await api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
+      track('create_result', { result: 'accepted' });
       clearPending(); ++S.revision; followJob(j, true);
       await draftStore('delete').catch(() => {});
       msg.textContent = '';
       await Promise.all([refreshList(), loadSession().then((session) => { renderQuota(session.usage); updateAccessSummary(); })])
         .catch((e) => banner(`Your hero is saved. Could not refresh account or library details: ${e.message}`));
     } catch (e) {
+      track('create_result', { result: knownCreateResult(e.code, e.status) });
       if (e.status === 409 && (!e.code || e.code === 'conflict')) {
         clearPending();
         await keepDraft(values).catch(() => draftStore('delete').catch(() => {}));
@@ -417,7 +437,7 @@ let guestOpening = null;
 async function openGuestWorkspace() {
   if (!guestOpening) guestOpening = (async () => {
     const result = await api('/api/demo/access', {method:'POST',json:{}});
-    S.csrf = result.csrf; await loadSession();
+    S.csrf = result.csrf; setCsrf(S.csrf); await loadSession();
   })();
   try { await guestOpening; } finally { guestOpening = null; }
 }
@@ -444,6 +464,8 @@ async function boot() {
   const signinRoute = ['/signin', '/admin/signin'].includes(location.pathname);
   $('#headerSignIn').textContent = signinRoute ? 'Sign in' : 'Your heroes';
   initSignin(); initJobs(); initGuestAccess();
+  bindOrbitDrag($('#preview'), 'workbench');
+  document.querySelectorAll('a[href="/terms"],a[href="/privacy"]').forEach((link) => link.addEventListener('click', () => track('page_view', { page: 'legal' }, { flush: true })));
   $('#backToIdeas').addEventListener('click', () => {
     history.pushState(null, '', '/'); returnToEntry();
     $('#entryH').tabIndex = -1; $('#entryH').focus();
@@ -485,6 +507,7 @@ async function boot() {
   if (location.pathname === '/admin/signin') { show('#loading', false); signIn(); return; }
   await restoreDraft();
   show('#loading', false); show('#entry');
+  trackOnce('page:landing', 'page_view', { page: 'landing' });
   landing = landingGallery();
   if (S.session.signed_in) await signedIn();
   if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'});

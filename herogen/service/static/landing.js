@@ -1,4 +1,5 @@
 import { createPreview } from '/assets/preview.js';
+import { bindOrbitDrag, track } from './analytics.js';
 
 export function landingGallery() {
   const $ = s => document.querySelector(s), viewer = createPreview();
@@ -63,18 +64,21 @@ export function landingGallery() {
         button.setAttribute('aria-pressed', 'false'); button.setAttribute('aria-label', `View ${item.title} in 3D`);
         const thumb = document.createElement('span'); thumb.className = 'model-thumb'; thumb.textContent = '3D'; thumb.setAttribute('aria-hidden', 'true');
         const label = document.createElement('span'); label.textContent = item.title; button.append(thumb, label);
-        button.addEventListener('click', () => select(item)); $('#modelPicker').append(button);
+        button.addEventListener('click', () => { track('picker_select', { id: item.id }); select(item); }); $('#modelPicker').append(button);
       }
       if (!items.length) { status.textContent = 'No saved models have been published yet.'; return; }
       // Prefer the published ranger; preserve catalog order for other results.
       await select(items[0]); if (!destroyed) thumbnails();
     } catch { status.textContent = 'The gallery is unavailable. Retry to load the saved models.'; retry.hidden = false; }
   }
+  bindOrbitDrag(canvas, 'landing');
   retry.addEventListener('click', () => selected ? select(selected) : catalog());
   $('#featuredArtwork').addEventListener('error', () => { $('#featuredArtwork').hidden = true; });
+  $('#featuredDetails').addEventListener('click', () => track('inspect_saved_run', selected?.id ? { id: selected.id } : null, { flush: true }));
   document.querySelectorAll('[data-shade]').forEach(button => button.addEventListener('click', () => {
     viewer.shading(button.dataset.shade);
     document.querySelectorAll('[data-shade]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    track('shade_toggle', { mode: button.dataset.shade });
   }));
   function visibility() { if (renderable() && selected) select(selected); else { ++revision; viewer.pause(); } }
   document.addEventListener('visibilitychange', visibility);

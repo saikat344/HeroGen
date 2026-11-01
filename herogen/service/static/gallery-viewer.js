@@ -1,4 +1,5 @@
 import { show, hide } from '/assets/preview.js';
+import { bindOrbitDrag, primeAnalytics, track } from './analytics.js';
 const $ = (s) => document.querySelector(s);
 let character = null, sketch = false, loading = false;
 async function model() {
@@ -22,6 +23,9 @@ $('#referenceToggle').addEventListener('click',()=>{if(character){sketch=!sketch
 $('#publicReference').addEventListener('error',()=>{ $('#publicReference').hidden=true;$('#referenceStatus').textContent='This reference image could not be loaded. Toggle the reference to retry.'; });
 window.addEventListener('pagehide',hide);
 async function boot() {
+  primeAnalytics();
+  track('page_view', { page: 'gallery_detail' });
+  bindOrbitDrag($('#publicCanvas'), 'gallery_detail');
   const id = location.pathname.split('/').at(-1);
   const response=await fetch(`/api/gallery/${encodeURIComponent(id)}`,{credentials:'omit',cache:'no-store'});
   if(!response.ok) throw new Error('This public character is unavailable. Return to the gallery to choose another.');
