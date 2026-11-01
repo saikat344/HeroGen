@@ -562,6 +562,12 @@ class Deploy(RootCase):
         for k in ("PATH", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "MODAL_ENVIRONMENT"):
             self.assertEqual(denv[k], env[k])
 
+    def test_optional_public_guest_and_gallery_settings_are_forwarded(self):
+        env=dict(SETTINGS,HEROGEN_SERVICE_PUBLIC_DEMO='true',HEROGEN_SERVICE_GALLERY='public-pack',HEROGEN_SERVICE_MAX_RUNNING='5',HEROGEN_SERVICE_UNREVIEWED='ignored')
+        actual=R.deploy_env(env)
+        for name in R.OPTIONAL: self.assertEqual(actual[name],env[name])
+        self.assertNotIn('HEROGEN_SERVICE_UNREVIEWED',actual)
+
     def test_entry_point_missing(self):
         with self.assertRaises(R.ReleaseError) as e:
             R.deploy("v1.4.0", SETTINGS, self.root, self.run_())

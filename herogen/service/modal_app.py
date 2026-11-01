@@ -109,13 +109,16 @@ def price_per_s(group: str) -> float:
     return cpu * CPU_CORE_USD_S + mem / 1024 * MEM_GIB_USD_S
 
 
-IMAGE_ENV = {**service_config.env_for_deploy(), "HEROGEN_SERVICE_APP": APP_NAME,
+IMAGE_ENV = {**{k: v for k, v in service_config.env_for_deploy().items()
+                if k != "HEROGEN_SERVICE_GALLERY"}, "HEROGEN_SERVICE_APP": APP_NAME,
              "HEROGEN_SERVICE_COMMIT": _commit(), "HEROGEN_SERVICE_DATA": DATA, "PYTHONDONTWRITEBYTECODE": "1"}
 base = (modal.Image.debian_slim(python_version=PYTHON)
         .pip_install_from_requirements(str(HERE / "requirements.txt"))
         .pip_install(SAM_PARSER)
         .env(IMAGE_ENV))
-web_image = base.add_local_python_source("herogen").add_local_dir(
+# Environment build steps must precede all lazy local mounts.
+web_image = base.env({"HEROGEN_SERVICE_GALLERY": "/public-gallery"}) if DEPLOY.gallery_dir else base
+web_image = web_image.add_local_python_source("herogen").add_local_dir(
     str(HERE / "static"), "/root/herogen/service/static")
 if DEPLOY.gallery_dir is not None:
     # Validate the separately curated public pack before packaging it; never mount private run storage.
@@ -124,8 +127,7 @@ if DEPLOY.gallery_dir is not None:
         for character in catalog(DEPLOY.gallery_dir):
             for kind in ('sketch', 'artwork', 'model'):
                 artifact(DEPLOY.gallery_dir, character['id'], kind)
-    web_image = web_image.add_local_dir(str(DEPLOY.gallery_dir), "/public-gallery").env(
-        {"HEROGEN_SERVICE_GALLERY": "/public-gallery"})
+    web_image = web_image.add_local_dir(str(DEPLOY.gallery_dir), "/public-gallery")
 blender_image = (
     base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93")  # BSD-3-Clause; Apache-2.0
     .apt_install(*BLENDER_APT)

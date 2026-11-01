@@ -35,9 +35,13 @@ def main(argv=None) -> int:
     source.add_argument('--report', type=Path, help='saved budget report for local verification')
     parser.add_argument('--state', required=True, type=Path, help='private local deduplication state')
     args=parser.parse_args(argv)
-    previous=json.loads(args.state.read_text()) if args.state.exists() else {}
+    previous={}
     now=time.time()
     try:
+        loaded=json.loads(args.state.read_text()) if args.state.exists() else {}
+        if not isinstance(loaded,dict) or not isinstance(loaded.get('conditions',[]),list):
+            raise ValueError('Invalid monitor state')
+        previous=loaded
         if args.report:
             report=json.loads(args.report.read_text())
         else:
@@ -47,7 +51,7 @@ def main(argv=None) -> int:
         changes,state=assess(report,previous,now)
     except Exception as error:
         # Never interpret an unreachable meter as zero spend. No exception body or credentials in output.
-        state={'checked_at':now,'conditions':['monitor_unavailable'],'capacity_since':previous.get('capacity_since')}
+        state={'checked_at':now,'conditions':sorted(set(previous.get('conditions',[])) | {'monitor_unavailable'}),'capacity_since':None}
         changes={'new':[] if 'monitor_unavailable' in previous.get('conditions',[]) else ['monitor_unavailable'],
                  'resolved':[], 'error_type':type(error).__name__}
     args.state.parent.mkdir(parents=True,exist_ok=True)

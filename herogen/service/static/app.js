@@ -448,13 +448,13 @@ async function boot() {
     const open = $('#heroLibrary').hidden; show('#heroLibrary', open); $('#showLibrary').setAttribute('aria-expanded', String(open));
     if (open) await refreshList().catch((e) => banner(e.message));
   });
-  document.querySelectorAll('a[href="#gallery"]').forEach(link => link.addEventListener('click', event => {
+  document.querySelectorAll('a[href="#gallery"],a[href="/#gallery"]').forEach(link => link.addEventListener('click', event => {
     event.preventDefault(); history.pushState(null, '', '/#gallery'); returnToEntry();
     $('#gallery').scrollIntoView({block:'start'});
   }));
   window.addEventListener('popstate', () => {
     const id = new URLSearchParams(location.hash.slice(1)).get('job');
-    if (id) openJob(id, true); else returnToEntry();
+    if (id) openJob(id, true); else { returnToEntry(); if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'}); }
   });
   $('#headerSignIn').addEventListener('click', async () => {
     try { if (!['/signin','/admin/signin'].includes(location.pathname)) await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
@@ -471,6 +471,7 @@ async function boot() {
   await restoreDraft();
   show('#loading', false); show('#entry');
   if (S.session.signed_in) await signedIn();
+  if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'});
   window.addEventListener('focus', async () => {
     if (S.session.signed_in) return;
     try {

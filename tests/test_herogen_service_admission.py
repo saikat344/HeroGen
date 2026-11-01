@@ -113,6 +113,53 @@ class TestAdmission(TempDirCase):
         row=self.store.budget_report()['admissions'][0]
         self.assertTrue(row['closed']); self.assertIsNone(row['actual_micro'])
 
+    def execute_job(self, user, runner, heldout):
+        j,_=self.job(user); storage=Storage(self.s.data_dir); storage.save_input(user['id'],j['id'],png())
+        def execute(job,attempt,group,resume):
+            return run_group(self.store,self.s,job,attempt,group,resume,runner,InPlaceWorkdir(make_context(self.s,storage,job)))
+        result=run_job(self.store,self.s,storage,j['id'],'call',execute,heldout=heldout)
+        return j,result
+
+    def test_rejected_deleted_or_unspawned_side_checks_release_certain_capacity(self):
+        u,_=self.guest(); j,result=self.execute_job(u,FakeRunner(fail={'3':'reject'}),lambda job:None)
+        self.assertEqual(result,'rejected'); self.assertTrue(self.store.budget_report()['admissions'][0]['closed'])
+        j,result=self.execute_job(u,FakeRunner(),lambda job:None)
+        self.assertEqual(result,'succeeded'); self.assertFalse(self.store.budget_report()['admissions'][-1]['closed'])
+        self.store.job_delete(j['id'],u['id']); self.assertTrue(self.store.budget_report()['admissions'][-1]['closed'])
+        def failed_spawn(job): raise RuntimeError('Synthetic spawn failure')
+        j,result=self.execute_job(u,FakeRunner(),failed_spawn)
+        self.assertEqual(result,'succeeded'); self.assertTrue(self.store.budget_report()['admissions'][-1]['closed'])
+        side=next(stage for stage in self.store.job_stages(j['id']) if stage['stage']=='2h')
+        self.assertEqual(side['state'],'unavailable')
+
+    def test_crashed_budgeted_worker_stops_retry_and_alert_clears_after_confirmation(self):
+        u,_=self.guest(); j,_=self.job(u)
+        self.store.job_claim(j['id'],'lost',60,2)
+        self.store.admission_work_begin(j['id'],'lost-work','model',self.s.cost_signature)
+        self.clock.advance(120); self.store.reconcile_stale(2)
+        self.assertEqual(self.store.job_get(j['id'])['state'],'failed')
+        self.assertEqual(self.store.job_get(j['id'])['error_code'],'generation_uncertain')
+        self.assertIn('work_uncertain',self.store.budget_report()['summary']['alerts'])
+        self.assertIsNone(self.store.job_claim(j['id'],'retry',60,2))
+        self.store.budget_reconcile(j['id'],0,'All remote work confirmed stopped',work_stopped=True)
+        self.assertEqual(self.store.budget_report()['work'],[])
+        self.assertNotIn('work_uncertain',self.store.budget_report()['summary']['alerts'])
+
+    def test_side_lease_loss_is_uncertain_without_affecting_main_job(self):
+        u,_=self.guest(); j,_=self.job(u); self.store.job_claim(j['id'],'main',1000,2)
+        self.assertTrue(self.store.side_claim(j['id'],'2h','side',30))
+        self.store.admission_work_begin(j['id'],'side-work','heldout',self.s.cost_signature)
+        self.clock.advance(60); self.store.reconcile_stale(2)
+        self.assertEqual(self.store.job_get(j['id'])['state'],'running')
+        self.assertIn('work_uncertain',self.store.budget_report()['summary']['alerts'])
+        self.assertFalse(self.store.budget_report()['admissions'][0]['closed'])
+
+    def test_account_deletion_closes_unstarted_reservation_without_refunding_money(self):
+        u,_=self.guest(); j,_=self.job(u); self.store.user_delete(u['id'])
+        row=self.store.budget_report()['admissions'][0]
+        self.assertTrue(row['closed']); self.assertIsNone(row['actual_micro'])
+
+
 class TestGuestHTTP(WebCase):
     def build(self,**kw):
         super().build(public_demo=True,code_commit='a'*40,max_running_jobs=5,**kw)
