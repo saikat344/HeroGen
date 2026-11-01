@@ -256,8 +256,9 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
     if spec.key == "p" and rec.get("status") == "input_rejected":
         return ("The description could not be used. Describe one character in words within the description's "
                 "length limit, then try again.")
-    if spec.key in ("p", "1") and rec.get("status") == "content_policy":
-        return "The image model refused this description under its content policy. Try rewording the description."
+    if spec.key in ("p", "1", "2") and rec.get("status") == "content_policy":
+        text = "description" if spec.key == "p" else "appearance note or character description"
+        return f"The image model refused this {text} under its content policy. Try rewording the {text}."
     checks = failed_checks(rec)
     if spec.key in ("0", "1") and rec.get("status") == "input_rejected":
         reason = _input_reason(checks) or "We couldn't use this image."
@@ -372,9 +373,7 @@ class CliRunner:
                 src = named
             return pipe + [str(src), *common, "--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
         if spec.key == "1":
-            if ctx.kind == "prompt":
-                return [py, "-m", "herogen.service.pipestage", "1", *common], None
-            return pipe + common + ["--stages", "1", "--live"], None
+            return [py, "-m", "herogen.service.pipestage", "1", *common], None
         if spec.key == "2":   # stage 2 alone: the pipeline CLI would follow it with 2h, which runs beside the job
             return [py, "-m", "herogen.service.pipestage", "2", *common], None
         if spec.key == "2h":
@@ -477,16 +476,17 @@ class CliRunner:
         for r in [rec] + [read_record(ctx.run_dir, x) for x in spec.extra]:
             c = r.get("cost_usd") if r else None
             cost += float(c) if isinstance(c, (int, float)) and math.isfinite(c) else 0.0
-        if spec.key == "p" or (spec.key == "1" and ctx.kind == "prompt"):
-            # These stages' records and model errors can contain the description. Use their status for decisions,
+        if spec.key in ("p", "1", "2"):
+            # These stages' records and model errors can contain descriptions or notes. Use status for decisions,
             # never their text as a message or log detail, including output from a killed subprocess.
             if (code == 0 and rec and rec.get("ok") is True and "status" not in rec and "error" not in rec
                     and not timed_out):
                 return Outcome("passed", seconds, cost)
-            gate = (code == 6 and rec and rec.get("ok") is False and rec.get("status") == "gate_failed"
+            gate = (code == (6 if spec.key == "p" else 2) and rec and rec.get("ok") is False
+                    and rec.get("status") == "gate_failed"
                     and "error" not in rec and isinstance(rec.get("checks"), list)
                     and all(isinstance(check, dict) for check in rec["checks"]) and failed_checks(rec))
-            # prompt_sketch writes input rejection via fail(status="input_rejected") and policy errors
+            # The pipeline writes input rejection via fail(status="input_rejected") and policy errors
             # via fail() (status="error"). Only the adapter's structured exception code identifies policy.
             refusal = (code in (3, 4) and rec and rec.get("ok") is False
                        and rec.get("status") == {3: "input_rejected", 4: "error"}[code]
@@ -494,8 +494,9 @@ class CliRunner:
             if not timed_out and (gate or refusal):
                 status = {3: "input_rejected", 4: "content_policy"}.get(code)
                 safe = {"status": status or (rec or {}).get("status")}
-                # Gate checks come from the record; input and policy refusals need no model-supplied text.
-                if gate or (code == 3 and spec.key == "1"):
+                # Gate and input checks contain measurements; policy refusals need no model-supplied text.
+                if gate or (code == 3 and spec.key != "p" and isinstance(rec.get("checks"), list)
+                            and all(isinstance(check, dict) for check in rec["checks"])):
                     safe["checks"] = rec.get("checks")
                 return Outcome("rejected", seconds, cost, describe_rejection(spec, safe), "rejected")
             if not timed_out and code == 5:
