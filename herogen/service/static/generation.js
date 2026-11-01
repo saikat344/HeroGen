@@ -11,6 +11,7 @@ const COPY = {
 };
 const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled']);
 const INTERRUPTED = new Set(['failed', 'rejected', 'canceled']);
+const REVIEW_ISSUES = new Set(['failed', 'rejected', 'unavailable']);
 const STATE = { passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   canceled: 'Cancelled', skipped: 'Skipped', unavailable: 'Unavailable' };
 export function generationState(job) {
@@ -20,7 +21,7 @@ export function generationState(job) {
   const focus = active || main.find((s) => s.key === job.stage) || main.find((s) => s.state === 'pending');
   const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
   const side = stages.filter((s) => s.side);
-  const sideIssue = side.some((s) => ['failed', 'rejected'].includes(s.state));
+  const sideIssue = side.some((s) => REVIEW_ISSUES.has(s.state));
   const title = { queued: job.error ? 'Waiting to retry' : 'Your hero is in the queue', running: 'Your hero is taking shape.',
     succeeded: 'Meet your hero.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
   const subtitle = job.state === 'succeeded' ? (issues.length || sideIssue ? 'Your results are available. Some steps need attention below.' : 'Explore the result and the available downloads.') :
@@ -43,19 +44,22 @@ function node(tag, content, cls) {
 }
 export function generationView($, select3D) {
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
-  function pick(key, chosen = false) {
+  function pick(key, chosen = false, retry = false) {
     selected = key; manual = chosen; model = key === 'model';
     $('#previewWrap').hidden = !model;
     $('#artboardImage').hidden = model || !key;
     $('#artboardEmpty').hidden = model || !!key;
     $('#modelTab').setAttribute('aria-pressed', String(model));
     $('#artTab').setAttribute('aria-pressed', String(!model));
-    if (model) { text($('#artifactLabel'), '3D preview'); select3D(job.downloads.glb.url); }
+    if (model) {
+      $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
+      text($('#artifactLabel'), '3D preview'); select3D(job.downloads.glb.url);
+    }
     else {
       const image = IMAGES.find(([k]) => k === key);
       if (image) {
         const url = job.images[key];
-        if ($('#artboardImage').getAttribute('src') !== url) { $('#imageError').hidden = true; $('#artboardImage').src = url; }
+        if (retry || $('#artboardImage').getAttribute('src') !== url) { $('#imageError').hidden = true; $('#artboardImage').src = url; }
         if (!$('#imageError').hidden) $('#artboardImage').hidden = true;
         $('#artboardImage').alt = `${image[1]} for ${job.name || 'your hero'}`;
         text($('#artifactLabel'), image[1]);
@@ -70,12 +74,12 @@ export function generationView($, select3D) {
   });
   $('#modelTab').addEventListener('click', () => { if (job?.downloads?.glb?.available) pick('model', true); });
   $('#artboardImage').addEventListener('error', () => {
+    if (model || !selected || $('#artboardImage').getAttribute('src') !== job?.images?.[selected]) return;
     $('#artboardImage').hidden = true; $('#imageError').hidden = false;
   });
   $('#retryImage').addEventListener('click', () => {
     if (!selected || model) return;
-    $('#imageError').hidden = true; $('#artboardImage').hidden = false;
-    $('#artboardImage').src = job.images[selected];
+    pick(selected, true, true);
   });
   return {
     update(next) {
@@ -111,7 +115,7 @@ export function generationView($, select3D) {
       const side = state.side.map((s) => `${s.label}: ${s.state === 'pending' && state.terminal ? 'Not started' : STATE[s.state] || s.state}${s.message ? ` — ${s.message}` : ''}`).join('\n');
       text($('#qualityStatus'), side || 'No separate quality review was reported.');
       $('#qualityReview').classList.toggle('st-running', state.reviewRunning);
-      $('#qualityReview').classList.toggle('review-attention', state.side.some((s) => ['failed', 'rejected'].includes(s.state)));
+      $('#qualityReview').classList.toggle('review-attention', state.side.some((s) => REVIEW_ISSUES.has(s.state)));
       text($('#qualityNote'), state.reviewRunning ? 'This review is still running alongside the main job.' : 'This review runs separately from generation. Its verdict does not change the main job’s status.');
       const issues = state.steps.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
       $('#stageIssues').replaceChildren(...issues.map((s) => node('p', `${s.title} · ${s.status}${s.message ? ` — ${s.message}` : ''}`)));
@@ -123,7 +127,7 @@ export function generationView($, select3D) {
         $('#images').replaceChildren(...available.map(([key, label]) => {
           const b = node('button'); b.type = 'button'; b.dataset.image = key; b.setAttribute('aria-label', `View ${label.toLowerCase()}`);
           const image = node('img'); image.src = job.images[key]; image.alt = ''; image.loading = 'lazy';
-          b.append(image, node('span', label)); b.addEventListener('click', () => { $('#imageError').hidden = true; pick(key, true); }); return b;
+          b.append(image, node('span', label)); b.addEventListener('click', () => pick(key, true, !$('#imageError').hidden)); return b;
         }));
       }
       $('#modelTab').hidden = !job.downloads?.glb?.available;
