@@ -178,6 +178,15 @@ prompts, thresholds, retries and acceptance rules are unchanged.
 - The image/segmentation client's transport retry policy is limited to at most two attempts; each attempt,
   including a zero-cost HTTP refusal, is recorded. Transport retries are distinct from quality retries.
 
+Fast Model API attempts use a rolling 60-second request budget per model and API key: 140 RPM for
+`muse-image-1.0`, 60 RPM each for `sam-3.1` and `muse-spark-1.3`. All models share a 32-call in-flight
+ceiling. Override these with positive integers in `HEROGEN_RPM_MUSE_IMAGE_1_0`, `HEROGEN_RPM_SAM_3_1`,
+`HEROGEN_RPM_MUSE_SPARK_1_3` and `HEROGEN_MAX_IN_FLIGHT`. Admissions, including failed attempts, remain
+in the window for a full minute. A 429 halves the affected model's RPM budget and shares its retry hold
+across the key (at most 60 seconds); every 20 successful attempts restore one RPM to the configured
+maximum. Processes share the same locked per-key state under `HEROGEN_LIMITER_DIR`, including active slots
+and retry holds used by normal-mode callers. Normal mode retains its adaptive 4-to-8 in-flight limiter.
+
 For a live text-to-model run, execute these commands in order (credentials and authorized remote compute
 must already be configured):
 

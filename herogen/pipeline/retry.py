@@ -178,6 +178,9 @@ HOLD_MAX_S = BACKOFF_CAP_S
 LIMIT_START = 4
 LIMIT_MAX = 8
 SUCCESSES_PER_STEP = 20
+FAST_RPM = {"muse-image-1.0": 140, "sam-3.1": 60, "muse-spark-1.3": 60}
+FAST_MAX_IN_FLIGHT = 32
+RPM_WINDOW_S = 60.0
 
 
 if os.name == "nt":
@@ -317,3 +320,84 @@ class SharedLimiter:
                     state["successes"] = 0
             return state["limit"]
         return int(self._update(done))  # type: ignore[arg-type]
+
+
+def _positive_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer") from None
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+class SharedRPMLimiter(SharedLimiter):
+    """Fast-mode rolling-minute request limits, sharing the legacy per-key file and active slots.
+
+    Every admitted attempt counts, even if it fails or its process exits. Each model has an independent
+    RPM budget; all models share the in-flight ceiling and 429 hold. A 429 halves that model's RPM budget;
+    twenty successes restore one RPM, up to its configured maximum. The normal limiter is unchanged.
+    """
+
+    def __init__(self, directory: Path | str, key_id: str, *, model: str, rpm: int | None = None,
+                 max_in_flight: int | None = None, **kwargs) -> None:
+        super().__init__(directory, key_id, **kwargs)
+        self.model = model
+        env_name = "HEROGEN_RPM_" + model.upper().replace("-", "_").replace(".", "_")
+        self.rpm = _positive_env(env_name, FAST_RPM.get(model, 60)) if rpm is None else rpm
+        self.max_in_flight = (_positive_env("HEROGEN_MAX_IN_FLIGHT", FAST_MAX_IN_FLIGHT)
+                              if max_in_flight is None else max_in_flight)
+        if self.rpm < 1 or self.max_in_flight < 1:
+            raise ValueError("RPM and maximum in-flight calls must be positive")
+
+    def _budget(self, state: dict, now: float) -> dict:
+        budget = state.setdefault("rpm", {}).setdefault(self.model, {})
+        budget["limit"] = max(1, min(budget.get("limit", self.rpm), self.rpm))
+        budget.setdefault("successes", 0)
+        budget["requests"] = [t for t in budget.get("requests", []) if t > now - RPM_WINDOW_S]
+        return budget
+
+    def acquire(self, deadline: float) -> tuple[str | None, float]:
+        with self._local:
+            self._n += 1
+            slot = f"{os.getpid()}-{self._token}-{self._n}"
+        t0 = self.clock()
+        while True:
+            def take(state: dict, now: float) -> float:
+                budget = self._budget(state, now)
+                if now > deadline:
+                    return -1.0
+                requests = budget["requests"]
+                if (now >= state["hold_until"] and len(state["slots"]) < self.max_in_flight
+                        and len(requests) < budget["limit"]):
+                    state["slots"][slot] = {"pid": os.getpid(), "since": now}
+                    requests.append(now)
+                    return 0.0
+                return max(self.poll_s, state["hold_until"] - now,
+                           requests[-budget["limit"]] + RPM_WINDOW_S - now
+                           if len(requests) >= budget["limit"] else 0.0)
+            wait = float(self._update(take))
+            if wait == 0.0:
+                return slot, self.clock() - t0
+            if wait < 0.0 or self.clock() + wait > deadline:
+                return None, self.clock() - t0
+            self.sleep(min(wait, max(self.poll_s, 1.0)))
+
+    def release(self, slot: str, *, rate_limited: bool = False, hold_s: float = 0.0, ok: bool = False) -> int:
+        hold = min(max(0.0, hold_s), HOLD_MAX_S) if math.isfinite(hold_s) else 0.0
+
+        def done(state: dict, now: float) -> int:
+            state["slots"].pop(slot, None)
+            budget = self._budget(state, now)
+            if rate_limited:
+                budget["limit"] = max(1, budget["limit"] // 2)
+                budget["successes"] = 0
+                state["hold_until"] = max(state["hold_until"], now + hold)
+            elif ok:
+                budget["successes"] += 1
+                if budget["successes"] >= SUCCESSES_PER_STEP and budget["limit"] < self.rpm:
+                    budget["limit"] += 1
+                    budget["successes"] = 0
+            return budget["limit"]
+        return int(self._update(done))
