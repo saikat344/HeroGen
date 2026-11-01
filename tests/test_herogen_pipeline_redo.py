@@ -63,6 +63,49 @@ class RedoCase(unittest.TestCase):
         self.assertFalse(run.exists("02-turnaround.png"))
         self.assertFalse(run.exists("stage-2.json"))
 
+    def texture_parent(self):
+        for stage, outputs in ((2, ['views/front.png', 'masks/front.png']),
+                               (3, ['03-source.glb', '03-joints.json', '03-renders/front.png'])):
+            for rel in outputs:
+                self.parent.file(rel).write_bytes(b'passed output')
+            self.parent.write_stage({'stage': stage, 'ok': True, 'outputs': outputs, 'checks': []})
+        self.parent.file('blender-work/03-source-uv.npz').write_bytes(b'uv mapping')
+        self.parent.file('blender-work/04-body.npz').write_bytes(b'later work')
+        self.parent.file('03-refined.glb').write_bytes(b'old texture')
+
+    def test_texture_copies_passing_reconstruction_inputs_and_only_earlier_records(self):
+        from herogen.pipeline.redo import note_for
+        self.texture_parent(); before = self.snapshot()
+        run = self.fork('3f', 'weathered brass')
+        for rel in ('03-source.glb', '03-joints.json', '03-renders/front.png',
+                    'blender-work/03-source-uv.npz', 'views/front.png', 'masks/front.png'):
+            self.assertEqual(run.file(rel).read_bytes(), self.parent.file(rel).read_bytes())
+        self.assertFalse(run.exists('blender-work/04-body.npz'))
+        self.assertFalse(run.exists('03-refined.glb'))
+        self.assertEqual(run.read_stage(3)['seconds'], 0)
+        self.assertEqual(note_for(run, '3f'), 'weathered brass')
+        self.assertEqual(note_for(run, 2), '')
+        self.assertEqual(before, self.snapshot())
+
+    def test_texture_rejects_links_in_auxiliary_folders_before_publishing(self):
+        self.texture_parent()
+        for rel in ('views/linked.png', 'blender-work/03-source-uv.npz', '03-joints.json'):
+            path = self.parent.file(rel); path.unlink(missing_ok=True)
+            path.symlink_to(self.parent.file('00-sketch.png'))
+            with self.subTest(rel=rel), self.assertRaises(ValueError):
+                self.fork('3f')
+            self.assertFalse((self.root / 'child').exists())
+            path.unlink()
+            path.write_bytes(b'passed')
+
+    def test_texture_rejects_failed_stage_three(self):
+        self.texture_parent()
+        rec = self.parent.read_stage(3)
+        self.parent.write_stage({**rec, 'checks': [{'pass': False, 'gate': True}]})
+        with self.assertRaises(ValueError):
+            self.fork('3f')
+        self.assertFalse((self.root / 'child').exists())
+
     def test_cover_redo_uses_sketch_after_failed_missing_or_interrupted_cover(self):
         import base64
 

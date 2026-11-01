@@ -67,6 +67,7 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         db_path = self.tmp / "v9.db"
         con = sqlite3.connect(str(db_path))
         v9_schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS analytics_events")[0]
+        v9_schema = v9_schema.replace("  build_all INTEGER NOT NULL DEFAULT 0,\n", '')
         con.executescript(v9_schema)
         con.execute("PRAGMA user_version = 9")
         con.execute("INSERT INTO allowlist(email, added_at, note) VALUES ('ops@example.com', 1000.0, 'v9 row')")
@@ -78,7 +79,7 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         store = Store(db_path, clock=clock)
         try:
             ver = store.db.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(ver, 13)
+            self.assertEqual(ver, 14)
             self.assertEqual(store.db.execute("SELECT email FROM allowlist").fetchone()[0], "ops@example.com")
 
             store.analytics_record(VID_A, "desktop", [("page_view", "page", "landing")])

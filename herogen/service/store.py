@@ -356,7 +356,7 @@ class Store(GenerationStore, AnalyticsStore):
                    storage_max_bytes: int, input_sha: str = "", prompt: str = "",
                    name: str = "", code_commit: str = "",
                    parent_job: str | None = None, from_stage: str | None = None,
-                   note: str = "") -> tuple[dict[str, Any], bool]:
+                   note: str = "", build_all: bool = False) -> tuple[dict[str, Any], bool]:
         """Create a queued job, or return the one this user already made with the same `client_key`.
 
         Idempotent: the same key and request returns the first job and `False`; the same key with a different
@@ -367,8 +367,8 @@ class Store(GenerationStore, AnalyticsStore):
             from herogen.pipeline.redo import clean_note
 
             note = clean_note(note)
-            if from_stage not in ("1", "2"):
-                raise StoreError("Choose cover or turnaround to redo.")
+            if from_stage not in ("1", "2", "3f"):
+                raise StoreError("Choose cover, turnaround or texture to redo.")
         elif from_stage is not None or note:
             raise StoreError("Choose an earlier hero to redo.")
         with self._tx() as c:
@@ -386,6 +386,7 @@ class Store(GenerationStore, AnalyticsStore):
             if old is not None:
                 same = (old["kind"], old["input_sha"], old["prompt"], old["name"], old["profile"], old["parent_job"], old["from_stage"], old["note"]) == (
                     kind, input_sha, prompt, name, profile, parent_job, from_stage, note)
+                same = same and bool(old["build_all"]) == build_all
                 if not same:
                     raise Conflict("this request key was already used for a different hero")
                 return dict(old), False
@@ -397,10 +398,11 @@ class Store(GenerationStore, AnalyticsStore):
                 raise StoreError("Your saved heroes use all of your storage; delete some to make room.", "storage_full")
             self._guard_generation(c)
             c.execute("INSERT INTO jobs(id, user_id, client_key, kind, input_sha, prompt, name, profile, state, "
-                      "created_at, code_commit, parent_job, from_stage, note, stop_after) "
-                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      "created_at, code_commit, parent_job, from_stage, note, stop_after, build_all) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (job_id, user_id, client_key, kind, input_sha, prompt, name, profile, "queued", self.clock(),
-                       code_commit, parent_job, from_stage, note, from_stage))
+                       code_commit, parent_job, from_stage, note,
+                       None if build_all or from_stage == "3f" else from_stage, int(build_all)))
             self._audit(c, user_id, "job_created", job_id, {"kind": kind, "profile": profile})
             row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row), True

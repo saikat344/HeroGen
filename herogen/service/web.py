@@ -490,7 +490,7 @@ class App:
                 "created_at": j["created_at"], "finished_at": j["finished_at"], "stage": j["stage"],
                 "stage_label": STAGE_LABELS.get(j["stage"] or "", None),
                 "parent_job": j["parent_job"], "from_stage": j["from_stage"], "note": j["note"],
-                "stop_after": j["stop_after"]}
+                "stop_after": j["stop_after"], "build_all": bool(j["build_all"])}
 
     async def job_create(self, request: Request) -> Response:
         u = await self.require_user(request)
@@ -579,7 +579,8 @@ class App:
             return None
         rows = {r["stage"]: r for r in await self.call(self.svc.store.job_stages, job_id)}
         files = await self.call(self._files, user_id, job)
-        typical = await self.call(self.svc.store.analytics_stage_times)
+        samples = await self.call(self.svc.store.analytics_stage_samples)
+        typical = await self.call(self._typical_times, samples)
         stages = []
         for spec in plan_for(job["kind"], job["profile"]):
             r = rows.get(spec.key)
@@ -605,7 +606,8 @@ class App:
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
                 "code_commit": job["code_commit"] or None, "images": files["images"],
                 "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
-                "roblox_readme": files["readme"],
+                "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
+                "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
                 "viewer": f"/viewer#run={rid}"}
 
     def _files(self, user_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -614,6 +616,22 @@ class App:
         run = st.run_dir(user_id, job["id"])
         rid = f"{labapi.ROOT_KEY}/{job['id']}"
         with st.volume.reading():
+            records = []
+            for spec in plan_for(job['kind'], job['profile']):
+                f = st.run_file(user_id, job['id'], spec.record)
+                if f:
+                    try:
+                        record = json.loads(f[0].read_text())
+                    except (OSError, ValueError):
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+            rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
+            recorded = {str(r.get('stage')) for r in records if r.get('status') != 'running'}
+            def image_ready(key: str) -> bool:
+                stage = {'sketch': '0', 'cover': '1'}.get(key, '2')
+                return stage in recorded and rows.get(stage, {}).get('state') not in ('running', 'pending')
+
             def asset(rel: str) -> dict[str, Any] | None:
                 f = st.run_file(user_id, job['id'], rel)
                 if not f:
@@ -623,12 +641,11 @@ class App:
                 except OSError:
                     return None
 
-            images = {k: a['url'] for k, rel in labapi.IMAGES.items() if (a := asset(rel))}
+            images = {k: a['url'] for k, rel in labapi.IMAGES.items() if image_ready(k) and (a := asset(rel))}
             # Include all published character views, including top and additional viewing angles.
             for path in sorted((run / 'views').glob('*.png')):
-                if a := asset(f'views/{path.name}'):
+                if image_ready(path.stem) and (a := asset(f'views/{path.name}')):
                     images.setdefault(path.stem, a['url'])
-            rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
             progress = read_progress(run)
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
@@ -668,7 +685,39 @@ class App:
                     downloads["roblox"] = {"available": False, "reason": reason}
             else:
                 downloads["roblox"] = {"available": False, "reason": "The body is not finished yet."}
-        return {"images": images, "downloads": downloads, "readme": readme, "models": models, "refinement": progress}
+            from herogen.pipeline.redo import _passed
+
+            passed = {str(r.get('stage')) for r in records if _passed(r, r.get('stage'))}
+            can_texture = all(k in passed for k in ('0', '1', '2', '3')) and bool(asset('03-source.glb'))
+            can_redo = {'cover': '0' in passed and bool(images.get('sketch')),
+                        'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
+                        'texture': can_texture}
+        return {"images": images, "downloads": downloads, "readme": readme, "models": models, "refinement": progress,
+                "can_texture": can_texture, "can_redo": can_redo,
+                "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),
+                "recipe": {"profile": job['profile'], "note": job['note'], "from_stage": job['from_stage'],
+                    "stages": [{"stage": r.get('stage'), "models": r.get('models', []),
+                                "prompt_version": (r.get('details') or {}).get('prompt_version'),
+                                "profile": r.get('profile')} for r in records]}}
+
+    def _typical_times(self, samples: list[dict]) -> dict[str, float]:
+        from herogen.service.analytics import typical_stage_times, real_timing
+
+        st = self.svc.storage
+        st.volume.refresh()
+        with st.volume.reading():
+            kept = []
+            for row in samples:
+                f = st.run_file(row['user_id'], row['job_id'], f"stage-{row['stage']}.json")
+                if not f:
+                    continue
+                try:
+                    rec = json.loads(f[0].read_text())
+                except (OSError, ValueError):
+                    continue
+                if real_timing(rec):
+                    kept.append(row)
+        return typical_stage_times(kept)
 
     def _job_id(self, request: Request) -> str:
         jid = request.path_params["job"]
@@ -695,15 +744,20 @@ class App:
         if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
             return r
         data = await self.json_body(request)
-        stage = {"cover": 1, "turnaround": 2}.get(data.get("stage")) if isinstance(data.get("stage"), str) else None
+        stage = {"cover": 1, "turnaround": 2, "texture": "3f"}.get(data.get("stage")) if isinstance(data.get("stage"), str) else None
         if stage is None:
-            return error(400, "bad_stage", "Choose cover or turnaround to redo.")
+            return error(400, "bad_stage", "Choose cover, turnaround or texture to redo.")
         from herogen.pipeline.redo import clean_note
 
         try:
             note = clean_note(data.get("note", ""))
         except ValueError as e:
             return error(400, "bad_note", str(e))
+        if stage == '3f' and note and not self.s.texture_notes:
+            return error(400, 'bad_note', 'Texture notes are not available yet. Try Retry texture.')
+        build_all = data.get('build_all', False)
+        if not isinstance(build_all, bool):
+            return error(400, 'bad_request', 'Choose whether to build the complete version.')
         if parent["state"] in ("queued", "running"):
             return error(409, "conflict", "Wait for this hero to stop before making a new version.")
         new = new_id("j")
@@ -718,7 +772,7 @@ class App:
                 kind=parent["kind"], profile=parent["profile"], input_sha=parent["input_sha"],
                 prompt=parent["prompt"], name=parent["name"], code_commit=self.s.code_commit,
                 storage_max_bytes=self.s.user_storage_max_bytes,
-                parent_job=jid, from_stage=str(stage), note=note)
+                parent_job=jid, from_stage=str(stage), note=note, build_all=build_all)
         except StoreError as e:
             if e.code != "busy":
                 await self.call(self._delete_files, u["id"], new)
@@ -732,7 +786,53 @@ class App:
                 log.exception("dispatch after redo failed")
         return JSONResponse(await self.job_view(job["id"], u["id"]), status_code=201 if created else 200)
 
-    def _prepare_redo(self, user_id: str, new: str, parent: str, stage: int, note: str) -> None:
+    async def job_retry_input(self, request: Request) -> Response:
+        u = await self.require_user(request)
+        jid = self._job_id(request)
+        parent = await self.call(self.svc.store.job_get, jid, u['id'])
+        if parent is None:
+            return error(404, 'not_found', 'No such hero.')
+        key = request.headers.get('idempotency-key', '')
+        if not IDEMPOTENCY_RE.match(key):
+            return error(400, 'idempotency_key', 'Use an Idempotency-Key of 8 to 64 letters, digits, - or _.')
+        if (r := await self.limit(f"jobs-user:{u['id']}", self.s.rate_jobs_user)) is not None:
+            return r
+        files = await self.call(self._files, u['id'], parent)
+        if parent['state'] != 'rejected' or not files['input_rejected']:
+            return error(409, 'conflict', 'This hero was not stopped by an input check.')
+        new = new_id('j')
+        if parent['kind'] == 'sketch':
+            def copy_input():
+                st = self.svc.storage
+                st.volume.refresh()
+                with st.volume.reading():
+                    source = st.run_file(u['id'], jid, '00-sketch.png')
+                    if not source:
+                        raise ValueError('The saved input is unavailable. Choose your image again.')
+                    data = source[0].read_bytes()
+                self._save_input(u['id'], new, data)
+            try:
+                await self.call(copy_input)
+            except ValueError as e:
+                return error(409, 'input_missing', str(e))
+        try:
+            job, created = await self.call(self.svc.store.job_create, job_id=new, user_id=u['id'], client_key=key,
+                kind=parent['kind'], profile=parent['profile'], input_sha=parent['input_sha'], prompt=parent['prompt'],
+                name=parent['name'], code_commit=self.s.code_commit, storage_max_bytes=self.s.user_storage_max_bytes)
+        except StoreError as e:
+            if e.code != 'busy':
+                await self.call(self._drop_input, u['id'], new)
+            raise
+        if not created:
+            await self.call(self._drop_input, u['id'], new)
+        else:
+            try:
+                await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
+            except Exception:
+                log.exception('dispatch after input retry failed')
+        return JSONResponse(await self.job_view(job['id'], u['id']), status_code=201 if created else 200)
+
+    def _prepare_redo(self, user_id: str, new: str, parent: str, stage: int | str, note: str) -> None:
         from herogen.pipeline.redo import fork_run
 
         st = self.svc.storage
@@ -761,6 +861,8 @@ class App:
         for job in jobs:
             files = await self.call(self._files, u["id"], job)
             versions.append({**self.job_summary(job), "status": job["state"],
+                             "seconds": job['seconds'], "cost_usd": job['cost_usd'],
+                             "model_url": files['models'][-1]['url'] if files['models'] else None,
                              "cover_thumbnail_url": files["images"].get("cover")})
         return JSONResponse({"versions": versions})
 
@@ -1094,6 +1196,7 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/api/jobs/{job}", a.job_get, methods=["GET"]),
         Route("/api/jobs/{job}", a.job_delete, methods=["DELETE"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/redo", a.job_redo, methods=["POST"], max_body_size=JSON_LIMIT),
+        Route("/api/jobs/{job}/retry-input", a.job_retry_input, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/continue", a.job_continue, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/versions", a.job_versions),
         Route("/api/jobs/{job}/cancel", a.job_cancel, methods=["POST"], max_body_size=JSON_LIMIT),

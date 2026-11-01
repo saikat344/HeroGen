@@ -77,6 +77,7 @@ class Settings:
     stage3_args: str = "--mesh-source sam3d-objects --joints sam3d-body --remote live"
     spend_limits_enabled: bool = False
     refine_cap_usd: float = 0.80
+    texture_notes: bool = False
     stage_timeout_s: int = 3600
     blender_timeout_s: int = 3 * 3600
     code_commit: str = ""
@@ -112,13 +113,15 @@ class Settings:
         return {"upload_max_bytes": self.upload_max_bytes, "upload_min_side": self.upload_min_side,
                 "prompt_max_chars": prompt_limit(self.prompt_max_chars), "name_max_chars": self.name_max_chars,
                 "retention_days": self.retention_days, "profiles": list(self.profiles),
-                "default_profile": self.default_profile, "terms_version": self.terms_version}
+                "default_profile": self.default_profile, "terms_version": self.terms_version,
+                "texture_notes": self.texture_notes}
 
     def with_(self, **kw: Any) -> Settings:
         return replace(self, **kw)
 
 
 ENV = {
+    "texture_notes": "HEROGEN_TEXTURE_NOTES",
     "mode": "HEROGEN_SERVICE_MODE",
     "gallery_dir": "HEROGEN_SERVICE_GALLERY",
     "public_demo": "HEROGEN_SERVICE_PUBLIC_DEMO",
@@ -254,6 +257,6 @@ def env_for_deploy(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Non-secret service settings and pipeline prompt selectors to bake into the Modal image at deploy time."""
     env = os.environ if env is None else env
     secret_vars = {ENV[f] for f in SECRET_FIELDS}
-    selectors = {"HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION"}
+    selectors = {"HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION", "HEROGEN_TEXTURE_NOTES"}
     return {k: v for k, v in env.items() if (k.startswith("HEROGEN_SERVICE_") or k in selectors)
             and k not in secret_vars}

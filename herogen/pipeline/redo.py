@@ -47,15 +47,15 @@ def _passed(rec: dict, stage: int | str) -> bool:
             and not any(c.get("gate", True) and c.get("pass") is False for c in rec.get("checks", [])))
 
 
-def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: object = "") -> RunFolder:
+def fork_run(root: Path, run_id: str, parent: Path, from_stage: int | str, note: object = "") -> RunFolder:
     """Publish a complete copy atomically into a new, absent folder; never open the parent for writing.
 
     Earlier records retain their measurements and historical calls, with a zero cost for this version and
     ``reused_from`` provenance. A cover redo edits a passing, decodable parent cover when available,
     otherwise the sketch. Both paths are still checked against the sketch.
     """
-    if from_stage not in (1, 2):
-        raise ValueError("Choose cover or turnaround to redo.")
+    if from_stage not in (1, 2, "3f"):
+        raise ValueError("Choose cover, turnaround or texture to redo.")
     note = clean_note(note)
     if not run_id or "/" in run_id or "\\" in run_id or run_id.startswith("."):
         raise ValueError("Choose a new run id.")
@@ -68,7 +68,7 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: objec
     if not parent.is_dir() or parent.is_symlink():
         raise ValueError("The earlier version could not be found.")
     records = []
-    for stage in ("p", *range(from_stage)):
+    for stage in ("p", *range(4 if from_stage == "3f" else from_stage)):
         path = parent / f"stage-{stage}.json"
         if stage == "p" and not path.exists():
             continue
@@ -81,7 +81,7 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: objec
     lineage = {"parent_run": parent.name, "from_stage": from_stage, "note": note}
     files = {rel for rec in records for rel in rec.get("outputs", [])}
     files.add("00-sketch.png")
-    if from_stage == 2:
+    if from_stage in (2, "3f"):
         files.add("01-cover.png")
     elif (parent / "stage-1.json").exists():
         # Stage 1 is optional here: failed or interrupted covers must not become editing references.
@@ -92,6 +92,25 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: objec
         if (_valid_record(cover_rec) and _passed(cover_rec, 1)
                 and "01-cover.png" in cover_rec.get("outputs", []) and (parent / "01-cover.png").exists()):
             files.add("01-cover.png")
+    if from_stage == "3f":
+        files.add("03-source.glb")
+        # Older records do not enumerate all auxiliary reconstruction inputs and views.
+        for directory in ("views", "03-renders"):
+            folder = parent / directory
+            if folder.is_symlink():
+                raise ValueError("The earlier version has a linked output.")
+            if folder.exists():
+                for path in folder.rglob("*"):
+                    if path.is_symlink():
+                        raise ValueError("The earlier version has a linked output.")
+                    if path.is_file():
+                        files.add(path.relative_to(parent).as_posix())
+        if (parent / "03-joints.json").exists() or (parent / "03-joints.json").is_symlink():
+            files.add("03-joints.json")
+        for name in ('03-mesh.npz', '03-source-uv.npz', '03-source-texture.png'):
+            path = parent / 'blender-work' / name
+            if path.exists() or path.is_symlink():
+                files.add(f'blender-work/{name}')
     sources = {rel: _source(parent, rel) for rel in files}
     if "01-cover.png" in sources:
         from PIL import Image
@@ -122,7 +141,7 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: objec
     return RunFolder(root, run_id)
 
 
-def note_for(run: RunFolder, stage: int) -> str:
+def note_for(run: RunFolder, stage: int | str) -> str:
     if not run.exists("redo.json"):
         return ""
     meta = run.read_json("redo.json")
