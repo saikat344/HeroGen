@@ -10,6 +10,7 @@ import subprocess
 from unittest import mock
 
 from tests.test_herogen_pipeline_prompt import DUMMY_KEY, FakeAPI
+from tests.test_herogen_pipeline_flow import FakeAPI as CoverAPI
 from tests.test_herogen_service_jobs import JobCase
 
 from herogen import prompts
@@ -51,13 +52,17 @@ class PromptJobTest(JobCase):
     def setUp(self):
         super().setUp()
         self.api = FakeAPI()
+        self.cover_api = CoverAPI()
+        self.real_stages = {"p", "0"}
+        self.active_stage = None
         self.cli = CliRunner(model_api_key=DUMMY_KEY)
         self.commands = []
         self.stage_outcomes = []
         self.description = "a chevalier with a violet shield"
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(ModelClient, "_post", lambda c, e, b, **kw: self.post(c, e, b, **kw)).start()
-        mock.patch.object(client_mod, "decode_sam_output", lambda *a: self.api.decode(*a)).start()
+        mock.patch.object(client_mod, "decode_sam_output", lambda *a:
+                          (self.cover_api if self.active_stage == "1" else self.api).decode(*a)).start()
         mock.patch.object(RunFolder, "write_json", _write_json).start()
         mock.patch("herogen.service.runner.subprocess.run", side_effect=self.subprocess).start()
         fake = self.runner
@@ -68,7 +73,8 @@ class PromptJobTest(JobCase):
                 return fake.available(spec)
 
             def run(self, spec, ctx):
-                if spec.key in ("p", "0"):
+                if spec.key in test.real_stages:
+                    test.active_stage = spec.key
                     out = test.cli.run(spec, ctx)
                     test.stage_outcomes.append((spec.key, out))
                     return out
@@ -77,6 +83,8 @@ class PromptJobTest(JobCase):
         self.runner = PromptRunner()
 
     def post(self, client, endpoint, body, **kw):
+        if self.active_stage == "1":
+            return self.cover_api.post(client, endpoint, body)
         return self.api.post(client, endpoint, body, **kw)
 
     def subprocess(self, argv, **kw):
@@ -195,6 +203,55 @@ class PromptJobTest(JobCase):
         self.assertNotIn(self.description, saved["error_message"])
         self.assertNotIn(self.description, "\n".join(logs.output))
         self.assertEqual(saved["attempts"], 1)
+
+    def test_cover_policy_and_model_errors_do_not_log_the_description(self):
+        self.real_stages.add("1")
+        post = self.post
+        for status, policy, expected, error_code in (
+                (400, True, "rejected", "rejected"),
+                (503, False, "queued", "model_unavailable"),
+                (400, False, "failed", "stage_error")):
+            with self.subTest(status=status, policy=policy):
+                seen = []
+
+                def refuse(client, endpoint, body, **kw):
+                    if self.active_stage == "1" and endpoint == "images/edits":
+                        seen.append(body["prompt"])
+                        raise ApiError(f"refused prompt: {body['prompt']}", http_status=status,
+                                       error_code="content_policy_violation" if policy else None,
+                                       transient=status == 503)
+                    return post(client, endpoint, body, **kw)
+
+                job = self.prompt_job()
+                with mock.patch.object(self, "post", side_effect=refuse), \
+                        self.assertLogs("herogen.service", "INFO") as logs:
+                    self.assertEqual(self.go(job), expected)
+                self.assertTrue(seen)
+                self.assertIn(self.description, seen[0])
+                self.assertEqual(self.commands[-1][2:4], ["herogen.service.pipestage", "1"])
+                saved = self.store.job_get(job["id"])
+                self.assertEqual((saved["error_stage"], saved["error_code"]), ("1", error_code))
+                if policy:
+                    self.assertIn("content policy", saved["error_message"])
+                    self.assertIn("rewording", saved["error_message"])
+                self.assertNotIn(self.description, saved["error_message"])
+                self.assertNotIn(self.description, "\n".join(logs.output))
+                self.assertEqual(self.record(job, "1")["status"], "error")
+
+    def test_cover_unexpected_output_and_timeouts_do_not_log_the_description(self):
+        from herogen.service.worker import make_context
+
+        job = self.prompt_job()
+        ctx = make_context(self.s, self.storage, job)
+        spec = next(s for s in PLAN if s.key == "1")
+        for code, timed_out in ((1, False), (-1, True), (0, False), (4, False)):
+            with self.subTest(code=code, timed_out=timed_out):
+                out = CliRunner.outcome(spec, ctx, 1, code, self.description,
+                                        f"HTTP 503: content_policy_violation {self.description}", timed_out)
+                self.assertEqual((out.state, out.code, out.transient),
+                                 ("failed", "timeout" if timed_out else "stage_error", timed_out))
+                self.assertNotIn(self.description, out.message + out.detail)
+                self.assertIn(f"exit_code={code}", out.detail)
 
     def test_recorded_transient_failure_retries_and_permanent_failure_does_not(self):
         for status, expected in ((503, "queued"), (400, "failed")):
