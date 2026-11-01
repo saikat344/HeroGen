@@ -92,7 +92,7 @@ class Pass:
         self.selected = None
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
-               body_cam, recipe, persistence_lock):
+               body_cam, recipe, persistence_lock, user_note=""):
         from . import _view, imaging as I
         for index in range(I.HAIR_ATTEMPTS if self.hair else I.ATTEMPTS):
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
@@ -103,7 +103,7 @@ class Pass:
             future = pool.submit(_view, child, prep, frozen, tex, cam, self.hair, folder, private,
                                  timeout, cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=rendered, apply=lambda *args: 0,
-                                 attempts=1, attempt_start=index, cancelled=self.cancelled)
+                                 attempts=1, attempt_start=index, cancelled=self.cancelled, user_note=user_note)
             self.tasks.append((future, child, private, folder))
 
     def collect(self, index):
@@ -229,7 +229,8 @@ class Publisher:
         self.write()
 
 
-def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock):
+def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock,
+          user_note=""):
     from . import imaging as I
     from .backend import blender
 
@@ -304,7 +305,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         folder / 'blender.log', timeout=timeout)
                 for job in jobs:
                     job.submit(pool, client, prep, current, tex, cams[job.name], folder, timeout, cover,
-                               head_found, cams['body+0'], recipe, persistence_lock)
+                               head_found, cams['body+0'], recipe, persistence_lock, user_note=user_note)
                     all_passes.append(job)
                     for index, (future, *_) in enumerate(job.tasks):
                         remaining[future] = (job, index, wave_index)
