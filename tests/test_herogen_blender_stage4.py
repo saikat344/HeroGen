@@ -423,7 +423,19 @@ class TestEndToEndBlender(SyntheticBase):
                 stats = info["bake"][lod]["head"] if section == "Head" else info["bake"][lod]
                 self.assertEqual(stats["texels_primary"], 1)
                 self.assertFalse(stats["closeups_applied"])
-                self.assertEqual(stats["sampling"], "closest-triangle barycentric UV")
+                self.assertEqual(stats["sampling"], "smooth-normal cage rays with closest-triangle fallback")
+                projection = stats["primary_projection"]
+                self.assertGreater(projection["max_distance"], 0)
+                self.assertEqual(projection["distance_factor"], 4)
+                self.assertEqual(projection["fallback_fraction"], projection["fallback_count"] / projection["samples"])
+            stats = info["bake"][lod]
+            overall = stats["primary_projection_overall"]
+            self.assertEqual(overall["samples"], stats["primary_projection"]["samples"]
+                             + stats["head"]["primary_projection"]["samples"])
+            self.assertEqual(overall["fallback_count"], stats["primary_projection"]["fallback_count"]
+                             + stats["head"]["primary_projection"]["fallback_count"])
+            self.assertEqual(overall["fallback_fraction"], overall["fallback_count"] / overall["samples"])
+            self.assertEqual(stats["head"]["primary_projection"]["normal_fields"], {"Head": "bounding ellipsoid"})
         for name in ("atlas-high-views.png", "atlas-head-high-views.png"):
             self.assertTrue((run / "04-body" / name).is_file())
             self.assertFalse(any(name in path for path in r4["outputs"]))

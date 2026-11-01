@@ -92,8 +92,8 @@ UV_GUTTER_PX = 2
 # a 1024 px Head texture is within all three, and the profiles' `texture_max_px` check counts it.
 HEAD_SECTION = "Head"
 HEAD_TEXTURE = dict(ATLAS)
-# At 1024, s009's frontal-island scale 2 brings close-up gradient energy from 0.889 to 0.960 of the refined
-# reference (0 degrees), 0.655 to 0.677 at held-out 40 degrees. Exact UV lookup removes the dominant mosaic.
+# At 1024, s009's frontal-island scale 2 raises frontal density from 440 to 706 texels per stud and
+# Head UV fill from 47.9% to 59.3%. Scaling whole islands retains their shapes and continuous UV edges.
 # The view bake keeps its existing packing. The fixed-size texture and its 2-pixel gutter are unchanged.
 HEAD_FRONT_DENSITY = 2.0
 # Comparison variant only (atlas-high-side-trust.png): weight of a side view that did not shape the mesh. On the
@@ -584,6 +584,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                 h, hst, _ = texture.bake(head, uvs, colour_views, head_size, zbuf,
                                          closeups=closeups if tag != "no-closeup" and kw.get("primary") is None
                                          else None, **kw)
+                if kw.get("primary") is not None:
+                    projections = [s.get("primary_projection", {}) for s in (st, hst)]
+                    samples = sum(p.get("samples", 0) for p in projections)
+                    fallback = sum(p.get("fallback_count", 0) for p in projections)
+                    st["primary_projection_overall"] = {
+                        "samples": samples, "fallback_count": fallback,
+                        "fallback_fraction": fallback / samples if samples else 0.0}
                 return a, h, {**st, "head": hst}
 
             atlas, head_tex, stats = both("", primary=primary) if primary is not None else both("", source=source)
