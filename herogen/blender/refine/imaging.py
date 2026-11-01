@@ -315,6 +315,7 @@ def _refine_similarity(target, source, weight, initial=None):
 # measure scale along every direction; determinant also catches two-axis shrinkage.
 # These select a registration method before any outline or hair gate is evaluated.
 AFFINE_SCALE = (0.85, 1.25)
+AFFINE_AXIS_RATIO_MAX = 1.125  # largest / smallest directional scale
 AFFINE_DETERMINANT_MIN = 0.80
 AFFINE_SHEAR_MAX = 0.15
 AFFINE_ROTATION_MAX = 5.0   # degrees, from the polar rotation of the linear map
@@ -329,6 +330,7 @@ def _affine_degeneracy(matrix, figure):
         return {"reasons": ["nonfinite"]}
     linear = matrix[:, :2]
     scales = np.linalg.svd(linear, compute_uv=False)
+    axis_ratio = float(scales.max() / max(1e-20, scales.min()))
     determinant = float(np.linalg.det(linear))
     axes_scale = np.linalg.norm(linear, axis=0)
     shear = float(abs(np.dot(linear[:, 0], linear[:, 1])) / max(1e-20, np.prod(axes_scale)))
@@ -338,6 +340,8 @@ def _affine_degeneracy(matrix, figure):
         reasons.append("rotation")
     if scales.min() < AFFINE_SCALE[0] or scales.max() > AFFINE_SCALE[1]:
         reasons.append("scale")
+    if axis_ratio > AFFINE_AXIS_RATIO_MAX:
+        reasons.append("axis_ratio")
     if determinant < AFFINE_DETERMINANT_MIN:
         reasons.append("determinant")
     if shear > AFFINE_SHEAR_MAX:
@@ -351,7 +355,8 @@ def _affine_degeneracy(matrix, figure):
             reasons.append("centroid")
     else:
         reasons.append("empty_figure")
-    return {"reasons": reasons, "singular_scales": scales.tolist(), "determinant": determinant,
+    return {"reasons": reasons, "singular_scales": scales.tolist(), "axis_ratio": axis_ratio,
+            "determinant": determinant,
             "shear": shear, "rotation_degrees": rotation, "centroid_displacement": displacement}
 
 

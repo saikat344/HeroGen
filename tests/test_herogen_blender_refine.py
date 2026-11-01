@@ -270,7 +270,7 @@ class AffineDegeneracyTests(unittest.TestCase):
 
     def test_directional_scale_bounds(self):
         for scale in (0.85, 1.25):
-            self.assertEqual(self.reasons(self.matrix([[scale, 0], [0, 1]])), [])
+            self.assertNotIn("scale", self.reasons(self.matrix([[scale, 0], [0, 1]])))
         for scale in (0.85 - 1e-6, 1.25 + 1e-6):
             self.assertIn("scale", self.reasons(self.matrix([[scale, 0], [0, 1]])))
         # Both column lengths are ordinary, but their near-parallel directions collapse area.
@@ -281,11 +281,17 @@ class AffineDegeneracyTests(unittest.TestCase):
             with self.subTest(area=area):
                 self.assertEqual(self.reasons(self.matrix(np.eye(2) * np.sqrt(area))), expected)
 
+    def test_directional_ratio_catches_moderate_axis_collapse(self):
+        for ratio in (1.1161, 1.125 - 1e-6):
+            self.assertEqual(self.reasons(self.matrix([[1.06, 0], [0, 1.06 / ratio]])), [])
+        for ratio in (1.125 + 1e-6, 1.1394):
+            self.assertEqual(self.reasons(self.matrix([[1.06, 0], [0, 1.06 / ratio]])), ["axis_ratio"])
+
     def test_shear_bound_uses_normalized_column_angle(self):
-        for shear, expected in ((0.15 - 1e-6, []), (0.15 + 1e-6, ["shear"])):
+        for shear, expected in ((0.15 - 1e-6, False), (0.15 + 1e-6, True)):
             with self.subTest(shear=shear):
                 linear = [[1, shear], [0, np.sqrt(1 - shear ** 2)]]
-                self.assertEqual(self.reasons(self.matrix(linear)), expected)
+                self.assertEqual("shear" in self.reasons(self.matrix(linear)), expected)
 
     def test_rotation_bound_about_silhouette_centroid(self):
         for angle, expected in ((4.999, []), (-4.999, []), (5.001, ["rotation"]), (-5.001, ["rotation"])):
