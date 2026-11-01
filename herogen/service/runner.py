@@ -413,7 +413,7 @@ class CliRunner:
             extra["MODEL_API_KEY"] = self._model_key
         from herogen.service.refine_budget import budget_bridge
         from herogen.pipeline.ledger import BRIDGE
-        from herogen.service.processes import identity, stopped
+        from herogen.service.processes import identity, wait_stopped
         import signal
         import threading
         registered = threading.Event()
@@ -461,7 +461,7 @@ class CliRunner:
                             except ProcessLookupError:
                                 pass
                             proc.wait()
-                            if stopped(process, group=True):
+                            if wait_stopped(process, group=True):
                                 ctx.accounting('process_stopped', **process)
             except subprocess.TimeoutExpired as e:
                 timed_out = True
