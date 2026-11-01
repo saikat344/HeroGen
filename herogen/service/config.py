@@ -47,6 +47,7 @@ class Settings:
     session_idle_s: int = 7 * 24 * 3600
     terms_version: str = ""
     legal_dir: Path | None = None
+    admin_emails: tuple[str, ...] = field(default=(), repr=False)
     # Quotas and limits
     jobs_per_day: int = 5
     jobs_total: int = 50
@@ -69,6 +70,7 @@ class Settings:
     # Retention (days); recorded in the privacy policy
     retention_days: int = 30
     audit_retention_days: int = 365
+    analytics_retention_days: int = 30
     # Requests
     trusted_ip_header: str = ""
     allowed_hosts: tuple[str, ...] = ()
@@ -109,6 +111,14 @@ class Settings:
     def hosts(self) -> tuple[str, ...]:
         return self.allowed_hosts or (self.host.split(":")[0],)
 
+    def is_admin(self, user: Mapping[str, Any] | None) -> bool:
+        from herogen.service.auth import normalize_email
+
+        if not user or user.get("kind") != "account" or not self.admin_emails:
+            return False
+        email = normalize_email(user.get("email"))
+        return email is not None and email in {normalize_email(e) for e in self.admin_emails}
+
     def public(self) -> dict[str, Any]:
         """The limits a signed-in user may see."""
         from herogen.service.uploads import prompt_limit
@@ -140,6 +150,7 @@ ENV = {
     "session_idle_s": "HEROGEN_SERVICE_SESSION_IDLE",
     "terms_version": "HEROGEN_SERVICE_TERMS_VERSION",
     "legal_dir": "HEROGEN_SERVICE_LEGAL_DIR",
+    "admin_emails": "HEROGEN_SERVICE_ADMIN_EMAILS",
     "jobs_per_day": "HEROGEN_SERVICE_JOBS_PER_DAY",
     "jobs_total": "HEROGEN_SERVICE_JOBS_TOTAL",
     "max_running_jobs": "HEROGEN_SERVICE_MAX_RUNNING",
@@ -159,6 +170,7 @@ ENV = {
     "rate_api_ip": "HEROGEN_SERVICE_RATE_API_IP",
     "retention_days": "HEROGEN_SERVICE_RETENTION_DAYS",
     "audit_retention_days": "HEROGEN_SERVICE_AUDIT_RETENTION_DAYS",
+    "analytics_retention_days": "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS",
     "trusted_ip_header": "HEROGEN_SERVICE_IP_HEADER",
     "allowed_hosts": "HEROGEN_SERVICE_HOSTS",
     "default_profile": "HEROGEN_SERVICE_PROFILE",
@@ -188,6 +200,8 @@ def _parse(name: str, raw: str, default: Any) -> Any:
         if isinstance(default, tuple) and default and isinstance(default[0], int):
             a, b = raw.split("/", 1)
             return (int(a), int(b))
+        if name == "admin_emails":
+            return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
         if isinstance(default, tuple) or name == "allowed_hosts":
             return tuple(x.strip() for x in raw.split(",") if x.strip())
         if name in ("data_dir", "meta_path", "outbox_path", "legal_dir", "gallery_dir"):
@@ -232,10 +246,14 @@ def validate(s: Settings, require_key: bool = True) -> None:
     for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
                  "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
                  "upload_min_side",
-                 "prompt_max_chars", "retention_days", "audit_retention_days", "stage_timeout_s",
-                 "blender_timeout_s"):
+                 "prompt_max_chars", "retention_days", "audit_retention_days", "analytics_retention_days",
+                 "stage_timeout_s", "blender_timeout_s"):
         if getattr(s, name) <= 0:
             raise ConfigError(f"{ENV[name]} must be positive")
+    from herogen.service.auth import normalize_email
+
+    if any(normalize_email(e) is None for e in s.admin_emails):
+        raise ConfigError(f"{ENV['admin_emails']} must list valid comma-separated email addresses")
     if s.upload_min_side > s.upload_max_side:
         raise ConfigError(f"{ENV['upload_min_side']} must not exceed {ENV['upload_max_side']}")
     if s.mode == "production":
