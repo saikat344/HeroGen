@@ -568,6 +568,35 @@ notes record the replacements and any surface partition. Characters whose part l
 keep their selected joints and original labelling. This recovery adds no exterior surface and changes no gap
 or export thresholds.
 
+## Texture refinement schedules
+
+`python3 -m herogen.blender run --stages 3f --refine-profile fast` opts into a shorter repaint
+schedule. Omit `--refine-profile` for the existing sequential `best` schedule. The target profile
+(`--profile best`, `roblox-ingame` or `roblox-avatar`) remains independent of the repaint schedule.
+The service selects the schedule through `HEROGEN_SERVICE_REFINE_PROFILE=fast`, passed explicitly to
+the stage subprocess; its default is `best`. Direct stage callers can pass `refine_profile="fast"`.
+For batch runners, `HEROGEN_REFINE_PROFILE=fast` supplies the stage's fallback when no argument is given.
+Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast uses the same close-up
+frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
+
+Fast renders five cameras from one frozen atlas: `head+0`, `body+0`, `body+90`, `body-90`, `body+180`.
+At most five workers edit and gate those views concurrently. Each worker uses the existing registration,
+outline, face containment and hair exclusion logic, including its unchanged thresholds. Accepted results
+are projected through `Texture.apply` in the listed order, never in completion order. A second wave,
+`hair-upper+180`, sees the first wave's paint and uses the existing hair gates and weight map. A missing
+head skips the head close-up. Fast retains the normal three-sample and hair two-sample retry limits;
+it cannot be combined with close-up texture upscaling. This schedule changes repaint inputs and is a
+quality/latency tradeoff, not an output-equivalent execution of `best`.
+
+Every worker has its own call log and cache directory beneath `cache/fast/<pass>`. It copies matching
+root cache families on demand; after draining, complete families and call logs are published in pass
+order. Transport retry reservations share a lock, while active reservation tokens are local to each
+thread. The lock spans local budget updates and stage-record persistence before an HTTP
+attempt is authorized. An unresolved request remains reserved.
+Cap stops drain submitted work and prohibit another wave. Model errors drain workers, preserve their
+cache/log evidence, record the failure, and propagate it; no refined output is exported after an error.
+Blender renders remain serial, with all cameras of a wave batched into one process.
+
 ## Stage 4 texture: refined colour and view projection
 
 Stage 4 first checks whether stage 3f's refined texture can supply the entire sectioned body
