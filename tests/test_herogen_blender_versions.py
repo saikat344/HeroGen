@@ -164,7 +164,8 @@ class AtomicWrites(unittest.TestCase):
         self.assertIn("write_atomic(path", inspect.getsource(record.StageRecord.finish))
         self.assertIn("write_atomic(path", inspect.getsource(body_joints.write_joints))
         self.assertIn("write_atomic(path", inspect.getsource(score.write_scores))
-        self.assertIn('write_atomic(body / "sections.json"', inspect.getsource(stage4.run_stage4))
+        self.assertIn("return _run_stage4(", inspect.getsource(stage4.run_stage4))
+        self.assertIn('write_atomic(body / "sections.json"', inspect.getsource(stage4._run_stage4))
         self.assertIn("write_atomic(entry_path", inspect.getsource(client.RemoteClient._call))
 
 
