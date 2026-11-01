@@ -40,7 +40,7 @@ const PICTURES = {
 
 const S = {
   ws: null, char: null, profile: null, runId: null, run: null, lod: 'high', shading: 'textured', pose: 'rest',
-  mode: '3d', img: 'sketch', iso: null, focus: null, view: 'q', cmpSel: [], cmpView: 'q',
+  mode: '3d', img: 'sketch', iso: null, focus: null, view: 'q', cmpSel: [], cmpView: 'q', light: 'lit',
 };
 const details = new Map();
 let COPY = { states: {}, icons: {} };
@@ -491,6 +491,14 @@ function setShading(v) {
   pressed('#shadeSeg', v);
   viewer.setShading(v);
   renderLegend();
+}
+
+// Lit or Art: how a textured body is presented. Exposure scales the Lit view only, so the slider rests in Art.
+function setLight(v) {
+  S.light = v === 'art' ? 'art' : 'lit';
+  pressed('#lightSeg', S.light);
+  viewer.setLighting(S.light);
+  $('#exposure').disabled = S.light !== 'lit';
 }
 
 function setCamera(v) {
@@ -1058,6 +1066,7 @@ function decorate() {
     camSeg: { orbit: 'rotate-3d', front: 'hg-cam-front', q: 'hg-cam-34', side: 'hg-cam-side', back: 'hg-cam-back' },
     cmpCam: { front: 'hg-cam-front', q: 'hg-cam-34', side: 'hg-cam-side', back: 'hg-cam-back' },
     shadeSeg: { textured: 'hg-shade-textured', clay: 'hg-shade-clay', wire: 'hg-shade-wire', sections: 'hg-shade-sections' },
+    lightSeg: { lit: 'sun', art: 'image' },
   };
   fill('#poseSeg', POSES.map((p) => h('button', { type: 'button', 'data-v': p.key, 'aria-pressed': String(p.key === 'rest'), title: p.label }, p.short || p.label)));
   BTN_ICONS.poseSeg = Object.fromEntries(POSES.map((p) => [p.key, p.icon]));
@@ -1083,6 +1092,12 @@ function bind() {
   seg('#profileSeg', (v) => selectProfile(v));
   seg('#modeSeg', setMode);
   seg('#shadeSeg', setShading);
+  seg('#lightSeg', setLight);
+  $('#exposure').addEventListener('input', (e) => {
+    const v = Number(e.target.value);
+    $('#exposureOut').textContent = v.toFixed(2);
+    viewer.setExposure(v);
+  });
   seg('#poseSeg', (v) => setPose(v));
   seg('#camSeg', setCamera);
   seg('#lodSeg', (v) => { if (v !== S.lod) { S.lod = v; pressed('#lodSeg', v); showBody(); } });

@@ -780,6 +780,40 @@ class PageReferencesTest(unittest.TestCase):
                 self.assertTrue((STATIC_DIR.parent / attr).is_file(), attr)  # every referenced file ships
         self.assertNotRegex(html, r"<style|style=", "inline styles would need 'unsafe-inline' in the CSP")
 
+    def test_lighting_controls_and_pinned_room_environment(self):
+        """The Lit and Art views: RoomEnvironment pinned like the other addons, and the controls that drive them."""
+        html = (STATIC_DIR / "index.html").read_text()
+        importmap = re.search(r"<script type=\"importmap\">(.*?)</script>", html, re.S)
+        imports = json.loads(importmap.group(1))["imports"]
+        integrity = json.loads(importmap.group(1))["integrity"]
+        # RoomEnvironment comes from the same pinned 0.160.0 CDN folder as the other addons.
+        room = imports["three/addons/"] + "environments/RoomEnvironment.js"
+        self.assertIn(room, integrity)
+        self.assertRegex(integrity[room], r"^sha384-[A-Za-z0-9+/]{64}$")
+        # A Lit/Art toggle sits between the shading buttons and the pose buttons, with an exposure slider for Lit.
+        segs = {m.group(1): m.start() for m in re.finditer(r'<div class="seg" id="(\w+)"', html)}
+        self.assertIn("lightSeg", segs)
+        self.assertGreater(segs["lightSeg"], segs["shadeSeg"])
+        self.assertLess(segs["lightSeg"], segs["poseSeg"])
+        light = re.search(r'<div class="seg" id="lightSeg".*?</div>', html, re.S).group(0)
+        self.assertRegex(light, r'data-v="lit" aria-pressed="true"')
+        self.assertRegex(light, r'data-v="art" aria-pressed="false"')
+        slider = re.search(r'<input type="range" id="exposure"[^>]*>', html)
+        self.assertIsNotNone(slider)
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', slider.group(0)))
+        self.assertEqual((attrs["min"], attrs["max"], attrs["step"], attrs["value"]), ("0.5", "2", "0.05", "1"))
+        # The viewer lights with the RoomEnvironment rig, tone maps the lit views only, and swaps to unlit
+        # materials for Art; the page wires both controls to it.
+        viewer = (STATIC_DIR / "viewer.js").read_text()
+        for needle in ("RoomEnvironment", "ACESFilmicToneMapping", "NoToneMapping", "MeshBasicMaterial",
+                       "toneMappingExposure", "setLighting", "setExposure"):
+            self.assertIn(needle, viewer)
+        app = (STATIC_DIR / "app.js").read_text()
+        self.assertIn("seg('#lightSeg', setLight)", app)
+        self.assertIn("$('#exposure').addEventListener('input'", app)
+        self.assertIn("viewer.setLighting(", app)
+        self.assertIn("viewer.setExposure(", app)
+
     def test_scripts_and_styles(self):
         scripts = self.scripts()
         self.assertIn("app.js", scripts)

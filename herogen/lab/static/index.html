@@ -80,6 +80,14 @@
             <button type="button" data-v="textured" aria-pressed="true">Textured</button><button type="button" data-v="clay" aria-pressed="false">Clay</button><button type="button" data-v="wire" aria-pressed="false">Wireframe</button><button type="button" data-v="sections" aria-pressed="false">Sections</button>
           </div>
         </div>
+        <div class="tgroup"><span class="eyebrow" id="lightL">Light</span>
+          <div class="seg" id="lightSeg" role="group" aria-labelledby="lightL">
+            <button type="button" data-v="lit" aria-pressed="true" title="Studio lighting: image-based light plus one key light">Lit</button><button type="button" data-v="art" aria-pressed="false" title="The painted texture unlit, exactly as it is">Art</button>
+          </div>
+        </div>
+        <div class="tgroup"><label class="eyebrow" for="exposure">Exposure</label>
+          <div class="expose"><input type="range" id="exposure" min="0.5" max="2" step="0.05" value="1"><output id="exposureOut" for="exposure">1.00</output></div>
+        </div>
         <div class="tgroup"><span class="eyebrow" id="poseL">Pose</span>
           <div class="seg" id="poseSeg" role="group" aria-labelledby="poseL"></div>
         </div>

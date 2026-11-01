@@ -168,6 +168,10 @@ tr.borrowed td{color:var(--fg-2)}
 /* viewer */
 .stage{display:flex;flex-direction:column;gap:10px;min-width:0}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-end}
+.expose{display:flex;align-items:center;gap:7px;padding:4px 2px}
+#exposure{width:110px;accent-color:var(--accent)}
+#exposure:disabled{opacity:.45}
+.expose output{font-family:var(--f-mono);font-variant-numeric:tabular-nums;font-size:11px;color:var(--fg-3);min-width:34px}
 .viewport{position:relative;height:clamp(380px,calc(100vh - 250px),760px);background:var(--viewer-bg);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
 .viewport.side{height:auto;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);align-items:stretch}
 .viewport.side .pane{aspect-ratio:var(--ar,1);background:var(--viewer-bg);height:auto;max-width:100%}
