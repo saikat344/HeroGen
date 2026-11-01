@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HeroGen</title>
 <link rel="icon" href="data:,">
+<script src="/assets/theme.js"></script>
 <link rel="stylesheet" href="/assets/app.css">
 <script type="importmap">
 {
@@ -27,7 +28,7 @@
   <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
   <div class="spacer"></div>
   <nav aria-label="Main"><button type="button" class="link" id="howButton">How it works</button><a href="/#gallery">Gallery</a><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
-  <button type="button" id="headerSignIn" disabled>Open workspace</button>
+  <button type="button" id="headerSignIn" disabled hidden>Your heroes</button>
   <button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
   <span id="who" class="who" hidden></span>
   <button type="button" id="signOut" class="link" hidden>Sign out</button>
@@ -71,7 +72,7 @@
       <div class="hero-copy">
         <p class="eyebrow">For the characters you imagine <span></span></p>
         <h1 id="entryH">Every hero starts<br>with an idea.</h1>
-        <p class="intro">Describe a character, explore a starting point, or bring your own image.</p>
+        <p class="intro">Turn artwork, sketches, or a description into a textured 3D character.</p>
         <form id="jobForm" novalidate>
           <fieldset hidden><legend>Start from</legend><label><input type="radio" name="kind" value="prompt" checked>Describe it</label><label><input type="radio" name="kind" value="sketch">Upload an image</label></fieldset>
           <div class="composer">
@@ -89,10 +90,29 @@
           <p id="jobMsg" class="msg" role="status"></p><p id="quota" class="muted small"></p>
         </form>
       </div>
-      <div class="hero-art"><img src="/assets/art/hero-collage.png" alt="Character design sheets: an adventurous courier, a clockwork gardener, and a moonlit mage" id="heroArtwork" fetchpriority="high"></div>
+      <section class="landing-gallery" id="gallery" aria-label="Explore previously generated heroes">
+        <div class="landing-viewer">
+          <div class="viewer-toolbar"><p class="eyebrow">Generated with HeroGen</p><div class="shade-switch" role="group" aria-label="Model shading">
+            <button type="button" data-shade="textured" aria-pressed="true"><img src="/static/icons/hg-shade-textured.svg" alt="">Textured</button><button type="button" data-shade="clay" aria-pressed="false"><img src="/static/icons/hg-shade-clay.svg" alt="">Clay</button><button type="button" data-shade="wire" aria-pressed="false"><img src="/static/icons/hg-shade-wire.svg" alt="">Wire</button>
+          </div></div>
+          <h2 id="featuredTitle">Explore generated heroes</h2>
+          <canvas id="landingCanvas" aria-label="Saved 3D character. Drag to rotate or scroll to zoom."></canvas>
+          <details class="artwork-inset" open><summary>Original artwork</summary><img id="featuredArtwork" alt="" hidden><a id="featuredDetails" hidden>Inspect saved run ↗</a></details>
+          <div class="viewer-caption"><p id="landingStatus" role="status">Loading the public gallery…</p><button type="button" id="retryLanding">Retry</button></div>
+          <p class="saved-label">Previously generated with HeroGen</p>
+        </div>
+        <div id="modelPicker" class="model-picker" role="group" aria-label="Select a saved 3D model"></div>
+      </section>
     </div>
     <section class="gallery" id="starterGallery" aria-labelledby="galleryH" hidden><div class="row"><h2 id="galleryH">Start from a character</h2><div class="spacer"></div><span class="small muted">Choose an image to make it yours</span></div><div id="templates" class="template-grid"></div><p id="templateMsg" class="small msg" role="status"></p></section>
-    <section id="gallery" class="public-gallery" aria-labelledby="publicGalleryH"><div class="row"><div><p class="eyebrow">Previously generated with HeroGen</p><h2 id="publicGalleryH">From an idea to another dimension.</h2></div></div><p class="muted">Explore real saved results. These examples do not start a new generation.</p><div id="publicGalleryCards" class="public-gallery-grid"></div><p id="publicGalleryStatus" class="small muted" role="status">Loading the public gallery…</p></section>
+    <section class="landing-how" id="howItWorks" aria-labelledby="howHeading">
+      <div class="sketchbook"><img src="/assets/art/hero-collage.png" id="heroArtwork" alt="Character sketchbook with a forest courier in an orange coat, a clockwork gardener, and a moonlit mage" loading="lazy"></div>
+      <div class="how-content"><p class="eyebrow">From imagination to another dimension</p><h2 id="howHeading">How your hero comes to life</h2><p class="muted">Start with artwork, a sketch, or an idea.</p>
+        <ol class="journey"><li><span class="step-number">1</span><h3>Bring your idea</h3><p>Describe your forest courier, or bring artwork or a sketch. An orange coat. A teal scarf. Your character.</p><span class="journey-note">Your idea → character artwork</span></li>
+        <li><span class="step-number">2</span><h3>Build your character</h3><p>Muse Image draws front, side and back views.<br>SAM 3D Objects builds the mesh.<br>HeroGen repaints the texture.</p><span class="journey-note">Artwork → views → textured mesh</span></li>
+        <li><span class="step-number">3</span><h3>Explore in 3D</h3><p>Rotate the result. Switch to clay or wireframe to inspect the geometry. Review the saved run before downloading.</p><a href="/#gallery">Explore real generated models ↑</a></li></ol>
+      </div>
+    </section>
   </section>
   <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>
 

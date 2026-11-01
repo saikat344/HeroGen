@@ -295,7 +295,7 @@ class TestServicePage(ServiceBrowserCase):
         self.assertEqual(t.eval("document.querySelectorAll('#jobs li').length"), 1)
         self.assertTrue(t.eval("document.activeElement.id === 'detail'"))
 
-    def test_entry_rejects_excess_prompt_before_auth_and_supports_keyboard_dialog(self):
+    def test_entry_rejects_excess_prompt_and_focuses_how_section(self):
         t = self.tab
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#entry').hidden")
@@ -306,8 +306,7 @@ class TestServicePage(ServiceBrowserCase):
         t.eval("document.querySelector('[data-idea=moon]').click()")
         self.assertEqual(t.eval("document.querySelector('#prompt').getAttribute('aria-invalid')"), 'false')
         t.eval("document.querySelector('#howButton').click()")
-        self.assertTrue(t.eval("document.querySelector('#howDialog').open"))
-        t.eval("document.querySelector('#closeHow').click()")
+        self.assertTrue(t.eval("document.activeElement.id === 'howHeading'"))
         self.assertFalse(t.eval("document.querySelector('#howDialog').open"))
 
     def test_signout_clears_the_saved_draft(self):
@@ -545,7 +544,7 @@ class TestPublicLivePage(ServiceBrowserCase):
 
     def test_create_opens_guest_and_starts_without_an_account_or_code(self):
         t=self.tab; t.goto(self.url+'/')
-        t.wait("document.querySelector('#headerSignIn').textContent === 'Open workspace' && !document.querySelector('#headerSignIn').disabled")
+        t.wait("document.querySelector('#headerSignIn').textContent === 'Your heroes' && !document.querySelector('#headerSignIn').disabled")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit(); document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
         self.assertEqual(len(self.store.users_list()),1)
