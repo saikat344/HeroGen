@@ -3,9 +3,10 @@
 Each stage runs as the same command a person would type (`python3 -m herogen.pipeline run ...`,
 `python3 -m herogen.blender run ...`), in a subprocess with a timeout and an environment holding only what that
 stage needs (the Model API key reaches the model stages, stage 3 and held-out views). Its outcome is read from the stage record it
-writes (`stage-<n>.json`, docs/ARCHITECTURE.md): ok means passed, a record with a failed gate means the pipeline
-rejected the sketch (shown to the user with the checks that failed), and no record means an error (logged in
-full, shown as one sentence). Options that only some versions of a stage CLI have (`--profile`, `--remote-cache`)
+writes (`stage-<n>.json`, docs/ARCHITECTURE.md): ok means passed, a record with a failed gate or a rejected
+input means the pipeline refused the sketch (shown to the user as one plain reason; an input rejection keeps the
+measured checks in the logs), and no record means an error (logged in full, shown as one sentence). Options that
+only some versions of a stage CLI have (`--profile`, `--remote-cache`)
 are passed only when that CLI's `--help` lists them, so the service follows whichever pipeline it is deployed with.
 
 The Roblox rig (stage 6) runs only when the deployed code has a `herogen.roblox` command; until then the stage is
@@ -69,9 +70,11 @@ TIPS = ("Sketches work best with one character drawn full body from head to feet
 # Why a stage's gate failed, by check name prefix; the measured values follow in the message.
 REASONS = (
     ("0", "min_side_px", "The sketch is too small."),
-    ("1", "sketch_mask", "No single full-body figure was found in the sketch."),
-    ("1", "cover_mask", "The colour version lost the figure from the sketch."),
-    ("1", "silhouette_iou", "The colour version drifted too far from the sketch's outline."),
+    ("1", "sketch_mask_area_frac", "The character is drawn too small within the image."),
+    ("1", "cover_mask_area_frac", "The colour version lost the figure from the sketch."),
+    ("1", "aspect_agreement", "The colour version changed the character's proportions."),
+    ("1", "silhouette_iou_normalised", "The colour version drifted too far from the sketch's outline."),
+    ("1", "", "The colour version did not pass its checks."),
     ("2", "figures_found", "The turnaround sheet did not show four separate figures."),
     ("2", "a_pose", "In the front view the arms were not held away from the body."),
     ("2", "top", "The top view did not match the other views."),
@@ -86,6 +89,15 @@ REASONS = (
     ("6", "", "The Roblox rig could not be built from this body."),
     ("p", "", "The sketch drawn from your description could not be used."),
 )
+# Why a rejected input (a stage-0 or stage-1 record with status "input_rejected") leads its message, by check
+# name. Stage 1's input checks are judged by models, and their own ``message`` fields (written by
+# herogen/pipeline/inputs.py for the record and the logs) name the judging model and its prompts; the photo
+# check's message also carries its probability. The service therefore shows these plain sentences instead.
+# Stage 0's checks measure the upload itself and their messages are shown to the user as they are.
+INPUT_LEADS = {
+    "upload_real_person_photo_probability": "This looks like a photo of a real person.",
+    "sketch_feet_on_figure": "The character is cut off; HeroGen needs the full body, head to feet.",
+}
 
 
 @dataclass
@@ -195,26 +207,63 @@ def failed_checks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _sentence(text: str) -> str:
+    """A check's ``message`` as a sentence: whitespace collapsed, a capital first letter, a full stop."""
+    text = " ".join(str(text).split())
+    if not text:
+        return ""
+    if text[-1] not in ".!?":
+        text += "."
+    return text[0].upper() + text[1:]
+
+
+def _input_reason(checks: list[dict[str, Any]]) -> str:
+    """The lead of an input rejection: one plain sentence per failed gated check. Stage 1's model-judged checks
+    get the service's own sentence (``INPUT_LEADS``); every other check's own ``message`` is shown, so a check
+    added later needs no service change to be understood."""
+    leads = []
+    for c in checks:
+        name = str(c.get("name", ""))
+        if name == "sketch_characters_found":
+            leads.append("This image shows more than one character." if c.get("value")
+                         else "We couldn't find a character in this image.")
+        elif name in INPUT_LEADS:
+            leads.append(INPUT_LEADS[name])
+        elif c.get("message"):
+            leads.append(_sentence(c["message"]))
+    return " ".join(leads)
+
+
+def _measured(checks: list[dict[str, Any]]) -> str:
+    """The failed checks as measured values (up to four), for the logs."""
+    shown = []
+    for c in checks[:4]:
+        op = c.get("op", ">=")
+        shown.append(f"{c.get('name')} measured {_fmt(c.get('value'))}, needs {op} {_fmt(c.get('threshold'))}")
+    more = f" and {len(checks) - 4} more" if len(checks) > 4 else ""
+    return f"Checks that failed: {'; '.join(shown)}{more}." if shown else ""
+
+
 def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
-    """A sentence or two for the user: what the stage found wrong, then the measured checks that failed."""
+    """A sentence or two for the user: what the stage found wrong, then the measured checks that failed. An
+    input rejection (stages 0 and 1) instead leads with one plain sentence per failed input check, keeps the
+    measured checks out of the message (they go to the logs) and ends with the general tips."""
     if spec.key == "p" and rec.get("status") == "input_rejected":
         return ("The description could not be used. Describe one character in words within the description's "
                 "length limit, then try again.")
     if spec.key == "p" and rec.get("status") == "content_policy":
         return "The image model refused this description under its content policy. Try rewording the description."
     checks = failed_checks(rec)
+    if spec.key in ("0", "1") and rec.get("status") == "input_rejected":
+        reason = _input_reason(checks) or "We couldn't use this image."
+        return f"{reason} {TIPS}"
     reason = next((text for stage, prefix, text in REASONS
                    if stage == spec.key and any(str(c.get("name", "")).startswith(prefix) for c in checks)
                    and prefix), None)
     if reason is None:
         reason = next((text for stage, prefix, text in REASONS if stage == spec.key and not prefix),
                       "The stage did not pass its checks.")
-    shown = []
-    for c in checks[:4]:
-        op = c.get("op", ">=")
-        shown.append(f"{c.get('name')} measured {_fmt(c.get('value'))}, needs {op} {_fmt(c.get('threshold'))}")
-    more = f" and {len(checks) - 4} more" if len(checks) > 4 else ""
-    measured = f" Checks that failed: {'; '.join(shown)}{more}." if shown else ""
+    measured = f" {_measured(checks)}" if checks else ""
     tip = " Try rewording the description." if spec.key == "p" else (f" {TIPS}" if spec.key in ("0", "1", "2") else "")
     return f"The {spec.label} stage rejected this hero. {reason}{measured}{tip}"
 
@@ -418,6 +467,14 @@ class CliRunner:
             return Outcome("failed", seconds, cost, message, code_s, transient, detail=detail)
         if rec is not None and rec.get("ok") is True and not timed_out:
             return Outcome("passed", seconds, cost, detail=tail if code else "")
+        if (spec.key in ("0", "1") and rec is not None and rec.get("ok") is False
+                and rec.get("status") == "input_rejected" and not timed_out):
+            # The upload itself cannot be used (no character, a photo of a real person, a cropped figure):
+            # a rejection, not an error. The user gets the plain input reason; the measured checks stay in
+            # the detail for the logs.
+            raw = _measured(failed_checks(rec))
+            return Outcome("rejected", seconds, cost, describe_rejection(spec, rec), "rejected",
+                           detail=" ".join(p for p in (raw, tail) if p))
         if rec is not None and rec.get("ok") is False and rec.get("error") and not timed_out:
             # The stage could not use its input at all: an error, not a rejection. The record's own error line
             # is shown only when it holds no path (it may name files on the worker).

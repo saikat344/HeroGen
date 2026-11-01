@@ -884,13 +884,100 @@ class TestStageCommands(TempDirCase):
         out = CliRunner.outcome(spec, ctx, 1.0, 0, "", "", False)
         self.assertEqual((out.state, out.cost_usd), ("passed", 0.02))
         (ctx.run_dir / "stage-1.json").write_text(json.dumps({"ok": False, "checks": [
-            {"name": "sketch_mask_area_frac", "value": 0.0123, "threshold": 0.05, "pass": False}]}))
+            {"name": "sketch_mask_area_frac", "value": 0.005, "threshold": 0.01, "pass": False}]}))
         out = CliRunner.outcome(spec, ctx, 1.0, 2, "", "", False)
         self.assertEqual(out.state, "rejected")
-        self.assertIn("No single full-body figure", out.message)
-        self.assertIn("0.0123", out.message)
+        self.assertIn("drawn too small within the image", out.message)
+        self.assertIn("0.005", out.message)
         out = CliRunner.outcome(spec, ctx, 9.0, -1, "", "", True)
         self.assertEqual((out.state, out.code, out.transient), ("failed", "timeout", True))
+
+    def rejected_input_outcome(self, stage: str, checks: list[dict]) -> Outcome:
+        """The outcome of a record like the pipeline writes when an input check rejects the upload."""
+        ctx = self.ctx()
+        ctx.run_dir.mkdir(parents=True)
+        spec = next(s for s in PLAN if s.key == stage)
+        (ctx.run_dir / spec.record).write_text(json.dumps(
+            {"stage": stage, "name": spec.label, "ok": False, "status": "input_rejected",
+             "error": "rejected", "checks": checks}))
+        return CliRunner.outcome(spec, ctx, 5.0, 3, "stage: input rejected; stopping",
+                                 "stage: input rejected; stopping", False)
+
+    def test_input_rejection_without_a_character(self):
+        message = ("no character found in the sketch: SAM 3.1 found nothing for any of 'person', 'full body', "
+                   "'character'. HeroGen needs one clearly drawn, full-body character")
+        out = self.rejected_input_outcome("1", [
+            {"name": "upload_real_person_photo_probability", "value": 0.01, "threshold": 0.5, "op": "<",
+             "pass": True, "gate": True, "verdict": "pass"},
+            {"name": "sketch_characters_found", "value": 0, "threshold": 1, "op": "==", "pass": False,
+             "gate": True, "verdict": "reject", "message": message},
+        ])
+        self.assertEqual((out.state, out.code), ("rejected", "rejected"))
+        self.assertTrue(out.message.startswith("We couldn't find a character in this image."), out.message)
+        self.assertIn("full body from head to feet", out.message, "the general tips follow")
+        for hidden in ("sketch_characters_found", "measured", "SAM 3.1"):
+            self.assertNotIn(hidden, out.message)
+        self.assertIn("sketch_characters_found measured 0, needs == 1", out.detail)
+
+    def test_input_rejection_of_several_characters(self):
+        message = ("the sketch shows 2 characters: SAM 3.1 found 1 more at least 25% the size of the largest "
+                   "(the next is 66% of it). Draw one character per sketch")
+        out = self.rejected_input_outcome("1", [
+            {"name": "sketch_characters_found", "value": 2, "threshold": 1, "op": "==", "pass": False,
+             "gate": True, "verdict": "reject", "message": message},
+        ])
+        self.assertEqual((out.state, out.code), ("rejected", "rejected"))
+        self.assertTrue(out.message.startswith("This image shows more than one character."), out.message)
+        self.assertIn("full body from head to feet", out.message)
+        for hidden in ("sketch_characters_found", "measured", "SAM 3.1"):
+            self.assertNotIn(hidden, out.message)
+        self.assertIn("sketch_characters_found measured 2, needs == 1", out.detail)
+
+    def test_input_rejection_of_a_real_person_photo(self):
+        message = ("this looks like a photograph of a real person (Muse Spark: photo_of_real_person, "
+                   "probability 0.97). Upload a drawing or artwork of a character, not a photo of a real person")
+        out = self.rejected_input_outcome("1", [
+            {"name": "upload_real_person_photo_probability", "value": 0.97, "threshold": 0.5, "op": "<",
+             "pass": False, "gate": True, "verdict": "reject", "message": message},
+        ])
+        self.assertEqual((out.state, out.code), ("rejected", "rejected"))
+        self.assertTrue(out.message.startswith("This looks like a photo of a real person."), out.message)
+        for hidden in ("upload_real_person_photo_probability", "measured", "Muse Spark", "0.97", "probability"):
+            self.assertNotIn(hidden, out.message, "neither the judging model nor its probability is shown")
+        self.assertIn("upload_real_person_photo_probability measured 0.97, needs < 0.5", out.detail,
+                      "the measured check stays in the logs")
+
+    def test_input_rejection_of_a_cropped_figure(self):
+        message = ("the figure looks cropped: SAM 3.1 found its legs but no feet. HeroGen needs the whole body "
+                   "from the top of the head to the feet; draw or scan the full figure")
+        out = self.rejected_input_outcome("1", [
+            {"name": "sketch_feet_on_figure", "value": 0, "threshold": 1, "op": ">=", "pass": False,
+             "gate": True, "verdict": "reject", "message": message},
+        ])
+        self.assertEqual((out.state, out.code), ("rejected", "rejected"))
+        self.assertTrue(out.message.startswith(
+            "The character is cut off; HeroGen needs the full body, head to feet."), out.message)
+        for hidden in ("sketch_feet_on_figure", "measured", "SAM 3.1"):
+            self.assertNotIn(hidden, out.message)
+        self.assertIn("sketch_feet_on_figure measured 0, needs >= 1", out.detail)
+
+    def test_input_rejection_of_a_too_small_too_faint_sketch(self):
+        out = self.rejected_input_outcome("0", [
+            {"name": "min_side_px", "value": 100, "threshold": 256, "op": ">=", "pass": False, "gate": True,
+             "verdict": "reject", "message": "the sketch is too small: its shorter side is 100 px and HeroGen "
+             "needs at least 256 px. Scan or export it at a higher resolution"},
+            {"name": "sketch_line_contrast", "value": 12.3, "threshold": 32, "op": ">=", "pass": False,
+             "gate": True, "verdict": "reject", "message": "the lines are too faint: the darkest lines are only "
+             "12.3 grey levels darker than the paper and HeroGen needs at least 32. Darken the lines, or scan "
+             "or photograph the sketch with more contrast"},
+        ])
+        self.assertEqual((out.state, out.code), ("rejected", "rejected"))
+        self.assertTrue(out.message.startswith("The sketch is too small: its shorter side is 100 px"), out.message)
+        self.assertIn("The lines are too faint:", out.message, "each failed check's message is shown as a sentence")
+        self.assertIn("full body from head to feet", out.message)
+        for hidden in ("min_side_px", "sketch_line_contrast", "measured"):
+            self.assertNotIn(hidden, out.message)
+        self.assertIn("min_side_px measured 100, needs >= 256", out.detail)
 
     def test_transient_failures_are_recognised_by_status(self):
         from herogen.service.runner import transient_failure
