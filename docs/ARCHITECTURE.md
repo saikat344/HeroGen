@@ -2730,7 +2730,7 @@ page; invalid payloads are rejected with HTTP 400 and counted in structured serv
 The service never records IP addresses, raw `User-Agent` strings, email addresses, prompt text, character
 names, file names or image bytes in `analytics_events`. When Global Privacy Control is active
 (`navigator.globalPrivacyControl` in the browser or `Sec-GPC: 1` on the request), no client events are sent or
-stored. Schema v7 adds `analytics_events` via numbered store migration, and the daily retention worker deletes
+stored. Schema v10 adds `analytics_events` via numbered store migration 9, and the daily retention worker deletes
 rows older than `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` (default 30). Job outcomes, user kind (`account` vs
 `guest`), per-stage durations and costs (`p`, `0`, `1`, `2`, `3`, `3f`, `4`, `6`, `5`, plus side stage `2h`
 reported separately) and admission budget figures are computed directly from `jobs`, `job_stages`,

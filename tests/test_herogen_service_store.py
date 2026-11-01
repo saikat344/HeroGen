@@ -582,15 +582,16 @@ class TestSchema(TempDirCase):
         """A database made with the schema of an older version, holding one job and its reservation."""
         from herogen.service import store as store_mod
 
-        schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '')
+        schema = store_mod.SCHEMA.replace(store_mod.ADMISSION_SCHEMA, '').replace(store_mod.ANALYTICS_SCHEMA, '')
         if version < 8:
             schema = schema.replace("  continued_after INTEGER NOT NULL DEFAULT 0, parent_job TEXT, from_stage TEXT, "
-                                "note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n", "")
+                                    "note TEXT NOT NULL DEFAULT '', stop_after TEXT,\n", "")
         if version < 5:
             schema = schema.replace(", kind TEXT NOT NULL DEFAULT 'account'", '')
             schema = schema.replace(', budget_required INTEGER NOT NULL DEFAULT 0', '')
         else:
-            admission = store_mod.LEGACY_ADMISSION_SCHEMA
+            # v9 already has the phase-aware admission tables; older stores have the legacy ones.
+            admission = store_mod.ADMISSION_SCHEMA if version >= 9 else store_mod.LEGACY_ADMISSION_SCHEMA
             if version < 7:
                 admission = admission.replace(", process TEXT NOT NULL DEFAULT ''", '')
                 admission = ';'.join(stmt for stmt in admission.split(';')
@@ -639,6 +640,8 @@ class TestSchema(TempDirCase):
             self.assertEqual(st.job_stages("j_x")[0]["cost_usd"], 0.02)
             cols = [r[1] for r in st.db.execute("PRAGMA table_info(job_stages)")]
             self.assertIn("claim", cols)
+            self.assertEqual(st.db.execute("SELECT COUNT(*) FROM analytics_events").fetchone()[0], 0,
+                             f"v{version} gains an empty analytics table")
             if version >= 5:
                 kept = st.db.execute("SELECT amount_micro, closed, cost_signature FROM admissions "
                                      "WHERE job_id='j_x'").fetchone()
