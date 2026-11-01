@@ -440,7 +440,8 @@ function initGuestAccess() {
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
-  $('#headerSignIn').textContent = ['/signin', '/admin/signin'].includes(location.pathname) ? 'Sign in' : 'Your heroes';
+  const signinRoute = ['/signin', '/admin/signin'].includes(location.pathname);
+  $('#headerSignIn').textContent = signinRoute ? 'Sign in' : 'Your heroes';
   initSignin(); initJobs(); initGuestAccess();
   $('#backToIdeas').addEventListener('click', () => {
     history.pushState(null, '', '/'); returnToEntry();
@@ -451,17 +452,26 @@ async function boot() {
     if (open) await refreshList().catch((e) => banner(e.message));
   });
   document.querySelectorAll('a[href="#gallery"],a[href="/#gallery"]').forEach(link => link.addEventListener('click', event => {
+    if (location.pathname !== '/') return;
     event.preventDefault(); history.pushState(null, '', '/#gallery'); returnToEntry();
     $('#gallery').scrollIntoView({block:'start'});
   }));
   window.addEventListener('popstate', () => {
+    if (location.pathname !== '/') return;
     const id = new URLSearchParams(location.hash.slice(1)).get('job');
     if (id) openJob(id, true); else { returnToEntry(); if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'}); }
   });
   $('#headerSignIn').addEventListener('click', async () => {
-    try { if (!['/signin','/admin/signin'].includes(location.pathname)) await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
-    if (S.session?.signed_in) { await refreshList(); show('#app'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true'); $('#heroLibrary').scrollIntoView({block:'start'}); }
-    else signIn();
+    if (['/signin', '/admin/signin'].includes(location.pathname)) { signIn(); return; }
+    try { await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
+    if (!S.session?.signed_in) { signIn(); return; }
+    try {
+      await refreshList();
+      if (!S.session?.signed_in) return;
+      banner('');
+      show('#app'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
+      $('#heroLibrary').scrollIntoView({block:'start'});
+    } catch (e) { banner(e.message); }
   });
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
   $('#signOut').addEventListener('click', async () => {
@@ -469,7 +479,7 @@ async function boot() {
     catch (e) { banner(e.message); }
   });
   $('#headerSignIn').disabled = false;
-  show('#headerSignIn', !!S.session.signed_in || ['/signin', '/admin/signin'].includes(location.pathname));
+  show('#headerSignIn', !!S.session.signed_in || signinRoute);
   if (location.pathname === '/signin') { show('#loading', false); return initVerify(); }
   if (location.pathname === '/admin/signin') { show('#loading', false); signIn(); return; }
   await restoreDraft();
