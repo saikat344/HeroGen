@@ -254,7 +254,7 @@ def describe_rejection(spec: StageSpec, rec: dict[str, Any]) -> str:
         text = "description" if spec.key == "p" else "appearance note or character description"
         return f"The image model refused this {text} under its content policy. Try rewording the {text}."
     if spec.key == '4' and rec.get('joint_reasons'):
-        return "Roblox body unavailable for this hero: these joints could not be separated: " + ", ".join(rec['joint_reasons']) + "."
+        return "Roblox files unavailable for this hero: " + ", ".join(rec['joint_reasons']) + " could not be separated."
     checks = failed_checks(rec)
     if spec.key in ("0", "1") and rec.get("status") == "input_rejected":
         reason = _input_reason(checks) or "We couldn't use this image."

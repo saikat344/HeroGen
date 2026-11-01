@@ -22,7 +22,7 @@ class BestEffortTest(JobCase):
                 saved = self.store.job_get(job['id'])
                 self.assertEqual(saved['state'], 'succeeded')
                 rows = self.stages(job)
-                self.assertEqual(rows[stage]['state'], 'skipped')
+                self.assertEqual(rows[stage]['state'], 'rejected' if (stage, mode) == ('4', 'reject') else 'skipped')
                 self.assertTrue(rows[stage]['message'])
                 run = self.storage.run_dir(self.user['id'], job['id'])
                 self.assertEqual(glb_path(run).name, '03-source.glb' if stage in ('3', '3f') else '03-refined.glb')
@@ -37,6 +37,36 @@ class BestEffortTest(JobCase):
                 if stage == '3':
                     self.assertIn('rough', rows['3']['message'])
                     self.assertEqual(rows['3f']['state'], 'skipped')
+
+    def test_rejected_joints_skip_rig_with_the_real_reason(self):
+        from herogen.service.runner import write_record
+
+        class RejectedJoints(FakeRunner):
+            def _stage_4(self, ctx, run):
+                write_record(run, {'stage': 4, 'ok': False, 'status': 'rejected',
+                                   'reason': 'LeftElbow, RightElbow could not be separated.',
+                                   'joint_reasons': {'LeftElbow': 'no shared rim', 'RightElbow': 'empty section'},
+                                   'checks': [], 'outputs': [], 'cost_usd': 0})
+
+        self.runner = RejectedJoints()
+        job = self.new_job()
+        self.assertEqual(self.go(job), 'succeeded')
+        saved = self.store.job_get(job['id'])
+        self.assertEqual((saved['state'], saved['export_state']), ('succeeded', 'unavailable'))
+        self.assertEqual(saved['export_message'], 'LeftElbow, RightElbow could not be separated.')
+        rows = self.stages(job)
+        self.assertEqual(rows['4']['state'], 'rejected')
+        self.assertEqual(rows['6']['state'], 'skipped')
+        self.assertNotIn('6', self.runner.calls)
+        message = 'Roblox files unavailable for this hero: LeftElbow, RightElbow could not be separated.'
+        self.assertEqual(rows['4']['message'], message)
+        self.assertEqual(rows['6']['message'], message)
+        self.assertNotIn('stopped unexpectedly', json.dumps(rows))
+        run = self.storage.run_dir(self.user['id'], job['id'])
+        self.assertIsNotNone(glb_path(run))
+        self.assertFalse((run / '04-body' / 'sections.json').exists())
+        six = json.loads((run / 'stage-6.json').read_text())
+        self.assertEqual((six['ok'], six['status'], six['reason']), (False, 'skipped', message))
 
     def test_successful_texture_fallbacks_are_visible(self):
         from herogen.service.runner import write_record

@@ -453,10 +453,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             ref_sets[label] = cuts.worst_by_joint(ref["verts"], ref["faces"], sk, offs, sets,
                                                   (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"])
     except cuts.UnmeasurableJoints as exc:
-        reason = "These joints could not be separated: " + ", ".join(exc.reasons) + "."
+        reason = ", ".join(exc.reasons) + " could not be separated."
         rec.add(check("measurable_joints", False, passed=False, note=reason))
         rec.note(reason)
-        return rec.finish({"status": "rejected", "reason": reason, "joint_reasons": exc.reasons})
+        return rec.finish({"ok": False, "status": "rejected", "reason": reason, "joint_reasons": exc.reasons})
     ref_sets["unmoved"]["gate"] = cut_record["unmoved_worst_gap"]
     cut_record["reference_worst_gap"] = {label: {k: {j: round(v, 4) for j, v in d.items()} for k, d in sets.items()}
                                          for label, sets in ref_sets.items()}

@@ -280,7 +280,7 @@ def degradation_note(spec, out):
     if spec.key == '3f':
         return 'Texture refine was skipped: ' + reason.rstrip('.') + '. Showing the unrefined texture.'
     if spec.key == '4':
-        return out.message if out.message.startswith('Roblox body unavailable') else 'Roblox body unavailable for this hero: ' + reason
+        return out.message if out.message.startswith(('Roblox body unavailable', 'Roblox files unavailable')) else 'Roblox body unavailable for this hero: ' + reason
     if spec.key == '6':
         return 'Roblox files unavailable for this hero: ' + reason
     return 'The results page was skipped. Your model is available in this workbench.'
@@ -325,8 +325,8 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                 continue
             rows = {r['stage']: r for r in store.job_stages(jid)}
             dependency = '4' if spec.key == '6' else '3' if spec.key == '3f' else None
-            if dependency and rows.get(dependency, {}).get('state') == 'skipped':
-                why = ('Roblox rig was skipped because the game body is unavailable.' if spec.key == '6' else
+            if dependency and rows.get(dependency, {}).get('state') in ('skipped', 'rejected'):
+                why = (rows[dependency]['message'] if spec.key == '6' else
                        'Texture refine was skipped because the 3D shape is rough. Showing the unrefined texture.')
                 skip_stage(store, jid, attempt, spec, ctx, why)
                 workdir.sync()
@@ -364,7 +364,10 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                     'error': out.detail or out.message, 'seconds': out.seconds, 'cost_usd': out.cost_usd})
             compute = round(out.seconds * compute_price_per_s, 6)
             workdir.sync()
-            store.job_stage_set(jid, attempt, spec.key, "skipped" if degraded else out.state, seconds=out.seconds,
+            state = "skipped" if degraded else out.state
+            if spec.key == "4" and out.state == "rejected":
+                state = "rejected"
+            store.job_stage_set(jid, attempt, spec.key, state, seconds=out.seconds,
                                 cost_usd=round((prior.get(spec.key, {}).get("cost_usd") or 0.0)
                                                + out.cost_usd + compute, 6), message=degradation_note(spec, out) if degraded else out.message,
                                 mesh_saved=spec.key == "3" and out.state in ("passed", "rejected")
@@ -509,7 +512,7 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 export_state = 'unavailable'
                 rows = {r['stage']: r for r in store.job_stages(job_id)}
                 export_message = next((rows[k]['message'] for k in ('4', '6')
-                                       if rows.get(k, {}).get('state') == 'skipped' and rows[k]['message']), str(exc))
+                                       if rows.get(k, {}).get('state') in ('skipped', 'rejected') and rows[k]['message']), str(exc))
             for prefix in ('Roblox body unavailable for this hero: ', 'Roblox files unavailable for this hero: '):
                 export_message = export_message.removeprefix(prefix)
             store.job_export_finish(job_id, attempt, state=export_state, message=export_message,
