@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import math
 import time
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -528,13 +531,23 @@ def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], 
     """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width).
     Complete attached foreground on its SAM seed; when SAM finds nothing, ``mask`` is None and the drawn
     view is not used."""
+    return scale_top_view(_draw_top_view(client, cover), sq, size, bg)
+
+
+def _draw_top_view(client, cover, figure_mask=None):
     img = client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
-    sam, method, _ = sam_figure_mask(client, img)
+    sam, method, _ = (figure_mask or sam_figure_mask)(client, img)
     completion = {"method": "attached_foreground"}
     try:
         mask = imaging.complete_attached_foreground(img, sam)
     except ValueError as e:  # refused background, size or geometry: keep SAM's mask and say why
         mask, completion = sam, {"method": "none", "reason": str(e)}
+    return img, sam, method, mask, completion
+
+
+def scale_top_view(drawn, sq, size, bg):
+    """Scale a previously generated top against this candidate, without changing its pixels or checks."""
+    img, sam, method, mask, completion = drawn
     tb = imaging.bbox(mask)
     fb = imaging.bbox(sq["front"]["mask"])
     if tb is None or fb is None:
@@ -562,11 +575,103 @@ def hull_top_view(sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
     return {"image": img, "mask": m, "mask_method": "visual_hull"}
 
 
+class _TurnaroundRequests:
+    """Bounded speculative model calls; local checks and selection still run in attempt order.
+
+    Each branch owns its log. Logs join in the original logical order, including cached top reuses.
+    Unused samples still count as spend, and a failure in any launched sample fails the stage.
+    """
+
+    def __init__(self, client, cover, attempts, concurrency):
+        self.client, self.cover = client, cover
+        self.pool = ThreadPoolExecutor(max_workers=min(concurrency, attempts + 1))
+        self.branches = []
+        self.merged = set()
+        self.mask_locks = {}
+        self.mask_lock = threading.Lock()
+        step = prompt_registry.selected("turnaround").step("sheet")
+
+        def sheet(branch, attempt):
+            image = branch.edit_image(step["prompt"], [cover.copy()], size=step["params"]["size"], attempt=attempt)
+            return image, self.figure(branch, image)
+
+        # Queue the independent top beside the first candidate, even at width two.
+        self.sheets = [self.submit(sheet, 0)]
+        self.drawn = self.submit(_draw_top_view, cover.copy(), self.figure)
+        self.sheets += [self.submit(sheet, i) for i in range(1, attempts)]
+        self.top_uses = 0
+
+    def figure(self, client, image):
+        # Identical candidate pixels share a SAM cache key: avoid duplicate sends and concurrent writes.
+        key = (image.mode, image.size, hashlib.sha256(image.tobytes()).digest())
+        with self.mask_lock:
+            lock = self.mask_locks.setdefault(key, threading.Lock())
+        with lock:
+            return sam_figure_mask(client, image)
+
+    def submit(self, fn, *args):
+        branch = copy.copy(self.client)
+        branch.log = type(self.client.log)()
+        future = self.pool.submit(fn, branch, *args)
+        self.branches.append((future, branch))
+        return len(self.branches) - 1
+
+    def result(self, index):
+        future, branch = self.branches[index]
+        try:
+            return future.result()
+        finally:
+            if index not in self.merged:
+                self.client.log.calls.extend(branch.log.calls)
+                self.merged.add(index)
+
+    def sheet(self, attempt):
+        return self.result(self.sheets[attempt])
+
+    def top(self):
+        drawn = self.result(self.drawn)
+        if self.top_uses:
+            self.client.log.calls.extend({**c, "cached": True} for c in self.branches[self.drawn][1].log.calls)
+        self.top_uses += 1
+        return drawn
+
+    def drain(self):
+        self.pool.shutdown(wait=True)
+        first_error = None
+        for i in range(len(self.branches)):
+            try:
+                self.result(i)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        self.drain()
+
+
 def stage2_turnaround(
-    run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4
+    run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4,
+    concurrency: int = 1
 ) -> dict[str, Any]:
+    if type(concurrency) is not int or concurrency < 1 or type(attempts) is not int or attempts < 1:
+        raise ValueError("attempts and concurrency must be positive integers")
+    if concurrency > 1 and (client.before_api_attempt or client.after_api_attempt):
+        raise ValueError("parallel turnaround requires a client without per-attempt callbacks; "
+                         "reserve the bounded stage cost before launching, or use concurrency=1")
     st = _Stage(run, client, 2, "turnaround")
-    return _stopping_on_client_error(lambda: _stage2(st, run, client, height_units, attempts), st)
+
+    def execute():
+        if concurrency == 1:
+            return _stage2(st, run, client, height_units, attempts)
+        with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency) as requests:
+            return _stage2(st, run, client, height_units, attempts, requests)
+
+    return _stopping_on_client_error(execute, st)
 
 
 # Stage 3's carve of a sheet's views, gated by stage 3's own silhouette-IoU gate (see `carve_check`).
@@ -608,7 +713,7 @@ def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
-               height_units: float) -> tuple:
+               height_units: float, requests=None) -> tuple:
     """Select the top and check the final masks before ranking or accepting a sheet."""
     top_checks: list[dict[str, Any]] = []
     details: dict[str, Any] = {}
@@ -617,7 +722,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     # figures at one scale). It is used if its depth/width agrees with the side views; otherwise the top
     # silhouette implied by the four side views is used instead.
     side_masks = {n: v["mask"] for n, v in sq.items()}
-    drawn = model_top_view(client, cover, sq, size, bg)
+    drawn = (model_top_view(client, cover, sq, size, bg) if requests is None
+             else scale_top_view(requests.top(), sq, size, bg))
     used = None
     final_carve = None
     if drawn.get("mask") is not None:
@@ -662,7 +768,7 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     return used, drawn["raw"], top_checks, details, notes
 
 
-def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int
+def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int, requests=None
             ) -> dict[str, Any]:
     prompt, version = turnaround_prompt(run)
     step = version.step("sheet")
@@ -671,10 +777,14 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     tried = []
     kept: tuple = ()
     for attempt in range(attempts):
-        sheet = client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
+        if requests is None:
+            sheet = client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
+            figure = None
+        else:
+            sheet, figure = requests.sheet(attempt)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
-        fig, fig_method, n_inst = sam_figure_mask(client, sheet)
+        fig, fig_method, n_inst = sam_figure_mask(client, sheet) if figure is None else figure
         split = split_sheet(sheet, fig, thr, fig_method)
         sq: dict[str, Any] = {}
         size = 0
@@ -698,7 +808,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         # carve fails. The hybrid still needs complete views if no retry produces a passing carve.
         if sq and C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE]):
             top, top_raw, top_checks, top_details, top_notes = _sheet_top(
-                client, cover, sq, size, bg, height_units
+                client, cover, sq, size, bg, height_units, requests
             )
             # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
             side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
@@ -727,6 +837,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             break
     (_, kept_attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks,
      top, top_raw, top_details, top_notes) = kept
+    if requests is not None:
+        requests.drain()
     st.save_image("02-turnaround.png", sheet)
     st.details = {
         "prompt": prompt,

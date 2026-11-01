@@ -327,6 +327,17 @@ sheet and part-mask calls); later attempts reuse those results and scale them to
 and the final carve can change retrying and the kept sheet, and a top API error stops the stage; deferring top requests until
 after selection would change those outcomes.
 
+`stage2_turnaround(..., concurrency=1)` retains serial calls by default. The pipeline CLI and service
+stage adapter expose `--turnaround-concurrency`; a value above one overlaps the sheet edit/mask branches
+and one independent top edit/mask branch, bounded by that many worker threads. Local checks, top scaling,
+ranking and earliest-passing selection remain in attempt order with the same prompts and sample numbers.
+The top is scaled separately for each eligible sheet. Branch logs join in logical order; repeated top uses
+are recorded as cache hits. Identical candidate images serialize segmentation to avoid duplicate sends or
+concurrent writes to one cache entry. Unused speculative candidates are still paid and logged, and every
+launched call is drained before success: any model error or replay miss stops the stage. A replay therefore
+needs the speculative candidates too. Existing single-request budget callbacks require concurrency one;
+a parallel caller must reserve the bounded stage cost before launch. This does not change any gate.
+
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the
 same joints, arm prior, voxel resolution and smoothing, with the mesh rasterised in numpy instead of rendered

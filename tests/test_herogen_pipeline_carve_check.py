@@ -100,7 +100,7 @@ class SavedTopFlowTest(unittest.TestCase):
         self.top = imaging.top_from_hull(*(self.masks[n] for n in ("front", "back", "right", "left")))
         self.checked = []
 
-    def _flow(self, score, drawn=None, *, extra_checks=(), expected_failure=False, attempts=4, side_checks=None):
+    def _flow(self, score, drawn=None, *, extra_checks=(), expected_failure=False, attempts=4, side_checks=None, concurrency=1):
         def square(*_):
             return 96, {n: {"mask": m.copy(), "image": self.image.copy(), "mask_method": "sam-3.1"}
                         for n, m in self.masks.items()}
@@ -122,16 +122,34 @@ class SavedTopFlowTest(unittest.TestCase):
                 mock.patch.object(stages, "orient_sides", return_value=([], [], {})), \
                 mock.patch.object(stages.C, "side_view_checks", side_effect=side_checks or (lambda *a, **kw:
                                   side_view_checks(*a, **kw) + list(extra_checks))), \
+                mock.patch.object(stages, "_draw_top_view", return_value=(
+                    self.image, np.zeros_like(self.top), "sam-3.1", np.zeros_like(self.top), {})), \
                 mock.patch.object(stages, "model_top_view", return_value=drawn) as tops, \
                 mock.patch("herogen.pipeline.parts.write_part_masks", return_value={}), \
                 mock.patch.object(stage3, "carve_view_ious", side_effect=measure):
             if expected_failure:
                 with self.assertRaises(stages.GateFailed) as caught:
-                    stages.stage2_turnaround(self.run, self.client, attempts=attempts)
+                    stages.stage2_turnaround(self.run, self.client, attempts=attempts, concurrency=concurrency)
                 result = caught.exception.record
             else:
-                result = stages.stage2_turnaround(self.run, self.client, attempts=attempts)
+                result = stages.stage2_turnaround(self.run, self.client, attempts=attempts, concurrency=concurrency)
         return result, edits.call_count, tops.call_count
+
+    def test_parallel_exhaustion_preserves_records_and_every_output_byte(self):
+        import hashlib
+
+        def outputs():
+            return {str(p.relative_to(self.run.path)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in self.run.path.rglob("*") if p.is_file() and p.name != "stage-2.json"}
+
+        serial, _, _ = self._flow(lambda vs, _: {n: 0.8 for n in vs.views})
+        hashes = outputs()
+        parallel, _, _ = self._flow(lambda vs, _: {n: 0.8 for n in vs.views}, concurrency=4)
+        for rec in (serial, parallel):
+            rec.pop("started")
+            rec.pop("seconds")
+        self.assertEqual(serial, parallel)
+        self.assertEqual(hashes, outputs())
 
     def _assert_saved_check(self, result):
         saved = views.load_views(self.run.path, 5.5)
