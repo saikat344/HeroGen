@@ -2295,7 +2295,7 @@ deploying shell). The main ones:
 | `HEROGEN_SERVICE_HELDOUT_MAX` | 2 | Held-out view runs at once, service-wide |
 | `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
 | `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` | 30 | Retention in days for `analytics_events` |
-| `HEROGEN_SERVICE_ADMIN_EMAILS` | (empty) | Comma-separated email allowlist for `/admin` and `/api/admin/*` (empty grants nobody) |
+| `HEROGEN_SERVICE_ADMIN_EMAILS` | (empty) | Private comma-separated allowlist for `/admin` and `/api/admin/*` (empty grants nobody); runtime secret, never baked into an image |
 | `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
 | `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `best` | Profiles offered, and the default |
 | `HEROGEN_SERVICE_STAGE3_ARGS` | `--mesh-source sam3d-objects --joints sam3d-body --remote live` | Extra `herogen.blender run` options for stage 3 |
@@ -2306,10 +2306,16 @@ timeouts.
 
 | Secret (Modal secret) | Variables | Used by |
 | --- | --- | --- |
-| `<app>-web` | `HEROGEN_SESSION_KEY` (at least 32 random bytes), `HEROGEN_EMAIL_API_KEY` | `web`, `admin_command` |
+| `<app>-web` | `HEROGEN_SESSION_KEY` (at least 32 random bytes), `HEROGEN_EMAIL_API_KEY`, `HEROGEN_SERVICE_ADMIN_EMAILS` | `web`, `admin_command` |
 | `<app>-model` | `MODEL_API_KEY` | `model_stages`, `blender_stages` (stage 3 only), `heldout_stages` |
 | `<app>-admin` | `HEROGEN_ADMIN_KEY` (at least 32 random bytes) | `StoreService`, `admin_command`: the store's admin methods (invites, allowlist, users, quotas, audit) accept calls only with this key, so the web and worker functions cannot reach them |
 | `huggingface` | `HF_TOKEN` | the SAM 3D apps, only when stage 3 uses them |
+
+The release workflow reads `HEROGEN_SERVICE_ADMIN_EMAILS` from a masked GitHub environment secret.
+A deploying shell value is attached as a runtime Modal secret for `web` and `admin_command`, overriding
+the named web secret; the allowlist never enters image environment layers.
+`HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` is an optional GitHub environment variable baked into the image,
+including the scheduled retention function.
 
 ### Deploying
 

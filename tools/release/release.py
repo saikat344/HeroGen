@@ -62,13 +62,13 @@ REQUIRED = (
     ("HEROGEN_SERVICE_TERMS_VERSION", "variable"),
     ("HEROGEN_SERVICE_DOMAIN", "variable"),
 )
-OPTIONAL = ("HEROGEN_SERVICE_PUBLIC_DEMO", "HEROGEN_SERVICE_GALLERY", "HEROGEN_SERVICE_MAX_RUNNING")
+OPTIONAL = ("HEROGEN_SERVICE_PUBLIC_DEMO", "HEROGEN_SERVICE_GALLERY", "HEROGEN_SERVICE_MAX_RUNNING",
+            "HEROGEN_SERVICE_ADMIN_EMAILS", "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS")
 # Settings every deploy runs with. The service refuses to deploy in any mode but `production` (staging included:
 # the mode is "not dev", not the environment), and production mode needs a real email provider; `resend` is the
 # only one the service has.
 FIXED = {"HEROGEN_SERVICE_MODE": "production", "HEROGEN_SERVICE_EMAIL_PROVIDER": "resend"}
-# The service bakes every HEROGEN_SERVICE_* variable of the deploying shell into its image, so the deploy gets
-# only the ones above.
+# The deploy gets only the reviewed service settings above; private settings reach runtime through secrets.
 SERVICE_PREFIX = "HEROGEN_SERVICE_"
 
 # GitHub deployment states (REST API, deployment statuses). A deployment with no status yet is pending.
