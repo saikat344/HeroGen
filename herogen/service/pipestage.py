@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
+    ap.add_argument("--turnaround-concurrency", type=int, default=1)
     a = ap.parse_args(argv)
     from herogen.pipeline.client import ModelClient
     from herogen.pipeline.runfolder import RunFolder, runs_root
@@ -58,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         elif a.stage == "1":
             rec = stage1_cover(run, client)
         else:
-            rec = stage2_turnaround(run, client)
+            rec = stage2_turnaround(run, client, concurrency=a.turnaround_concurrency)
     except GateFailed as e:
         run.write_stage({**e.record, "status": "gate_failed"})
         print(f"stage {a.stage}: gate failed; stopping", file=sys.stderr)

@@ -111,6 +111,7 @@ def run_pipeline(
     from_stage: int | None = None,
     note: str = "",
     stop_after: int | None = None,
+    turnaround_concurrency: int = 1,
 ) -> int:
     """Run the stages in order. With ``prompt``, stage p draws the sketch and stage 0 copies its full-body image;
     stage 0 without a sketch path also takes the run's stage p image when stage p passed earlier."""
@@ -160,7 +161,7 @@ def run_pipeline(
             elif n == 1:
                 rec = stage1_cover(run, client)
             elif n == 2:
-                rec = stage2_turnaround(run, client)
+                rec = stage2_turnaround(run, client, concurrency=turnaround_concurrency)
             elif n == FACE_SOURCE:
                 rec = stage2f_face_source(run, client)
                 fallback = rec["details"].get("fallback")
@@ -232,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
+    r.add_argument("--turnaround-concurrency", type=int, default=1,
+                   help="parallel sheet/top calls; values above one may pay for unused candidates")
     r.add_argument("--label", default="", help="label for the input, e.g. 'stand-in sketch'")
     r.add_argument("--views", default=None,
                    help="held-out views to make, e.g. front-left-60,front-right-60 (default all; the others "
@@ -281,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                 a.sketch, a.run_id, stages, mode="live" if a.live else "replay",
                 runs=a.runs, cache=a.cache, label=a.label, views=views, prompt=a.prompt,
                 prompt_version=a.prompt_version, parent=a.parent, from_stage=a.from_stage, note=a.note,
-                stop_after=a.stop_after,
+                stop_after=a.stop_after, turnaround_concurrency=a.turnaround_concurrency,
             )
         except (ValueError, prompts.RegistryError) as e:
             ap.error(str(e))
