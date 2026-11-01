@@ -201,11 +201,13 @@ class MeshIndex:
             bary[better, j] = u[better]
         return best, bary
 
-    def closest(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def closest(self, points: np.ndarray, upper_bound: np.ndarray | None = None
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Exact nearest triangle ids, barycentric coordinates and unsigned distances.
 
         Ties choose the lowest face index. Empty/degenerate surfaces return -1, NaN barycentrics and infinity.
-        The expanding grid search has the same completeness bound as distance(); large boxes use bounded
+        An optional per-point surface-distance upper bound starts a tighter search box; incomplete bounds
+        expand until the same completeness condition holds. Large boxes use bounded
         brute-force batches. Callers may interpolate any corresponding triangle attributes with the barycentrics.
         """
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -227,10 +229,13 @@ class MeshIndex:
             np.minimum.at(chosen, qq[tied], tt[tied])
             return best, chosen
 
-        todo, r = np.arange(len(points)), self.h
+        todo = np.arange(len(points))
+        r = np.full(len(points), self.h) if upper_bound is None else np.asarray(upper_bound, float).copy()
+        if r.shape != (len(points),) or not np.isfinite(r).all() or (r < 0).any():
+            raise ValueError("closest upper bounds must be finite non-negative distances, one per point")
         while len(todo):
             p = points[todo]
-            i0, i1 = self._index(p - r, (0, 1, 2)), self._index(p + r, (0, 1, 2))
+            i0, i1 = self._index(p - r[:, None], (0, 1, 2)), self._index(p + r[:, None], (0, 1, 2))
             size = i1 - i0 + 1
             count = np.prod(size, axis=1)
             brute = count > BRUTE_BOX_CELLS
@@ -253,8 +258,9 @@ class MeshIndex:
             best, chosen = reduce_pairs(p, qq[good], tt[good])
             done = keep & ((best <= r) | (count >= np.prod(self.dims)))
             distances[todo[done]], ids[todo[done]] = best[done], chosen[done]
-            todo = todo[keep & ~done]
-            r *= 2
+            remaining = keep & ~done
+            todo = todo[remaining]
+            r = np.maximum(r[remaining] * 2, self.h)
         _, bary[:] = self._pair_closest(points, ids)
         return ids, bary, distances
 

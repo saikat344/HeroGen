@@ -145,7 +145,7 @@ def load(run: Path, work: Path, height: float) -> tuple[texture.SourceColour | N
         if not np.isfinite(placed_distances).all():
             return reject("placed refined mesh/source-NPZ surface distance is not finite")
         correspondence["placed_mesh_distance_studs"] = _stats(placed_distances, target_size)
-        primary = texture.SourceColour(placed, refined.faces, refined.corner_uv, refined.texture)
+        primary = texture.SourceColour(placed, refined.faces, refined.corner_uv, refined.texture, exact=True)
     except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
         return reject(f"refined colour source could not be read ({type(exc).__name__})")
     info["used"] = True
