@@ -49,3 +49,9 @@ test('stage timing reports running elapsed, finished measurements and supplied m
   assert.equal(stageTiming({state:'running',seconds:10,cost_usd:.1,elapsed_seconds:12,typical_seconds:60}),
     '12 s elapsed · usually about 60 s');
 });
+
+test('healthy finished heroes get the new title while degraded results keep their copy', () => {
+  assert.equal(generationState({state:'succeeded',stages:[stage('3f','passed')]}).title,'Your hero. Your next idea.');
+  assert.equal(generationState({state:'succeeded',stages:[stage('3f','skipped')]}).title,'Meet your hero.');
+  assert.equal(generationState({state:'failed'}).title,'Your hero needs attention.');
+});

@@ -256,15 +256,18 @@ class ServiceBrowserCase(TempDirCase):
         t.wait(f"location.href === {json.dumps(self.url + '/admin#settings')} && document.readyState === 'complete' && "
                "!document.querySelector('#adminShell').hidden")
 
-    def screenshot(self, name):
+    def screenshot(self, name, *, viewport=False):
         folder = os.environ.get('HEROGEN_TEST_SHOTS')
         if folder:
             from pathlib import Path
             target = Path(folder)
             target.mkdir(parents=True, exist_ok=True)
-            metrics = self.tab.call('Page.getLayoutMetrics')['cssContentSize']
-            shot = self.tab.call('Page.captureScreenshot', format='png', captureBeyondViewport=True,
-                                 clip={**metrics, 'scale':1})
+            if viewport:
+                shot = self.tab.call('Page.captureScreenshot', format='png', captureBeyondViewport=False)
+            else:
+                metrics = self.tab.call('Page.getLayoutMetrics')['cssContentSize']
+                shot = self.tab.call('Page.captureScreenshot', format='png', captureBeyondViewport=True,
+                                     clip={**metrics, 'scale':1})
             (target / name).write_bytes(base64.b64decode(shot['data']))
 
     def make_hero(self, name: str) -> None:
@@ -316,7 +319,7 @@ class TestServicePage(ServiceBrowserCase):
             self.signin()
             self.make_hero('Ready before exports')
             self.assertTrue(waiting.wait(10))
-            self.tab.wait("document.querySelector('#generationTitle').textContent === 'Meet your hero.'", timeout=20)
+            self.tab.wait("document.querySelector('#generationTitle').textContent === 'Your hero. Your next idea.'", timeout=20)
             self.assertEqual(self.tab.eval("document.querySelector('#exportStatus').textContent"), 'Roblox files: being prepared')
             self.assertEqual(self.tab.eval("fetch(document.querySelector('#downloads a').href).then(r=>r.status)"), 200)
             self.assertTrue(self.tab.eval("!document.querySelector('#modelTab').hidden"))
@@ -451,7 +454,7 @@ class TestServicePage(ServiceBrowserCase):
         t.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
         self.assertEqual(t.eval("document.querySelector('#artboardImage').getAttribute('src')"), selected)
         self.assertTrue(t.eval("document.querySelector('#previewWrap').hidden"))
-        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"), 'Meet your hero.')
+        self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"), 'Your hero. Your next idea.')
         t.eval("document.querySelector('#modelTab').click()")
         self.assertFalse(t.eval("document.querySelector('#previewWrap').hidden"))
         t.eval("document.querySelector('#artTab').click()")

@@ -4,6 +4,7 @@ import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
+import { workbenchLog } from '/assets/workbench.js';
 import { generationView } from '/assets/generation.js';
 import { variationsView } from '/assets/variations.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
@@ -19,6 +20,7 @@ function setScreen(next) {
   $('#app').classList.toggle('generation-screen', next === 'generation');
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
+const liveLog = workbenchLog($, api);
 const generation = generationView($, (url, options) => preview(url, options));
 const variations = variationsView($, { api, select: openJob, key: idemKey,
   textureNotes: () => S.session?.limits?.texture_notes === true,
@@ -40,7 +42,7 @@ const variations = variationsView($, { api, select: openJob, key: idemKey,
 function returnToEntry() {
   ++S.revision; clearTimeout(S.timer); S.current = null;
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
-  developer.update(null); generation.reset(); variations.reset(); setScreen('entry'); show('#jobLoading', false);
+  developer.update(null); generation.reset(); liveLog.reset(); variations.reset(); setScreen('entry'); show('#jobLoading', false);
 }
 function signIn() {
   if (location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
@@ -87,6 +89,26 @@ async function loadSession() {
   setCsrf(S.csrf);
   return S.session;
 }
+
+for (const id of ['heroesNav', 'breadcrumbHeroes']) $(`#${id}`).addEventListener('click', () => {
+  if ($('#app').hidden) { signIn(); return; }
+  $('#showLibrary').click(); $('#heroLibrary').scrollIntoView({block: 'start', behavior: 'smooth'});
+});
+$('#workspaceNav').addEventListener('click', () => $('#backToIdeas').click());
+$('#fullscreenPreview').addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await $('.viewer-surface').requestFullscreen();
+  } catch { banner('Fullscreen is unavailable in this browser. Use Expand viewer.'); }
+});
+$('#expandPreview').addEventListener('click', () => {
+  const expanded = $('#detail').classList.toggle('expanded-viewer');
+  $('#expandPreview').setAttribute('aria-pressed', String(expanded));
+});
+$('#previewLighting').addEventListener('click', () => {
+  const on = $('#previewLighting').getAttribute('aria-pressed') !== 'true';
+  $('#previewLighting').setAttribute('aria-pressed', String(on)); previewModule?.lighting(on);
+});
 
 const developer = developerMode($('#developerMode'), $('#developerPanel'),
   (id) => api(`/api/runs/r1/${encodeURIComponent(id)}`));
@@ -154,7 +176,7 @@ function renderJob(j) {
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
   const err = $('#detailErr');
   err.hidden = !j.error || j.input_rejected || !!j.parent_job; err.textContent = j.error ? j.error.message : '';
-  generation.update(j);
+  generation.update(j); liveLog.update(j);
   variations.update(j);
   const dl = $('#downloads');
   const items = [];
@@ -212,7 +234,7 @@ function polls(j) {
 
 function followJob(j, reveal = false) {
   clearTimeout(S.timer);
-  if (S.current !== j.id) { developer.update(null); generation.reset(); }
+  if (S.current !== j.id) { developer.update(null); generation.reset(); liveLog.reset(); }
   S.current = j.id;
   if (reveal) {
     setScreen('generation');
@@ -234,7 +256,7 @@ document.addEventListener('visibilitychange', () => {
 async function openJob(id, reveal = false) {
   const revision = ++S.revision;
   clearTimeout(S.timer);
-  if (S.current !== id) { developer.update(null); generation.reset(); show('#detail', false); }
+  if (S.current !== id) { developer.update(null); generation.reset(); liveLog.reset(); show('#detail', false); }
   S.current = id;
   if (reveal) show('#jobLoading');
   try {
@@ -329,7 +351,7 @@ function initJobs() {
     try {
       await api(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} });
       if (S.current === id) {
-        show('#detail', false); developer.update(null); generation.reset(); S.current = null;
+        show('#detail', false); developer.update(null); generation.reset(); liveLog.reset(); S.current = null;
         history.replaceState(null, '', '/'); setScreen('entry'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
       }
       await refreshList();
@@ -340,7 +362,8 @@ function initJobs() {
 
 async function signedIn() {
   const guest = S.session.user.kind === 'guest';
-  $('#who').textContent = guest ? 'Private workspace' : S.session.user.email; show('#who'); show('#signOut', !guest);
+  $('#who').textContent = 'Private workspace'; $('#who').title = guest ? 'Saved in this browser' : S.session.user.email;
+  show('#who'); show('#signOut', !guest);
   updateAccessSummary();
   show('#developerMode'); show('#app');
   const jobs = await refreshList();

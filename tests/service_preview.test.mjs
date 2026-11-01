@@ -124,3 +124,13 @@ test('comparison cameras mirror position, target and zoom in either direction',a
   assert.deepEqual(a.view(),b.view());
   a.dispose();b.dispose();
 });
+
+test('studio lighting changes illumination while preserving the loaded camera and model',async()=>{
+  const s=await setup(),v=s.api.createPreview(),model=s.model();
+  const load=v.show(s.canvas,'hero.glb');s.loads[0].done({scene:model});await load;
+  const before=v.view(),sun=s.scenes[0].models[1];
+  v.lighting(true);assert.equal(sun.intensity,3.2);
+  assert.deepEqual(v.view(),before);assert.equal(s.scenes[0].models.includes(model),true);
+  v.lighting(false);assert.equal(sun.intensity,1.6);
+  v.dispose();
+});

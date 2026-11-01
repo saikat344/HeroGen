@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { expectedTime, versionLabel, versionMetrics, versionRows } from '../herogen/service/static/variations.js';
+import { expectedTime, versionAction, versionLabel, versionMetrics, versionRows } from '../herogen/service/static/variations.js';
 
 test('version tree preserves parent depth, siblings and children of deleted ancestors', () => {
   const versions = [{id:'root'}, {id:'leaf',parent_job:'child'}, {id:'child',parent_job:'root'},
@@ -23,4 +23,12 @@ test('expected time uses measured medians for the continued stages and never fil
   stages[2].typical_seconds=null;
   assert.equal(expectedTime({stages},'texture'),'Usually about 4 min');
   assert.equal(expectedTime({stages},'turnaround'),'Time estimate needs more real runs.');
+});
+
+test('branch actions use known submissions and never invent historical provenance', () => {
+  assert.equal(versionAction({}, {}, 'Retry'),'Retry');
+  assert.equal(versionAction({}, {}, 'Refine'),'Refine');
+  assert.equal(versionAction({note:'Blue coat'}, {}),'Refine');
+  assert.equal(versionAction({note:'Blue coat'}, {note:'Blue coat'}),'Retry / Refine');
+  assert.equal(versionAction({}, {}),'Retry / Refine');
 });

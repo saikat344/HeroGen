@@ -1,4 +1,5 @@
 // Presentation follows reported model and export stage states.
+import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
@@ -22,7 +23,7 @@ export function generationState(job) {
   const focus = active || main.find((s) => s.key === job.stage) || main.find((s) => s.state === 'pending');
   const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
   const title = { queued: 'Waiting for a free worker', running: 'Your hero is taking shape.',
-    succeeded: 'Meet your hero.', stopped: 'Your version is saved.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
+    succeeded: issues.length ? 'Meet your hero.' : 'Your hero. Your next idea.', stopped: 'Your version is saved.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
   const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your model is ready. See the notes below.' : 'Explore the result and the available downloads.') :
     job.state === 'stopped' ? 'Inspect this version, then start a new attempt with Retry or Refine.' :
     job.state === 'queued' ? 'Your job is saved. It will begin when a worker is available.' :
@@ -99,6 +100,7 @@ export function generationView($, select3D) {
     selected = key; manual = chosen; model = key === 'model';
     $('#previewWrap').hidden = !model;
     if ($('#workbenchShading')) $('#workbenchShading').hidden = !model;
+    $('#previewLighting').hidden = !model;
     $('#artboardImage').hidden = model || !key;
     $('#artboardEmpty').hidden = model || !!key;
     $('#modelTab').setAttribute('aria-pressed', String(model));
@@ -145,7 +147,10 @@ export function generationView($, select3D) {
       const state = generationState(job);
       if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
       text($('#generationTitle'), state.title); text($('#generationSubtitle'), state.subtitle);
-      text($('#progressCount'), `${state.passed} of ${state.main.length} stages passed`);
+      const nextStep = state.steps.find(s => ['running', 'pending'].includes(s.state));
+      text($('#progressCount'), `${state.passed} of ${state.main.length} stages complete${nextStep && !state.terminal ? ` · Next: ${nextStep.title}` : ''}`);
+      $('#progressSegments').replaceChildren(...state.steps.map(s => node('span', null, `segment st-${s.state}`)));
+      $('#detail').dataset.jobState = job.state;
       text($('#workbenchName'), job.name || (job.kind === 'prompt' ? 'Your imagined hero' : 'Your uploaded character'));
       const stageSignature = JSON.stringify(state.steps);
       if ($('#stages').dataset.signature !== stageSignature) {
@@ -158,6 +163,8 @@ export function generationView($, select3D) {
             node('b', s.title), node('span', s.status, 'step-status'));
           const timing = stageTiming(s);
           if (timing) li.append(node('small', timing, 'step-duration'));
+          const source = stageSource(s.key);
+          if (source) { const a = node('a', 'View stage source ↗', 'stage-source'); a.href = source; a.target = '_blank'; a.rel = 'noopener'; li.append(a); }
           return li;
         }));
       }
@@ -185,7 +192,8 @@ export function generationView($, select3D) {
         $('#images').replaceChildren(...available.map(([key, label]) => {
           const b = node('button'); b.type = 'button'; b.dataset.image = key; b.setAttribute('aria-label', `View ${label.toLowerCase()}`);
           const image = node('img'); image.src = job.images[key]; image.alt = ''; image.loading = 'lazy';
-          b.append(image, node('span', label)); b.addEventListener('click', () => pick(key, true, !$('#imageError').hidden)); return b;
+          b.dataset.view = ['front','right','back'].includes(key) ? 'primary' : 'extra';
+          b.append(image, node('span', key === 'right' ? 'Side' : label)); b.addEventListener('click', () => pick(key, true, !$('#imageError').hidden)); return b;
         }));
       }
       $('#modelTab').hidden = !job.downloads?.glb?.available;
