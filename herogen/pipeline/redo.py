@@ -35,11 +35,24 @@ def _source(parent: Path, rel: str) -> Path:
     return src
 
 
+def _valid_record(rec: object) -> bool:
+    return (isinstance(rec, dict) and isinstance(rec.get("outputs", []), list)
+            and all(isinstance(rel, str) for rel in rec.get("outputs", []))
+            and isinstance(rec.get("checks", []), list)
+            and all(isinstance(c, dict) for c in rec.get("checks", [])))
+
+
+def _passed(rec: dict, stage: int | str) -> bool:
+    return (rec.get("stage") == stage and rec.get("ok") is True
+            and not any(c.get("gate", True) and c.get("pass") is False for c in rec.get("checks", [])))
+
+
 def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: object = "") -> RunFolder:
     """Publish a complete copy atomically into a new, absent folder; never open the parent for writing.
 
     Earlier records retain their measurements and historical calls, with a zero cost for this version and
-    ``reused_from`` provenance. A cover redo edits a copied parent cover, still checked against the sketch.
+    ``reused_from`` provenance. A cover redo edits a passing, decodable parent cover when available,
+    otherwise the sketch. Both paths are still checked against the sketch.
     """
     if from_stage not in (1, 2):
         raise ValueError("Choose cover or turnaround to redo.")
@@ -60,20 +73,34 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int, note: objec
         if stage == "p" and not path.exists():
             continue
         rec = json.loads(_source(parent, path.name).read_text())
-        if (not isinstance(rec, dict) or not isinstance(rec.get("outputs", []), list)
-                or any(not isinstance(rel, str) for rel in rec.get("outputs", []))
-                or not isinstance(rec.get("checks", []), list)
-                or any(not isinstance(c, dict) for c in rec.get("checks", []))):
+        if not _valid_record(rec):
             raise ValueError("The earlier version has an invalid stage record.")
-        if rec.get("stage") != stage or rec.get("ok") is not True or any(c.get("gate", True) and c.get("pass") is False
-                                            for c in rec.get("checks", [])):
+        if not _passed(rec, stage):
             raise ValueError("The earlier stages must pass their checks before this step can be redone.")
         records.append(rec)
     lineage = {"parent_run": parent.name, "from_stage": from_stage, "note": note}
     files = {rel for rec in records for rel in rec.get("outputs", [])}
-    files.update(("00-sketch.png", "01-cover.png"))
-    # For a cover redo, the old cover is an editing reference, not a passing stage record.
+    files.add("00-sketch.png")
+    if from_stage == 2:
+        files.add("01-cover.png")
+    elif (parent / "stage-1.json").exists():
+        # Stage 1 is optional here: failed or interrupted covers must not become editing references.
+        try:
+            cover_rec = json.loads(_source(parent, "stage-1.json").read_text())
+        except json.JSONDecodeError:
+            cover_rec = None
+        if (_valid_record(cover_rec) and _passed(cover_rec, 1)
+                and "01-cover.png" in cover_rec.get("outputs", []) and (parent / "01-cover.png").exists()):
+            files.add("01-cover.png")
     sources = {rel: _source(parent, rel) for rel in files}
+    if "01-cover.png" in sources:
+        from PIL import Image
+
+        try:
+            with Image.open(sources["01-cover.png"]) as image:
+                image.convert("RGB").load()
+        except (OSError, ValueError, Image.DecompressionBombError) as e:
+            raise ValueError("The earlier version has an unreadable cover. Choose another version.") from e
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".redo-", dir=root) as temp:
         temp_root = Path(temp)
