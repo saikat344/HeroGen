@@ -283,6 +283,47 @@ class ServiceBrowserCase(TempDirCase):
 
 class TestServicePage(ServiceBrowserCase):
 
+    def test_degraded_hero_shows_model_download_and_notes(self):
+        self.runner.fail = {'3f': 'error', '4': 'reject'}
+        self.runner.gate.set()
+        self.signin()
+        self.make_hero('Rough and ready')
+        self.tab.wait("document.querySelector('#generationTitle').textContent === 'Meet your hero.'", timeout=60)
+        self.tab.wait("!document.querySelector('#previewWrap').hidden && !!document.querySelector('#previewWrap canvas')", timeout=60)
+        self.tab.wait("!document.querySelector('#orbitHint').hidden", timeout=60)
+        self.tab.wait("/not available for this hero/.test(document.querySelector('#exportStatus').textContent)", timeout=60)
+        self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some(a => a.textContent === 'Download GLB')"))
+        self.assertIn('unrefined texture', self.tab.eval("document.querySelector('#stageIssues').textContent"))
+        self.assertTrue(self.tab.eval("document.querySelector('#previewWrap canvas').width > 0"))
+        self.assertFalse(self.tab.eval("[...document.querySelectorAll('#downloads a')].some(a => /Roblox/.test(a.textContent))"))
+        status = self.tab.eval("fetch(document.querySelector('#downloads a').href).then(r=>r.status)")
+        self.assertEqual(status, 200)
+        self.screenshot('degraded-workbench.png')
+        self.assertEqual(self.tab.errors, [])
+
+    def test_model_download_is_ready_while_exports_are_preparing(self):
+        gate, waiting = threading.Event(), threading.Event()
+        original = self.runner.run
+        def delayed(spec, ctx):
+            if spec.key == '4':
+                waiting.set()
+                if not gate.wait(30):
+                    raise RuntimeError('test export gate timed out')
+            return original(spec, ctx)
+        self.runner.run = delayed
+        self.runner.gate.set()
+        try:
+            self.signin()
+            self.make_hero('Ready before exports')
+            self.assertTrue(waiting.wait(10))
+            self.tab.wait("document.querySelector('#generationTitle').textContent === 'Meet your hero.'", timeout=20)
+            self.assertEqual(self.tab.eval("document.querySelector('#exportStatus').textContent"), 'Roblox files: being prepared')
+            self.assertEqual(self.tab.eval("fetch(document.querySelector('#downloads a').href).then(r=>r.status)"), 200)
+            self.assertTrue(self.tab.eval("!document.querySelector('#modelTab').hidden"))
+        finally:
+            gate.set()
+        self.tab.wait("document.querySelector('#exportStatus').textContent === 'Roblox files: ready'", timeout=30)
+
     def test_entry_rejects_excess_prompt_and_focuses_how_section(self):
         t = self.tab
         t.goto(self.url + '/')

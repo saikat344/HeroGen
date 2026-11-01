@@ -48,7 +48,7 @@ class Settings:
     terms_version: str = ""
     legal_dir: Path | None = None
     admin_emails: tuple[str, ...] = field(default=(), repr=False)
-    # Quotas and limits
+    # Runtime and request limits
     max_running_jobs: int = 5
     max_attempts: int = 2
     user_storage_max_bytes: int = 2 * 1024 ** 3

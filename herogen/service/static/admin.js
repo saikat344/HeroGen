@@ -357,7 +357,8 @@ function bootAdmin() {
     const jt = rep.stages?.job_totals || {};
     $('#jobTotalsKpis').replaceChildren(
       kpiCard('Jobs in window', jt.jobs ?? 0, `${jt.timed_jobs ?? 0} finished with timing`),
-      kpiCard('Median wall time', formatDuration(jt.median_seconds)),
+      kpiCard('Median time to model', formatDuration(jt.time_to_model?.median_seconds)),
+      kpiCard('Median time to export', formatDuration(jt.time_to_export?.median_seconds)),
       kpiCard('p90 wall time', formatDuration(jt.p90_seconds)),
       kpiCard('Median job cost', jt.median_cost_usd != null ? formatUsd(jt.median_cost_usd, { precise: true }) : '—'),
       kpiCard('p90 job cost', jt.p90_cost_usd != null ? formatUsd(jt.p90_cost_usd, { precise: true }) : '—'),

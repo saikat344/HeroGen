@@ -126,9 +126,8 @@ button.primary:hover:not(:disabled) { background:#c83512; }
 .creation-options summary { cursor:pointer; width:fit-content; }
 .options-grid { display:grid; grid-template-columns:1fr 1fr; gap:15px; padding-bottom:8px; }
 .options-grid label { font-size:12px; }.options-grid input,.options-grid select { font-size:13px; background:#fff8; }
-#jobMsg:empty,#quota:empty { display:none; }
+#jobMsg:empty { display:none; }
 #jobMsg { font-size:13px; }
-#quota { margin-bottom:8px; }
 .hero-art { position:relative; pointer-events:none; min-width:0; }
 .hero-art img { position:absolute; width:118%; height:108%; object-fit:contain; max-width:none; left:-5%; top:-2%; filter:drop-shadow(0 18px 17px #3c2b2125); }
 #sketchIn { display:flex; align-items:center; gap:16px; min-height:90px; margin-bottom:10px; }
@@ -316,7 +315,7 @@ h1#entryH { font-size:clamp(43px,4.4vw,73px); letter-spacing:-.055em; line-heigh
 .journey-note { display:block; color:var(--accent); border-top:1px solid var(--line); padding-top:12px; }
 .foot,.gallery { border-color:var(--line); }
 .footer-rule { background:var(--line); }
-#jobMsg:empty,#quota:empty { display:none; }
+#jobMsg:empty { display:none; }
 #jobForm:has(#jobMsg:empty) { margin-bottom:0; }
 [data-theme=dark] .entry-page { background-image:none; }
 [data-theme=dark] .artboard,[data-theme=dark] .generation,[data-theme=dark] .generation-step,[data-theme=dark] .developer { background:var(--card); color:var(--ink); }
