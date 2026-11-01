@@ -1980,6 +1980,10 @@ the named web secret; the allowlist never enters image environment layers. It ca
 in `<app>-web`. `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` is an optional GitHub environment variable
 baked into the image, including the scheduled retention function.
 
+`GET /api/session` exposes only generation acceptance, its reason code and a public sentence.
+Spend, estimates, capacity and operator settings are returned only by the authenticated
+`GET /api/admin/generation` endpoint. Generation sentences follow the current refusal reason.
+
 ### Persistence, hosting and retention
 
 SQLite writes use WAL, `BEGIN IMMEDIATE` and a process lock. Hosted writes snapshot the database to the
