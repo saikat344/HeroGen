@@ -327,14 +327,21 @@ sheet and part-mask calls); later attempts reuse those results and scale them to
 and the final carve can change retrying and the kept sheet, and a top API error stops the stage; deferring top requests until
 after selection would change those outcomes.
 
-Stage 2 dispatches model calls in gate order. A sheet edit and its segmentation must complete before
-its local checks; only an eligible sheet requests a top, and only a failed attempt requests another sheet.
-This preserves the first error, its retry classification, replay requirements and recorded spend across
-callers. Unreached calls are never sent, so their failures cannot replace a primary error and they incur no
-charges. Errors from every reached model call still stop the stage. `stage2_turnaround` retains the positive
-integer `concurrency` argument (default one), and the CLI and service retain `--turnaround-concurrency`
-(default four), for compatibility; these settings do not speculate across the gates. Single-request budget
-callbacks therefore apply to every dispatched call. Prompts, sample numbers, gates and ranking are unchanged.
+Stage 2 consumes model results in gate order. With `concurrency=1` (the function default), only
+reached calls are dispatched. At higher concurrency (CLI and service `--turnaround-concurrency` default
+four), independent sheet edits and the top edit overlap in a bounded pool. Segmentation, local checks,
+retry selection and repeated cached top requests remain in serial order. Prompts and sample numbers
+are identical, including the selected redo version and user note on every candidate.
+
+An error stops the stage only when serial execution would reach that request; the original exception
+and its classification propagate unchanged. Queued unused edits are cancelled or skipped immediately
+when selection ends or the serial path raises. Unused edits cannot start another HTTP retry. Already
+running requests are drained; their failures are
+logged and ignored. Every unused edit's call-log entries carry `speculative: true`, including billable
+unknown outcomes, and their cost remains charged in the stage record. Replays never send requests and
+cost $0; an unused speculative cache miss cannot fail a successful serial path. Clients with caller-owned
+per-attempt callbacks use serial scheduling: speculative budget reservations could otherwise exhaust a
+serial budget before a necessary call, changing its outcome.
 
 **Carve check (`carve_silhouette_iou_min`).** Every sheet that splits into four figures is carved exactly as
 stage 3 carves it (`herogen.blender.views.views_from_masks` and `herogen.blender.stage3.carve_view_ious`: the

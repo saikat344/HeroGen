@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import logging
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 import math
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -531,8 +535,8 @@ def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], 
     return scale_top_view(_draw_top_view(client, cover), sq, size, bg)
 
 
-def _draw_top_view(client, cover, figure_mask=None):
-    img = client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
+def _draw_top_view(client, cover, figure_mask=None, image=None):
+    img = image if image is not None else client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
     sam, method, _ = (figure_mask or sam_figure_mask)(client, img)
     completion = {"method": "attached_foreground"}
     try:
@@ -572,14 +576,103 @@ def hull_top_view(sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
     return {"image": img, "mask": m, "mask_method": "visual_hull"}
 
 
+class _TurnaroundRequests:
+    """Overlap independent image edits; consume results and segment in serial gate order.
+
+    Each edit owns its log. Unconsumed edits are cancelled where possible, otherwise drained and
+    accounted as speculative. Their exceptions never escape into the serial path.
+    """
+
+    def __init__(self, client, cover, attempts, concurrency, *, prompt, size):
+        self.client, self.cover = client, cover
+        self.pool = ThreadPoolExecutor(max_workers=min(concurrency, attempts + 1))
+        self.branches = []
+        self.consumed = set()
+        self.closed = False
+        self.stop = threading.Event()
+        self.sheets = [self.submit(prompt, size, 0)]
+        self.drawn = self.submit(TOP_PROMPT, "1024x1024", None)
+        self.sheets += [self.submit(prompt, size, i) for i in range(1, attempts)]
+        self.top_used = False
+
+    def submit(self, prompt, size, attempt):
+        branch = copy.copy(self.client)
+        branch.log = type(self.client.log)()
+        # An in-flight HTTP request must settle, but an unused edit must not start another retry.
+        def before_attempt(model):
+            if self.stop.is_set():
+                raise CancelledError()
+
+        branch.before_api_attempt = before_attempt
+
+        def edit():
+            if self.stop.is_set():
+                raise CancelledError()
+            kwargs = {"size": size}
+            if attempt is not None:
+                kwargs["attempt"] = attempt
+            return branch.edit_image(prompt, [self.cover.copy()], **kwargs)
+
+        self.branches.append((self.pool.submit(edit), branch))
+        return len(self.branches) - 1
+
+    def result(self, index):
+        future, branch = self.branches[index]
+        try:
+            return future.result()
+        finally:
+            self.client.log.calls.extend(branch.log.calls)
+            self.consumed.add(index)
+
+    def sheet(self, attempt):
+        return self.result(self.sheets[attempt])
+
+    def top(self):
+        # Later eligible candidates repeat the ordinary cached requests, just as serial does.
+        if self.top_used:
+            return _draw_top_view(self.client, self.cover)
+        self.top_used = True
+        return _draw_top_view(self.client, self.cover, image=self.result(self.drawn))
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop.set()
+        for index, (future, _) in enumerate(self.branches):
+            if index not in self.consumed:
+                future.cancel()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for index, (future, branch) in enumerate(self.branches):
+            if index in self.consumed:
+                continue
+            try:
+                future.result()
+            except CancelledError:
+                pass
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "Unused speculative turnaround edit %d failed (%s, http_status=%s, "
+                    "error_code=%s, transient=%s)", index, type(error).__name__,
+                    getattr(error, "http_status", None), getattr(error, "error_code", None),
+                    getattr(error, "transient", None))
+            self.client.log.calls.extend({**call, "speculative": True} for call in branch.log.calls)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        self.close()
+
+
 def stage2_turnaround(
     run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4,
     concurrency: int = 1
 ) -> dict[str, Any]:
-    """Generate only calls reached by the attempt gates, preserving serial errors and spend.
+    """Preserve serial gates and errors while overlapping edits at ``concurrency`` > 1.
 
-    ``concurrency`` remains accepted for existing callers. Sheet retries and the top depend on earlier
-    checks, so none can be dispatched speculatively without changing failure or billing behavior.
+    Unused speculative calls remain in the call log and cost, with ``speculative: true``.
+    Clients with per-attempt callbacks retain serial scheduling to preserve their budgets.
     """
     if type(concurrency) is not int or concurrency < 1 or type(attempts) is not int or attempts < 1:
         raise ValueError("attempts and concurrency must be positive integers")
@@ -587,7 +680,13 @@ def stage2_turnaround(
 
     def execute():
         prompt, version = turnaround_prompt(run)
-        return _stage2(st, run, client, height_units, attempts, prompt, version)
+        # Arbitrary caller-owned budgets may reserve the exact serial spend. Speculation must not
+        # exhaust that budget ahead of a necessary call, or change callback order and classification.
+        if concurrency == 1 or client.before_api_attempt or client.after_api_attempt:
+            return _stage2(st, run, client, height_units, attempts, prompt, version)
+        with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency,
+                                 prompt=prompt, size=version.step("sheet")["params"]["size"]) as requests:
+            return _stage2(st, run, client, height_units, attempts, prompt, version, requests)
 
     return _stopping_on_client_error(execute, st)
 
@@ -631,7 +730,7 @@ def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
-               height_units: float) -> tuple:
+               height_units: float, requests=None) -> tuple:
     """Select the top and check the final masks before ranking or accepting a sheet."""
     top_checks: list[dict[str, Any]] = []
     details: dict[str, Any] = {}
@@ -640,7 +739,8 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     # figures at one scale). It is used if its depth/width agrees with the side views; otherwise the top
     # silhouette implied by the four side views is used instead.
     side_masks = {n: v["mask"] for n, v in sq.items()}
-    drawn = model_top_view(client, cover, sq, size, bg)
+    drawn = (model_top_view(client, cover, sq, size, bg) if requests is None
+             else scale_top_view(requests.top(), sq, size, bg))
     used = None
     final_carve = None
     if drawn.get("mask") is not None:
@@ -686,14 +786,15 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
 
 
 def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int,
-            prompt: str, version) -> dict[str, Any]:
+            prompt: str, version, requests=None) -> dict[str, Any]:
     step = version.step("sheet")
     st.details = {"prompt_version": version.ref(), "prompt": prompt}
     cover = _load(run, "01-cover.png")
     tried = []
     kept: tuple = ()
     for attempt in range(attempts):
-        sheet = client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
+        sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
+                 if requests is None else requests.sheet(attempt))
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
         fig, fig_method, n_inst = sam_figure_mask(client, sheet)
@@ -720,7 +821,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         # carve fails. The hybrid still needs complete views if no retry produces a passing carve.
         if sq and C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE]):
             top, top_raw, top_checks, top_details, top_notes = _sheet_top(
-                client, cover, sq, size, bg, height_units
+                client, cover, sq, size, bg, height_units, requests
             )
             # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
             side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
@@ -747,6 +848,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
                     top, top_raw, top_details, top_notes)
         if C.gate_ok(side_checks):
             break
+    if requests is not None:
+        requests.close()
     (_, kept_attempt, sheet, bg, sq, size, assignment, orient, orient_notes, side_checks,
      top, top_raw, top_details, top_notes) = kept
     st.save_image("02-turnaround.png", sheet)
