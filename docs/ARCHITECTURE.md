@@ -260,6 +260,15 @@ measures. An unmeasurable baseline stops stage 4 with an error naming the joints
 missing rims; the stage 3 mesh and joint placement need correction before cuts can be chosen. A candidate move
 that removes an own or neighbouring joint's measurement is rejected and recorded in the trial's
 `unmeasurable_joints` map (joint to reason), without a gap or score. Missing measurements never count as zero.
+
+In the fast lane (`HEROGEN_FAST_LANE=1`, or `herogen.blender run --fast`), baseline joints without a measurable
+rim stay at their estimated cuts. A bilateral cut kind is searched only when both sides are measurable.
+Candidates still cannot remove a measurable joint. Stage 4 builds the R15 sections and applies the unchanged
+gap limit to every measurable joint in each final LOD. `stage-4.json` records `fast_lane: true` and
+`unverified_joints`, with each joint's name, reason and user-facing `message`; the `measurable_joints` check is
+informational. Unknown gaps are omitted, and a gap check with no measurements has a null value and is
+informational. Empty final sections still fail `sections_non_empty`, and every other existing gate remains
+in force. The full lane retains the error above.
 The search evaluates candidates on `--cut-workers` threads (1 to 12, default 3) and consumes their results in the
 original order, so the chosen cuts and every trial record are identical for any worker count.
 

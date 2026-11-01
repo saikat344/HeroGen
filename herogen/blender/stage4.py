@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import colorsys
 import json
+import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -315,13 +317,45 @@ def _texture_source_checks(turnaround: dict, transfer: dict | None, expected_vie
             + _texture_checks(turnaround, TEX_ERROR_GATE, TEX_SSIM_GATE, "turnaround", diagnostic=True))
 
 
+def _max_gap(values, fast: bool) -> float | None:
+    """Only the fast lane can report an empty set of measurements."""
+    return max(values, default=None) if fast else max(values)
+
+
+def _gap_check(name: str, value: float | None, gate: bool = True, **extra) -> dict:
+    """Apply the existing gap limit to measurements; an absent measurement is informational."""
+    if value is None:
+        return check(name, None, GAP_GATE, passed=False, gate=False, rule="<=",
+                     **{**extra, "note": "no measurable joints; see unverified_joints"})
+    return check(name, round(value, 4), GAP_GATE, passed=value <= GAP_GATE, gate=gate, rule="<=", **extra)
+
+
+def _record_unverified(rec: StageRecord, reasons: dict[str, str]) -> None:
+    """Expose the fast lane's unknown seams without turning them into passed measurements."""
+    rows = []
+    for joint, reason in sorted(reasons.items()):
+        label = re.sub(r"(?<!^)(?=[A-Z])", " ", joint).lower()
+        message = f"The {label} seam could not be checked on this character's joints."
+        rows.append({"joint": joint, "reason": reason, "message": message})
+        rec.note(message)
+    rec.data["fast_lane"] = True
+    rec.data["unverified_joints"] = rows
+    rec.add(check("measurable_joints", not bool(rows), passed=not bool(rows), gate=False,
+                  unverified_joints=rows))
+
+
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
-               profile: str = DEFAULT_PROFILE, cut_search: bool = True, cut_workers: int = 3) -> dict:
+               profile: str = DEFAULT_PROFILE, cut_search: bool = True, cut_workers: int = 3,
+               fast: bool = False) -> dict:
     """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
-    cut at its joint (for comparison; the record says so)."""
+    cut at its joint (for comparison; the record says so). `fast` or `HEROGEN_FAST_LANE=1` makes unknown
+    seam measurements informational; every measurable gap keeps the same gate."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
     cuts.validate_workers(cut_workers)
+    fast = fast or os.environ.get("HEROGEN_FAST_LANE") == "1"
+    unverified = {} if fast else None
+    measurement_kw = {"unverified": unverified} if fast else {}
     builds = LOD_BUILD[profile]
     # An earlier record must not outlive a run that stops: nothing after stage 4 may read a stale pass.
     (run / "stage-4.json").unlink(missing_ok=True)
@@ -440,18 +474,21 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         if cut_search:
             cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
                                                   (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE,
-                                                  workers=cut_workers)
+                                                  workers=cut_workers, **({"fast": True} if fast else {}))
+            if fast:
+                unverified.update(cut_record["unverified_joints"])
         else:
             cut_offsets = {}
             cut_record = {"method": "not searched: every cut at its joint (comparison run)", "chosen_fraction": {},
                           "unmoved_worst_gap": cuts.worst_by_joint(ref["verts"], ref["faces"], sk, {}, {"gate": gate_poses},
                                                                    (cover_ref["verts"], cover_ref["faces"]), cover_kw,
-                                                                   DOME["high"])["gate"]}
+                                                                   DOME["high"], **measurement_kw)["gate"]}
         ref_sets = {}
         for label, offs in (("unmoved", {}), ("moved", cut_offsets)):
             sets = {"heldout": heldout} if label == "unmoved" else {"gate": gate_poses, "heldout": heldout}
             ref_sets[label] = cuts.worst_by_joint(ref["verts"], ref["faces"], sk, offs, sets,
-                                                  (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"])
+                                                  (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"],
+                                                  **measurement_kw)
     except cuts.UnmeasurableJoints as exc:
         reason = ", ".join(exc.reasons) + " could not be separated."
         rec.add(check("measurable_joints", False, passed=False, note=reason))
@@ -502,17 +539,24 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
 
     # Pose test. Gated: the gap that stays visible with the covers on (both LODs). Reported alongside: the
     # visible gap without covers, the purely geometric gap without covers, and flat caps.
-    gaps = {lod: pose.joint_gaps(lod_secs[lod], poses, visible=True) for lod in lod_secs}
-    gaps_heldout = {lod: pose.joint_gaps(lod_secs[lod], heldout, visible=True) for lod in lod_secs}
-    gaps_nocover_visible = pose.joint_gaps(bare_secs["high"], poses, visible=True)
-    gaps_nocover_geometric = pose.joint_gaps(bare_secs["high"], poses)
+    if fast:
+        for secs in bare_secs.values():
+            unverified.update(cuts.unmeasurable_joints(secs))
+        _record_unverified(rec, unverified)
+    measured = ({lod: {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
+                      - cuts.unmeasurable_joints(secs).keys() for lod, secs in bare_secs.items()} if fast else {})
+    gap_kw = {lod: {"joints": js} for lod, js in measured.items()}
+    gaps = {lod: pose.joint_gaps(lod_secs[lod], poses, visible=True, **gap_kw.get(lod, {})) for lod in lod_secs}
+    gaps_heldout = {lod: pose.joint_gaps(lod_secs[lod], heldout, visible=True, **gap_kw.get(lod, {})) for lod in lod_secs}
+    gaps_nocover_visible = pose.joint_gaps(bare_secs["high"], poses, visible=True, **gap_kw.get("high", {}))
+    gaps_nocover_geometric = pose.joint_gaps(bare_secs["high"], poses, **gap_kw.get("high", {}))
     flat_by_key = {}
     for key in sorted(set(picks["high"].values())):
         d_hi = np.load(outs[key])
         flat_by_key[key], _ = split.build_sections(d_hi["verts"], d_hi["faces"], sk, cap="flat",
                                                    cut_offsets=cut_offsets)
     flat_secs = {n: flat_by_key[picks["high"][n]][n] for n in SECTIONS}
-    gaps_flat = pose.joint_gaps(flat_secs, poses)
+    gaps_flat = pose.joint_gaps(flat_secs, poses, **gap_kw.get("high", {}))
 
     # UV atlases (Blender smart project, all sections of a LOD packed together), then colour projection.
     body = run / "04-body"
@@ -734,22 +778,19 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                   rule=">=", note="pivot inside its section and, when a parent rim exists, within the larger of "
                   "its mean cut radius and 0.05 studs of the selected skeleton joint",
                   worst_offset_over_radius=round(worst_off, 3)))
-    gated = {lod: max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
+    gated = {lod: _max_gap((v for p, row in g.items() if p not in UNGATED_POSES for v in row.values()), fast)
              for lod, g in gaps.items()}
     for lod in builds:
-        rec.add(check(f"max_joint_gap_{lod}", round(gated[lod], 4), GAP_GATE, passed=gated[lod] <= GAP_GATE,
-                      rule="<=", poses=sorted(p for p in poses if p not in UNGATED_POSES)))
-        held = max(v for row in gaps_heldout[lod].values() for v in row.values())
-        rec.add(check(f"max_joint_gap_{lod}_heldout", round(held, 4), GAP_GATE, passed=held <= GAP_GATE, gate=False,
-                      rule="<=", poses=sorted(heldout),
+        rec.add(_gap_check(f"max_joint_gap_{lod}", gated[lod],
+                           poses=sorted(p for p in poses if p not in UNGATED_POSES)))
+        held = _max_gap((v for row in gaps_heldout[lod].values() for v in row.values()), fast)
+        rec.add(_gap_check(f"max_joint_gap_{lod}_heldout", held, gate=False, poses=sorted(heldout),
                       note="poses nothing is chosen on (the cut search never sees them); reported, not gated"))
     for p in sorted(UNGATED_POSES):
-        rec.add(check(f"max_joint_gap_high_{p}", round(max(gaps["high"][p].values()), 4), GAP_GATE,
-                      passed=max(gaps["high"][p].values()) <= GAP_GATE, gate=False, rule="<="))
+        rec.add(_gap_check(f"max_joint_gap_high_{p}", _max_gap(gaps["high"][p].values(), fast), gate=False))
     for name, g in (("visible_no_covers", gaps_nocover_visible), ("geometric_no_covers", gaps_nocover_geometric)):
-        val = max(v for p, row in g.items() if p not in UNGATED_POSES for v in row.values())
-        rec.add(check(f"max_joint_gap_high_{name}", round(val, 4), GAP_GATE, passed=val <= GAP_GATE, gate=False,
-                      rule="<=", note="comparison only"))
+        val = _max_gap((v for p, row in g.items() if p not in UNGATED_POSES for v in row.values()), fast)
+        rec.add(_gap_check(f"max_joint_gap_high_{name}", val, gate=False, note="comparison only"))
     rest_iou, rest_checks = _rest_iou_checks(vs, shape_views, mesh_source, bres["rest_silhouettes"],
                                            stage3_silhouettes)
     for c in rest_checks:
@@ -779,9 +820,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     poke = sum(s.cap_points_outside for s in hi.values())
     rec.add(check("cap_points_outside_neighbour_high", poke, 0, passed=poke == 0, gate=False, rule="==",
                   note="cap samples left outside the neighbour at rest after flattening (visible poke-through)"))
-    flat_gated = max(v for p, row in gaps_flat.items() if p not in UNGATED_POSES for v in row.values())
-    rec.add(check("max_joint_gap_high_flat_caps", round(flat_gated, 4), GAP_GATE,
-                  passed=flat_gated <= GAP_GATE, gate=False, rule="<=",
+    flat_gated = _max_gap((v for p, row in gaps_flat.items() if p not in UNGATED_POSES for v in row.values()), fast)
+    rec.add(_gap_check("max_joint_gap_high_flat_caps", flat_gated, gate=False,
                   note="comparison only: the same cut closed with flat fans"))
     truth_path = run / "synthetic" / "truth.json"
     joint_err = None
@@ -867,15 +907,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     rec.data["profile"] = {"name": profile, "lods": sorted(builds), "budgets": _budgets_record(profile)}
     rec.data["body"] = {"lods": lod_info, "decimation": dec["results"][0], "chosen_targets": chosen,
                         "sections_from": picks, "cuts": cut_record,
-                        "max_gap_by_pose_high": {p: max(r.values()) for p, r in gaps["high"].items()},
-                        "max_gap_by_pose_high_heldout": {p: max(r.values()) for p, r in gaps_heldout["high"].items()},
-                        "max_gap_by_pose_low": ({p: max(r.values()) for p, r in gaps["low"].items()}
+                        "max_gap_by_pose_high": {p: _max_gap(r.values(), fast) for p, r in gaps["high"].items()},
+                        "max_gap_by_pose_high_heldout": {p: _max_gap(r.values(), fast) for p, r in gaps_heldout["high"].items()},
+                        "max_gap_by_pose_low": ({p: _max_gap(r.values(), fast) for p, r in gaps["low"].items()}
                                                 if "low" in gaps else None),
-                        "max_gap_by_pose_high_flat": {p: max(r.values()) for p, r in gaps_flat.items()},
+                        "max_gap_by_pose_high_flat": {p: _max_gap(r.values(), fast) for p, r in gaps_flat.items()},
                         "max_gap_by_pose_high_visible_no_covers":
-                            {p: max(r.values()) for p, r in gaps_nocover_visible.items()},
+                            {p: _max_gap(r.values(), fast) for p, r in gaps_nocover_visible.items()},
                         "max_gap_by_pose_high_geometric_no_covers":
-                            {p: max(r.values()) for p, r in gaps_nocover_geometric.items()},
+                            {p: _max_gap(r.values(), fast) for p, r in gaps_nocover_geometric.items()},
                         "covers": cover_info, "texture": sections_json["texture"],
                         "rest_iou_with_covers": rest_iou,
                         "joint_error_synthetic": joint_err, "joint_evidence": sk.evidence}
