@@ -486,6 +486,9 @@ class TestStageCommands(TempDirCase):
         self.assertEqual(argv[argv.index("--quality-cache") + 1], str(ctx.cache_dir))
         argv, _ = r.command(specs["4"], ctx, {}, self.tmp)
         self.assertEqual(argv[argv.index("--profile") + 1], "roblox-avatar")
+        argv, _ = r.command(specs["4"], self.ctx(profile="best"), {}, self.tmp)
+        self.assertEqual(argv[argv.index("--profile") + 1], "roblox-ingame",
+                         "a best hero's game body gets the in-game budget the Roblox export needs")
         r._flags["herogen.blender"] = "usage: --run --stages"
         argv, _ = r.command(specs["4"], ctx, {}, self.tmp)
         self.assertNotIn("--profile", argv, "a pipeline without profiles gets no --profile")

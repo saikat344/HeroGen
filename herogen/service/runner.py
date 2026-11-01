@@ -149,6 +149,16 @@ def roblox_available() -> bool:
         return False
 
 
+# The game body exists only to feed the Roblox export, and the export refuses parts over Roblox's per-mesh
+# triangle limit, which a "best" body (no triangle budget) always exceeds. So a best hero's game body is built
+# with the in-game budget; the model shown on the website stays the full-detail stage 3/3f mesh.
+GAME_BODY_PROFILE = "roblox-ingame"
+
+
+def body_profile(profile: str) -> str:
+    return GAME_BODY_PROFILE if profile == "best" else profile
+
+
 def plan_for(kind: str, profile: str = "best") -> list[StageSpec]:
     from herogen.blender.refine import REFINE_PROFILES
 
@@ -389,7 +399,7 @@ class CliRunner:
                 if "--quality-cache" in help_text:
                     argv += ["--quality-cache", str(ctx.cache_dir)]
             if spec.key == "4" and "--profile" in help_text:
-                argv += ["--profile", ctx.profile]
+                argv += ["--profile", body_profile(ctx.profile)]
             if spec.key == "3f":
                 argv += ["--refine", "live", "--refine-cache", str(ctx.cache_dir), "--profile", ctx.profile,
                          "--refine-cap-usd", str(ctx.refine_cap_usd) if ctx.refine_cap_usd is not None else "none"]
