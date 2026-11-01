@@ -126,3 +126,26 @@ class TestLandingModels(ServiceBrowserCase):
         t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
         self.assertEqual(self.store.jobs_admin_list(), [])
         self.assertEqual(self.tab.errors, [])
+
+    def test_failed_model_switch_clears_previous_mesh_and_recovers_on_retry(self):
+        t = self.tab
+        t.call('Emulation.setDeviceMetricsOverride', width=1440, height=960, deviceScaleFactor=1, mobile=False)
+        t.goto(self.url + '/')
+        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.model-thumb img').length === 2")
+        box = t.eval("document.querySelector('#landingCanvas').getBoundingClientRect().toJSON()")
+        clip = {'x': box['x'] + 150, 'y': box['y'] + 60, 'width': 260, 'height': 320, 'scale': 1}
+        scout_shot = t.call('Page.captureScreenshot', format='png', clip=clip)['data']
+        t.eval("""(() => {
+            const orig = window.fetch;
+            window.fetch = (u, o) => (u instanceof Request ? u.url : String(u)).includes('/second-model/model') && !window.allowSecondModel
+                ? Promise.reject(new Error('offline fixture'))
+                : orig(u, o);
+        })()""")
+        t.eval("document.querySelector('#modelPicker button[data-id=second-model]').click()")
+        t.wait("!document.querySelector('#retryLanding').hidden && document.querySelector('#landingStatus').textContent.includes('could not be loaded')")
+        after_shot = t.call('Page.captureScreenshot', format='png', clip=clip)['data']
+        self.assertEqual(t.eval("document.querySelector('#featuredTitle').textContent"), 'second-model')
+        self.assertNotEqual(after_shot, scout_shot)
+        t.eval("window.allowSecondModel = true; document.querySelector('#retryLanding').click()")
+        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
+        self.assertEqual(t.errors, [])

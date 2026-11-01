@@ -62,7 +62,7 @@ export function createPreview() {
       const scene = new THREE.Scene();
       scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
       const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(3, 6, 4); scene.add(sun);
-      const grid = new THREE.GridHelper(8, 16, 0x8899aa, 0xccd5de); scene.add(grid);
+      const grid = new THREE.GridHelper(8, 16, 0x8899aa, 0xccd5de); grid.visible = false; scene.add(grid);
       const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
       const controls = new OrbitControls(camera, canvas); controls.enableDamping = true;
       controls.minDistance = 0.1; controls.maxDistance = 100;
@@ -79,10 +79,10 @@ export function createPreview() {
     if (state.url === url && state.model) return;
     restore();
     if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; }
-    state.url = null;
+    state.grid.visible = false; state.url = null; render();
     await new Promise((resolve, reject) => new GLTFLoader().load(url, gltf => {
       if (token !== request || !state) { release(gltf.scene); resolve(); return; }
-      state.model = gltf.scene; state.url = url; state.scene.add(gltf.scene);
+      state.model = gltf.scene; state.url = url; state.grid.visible = true; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
       const radius = Math.max(size.x, size.y, size.z, 0.01);
@@ -94,7 +94,7 @@ export function createPreview() {
       state.controls.target.copy(centre); state.grid.position.y = box.min.y;
       state.grid.scale.setScalar(radius / 2); shading(mode); resolve();
     }, undefined, error => {
-      if (token === request && state) { state.renderer.setAnimationLoop(null); reject(error); } else resolve();
+      if (token === request && state) { state.renderer.setAnimationLoop(null); render(); reject(error); } else resolve();
     }));
   }
   function snapshot() { render(); return state?.canvas.toDataURL('image/png'); }
