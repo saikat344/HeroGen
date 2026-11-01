@@ -105,7 +105,8 @@ class TestCutMeasurements(unittest.TestCase):
             self.assertEqual(saved, rec)
             self.assertFalse(rec['ok'])
             self.assertEqual(rec['status'], 'rejected')
-            self.assertIn('RightElbow', rec['reason'])
+            self.assertEqual(rec['reason'], ', '.join(rec['joint_reasons']) + ' could not be separated.')
+            self.assertFalse((run / '04-body' / 'sections.json').exists())
             self.assertIn('RightElbow', rec['joint_reasons'])
             self.assertNotIn('error', rec)
 
