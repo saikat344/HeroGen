@@ -81,6 +81,34 @@ class TestCutMeasurements(unittest.TestCase):
                 cuts.choose(self.verts, self.faces, self.sk, {}, (self.verts, self.faces), {}, (1, 8), .15,
                             workers=workers)
 
+    def test_stage4_records_unmeasurable_joints_as_rejected(self):
+        import json
+        from herogen.blender import refined_colour, stage4
+        lb = split.Labeller(split.build_rig(self.sk))
+        labels = lb.labels(self.verts)
+        faces = self.faces[~(labels[self.faces] == SECTIONS.index("RightUpperArm")).any(axis=1)]
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            synth.write_run(run, synth.humanoid(), size=384, ppu=60.0)
+            (run / '03-mesh.glb').write_bytes(b'synthetic mesh supplied by decimation fixture')
+            def decimate(job, *args, **kwargs):
+                for out in job['tasks'][0]['out'].values():
+                    Path(out).parent.mkdir(parents=True, exist_ok=True)
+                    np.savez(out, verts=self.verts, faces=faces)
+                return {'blender': 'synthetic'}
+            with patch.object(stage4.bl, 'run_job', side_effect=decimate), \
+                    patch.object(stage4, '_shape_views', return_value=('carve', set(stage4.VIEWS),
+                        stage4.check('shape_views', True))), \
+                    patch.object(refined_colour, 'load', return_value=(None, {'reason': 'synthetic fixture'})):
+                rec = stage4.run_stage4(run)
+            saved = json.loads((run / 'stage-4.json').read_text())
+            self.assertEqual(saved, rec)
+            self.assertFalse(rec['ok'])
+            self.assertEqual(rec['status'], 'rejected')
+            self.assertIn('RightElbow', rec['reason'])
+            self.assertIn('RightElbow', rec['joint_reasons'])
+            self.assertNotIn('error', rec)
+
     def test_named_joint_with_no_section_has_no_measurable_gap(self):
         # Remove the upper arm's geometry, keeping the complete skeleton and the rest of the body.
         lb = split.Labeller(split.build_rig(self.sk))
