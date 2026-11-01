@@ -8,6 +8,14 @@ with measurements. Without a sketch, it can draw one from a short text descripti
 → 15-section rigid R15 body → results
 ```
 
+## How this was built
+
+HeroGen was developed during the Meta hackathon period (October 26 – November 4, 2026). Most of the code was
+written by AI coding agents working within safeguards I defined: automated tests that must pass before any merge,
+independent AI code review of every change, and pre-publication checks for secrets, personal data and commit
+identity. I set the direction and quality bar, made the design decisions, and reviewed a small number of pull
+requests myself. The code is provided as-is under the [licence](LICENSE); use it at your own discretion.
+
 ## Stages
 
 | Stage | What it does | Models and tools |
