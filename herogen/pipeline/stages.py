@@ -682,7 +682,8 @@ def stage2_turnaround(
         prompt, version = turnaround_prompt(run)
         # Arbitrary caller-owned budgets may reserve the exact serial spend. Speculation must not
         # exhaust that budget ahead of a necessary call, or change callback order and classification.
-        if concurrency == 1 or client.before_api_attempt or client.after_api_attempt:
+        if (concurrency == 1 or client.before_api_attempt is not None
+                or client.after_api_attempt is not None):
             return _stage2(st, run, client, height_units, attempts, prompt, version)
         with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency,
                                  prompt=prompt, size=version.step("sheet")["params"]["size"]) as requests:
