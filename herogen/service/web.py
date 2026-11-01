@@ -1,7 +1,8 @@
 """The service's HTTP layer: a Starlette ASGI app (served by Modal's ASGI support, or uvicorn in dev mode).
 
-Pages: `/` (sign in, new hero, your heroes), `/signin` (the page a sign-in link opens), `/viewer` (the Studio
-viewer when the deployed code has it, else a minimal one), `/terms`, `/privacy`, `/healthz`.
+Pages: `/` (sign in, new hero, your heroes), `/signin` (the page a sign-in link opens), `/admin` (admin settings
+and first-party analytics), `/viewer` (the Studio viewer when the deployed code has it, else a minimal one),
+`/terms`, `/privacy`, `/healthz`.
 API (JSON; every unsafe method needs the CSRF header): see docs/ARCHITECTURE.md, "Service", for the table.
 Lab API for the viewer: `/api/workspace`, `/api/runs/r1/<job>`, `/runs/r1/<job>/<path>`, scoped to the user.
 
@@ -21,6 +22,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -40,6 +42,15 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from herogen.service import bundle, labapi
+from herogen.service.admission import micro_usd
+from herogen.service.analytics import (
+    DEFAULT_DAYS,
+    MAX_DAYS,
+    MIN_DAYS,
+    budget_sentence,
+    budget_summary,
+    validate_batch,
+)
 from herogen.service.auth import TOKEN_RE, Signer, mask_email, normalize_email, normalize_invite
 from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
@@ -68,6 +79,7 @@ ASSET_TYPES = {".css": "text/css; charset=utf-8", ".js": "text/javascript; chars
                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 FILE_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox"
 JSON_LIMIT = 16 * 1024
+EVENTS_LIMIT = 4 * 1024
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
 DOWNLOADS = ("glb", "roblox")
@@ -158,8 +170,13 @@ class App:
         secure = s.secure_cookies
         self.session_cookie = "__Host-hg_session" if secure else "hg_session"
         self.csrf_cookie = "__Host-hg_csrf" if secure else "hg_csrf"
+        self.events_rejected = 0
 
     # ---- helpers ----------------------------------------------------------------------------------------
+
+    def now(self) -> float:
+        clock = getattr(self.svc.store, "clock", None)
+        return clock() if callable(clock) else self.svc.clock()
 
     async def call(self, fn, *args, **kw):
         return await run_in_threadpool(fn, *args, **kw)
@@ -199,6 +216,13 @@ class App:
             raise HTTPException(401, "sign in first")
         return u
 
+    async def require_admin(self, request: Request) -> dict[str, Any]:
+        u = await self.user(request)
+        if not self.s.is_admin(u):
+            raise HTTPException(403, "Admin access is required.")
+        assert u is not None
+        return u
+
     async def json_body(self, request: Request) -> dict[str, Any]:
         if not request.headers.get("content-type", "").split(";")[0].strip() == "application/json":
             raise HTTPException(415, "send JSON")
@@ -226,6 +250,17 @@ class App:
 
     async def index(self, request: Request) -> Response:
         resp = self.page("index.html")
+        _, new = self.csrf_for(request)
+        if new:
+            self.set_cookie(resp, self.csrf_cookie, new, self.s.session_ttl_s)
+        return resp
+
+    async def admin_page(self, request: Request) -> Response:
+        u = await self.user(request)
+        body = (STATIC_DIR / "admin.html").read_text()
+        status = 200 if self.s.is_admin(u) else 403
+        resp = Response(body, status_code=status, media_type="text/html; charset=utf-8",
+                        headers={"Content-Security-Policy": page_csp(body)})
         _, new = self.csrf_for(request)
         if new:
             self.set_cookie(resp, self.csrf_cookie, new, self.s.session_ttl_s)
@@ -325,7 +360,8 @@ class App:
 
     async def session(self, request: Request) -> Response:
         u = await self.user(request)
-        data: dict[str, Any] = {"signed_in": u is not None, "limits": self.s.public(), "terms_ready": self.terms_ready(),
+        data: dict[str, Any] = {"signed_in": u is not None, "is_admin": self.s.is_admin(u),
+                                "limits": self.s.public(), "terms_ready": self.terms_ready(),
                                 "public_demo": self.s.public_demo}
         if self.s.public_demo:
             data['generation'] = await self.call(self.svc.store.admission_status, self.s.code_commit, self.s.cost_signature)
@@ -851,6 +887,135 @@ class App:
             return error(404, "not_found", "Not found.")
         return Response(got2[0], media_type=got2[1])
 
+    # ---- analytics and admin ----------------------------------------------------------------------------
+
+    def _reject_events(self, reason: str) -> JSONResponse:
+        self.events_rejected += 1
+        event("analytics_rejected", reason=reason, rejected_total=self.events_rejected)
+        return error(400, "bad_events", "Invalid analytics event payload.")
+
+    async def events(self, request: Request) -> Response:
+        ip_tag = self.svc.signer.tag(self.client_ip(request))
+        if (limited := await self.limit(f"events-ip:{ip_tag}", self.s.rate_api_ip)) is not None:
+            return limited
+        if request.headers.get("sec-gpc", "").strip() == "1":
+            return JSONResponse({"ok": True, "recorded": 0})
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+            return self._reject_events("content_type")
+        try:
+            raw = json.loads(await request.body())
+        except (ValueError, UnicodeDecodeError):
+            return self._reject_events("invalid_json")
+        try:
+            vid, device, items = validate_batch(raw)
+        except ValueError as exc:
+            return self._reject_events(str(exc))
+        recorded = await self.call(self.svc.store.analytics_record, vid, device, items)
+        return JSONResponse({"ok": True, "recorded": recorded})
+
+    async def admin_analytics(self, request: Request) -> Response:
+        await self.require_admin(request)
+        raw_days = request.query_params.get("days", str(DEFAULT_DAYS)).strip()
+        try:
+            if not re.fullmatch(r"-?\d{1,4}", raw_days):
+                raise ValueError
+            days = int(raw_days)
+            if not (MIN_DAYS <= days <= MAX_DAYS):
+                raise ValueError
+        except ValueError:
+            return error(400, "bad_days", f"Query parameter days must be an integer from {MIN_DAYS} to {MAX_DAYS}.")
+        return JSONResponse(await self.call(self.svc.store.analytics_report, days))
+
+    async def _budget_view(self) -> dict[str, Any]:
+        def load() -> dict[str, Any]:
+            now = self.now()
+            report = self.svc.store.budget_report()
+            status = self.svc.store.admission_status(self.s.code_commit, self.s.cost_signature)
+            summary = budget_summary(report, now)
+            policy = report.get("policy")
+            commit_valid = bool(re.fullmatch(r"[a-f0-9]{40}", self.s.code_commit))
+            return {
+                **summary,
+                "accepting": bool(status.get("accepting")),
+                "reason": status.get("reason"),
+                "sentence": budget_sentence(policy, status, now, self.s.code_commit),
+                "public_demo": self.s.public_demo,
+                "running": {
+                    "code_commit": self.s.code_commit or None,
+                    "commit_valid": commit_valid,
+                    "cost_signature": self.s.cost_signature,
+                },
+                "commit_matches": bool(policy and commit_valid and policy["code_commit"] == self.s.code_commit),
+                "cost_signature_matches": bool(policy and policy["cost_signature"] == self.s.cost_signature),
+                "now": round(now, 3),
+            }
+
+        return await self.call(load)
+
+    async def admin_budget_get(self, request: Request) -> Response:
+        await self.require_admin(request)
+        return JSONResponse(await self._budget_view())
+
+    async def admin_budget_post(self, request: Request) -> Response:
+        u = await self.require_admin(request)
+        body = await self.json_body(request)
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return error(400, "invalid_budget", "Choose whether live generation is enabled or paused.")
+        confirm_caps = body.get("confirm_provider_caps") is True
+        if enabled and not confirm_caps:
+            return error(400, "invalid_budget",
+                         "Confirm that provider spending caps are set before enabling live generation.")
+        raw_limit = body.get("limit_usd")
+        raw_reserve = body.get("reserve_usd")
+        if isinstance(raw_limit, bool) or raw_limit in (None, ""):
+            return error(400, "invalid_budget", "Enter a total budget limit in USD.")
+        if isinstance(raw_reserve, bool) or raw_reserve in (None, ""):
+            return error(400, "invalid_budget", "Enter a per-hero reserve in USD.")
+        try:
+            limit_micro = micro_usd(raw_limit)
+            reserve_micro = micro_usd(raw_reserve)
+        except ValueError as exc:
+            return error(400, "invalid_budget", str(exc))
+        if reserve_micro <= 0:
+            return error(400, "invalid_budget", "Per-hero reserve must be greater than $0.")
+        if limit_micro < reserve_micro:
+            return error(400, "invalid_budget", "Total budget limit must be at least the per-hero reserve.")
+        max_active = body.get("max_active")
+        if type(max_active) is not int or not (1 <= max_active <= 32):
+            return error(400, "invalid_budget", "Max active generations must be an integer from 1 to 32.")
+        days = body.get("days")
+        if (isinstance(days, bool) or not isinstance(days, (int, float))
+                or not math.isfinite(days) or not (0 < days <= 3650)):
+            return error(400, "invalid_budget", "Duration in days must be greater than 0 (up to 3650).")
+        bound_note = body.get("bound_note")
+        if not isinstance(bound_note, str) or not bound_note.strip():
+            return error(400, "invalid_budget",
+                         "Enter a bound note describing how the per-hero cost bound was verified.")
+        expires_at = self.now() + float(days) * 86400.0
+        try:
+            await self.call(
+                self.svc.store.budget_configure,
+                limit_micro,
+                reserve_micro,
+                max_active,
+                expires_at,
+                self.s.code_commit,
+                bound_note.strip(),
+                self.s.cost_signature,
+                confirm_caps,
+                enabled,
+                u["id"],
+            )
+        except ValueError as exc:
+            msg = str(exc)
+            if not re.fullmatch(r"[a-f0-9]{40}", self.s.code_commit):
+                msg = "Running service does not have a 40-character commit SHA configured (HEROGEN_SERVICE_COMMIT)."
+            return error(400, "invalid_budget", msg)
+        event("generation_budget_updated", actor=u["id"], enabled=enabled, limit_micro=limit_micro,
+              reserve_micro=reserve_micro, max_active=max_active)
+        return JSONResponse(await self._budget_view())
+
     async def not_found(self, request: Request) -> Response:
         return error(404, "not_found", "Not found.")
 
@@ -919,7 +1084,8 @@ def create_app(svc: Services) -> SecurityHeaders:
     upload_limit = s.upload_max_bytes + 256 * 1024
 
     async def http_error(request: Request, exc: HTTPException) -> Response:
-        codes = {401: "signed_out", 404: "not_found", 405: "method", 413: "too_large", 415: "media_type"}
+        codes = {401: "signed_out", 403: "forbidden", 404: "not_found", 405: "method", 413: "too_large",
+                 415: "media_type"}
         msg = {401: "Open your guest workspace to continue." if s.public_demo else "Sign in first.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
         return error(exc.status_code, codes.get(exc.status_code, "bad_request"), msg)
 
@@ -942,13 +1108,17 @@ def create_app(svc: Services) -> SecurityHeaders:
         return error(status, exc.code, str(exc), headers)
 
     routes = [
-        Route("/", a.index), Route("/signin", a.index), Route("/admin/signin", a.index), Route("/viewer", a.viewer),
-        Route("/terms", a.legal), Route("/privacy", a.legal), Route("/healthz", a.healthz),
+        Route("/", a.index), Route("/signin", a.index), Route("/admin/signin", a.index), Route("/admin", a.admin_page),
+        Route("/viewer", a.viewer), Route("/terms", a.legal), Route("/privacy", a.legal), Route("/healthz", a.healthz),
         Route("/assets/{path:path}", a.assets), Route("/static/{path:path}", a.studio_assets),
         Route("/gallery/{id}", a.gallery_page),
         Route("/api/gallery", a.public_gallery), Route("/api/gallery/{id}", a.public_gallery),
         Route("/gallery-assets/{id}/{kind}", a.gallery_asset),
         Route("/api/session", a.session),
+        Route("/api/events", a.events, methods=["POST"], max_body_size=EVENTS_LIMIT),
+        Route("/api/admin/analytics", a.admin_analytics, methods=["GET"]),
+        Route("/api/admin/generation-budget", a.admin_budget_get, methods=["GET"]),
+        Route("/api/admin/generation-budget", a.admin_budget_post, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/demo/access", a.public_access, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/request", a.auth_request, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/auth/link", a.auth_link, methods=["POST"], max_body_size=JSON_LIMIT),

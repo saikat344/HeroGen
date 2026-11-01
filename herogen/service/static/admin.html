@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HeroGen · Admin</title>
+<link rel="icon" href="data:,">
+<script src="/assets/theme.js"></script>
+<link rel="stylesheet" href="/assets/app.css">
+<script type="module" src="/assets/admin.js"></script>
+</head>
+<body class="entry-page admin-page">
+<header class="top">
+  <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
+  <span class="beta">Admin</span>
+  <div class="spacer"></div>
+  <span id="adminWho" class="who" hidden></span>
+  <button type="button" id="adminSignOut" class="link" hidden>Sign out</button>
+</header>
+<div id="adminBanner" class="banner" role="alert" hidden></div>
+
+<main>
+  <p id="adminLoading" class="muted admin-loading" role="status">Loading admin console…</p>
+
+  <section id="adminForbidden" class="card narrow" aria-labelledby="forbiddenH" hidden>
+    <p class="eyebrow">Restricted console <span></span></p>
+    <h1 id="forbiddenH">Admin access required</h1>
+    <p id="forbiddenMsg" class="muted">Sign in with an allowlisted administrator email to view settings and first-party analytics.</p>
+    <div class="row">
+      <a id="adminSignInLink" class="button primary-link" href="/admin/signin">Sign in with email</a>
+      <a class="button" href="/">Back to HeroGen</a>
+    </div>
+  </section>
+
+  <div id="adminShell" class="admin-shell" hidden>
+    <div class="admin-head">
+      <div>
+        <p class="eyebrow">Service operations <span></span></p>
+        <h1>HeroGen Admin</h1>
+      </div>
+      <div class="admin-tabs" role="tablist" aria-label="Admin sections">
+        <button type="button" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="true" tabindex="0">Settings</button>
+        <button type="button" role="tab" id="tab-analytics" aria-controls="panel-analytics" aria-selected="false" tabindex="-1">Analytics</button>
+      </div>
+    </div>
+
+    <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" class="admin-panel">
+      <div id="budgetStateCard" class="card admin-state-card" role="status" aria-live="polite">
+        <div class="admin-state-row">
+          <div>
+            <p class="note-label">Live-generation admission</p>
+            <p id="budgetSentence" class="admin-sentence">Loading admission state…</p>
+            <p id="budgetDemoNote" class="small muted" hidden></p>
+          </div>
+          <button type="button" id="quickPauseBtn" hidden>Pause now</button>
+        </div>
+      </div>
+
+      <div class="admin-grid-2">
+        <section class="card" aria-labelledby="policySummaryH">
+          <div class="row admin-card-head">
+            <h2 id="policySummaryH">Current budget &amp; capacity</h2>
+            <button type="button" id="refreshBudgetBtn" class="small">Refresh</button>
+          </div>
+          <div id="budgetKpis" class="kpi-grid"></div>
+          <div id="budgetBarWrap" class="budget-meter-wrap"></div>
+          <dl id="policyFacts" class="admin-dl"></dl>
+        </section>
+
+        <section class="card" aria-labelledby="verifySummaryH">
+          <h2 id="verifySummaryH">Running code &amp; cost bound</h2>
+          <p class="small muted">Admission requires the running commit and cost-affecting configuration signature to match the configured policy.</p>
+          <dl id="verifyFacts" class="admin-dl"></dl>
+        </section>
+      </div>
+
+      <section class="card" aria-labelledby="openResH">
+        <div class="row admin-card-head">
+          <h2 id="openResH">Open reservations</h2>
+          <span id="openResCount" class="state">0 open</span>
+        </div>
+        <p class="small muted">Read-only view. Reconciling stuck or completed reservations is CLI-only: <code>python3 -m herogen.service admin --data &lt;dir&gt; generation-reconcile &lt;job_id&gt; --actual-usd &lt;amount&gt; --evidence &lt;note&gt;</code> (or via <code>modal run -m herogen.service.modal_app::admin</code>).</p>
+        <div id="openResBody"></div>
+      </section>
+
+      <section class="card" aria-labelledby="editBudgetH">
+        <h2 id="editBudgetH">Configure live-generation admission</h2>
+        <p class="small muted">Saves with the running service’s commit and cost signature. Configuring this policy sets HeroGen’s conservative reservation gate; it does not purchase credits or set billing limits on external providers.</p>
+        <form id="budgetForm" novalidate>
+          <fieldset class="admin-mode-fieldset">
+            <legend>Admission mode</legend>
+            <div class="admin-radio-row">
+              <label class="radio-card"><input type="radio" name="budgetMode" id="modeAccepting" value="accepting"> <span><b>Accepting</b><small>Allow new live generations within the bounds below</small></span></label>
+              <label class="radio-card"><input type="radio" name="budgetMode" id="modePaused" value="paused" checked> <span><b>Paused</b><small>Refuse new live generations immediately</small></span></label>
+            </div>
+          </fieldset>
+
+          <div class="admin-form-grid">
+            <div>
+              <label for="limitUsd">Total limit (USD)</label>
+              <input id="limitUsd" name="limit_usd" type="text" inputmode="decimal" autocomplete="off" placeholder="10.00" required>
+            </div>
+            <div>
+              <label for="reserveUsd">Per-hero reserve (USD)</label>
+              <input id="reserveUsd" name="reserve_usd" type="text" inputmode="decimal" autocomplete="off" placeholder="3.00" required>
+            </div>
+            <div>
+              <label for="maxActive">Max active (1–32)</label>
+              <input id="maxActive" name="max_active" type="number" min="1" max="32" step="1" value="1" required>
+            </div>
+            <div>
+              <label for="durationDays">Duration (days)</label>
+              <input id="durationDays" name="days" type="number" min="0.1" max="3650" step="any" value="14" required>
+            </div>
+          </div>
+
+          <label for="boundNote">Bound note</label>
+          <textarea id="boundNote" name="bound_note" rows="2" maxlength="1000" placeholder="How the per-hero reserve bound was measured for this commit…" required></textarea>
+
+          <label class="check admin-cap-check" for="confirmProviderCaps">
+            <input type="checkbox" id="confirmProviderCaps" name="confirm_provider_caps">
+            <span>Provider spending caps are set (required to enable live generation).</span>
+          </label>
+
+          <div class="row admin-submit-row">
+            <button type="submit" id="saveBudgetBtn" class="primary">Save admission settings</button>
+            <p id="budgetFormMsg" class="msg small" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+      </section>
+    </section>
+
+    <section id="panel-analytics" role="tabpanel" aria-labelledby="tab-analytics" tabindex="0" class="admin-panel" hidden>
+      <div class="card admin-toolbar-card">
+        <div class="row admin-toolbar-row">
+          <div>
+            <p class="note-label">First-party privacy-preserving telemetry</p>
+            <p id="analyticsWindowNote" class="small muted">Session-scoped visitor IDs only; no cookies, IPs, User-Agents, emails, prompts or file names.</p>
+          </div>
+          <div class="row admin-window-controls">
+            <label for="analyticsDays" class="inline-label">Window</label>
+            <select id="analyticsDays" aria-label="Analytics time window">
+              <option value="7" selected>Last 7 days</option>
+              <option value="14">Last 14 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="90">Last 90 days</option>
+            </select>
+            <button type="button" id="refreshAnalyticsBtn">Refresh</button>
+          </div>
+        </div>
+      </div>
+
+      <section class="card" aria-labelledby="secDailyH">
+        <h2 id="secDailyH">Daily visitors &amp; page views</h2>
+        <div id="dailyKpis" class="kpi-grid"></div>
+        <div id="dailyChart" class="chart-stack"></div>
+      </section>
+
+      <section class="card" aria-labelledby="secFunnelH">
+        <h2 id="secFunnelH">Conversion funnel</h2>
+        <p class="small muted">Landing view → idea started (suggestion, starter, upload or typed) → create clicked → accepted → main pipeline completed → result viewed → download.</p>
+        <div id="funnelChart" class="chart-stack"></div>
+        <div id="funnelBreakdowns" class="pill-row"></div>
+      </section>
+
+      <div class="admin-grid-2">
+        <section class="card" aria-labelledby="secRefusalsH">
+          <h2 id="secRefusalsH">Refusal reasons</h2>
+          <div id="refusalsChart" class="chart-stack"></div>
+        </section>
+
+        <section class="card" aria-labelledby="secJobsH">
+          <h2 id="secJobsH">Jobs by final state</h2>
+          <div id="jobsStateSummary" class="pill-row"></div>
+          <div id="jobsStateChart" class="chart-stack"></div>
+        </section>
+      </div>
+
+      <section class="card" aria-labelledby="secStagesH">
+        <h2 id="secStagesH">Pipeline stages &amp; per-job totals</h2>
+        <div id="jobTotalsKpis" class="kpi-grid"></div>
+        <h3 class="admin-subhead">Main pipeline (in execution order)</h3>
+        <div id="mainStagesWrap" class="admin-table-wrap"></div>
+        <h3 class="admin-subhead">Side stage (runs separately after main completion)</h3>
+        <div id="sideStagesWrap" class="admin-table-wrap"></div>
+      </section>
+
+      <section class="card" aria-labelledby="secBudgetAnalyticsH">
+        <h2 id="secBudgetAnalyticsH">Live-generation budget</h2>
+        <div id="analyticsBudgetKpis" class="kpi-grid"></div>
+        <div id="analyticsBudgetBar" class="budget-meter-wrap"></div>
+      </section>
+
+      <div class="admin-grid-2">
+        <section class="card" aria-labelledby="secGalleryH">
+          <h2 id="secGalleryH">Gallery engagement</h2>
+          <div id="gallerySummary" class="kpi-grid kpi-compact"></div>
+          <h3 class="admin-subhead">Picker selections per hero</h3>
+          <div id="pickerChart" class="chart-stack"></div>
+          <h3 class="admin-subhead">Shade toggles</h3>
+          <div id="shadeChart" class="chart-stack"></div>
+        </section>
+
+        <section class="card" aria-labelledby="secDevicesH">
+          <h2 id="secDevicesH">Device split</h2>
+          <div id="deviceChart" class="chart-stack"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <span>HeroGen Admin · First-party metrics only</span>
+  <span class="footer-rule"></span>
+  <a href="/">Home</a>
+  <a href="/terms">Terms</a>
+  <a href="/privacy">Privacy</a>
+</footer>
+</body>
+</html>

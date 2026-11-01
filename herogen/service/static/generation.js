@@ -1,4 +1,5 @@
 // Presentation follows reported stage states; the held-out review is a separate side task.
+import { trackOnce } from './analytics.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
   0: ['Prepare input', 'Preparing your image', 'Check the input before creating the character artwork.'],
@@ -87,6 +88,7 @@ export function generationView($, select3D) {
       if (changed) { $('#imageError').hidden = true; selected = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id; }
       job = next;
       const state = generationState(job);
+      if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
       text($('#generationTitle'), state.title); text($('#generationSubtitle'), state.subtitle);
       text($('#progressCount'), `${state.passed} of ${state.main.length} stages passed`);
       text($('#workbenchName'), job.name || (job.kind === 'prompt' ? 'Your imagined hero' : 'Your uploaded character'));
