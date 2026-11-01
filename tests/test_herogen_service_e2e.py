@@ -550,9 +550,10 @@ class TestPublicLivePage(ServiceBrowserCase):
     def test_create_opens_guest_and_starts_without_an_account_or_code(self):
         t=self.tab; t.goto(self.url+'/')
         t.wait("document.querySelector('#headerSignIn').textContent === 'Open workspace'")
-        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit(); document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
         self.assertEqual(len(self.store.users_list()),1)
+        self.assertEqual(len(self.store.jobs_admin_list()),1)
         self.assertEqual(self.store.users_list()[0]['kind'],'guest')
         self.runner.gate.set()
         t.wait("document.querySelector('#state').textContent === 'succeeded'",timeout=60)
