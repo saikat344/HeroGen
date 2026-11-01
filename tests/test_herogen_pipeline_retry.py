@@ -180,7 +180,7 @@ class RetryThroughServerTest(unittest.TestCase):
         return p.read_text() if p.exists() else ""
 
     def ledger(self) -> list[dict]:
-        return [json.loads(x) for x in self.ledger_text().splitlines()]
+        return [json.loads(x) for x in self.ledger_text().splitlines() if json.loads(x)["outcome"] != "sent"]
 
     def test_retry_after_seconds_is_honoured(self):
         out, e = self._call(Script(err(429, Retry_After=3), OK_SAM))
@@ -538,7 +538,8 @@ class ReadDeadlineTest(unittest.TestCase):
         return seconds, error
 
     def ledger(self):
-        return [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()]
+        return [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()
+                if json.loads(x)["outcome"] != "sent"]
 
     def test_a_trickling_answer_is_cut_off_at_the_deadline(self):
         # Each 4-byte piece comes within the socket timeout; the part that trickles (a padded body, headers or
@@ -721,7 +722,7 @@ class SharedLimiterTest(unittest.TestCase):
             def split_open(path, mode):
                 return io.TextIOWrapper(io.BufferedWriter(ShortWriteFile(path, mode)))
 
-            client.open = split_open
+            client.ledger.open = split_open
             c = client.ModelClient(sys.argv[2] + "/cache", mode="replay")
             for i in range(40):
                 c._ledger({"child": int(sys.argv[3]), "i": i, "pad": sys.argv[3] * 200000})

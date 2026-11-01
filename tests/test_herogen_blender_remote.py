@@ -198,6 +198,11 @@ class Live(Base):
         self.assertEqual(entry["cost_basis"], rc.COST_BASIS)
         self.assertGreaterEqual(entry["cost_usd_estimate"], 0.0)
         self.assertFalse(c.log.calls[0]["cached"])
+        rows=[json.loads(line) for line in (self.cache/'calls-ledger.jsonl').read_text().splitlines()]
+        self.assertEqual([row['outcome'] for row in rows],['sent','ok'])
+        self.assertEqual(rows[0]['timeout_s'],60)
+        self.assertEqual(rows[0]['price_per_second'],rc.PRICE_PER_SECOND['T4'])
+        self.assertEqual(rows[0]['call_id'],rows[1]['call_id'])
         # the same request now replays, even in replay mode
         again = rc.RemoteClient(self.cache, mode="replay").body(self.img, [1, 2, 3, 4], "front mask")
         self.assertTrue(again.cached)
@@ -209,13 +214,20 @@ class Live(Base):
                 c.body(self.img, bbox, source)
         self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))
 
+    def test_deployed_function_bound_can_outlive_the_local_wait(self):
+        os.environ['HEROGEN_REMOTE_FUNCTION_TIMEOUT']='2400'
+        rc.RemoteClient(self.cache,mode='live',timeout=60).objects(self.img,self.msk)
+        sent=json.loads((self.cache/'calls-ledger.jsonl').read_text().splitlines()[0])
+        self.assertEqual(sent['timeout_s'],2400)
+        self.assertEqual(sent['price_usd'],2400*rc.PRICE_PER_SECOND[rc.DEFAULT_OBJECTS_GPU])
+
     def test_objects_gpu_is_configurable(self):
         r = rc.RemoteClient(self.cache, mode="live", timeout=60, objects_gpu="H100").objects(self.img, self.msk)
         entry = json.loads((r.dir / "entry.json").read_text())
         self.assertEqual(entry["run"]["env"]["HEROGEN_OBJECTS_GPU"], "H100")
         self.assertEqual(entry["run"]["env"]["HEROGEN_OBJECTS_TIMEOUT"], "60")
 
-    def test_failure_and_timeout_raise_and_record_nothing(self):
+    def test_failure_and_timeout_raise_and_retain_call_receipts(self):
         os.environ["FAKE_FAIL"] = "1"
         with self.assertRaises(rc.RemoteError) as cm:
             rc.RemoteClient(self.cache, mode="live", timeout=60).objects(self.img, self.msk)
@@ -224,16 +236,16 @@ class Live(Base):
         os.environ["FAKE_SLEEP"] = "5"
         with self.assertRaisesRegex(rc.RemoteError, "timed out"):
             rc.RemoteClient(self.cache, mode="live", timeout=0.5).objects(self.img, self.msk)
-        self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))
+        self.assertEqual(list(self.cache.iterdir()), [self.cache / "calls-ledger.jsonl"])
 
-    def test_a_failed_exit_with_outputs_records_nothing_and_says_so_in_one_line(self):
+    def test_a_failed_exit_with_outputs_retains_only_receipts_and_says_so_in_one_line(self):
         os.environ["FAKE_FAIL_AFTER_OUTPUT"] = "1"
         with self.assertRaises(rc.RemoteError) as cm:
             rc.RemoteClient(self.cache, mode="live", timeout=60).objects(self.img, self.msk)
         self.assertNotIn("\n", str(cm.exception))
         self.assertIn("exit 4", str(cm.exception))
         self.assertIn("line two", cm.exception.log)
-        self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))
+        self.assertEqual(list(self.cache.iterdir()), [self.cache / "calls-ledger.jsonl"])
 
     def test_a_cpu_run_keys_separately_from_gpu_runs(self):
         gpu = rc.RemoteClient(self.cache, mode="live", timeout=60).body(self.img, [1, 2, 3, 4], "front mask", gpu="T4")
@@ -260,7 +272,7 @@ class Live(Base):
         os.environ["HEROGEN_MODAL"] = str(broken)
         with self.assertRaisesRegex(rc.RemoteError, "could not start modal"):
             rc.RemoteClient(self.cache, mode="live", timeout=60).body(self.img, [1, 2, 3, 4], "front mask")
-        self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))
+        self.assertEqual(list(self.cache.iterdir()), [self.cache / "calls-ledger.jsonl"])
 
     def test_missing_modal_is_a_clear_error(self):
         os.environ["HEROGEN_MODAL"] = str(self.tmp / "nope")

@@ -26,17 +26,19 @@ from typing import Any
 from PIL import Image
 
 from herogen.pipeline.client import ReplayMiss, png_bytes
+from herogen.pipeline import ledger
 
 HERE = Path(__file__).resolve().parent
 APP = HERE / "sapiens_app.py"
 POSE_MODEL = "sapiens2-pose-1b"
-# Modal list price of the app's GPU (L40S) per second, for estimates only; the bill has the real figure.
-PRICE_PER_SECOND = 1.95 / 3600
-COST_BASIS = "estimate: GPU seconds of each live call x the L40S list price (model load not counted)"
+# Modal list price of the app's GPU (L4) per second, for estimates only; the bill has the real figure.
+PRICE_PER_SECOND = 0.80 / 3600
+COST_BASIS = "estimate: GPU seconds of each live call x the L4 list price (model load not counted)"
 RETRY_WAIT_S = (10.0, 30.0)  # waits before the second and third try of a live call
 # How long one try may take: a cold start (image, weights, model load) measured 61 s, a warm call 1.5 s. A try
 # that passes it (a container that never starts, say) is abandoned and tried again.
 CALL_TIMEOUT_S = 300.0
+FUNCTION_TIMEOUT_S = 1800.0
 
 
 class PoseError(RuntimeError):
@@ -113,7 +115,19 @@ class PoseClient:
             try:
                 if self._pose is None:
                     self._open()
-                return self._pose.keypoints.spawn(png, box).get(timeout=CALL_TIMEOUT_S)
+                receipt = ledger.sent(self.cache_dir, model=POSE_MODEL, endpoint="modal/keypoints",
+                                      key=hashlib.sha256(png + repr(box).encode()).hexdigest()[:24],
+                                      timeout=FUNCTION_TIMEOUT_S, price_usd=FUNCTION_TIMEOUT_S * PRICE_PER_SECOND,
+                                      timeout_s=FUNCTION_TIMEOUT_S, price_per_second=PRICE_PER_SECOND)
+                started = time.monotonic()
+                out = self._pose.keypoints.spawn(png, box).get(timeout=CALL_TIMEOUT_S)
+                # A response without a duration retains the full timeout bound.
+                seconds = out.get("seconds")
+                if isinstance(seconds, (int, float)):
+                    seconds = max(seconds, time.monotonic() - started)
+                    ledger.complete(self.cache_dir, receipt, outcome="ok", seconds=seconds,
+                                    cost_usd=seconds * PRICE_PER_SECOND)
+                return out
             except ImportError as e:
                 raise PoseError(f"{POSE_MODEL} needs the modal package (pip install herogen[remote]): {e}") from e
             except Exception as e:  # noqa: BLE001  (Modal raises many types; each try is recorded)
@@ -133,7 +147,13 @@ class PoseClient:
 
         try:
             pose = modal.Cls.from_name(sapiens_app.APP_NAME, sapiens_app.CLASS_NAME)()
+            receipt = ledger.sent(self.cache_dir, model=POSE_MODEL, endpoint="modal/app_sha256",
+                                  key=self._pins["app_sha256"], timeout=FUNCTION_TIMEOUT_S,
+                                  price_usd=FUNCTION_TIMEOUT_S * PRICE_PER_SECOND,
+                                  timeout_s=FUNCTION_TIMEOUT_S, price_per_second=PRICE_PER_SECOND)
+            started = time.monotonic()
             deployed = pose.app_sha256.remote()
+            ledger.complete(self.cache_dir, receipt, outcome="ok", cost_usd=(time.monotonic() - started) * PRICE_PER_SECOND)
         except modal.exception.NotFoundError as e:
             reason = f"no deployment of {sapiens_app.APP_NAME}: {type(e).__name__}: {e}"[:300]
         else:

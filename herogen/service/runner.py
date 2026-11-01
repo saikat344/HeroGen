@@ -129,6 +129,7 @@ class StageContext:
     env: dict[str, str] = field(default_factory=dict)
     refine_cap_usd: float = 0.80
     refine_budget: Callable | None = None
+    accounting: Callable | None = None
 
     @property
     def runs_root(self) -> Path:
@@ -321,6 +322,7 @@ def _slug(name: str) -> str:
 def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """The environment every stage subprocess gets: no secrets, only what Python and Blender need."""
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "HEROGEN_BLENDER", "HEROGEN_MODAL", "SYSTEMROOT", "TMPDIR",
+            "HEROGEN_REMOTE_FUNCTION_TIMEOUT",
             "HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     root = str(Path(__file__).resolve().parents[2])
@@ -410,9 +412,20 @@ class CliRunner:
         if (spec.group in ("model", "heldout") or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         from herogen.service.refine_budget import budget_bridge
+        from herogen.pipeline.ledger import BRIDGE
+        from herogen.service.processes import identity, stopped
+        import signal
+        import threading
+        registered = threading.Event()
+        registration_ok = False
+        def acknowledge(action, **kwargs):
+            if not registered.wait(120) or not registration_ok:
+                raise RuntimeError('Stage process registration timed out')
+            return ctx.accounting(action, **kwargs)
         bridge = budget_bridge(ctx.refine_budget) if spec.key == "3f" and ctx.refine_budget else nullcontext({})
-        with bridge as budget_env, tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
-            env = base_env({"HOME": home, **extra, **budget_env})
+        call_bridge = budget_bridge(acknowledge, BRIDGE) if ctx.accounting else nullcontext({})
+        with bridge as budget_env, call_bridge as call_env, tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
+            env = base_env({"HOME": home, **extra, **budget_env, **call_env})
             argv, stdin = self.command(spec, ctx, env, Path(home))
             for stale in (spec.record, *spec.extra):
                 p = ctx.run_dir / stale
@@ -422,11 +435,34 @@ class CliRunner:
             t0 = time.monotonic()
             timed_out = False
             try:
-                proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                if ctx.accounting is None:
+                    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
                                       timeout=timeout, env=env,
                                       cwd=home, **({"pass_fds": tuple(map(int, budget_env.values()))}
                                                    if budget_env else {}))
-                out, err, code = proc.stdout, proc.stderr, proc.returncode
+                    out, err, code = proc.stdout, proc.stderr, proc.returncode
+                else:
+                    # All descendants inherit the group. Even a failed stage must leave no child running.
+                    with subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None else None,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                          encoding="utf-8", env=env, cwd=home, start_new_session=True,
+                                          pass_fds=tuple(map(int, (*budget_env.values(), *call_env.values())))) as proc:
+                        process = {**identity(), 'pid': proc.pid}
+                        try:
+                            ctx.accounting('process_start', **process)
+                            registration_ok = True
+                            registered.set()
+                            out, err = proc.communicate(stdin, timeout=timeout)
+                            code = proc.returncode
+                        finally:
+                            registered.set()
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            proc.wait()
+                            if stopped(process, group=True):
+                                ctx.accounting('process_stopped', **process)
             except subprocess.TimeoutExpired as e:
                 timed_out = True
                 out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")

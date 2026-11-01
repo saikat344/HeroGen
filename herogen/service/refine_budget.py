@@ -13,10 +13,17 @@ from contextlib import contextmanager
 
 REQUEST_FD = "HEROGEN_REFINE_BUDGET_REQUEST_FD"
 RESPONSE_FD = "HEROGEN_REFINE_BUDGET_RESPONSE_FD"
+_CLIENT_LOCK = threading.Lock()
 
 
-def remote_budget(action, **kwargs):
-    request_fd, response_fd = int(os.environ[REQUEST_FD]), int(os.environ[RESPONSE_FD])
+def remote_budget(action, *, prefix="HEROGEN_REFINE_BUDGET", **kwargs):
+    # Parallel clients in one stage must not consume one another's acknowledgements.
+    with _CLIENT_LOCK:
+        return _remote_budget(action, prefix=prefix, **kwargs)
+
+
+def _remote_budget(action, *, prefix, **kwargs):
+    request_fd, response_fd = int(os.environ[prefix + "_REQUEST_FD"]), int(os.environ[prefix + "_RESPONSE_FD"])
     os.write(request_fd, json.dumps({"action": action, **kwargs}).encode() + b"\n")
     if not select.select([response_fd], [], [], 120)[0]:
         raise RuntimeError("Durable refinement budget acknowledgement timed out")
@@ -28,7 +35,7 @@ def remote_budget(action, **kwargs):
 
 
 @contextmanager
-def budget_bridge(callback):
+def budget_bridge(callback, prefix="HEROGEN_REFINE_BUDGET"):
     """Expose only this job attempt's budget operations to its stage subprocess."""
     request_read, request_write = os.pipe()
     response_read, response_write = os.pipe()
@@ -50,7 +57,7 @@ def budget_bridge(callback):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        yield {REQUEST_FD: str(request_write), RESPONSE_FD: str(response_read)}
+        yield {prefix + "_REQUEST_FD": str(request_write), prefix + "_RESPONSE_FD": str(response_read)}
     finally:
         os.close(request_write)
         os.close(response_read)

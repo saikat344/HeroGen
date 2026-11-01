@@ -32,6 +32,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from herogen.pipeline import ledger
+
 HERE = Path(__file__).resolve().parent
 RUNNERS = {"sam3d-objects": HERE / "objects.py", "sam3d-body": HERE / "body.py"}
 OBJECTS_RENDERER = "pytorch3d"       # texture bake and rasterisation without nvdiffrast (see objects.py)
@@ -260,6 +262,12 @@ class RemoteClient:
             cmd = [modal, "run", str(HERE / f"{runner}.py") + "::main", "--job", str(tmp / "job.json"),
                    "--out", str(out)]
             t0 = time.monotonic()
+            price = PRICE_PER_SECOND.get(gpu)
+            # Hosted deployments can have a longer function timeout than the local CLI wait.
+            function_timeout = float(os.environ.get("HEROGEN_REMOTE_FUNCTION_TIMEOUT", str(self.timeout)))
+            receipt = ledger.sent(self.cache_dir, model=summary["runner"], endpoint="modal/infer", key=key,
+                                  timeout=function_timeout, price_usd=None if price is None else function_timeout * price,
+                                  timeout_s=function_timeout, price_per_second=price)
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout,
                                       env={**os.environ, **env})
@@ -269,6 +277,8 @@ class RemoteClient:
                 raise RemoteError(f"{runner}: could not start modal ({type(exc).__name__}: {exc.strerror or exc})"
                                   ) from exc
             wall = time.monotonic() - t0
+            ledger.complete(self.cache_dir, receipt, outcome="ok" if proc.returncode == 0 else "unknown",
+                            cost_usd=0.0 if price is None else wall * price, seconds=wall)
             logtext = _scrub(proc.stdout[-20000:] + "\n--- stderr ---\n" + proc.stderr[-20000:])
             outputs = out / "job"
             missing = [r for r in required if not (outputs / r).exists()]

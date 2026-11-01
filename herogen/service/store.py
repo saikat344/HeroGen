@@ -28,15 +28,19 @@ from typing import Any
 
 from herogen.service.admission import AdmissionStore, SCHEMA as ADMISSION_SCHEMA, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
+    6: ("ALTER TABLE admission_work ADD COLUMN process TEXT NOT NULL DEFAULT ''",
+        next(s.strip() for s in ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_calls' in s),
+        next(s.strip() for s in ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admission_processes' in s)),
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
     2: ("ALTER TABLE job_stages ADD COLUMN claim TEXT", "ALTER TABLE job_stages ADD COLUMN lease_until REAL"),
     3: ("CREATE TABLE refine_budgets (job_id TEXT PRIMARY KEY, state TEXT NOT NULL)",),
     4: ("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'account'",
         "ALTER TABLE jobs ADD COLUMN budget_required INTEGER NOT NULL DEFAULT 0",
-        *tuple(s.strip() for s in ADMISSION_SCHEMA.split(';') if s.strip())),
+        *tuple(s.strip() for s in ADMISSION_SCHEMA.replace(", process TEXT NOT NULL DEFAULT ''", '').split(';')
+               if s.strip() and 'CREATE TABLE admission_calls' not in s and 'CREATE TABLE admission_processes' not in s)),
     5: ("UPDATE users SET kind='guest' WHERE kind='judge'",
         "DROP TABLE IF EXISTS judge_workspaces", "DROP TABLE IF EXISTS judge_codes",
         "ALTER TABLE admissions RENAME TO admissions_old",

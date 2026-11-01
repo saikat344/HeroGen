@@ -4,6 +4,7 @@ strict schema, checking every answer against it."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import os
@@ -19,12 +20,63 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import retry
+from herogen.pipeline import ledger
 from fake_model_server import FakeModelServer, error_body, no_wait_policy
 from test_herogen_pipeline_flow import DUMMY_KEY
 from herogen.pipeline import client as client_mod  # noqa: E402
 from herogen.pipeline.client import ApiError, ClientError, ModelClient, ReplayMiss, schema_errors  # noqa: E402
 
 _RESPONSE = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "<masks>"}]}]}
+
+
+class WriteAheadTest(unittest.TestCase):
+    def test_sent_is_durable_before_send_and_completion_reuses_its_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache=Path(tmp)/'cache'
+            c=ModelClient(cache,mode='live',limiter=mock.Mock(acquire=mock.Mock(return_value=('slot',0))))
+            response=mock.Mock(status=200,read=lambda: b'{}')
+            def opened(*args):
+                rows=[json.loads(s) for s in (cache/ledger.LEDGER).read_text().splitlines()]
+                self.assertEqual(len(rows),1); self.assertEqual(rows[0]['outcome'],'sent')
+                self.assertEqual(rows[0]['price_usd'],.01)
+                return contextlib.nullcontext(response)
+            with mock.patch.dict(os.environ,{'MODEL_API_KEY':DUMMY_KEY}), mock.patch.object(client_mod,'_open',opened):
+                c._post('images/generations',{},model=client_mod.IMAGE_MODEL,kind='generate',key='request-hash')
+            rows=[json.loads(s) for s in (cache/ledger.LEDGER).read_text().splitlines()]
+            self.assertEqual([r['outcome'] for r in rows],['sent','ok'])
+            self.assertEqual(rows[0]['call_id'],rows[1]['call_id'])
+            self.assertEqual(ledger.bound(rows)[:3],(10_000,1,0))
+            self.assertNotIn(DUMMY_KEY,(cache/ledger.LEDGER).read_text())
+
+    def test_crash_after_sent_and_failed_durable_write_never_look_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache=Path(tmp)/'cache'
+            c=ModelClient(cache,mode='live',limiter=mock.Mock(acquire=mock.Mock(return_value=('slot',0))))
+            with mock.patch.dict(os.environ,{'MODEL_API_KEY':DUMMY_KEY}), \
+                    mock.patch.object(client_mod,'_open',side_effect=SystemExit('synthetic crash')), \
+                    self.assertRaises(SystemExit):
+                c._post('responses',{'max_output_tokens':100},model=client_mod.TEXT_MODEL,kind='compare',key='hash',
+                        usage_cost_usd=lambda u: client_mod.answer_cost_usd(client_mod.TEXT_MODEL,u,100))
+            rows=[json.loads(s) for s in (cache/ledger.LEDGER).read_text().splitlines()]
+            want=client_mod.CONTEXT_TOKENS[client_mod.TEXT_MODEL]*1.25+100*4.25
+            self.assertEqual(ledger.bound(rows)[:3],(int(want),1,1))
+            with mock.patch.dict(os.environ,{'MODEL_API_KEY':DUMMY_KEY}), \
+                    mock.patch.object(ledger.os,'fsync',side_effect=OSError('synthetic disk failure')), \
+                    mock.patch.object(client_mod,'_open') as send, self.assertRaises(OSError):
+                c._post('images/generations',{},model=client_mod.IMAGE_MODEL,kind='generate',key='hash')
+            send.assert_not_called()
+
+    def test_known_token_cost_keeps_sub_micro_precision_until_settlement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache=Path(tmp)/'cache'
+            c=ModelClient(cache,mode='live',limiter=mock.Mock(acquire=mock.Mock(return_value=('slot',0))))
+            response=mock.Mock(status=200,read=lambda:b'{"usage":{"input_tokens":1,"output_tokens":0}}')
+            with mock.patch.dict(os.environ,{'MODEL_API_KEY':DUMMY_KEY}), \
+                    mock.patch.object(client_mod,'_open',return_value=contextlib.nullcontext(response)):
+                c._post('responses',{},model=client_mod.TEXT_MODEL,kind='compare',key='hash',
+                        usage_cost_usd=lambda u:client_mod.answer_cost_usd(client_mod.TEXT_MODEL,u,100))
+            rows=[json.loads(s) for s in (cache/ledger.LEDGER).read_text().splitlines()]
+            self.assertEqual(ledger.bound(rows)[:3],(2,1,0))
 
 
 class SamPaidResponseTest(unittest.TestCase):
@@ -269,7 +321,8 @@ class CompareThroughServerTest(unittest.TestCase):
         with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}), \
                 self.assertLogs("herogen.pipeline.client", "WARNING"):
             out = c.compare_images("q", self.images, schema=SAMPLE_SCHEMA)
-        rows = [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()]
+        rows = [json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()
+                if json.loads(x)["outcome"] != "sent"]
         return out, c, server, rows
 
     def test_a_429_is_retried_and_lowers_the_shared_limit(self):

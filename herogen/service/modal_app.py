@@ -140,7 +140,8 @@ blender_image = (
         "printf '#!/bin/sh\\nexec python3 -m herogen.service.modal_bridge \"$@\"\\n' > /usr/local/bin/herogen-modal-bridge"
         " && chmod 755 /usr/local/bin/herogen-modal-bridge",
     )
-    .env({"HEROGEN_BLENDER": "/opt/blender/blender", "HEROGEN_MODAL": "/usr/local/bin/herogen-modal-bridge"})
+    .env({"HEROGEN_BLENDER": "/opt/blender/blender", "HEROGEN_MODAL": "/usr/local/bin/herogen-modal-bridge",
+          "HEROGEN_REMOTE_FUNCTION_TIMEOUT": "1800"})
     .add_local_python_source("herogen")
 )
 
@@ -336,7 +337,7 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
                        lambda: store.job_current(job["id"], attempt),
                        still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)
     runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group in ("model", "blender") else "")
-    return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s(group)).to_dict()
+    return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s(group), TIMEOUTS[group]).to_dict()
 
 
 @app.function(image=web_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["model"][0],
@@ -382,7 +383,7 @@ def heldout_stages(job: dict) -> str | None:
                               lambda: store.side_live(job["id"], "2h", claim))
 
     return run_heldout(store, s, job, CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "")), workdir_for,
-                       price_per_s("model"))
+                       price_per_s("model"), TIMEOUTS['heldout'])
 
 
 @app.function(image=web_image, schedule=modal.Period(minutes=1), timeout=120)

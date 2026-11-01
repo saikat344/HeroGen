@@ -1436,8 +1436,10 @@ without usage is never counted at $0.
   that trickles bytes can't hold a call past it. An attempt cut off this way ends like a socket timeout (outcome
   `unknown`, counted in the cost), and no attempt starts once the time limit has passed. An answer that ends
   before its `Content-Length` is an error of unknown outcome too (`IncompleteRead`), retried and never cached.
-- **Ledger and logs:** every HTTP attempt is a line in `<cache>/calls-ledger.jsonl`: time, model, endpoint,
-  request key, attempt, status, outcome (`ok`, `failed`, `unknown` or `unreadable`), seconds, the wait for a
+- **Ledger and logs:** every HTTP attempt first appends a durable `sent` receipt to `<cache>/calls-ledger.jsonl`,
+  with a unique call id, model, endpoint, request hash, epoch expiry and full configured price. The completion
+  reuses its id and includes time, model, endpoint, request key, attempt, status, outcome (`ok`, `failed`,
+  `unknown` or `unreadable`), known cost, seconds, the wait for a
   call slot and the wait before the next attempt with its reason, and the scrubbed error. Each retry is also a
   warning on the `herogen.pipeline.client` logger. Neither holds a header or the key. An attempt that may
   have reached the model and be billed without a usable answer has outcome `unknown`, is also in the stage
@@ -1450,6 +1452,8 @@ without usage is never counted at $0.
   input at 0. A 200 answer that failed and is retried is priced from the usage it reports, like any answer;
   an attempt with no answer (cut off, timed out, unreadable) and an answer with no usage (an incomplete one,
   say) are counted at the output-token cap ($0.01275 for stage p's 3000), so neither is ever counted at $0.
+  These stage estimates differ from automatic settlement: unanswered or unknown calls retain their entire
+  sent bound, including Muse Spark's maximum input-context charge (see generation admission below).
   Otherwise a Muse Spark call is handled like a SAM 3.1 call: it is retried on a 409, and a 5xx is not counted.
 
 ## Stage p: prompt to sketch
@@ -2474,7 +2478,7 @@ CSRF, origin checks and secure session cookies protect every state-changing requ
 access remains separate at `/admin/signin` and shares the global admission limits when public mode is enabled.
 There is no Facebook login or special judge-account route.
 
-The metadata schema v6 migrates v1–v5 stores, preserving existing reservations and guest histories while
+The metadata schema v7 migrates v1–v6 stores, preserving existing reservations and guest histories while
 retiring the invitation-specific workspace tables. Admission and job insertion run in one SQLite transaction.
 A repeated Idempotency-Key returns the original workspace's job without another reservation. One active
 reservation per workspace is enforced, including canceled work whose remote shutdown is uncertain. A global
@@ -2494,11 +2498,41 @@ prices also require operator re-verification.
 
 Reservations use integer micro-USD and persist across restarts and policy changes. A job's completion releases
 its capacity slot only when main and expected held-out work have finished and all worker receipts are certain.
-Cancellation, deletion, failure and timeout never automatically release reserved money. Uncertain workers keep
-capacity occupied, preventing overlapping replacements. A failed job can still incur provider charges.
-`generation-budget-report` exposes reservations and unresolved work to the operator; `generation-reconcile`
-records a measured cost with provider evidence and requires confirmation of stopped work for uncertain exits.
-An actual cost above its reservation pauses new admissions. Guest generations have no separate lifetime allowance.
+Cancellation, deletion, failure and timeout alone never release reserved money. A failed job can still incur
+provider charges. Each paid HTTP attempt first fsyncs a `sent` entry to `calls-ledger.jsonl`: model, endpoint,
+request hash, unique call id, epoch expiry (the remaining call timeout) and full configured price. A completion
+with the same id records its outcome and known cost. For Muse Spark, an unanswered call's full price includes input at
+the [documented 1,048,576-token context limit](https://dev.meta.ai/docs/cookbook/long-context) plus the requested
+output-token cap; a response with incomplete usage retains this bound. Stage cost estimates still use reported
+usage, independently of this conservative settlement bound. Modal receipts record the
+function timeout and GPU price per second; their bounds use the function timeout, including when the local
+wait is shorter. Known Modal costs use at least the caller's wall time, covering startup as well as reported
+inference time; a missing reported Sapiens duration retains its full bound. Unknown GPU prices prevent
+automatic settlement. Replay/cache hits issue no paid receipts.
+No API key or header is recorded. The service acknowledges each receipt in the durable SQLite `admission_calls`
+table before a stage can send; losing a local copy or copying back parallel caches cannot lose this evidence.
+The budget evidence names that database and the job's ledger rows. Paid stage-group and held-out workers also
+record compute bounds and elapsed compute costs, separately from model calls; stage-record totals are not
+added again. Orchestration, idle containers, storage and egress remain non-job overhead.
+
+The minute sweep considers terminal jobs with unreconciled admissions, including uncertain or disappeared
+workers and completed work still holding money, after main and expected side work finish. Every worker invocation must have either returned with an
+explicit stopped receipt or be proven absent on its recorded host. Every stage subprocess runs in a registered
+process group; exit/timeout kills descendants and reaps the direct child. Every recorded group must be proven
+gone, including any descendants still waiting to be reaped. Lease expiry is never process-exit evidence. Missing legacy receipts, an uninspectable foreign host,
+missing prices or malformed/incomplete ledger evidence retain the reservation for manual reconciliation.
+The sweep also waits strictly past the latest sent call expiry plus 60 seconds (or the work's start plus 60 seconds
+when no call was sent). It sums known completed costs, each unanswered `sent`/`unknown` call at full configured
+price, and unknown Modal calls at function timeout times price per second. The sum rounds up to integer
+micro-USD. This is a ledger bound, never a provider invoice. It uses `budget_reconcile(..., work_stopped=True)`
+to close receipts and release the slot and unused reservation, with evidence
+`auto-settled: <n> calls, <k> charged at full price, ledger <path>` and an `auto_settled` audit entry.
+The transaction compares the complete stopped-work/ledger snapshot and requires an unreconciled admission:
+a manual reconciliation that commits first wins, and concurrent sweep calls cannot settle twice.
+`generation-budget-report` identifies auto-settled jobs and exposes reservations and unresolved work;
+`generation-reconcile` remains available with operator evidence and requires confirmation of stopped work
+for uncertain exits. A cost above its reservation pauses new admissions. Guest generations have no separate
+lifetime allowance.
 
 This ledger limits admitted reservation bounds; it is not an invoice meter or a provider billing cap. Gallery
 hosting, idle containers, storage and egress are not allocated per generation. A real total-spend ceiling also
@@ -2524,8 +2558,9 @@ without any network using `--report <report.json>` instead of `--app`.
 
 For controlled guest generations, an expired main-worker lease fails the job with an explicit uncertain-work
 error instead of automatically re-running potentially live remote compute. The sweep marks its open receipts
-uncertain; side-worker lease loss does the same without changing the main outcome. Reconciliation with confirmed
-shutdown closes the receipts and resolves that alert. A side check that cannot claim a failed/deleted job, or
+uncertain; side-worker lease loss does the same without changing the main outcome. Automatic settlement under
+the stopped-process and timeout rule above, or manual reconciliation with confirmed shutdown, closes the receipts
+and resolves that alert. A side check that cannot claim a failed/deleted job, or
 cannot be spawned, does not retain a capacity slot when no paid work is running. Failed side spawning records
 an unavailable check. Active or uncertain work still retains its reservation. Account deletion and file purge
 use the same terminal accounting. Deploys forward the optional public-guest/gallery/dispatcher settings through

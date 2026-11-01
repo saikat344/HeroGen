@@ -15,6 +15,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.pipeline import sapiens  # noqa: E402
+from herogen.pipeline import ledger
 from herogen.pipeline.client import ReplayMiss  # noqa: E402
 
 ANSWER = {"names": ["nose", "left_wrist"], "keypoints": [[10.0, 20.0], [30.5, 40.25]], "scores": [0.9, 0.4],
@@ -103,6 +104,27 @@ class PoseClientTest(unittest.TestCase):
             c.keypoints(self.img, [0, 0, 64, 64])
         self.assertEqual(len(opened), 2)  # the app is opened again after a failure
         self.assertEqual([a.args[0] for a in sleep.call_args_list], [0.0, sapiens.RETRY_WAIT_S[0]])
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual([r['outcome'] for r in rows],['sent','sent','ok'])
+        cost,calls,full,_=ledger.bound(rows)
+        self.assertEqual((calls,full),(2,1))
+        self.assertGreaterEqual(cost,(sapiens.FUNCTION_TIMEOUT_S+2)*sapiens.PRICE_PER_SECOND*1e6)
+
+    def test_missing_modal_duration_retains_function_timeout_bound(self):
+        answer={k:v for k,v in ANSWER.items() if k!='seconds'}
+        c,_,_,patch=self._live([answer])
+        with patch,mock.patch.object(sapiens.time,'sleep'):
+            c.keypoints(self.img,[0,0,64,64])
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual(ledger.bound(rows)[:3],(400_000,1,1))
+
+    def test_completion_includes_the_call_wall_time_not_only_inference(self):
+        c,_,_,patch=self._live([ANSWER])
+        with patch,mock.patch.object(sapiens.time,'sleep'),mock.patch.object(sapiens.time,'monotonic',side_effect=[0,10]):
+            c.keypoints(self.img,[0,0,64,64])
+        rows=[json.loads(line) for line in (self.cache/ledger.LEDGER).read_text().splitlines()]
+        self.assertEqual(rows[1]['seconds'],10)
+        self.assertEqual(rows[1]['cost_usd'],10*sapiens.PRICE_PER_SECOND)
 
     def test_every_try_fails(self):
         c, _, _, patch = self._live([RuntimeError("a"), RuntimeError("b"), RuntimeError("c")])

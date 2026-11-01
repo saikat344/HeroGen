@@ -3,12 +3,18 @@ from __future__ import annotations
 import concurrent.futures
 import secrets
 import threading
+import json
+import sys
+from unittest import mock
 from test_herogen_service_support import Clock, TempDirCase, settings, png
 from herogen.service.store import Store, StoreError, new_id
 from herogen.service.admission import micro_usd, ADMIN, PUBLIC
 from herogen.service.fakes import FakeRunner
 from herogen.service.storage import Storage
 from herogen.service.worker import run_job, run_group, InPlaceWorkdir, make_context
+from herogen.service.worker import settle_admissions, reconcile, run_heldout
+from herogen.service.processes import identity
+from herogen.service.runner import CliRunner, plan_for
 from test_herogen_service_web import WebCase, Browser
 
 class TestAdmission(TempDirCase):
@@ -166,6 +172,172 @@ class TestAdmission(TempDirCase):
         u,_=self.guest(); j,_=self.job(u); self.store.user_delete(u['id'])
         row=self.store.budget_report()['admissions'][0]
         self.assertTrue(row['closed']); self.assertIsNone(row['actual_micro'])
+
+    def settlement_job(self, *, live=False, modal=False, complete=None):
+        u,_=self.guest(); job,_=self.job(u)
+        self.store.admission_work_begin(job['id'],'work','model',self.s.cost_signature,process=identity())
+        sent=dict(call_id='call',model='synthetic',endpoint='responses',key='request-hash',
+                  outcome='sent',deadline=self.clock()+120,price_usd=.01)
+        if modal:
+            sent.update(endpoint='modal/infer',timeout_s=1800,price_per_second=.001,price_usd=1.8)
+        self.store.admission_record(job['id'],'work','call',row=sent)
+        if complete is not None:
+            self.store.admission_record(job['id'],'work','call',row={**sent,**complete})
+        self.store.admission_work_end(job['id'],'work',False,worker_stopped=not live)
+        self.close(job)
+        return job,sent
+
+    def test_sent_crash_settles_at_full_price_only_after_deadline_and_grace(self):
+        job,sent=self.settlement_job()
+        self.assertEqual(settle_admissions(self.store),[])
+        self.clock.advance(180)
+        self.assertEqual(settle_admissions(self.store),[])
+        self.clock.advance(.001)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
+        report=self.store.budget_report(); row=report['admissions'][0]
+        self.assertEqual(row['actual_micro'],10_000); self.assertTrue(row['closed'])
+        self.assertTrue(row['auto_settled']); self.assertEqual(report['summary']['active'],0)
+        self.assertIn('1 calls, 1 charged at full price, ledger ',row['evidence'])
+        self.assertEqual(settle_admissions(self.store),[])
+        self.assertEqual(len([a for a in self.store.audit_list() if a['action']=='auto_settled']),1)
+
+    def test_live_worker_and_live_descendant_retain_the_reservation(self):
+        job,_=self.settlement_job(live=True); self.clock.advance(1000)
+        self.assertEqual(settle_admissions(self.store),[])
+        # A worker returning does not prove an orphaned child group stopped.
+        self.store.db.execute('INSERT INTO admission_processes VALUES (?,?,?,0)',('work',identity()['host'],123))
+        self.store.admission_work_end(job['id'],'work',False,worker_stopped=True)
+        with mock.patch('herogen.service.worker.stopped',return_value=False):
+            self.assertEqual(settle_admissions(self.store,process_stopped=lambda *a,**k:False),[])
+        self.assertIsNone(self.store.budget_report()['admissions'][0]['actual_micro'])
+
+    def test_unknown_modal_uses_function_timeout_times_gpu_price(self):
+        job,_=self.settlement_job(modal=True,complete={'outcome':'unknown','cost_usd':.001})
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
+        self.assertEqual(self.store.budget_report()['admissions'][0]['actual_micro'],1_800_000)
+
+    def test_normal_completion_uses_known_cost_without_counting_sent_twice(self):
+        job,_=self.settlement_job(complete={'outcome':'ok','cost_usd':.0031})
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
+        row=self.store.budget_report()['admissions'][0]
+        self.assertEqual(row['actual_micro'],3100); self.assertIn('0 charged at full price',row['evidence'])
+
+    def test_manual_reconcile_wins_after_settler_read_without_double_settlement(self):
+        job,_=self.settlement_job(); self.clock.advance(181)
+        auto=self.store.admission_auto_settle
+        def race(job_id,snapshot):
+            self.store.budget_reconcile(job_id,7,'Synthetic manual evidence',work_stopped=True)
+            return auto(job_id,snapshot)
+        with mock.patch.object(self.store,'admission_auto_settle',side_effect=race):
+            self.assertEqual(settle_admissions(self.store),[])
+        row=self.store.budget_report()['admissions'][0]
+        self.assertEqual(row['actual_micro'],7); self.assertFalse(row['auto_settled'])
+        self.assertEqual(len([a for a in self.store.audit_list() if a['action']=='generation_budget_reconciled']),1)
+
+    def test_expired_lease_does_not_prove_a_live_worker_stopped(self):
+        u,_=self.guest(); job,_=self.job(u); self.store.job_claim(job['id'],'call',10,2)
+        self.store.admission_work_begin(job['id'],'work','model',self.s.cost_signature,process=identity())
+        self.clock.advance(1000)
+        reconcile(self.store,self.s,lambda jid:'unused')
+        self.assertIsNone(self.store.budget_report()['admissions'][0]['actual_micro'])
+
+    def test_gone_worker_settles_after_sweep_and_foreign_or_missing_evidence_retains(self):
+        job,_=self.settlement_job(live=True); self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store,process_stopped=lambda *a,**k:True),[job['id']])
+        u,_=self.guest(); old,_=self.job(u)
+        self.store.admission_work_begin(old['id'],'old','model',self.s.cost_signature)
+        self.close(old)
+        self.clock.advance(1000)
+        self.assertEqual(settle_admissions(self.store,process_stopped=lambda *a,**k:True),[])
+
+    def test_changed_ledger_snapshot_cannot_settle(self):
+        job,_=self.settlement_job(); self.clock.advance(181)
+        snapshot=self.store._admission_snapshot(job['id'])
+        self.store.db.execute("UPDATE admission_calls SET receipt=? WHERE job_id=?",
+                             (json.dumps(dict(snapshot['calls'][0],deadline=self.clock()+1000)),job['id']))
+        self.assertFalse(self.store.admission_auto_settle(job['id'],snapshot))
+
+    def test_stage_subprocess_acknowledges_ledger_and_records_its_process_group(self):
+        user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
+        self.store.admission_work_begin(job['id'],'stage','model',self.s.cost_signature,process=identity())
+        ctx=make_context(self.s,storage,job); ctx.run_dir.mkdir(parents=True)
+        ctx.accounting=lambda action,**kw:self.store.admission_record(job['id'],'stage',action,**kw)
+        script="from pathlib import Path; from herogen.pipeline import ledger; import sys; ledger.sent(Path(sys.argv[1]),model='synthetic',endpoint='responses',key='hash',timeout=1,price_usd=.01)"
+        runner=CliRunner()
+        with mock.patch.object(runner,'available',return_value=None), \
+                mock.patch.object(runner,'command',return_value=([sys.executable,'-c',script,str(ctx.cache_dir)],None)):
+            runner.run(plan_for('sketch','best')[0],ctx)
+        snapshot=self.store._admission_snapshot(job['id'])
+        self.assertEqual(len(snapshot['calls']),1)
+        self.assertEqual(snapshot['calls'][0]['outcome'],'sent')
+        self.assertEqual(len(snapshot['processes']),1); self.assertTrue(snapshot['processes'][0]['stopped'])
+
+    def test_compute_receipts_use_elapsed_time_or_full_timeout(self):
+        user,_=self.guest(); job,_=self.job(user)
+        process={**identity(),'compute_timeout_s':100,'compute_price_per_second':.001}
+        self.store.admission_work_begin(job['id'],'compute','model',self.s.cost_signature,process=process)
+        self.store.admission_work_end(job['id'],'compute',False,worker_stopped=True,compute_seconds=2)
+        self.close(job); self.clock.advance(161)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
+        self.assertEqual(self.store.budget_report()['admissions'][0]['actual_micro'],2000)
+
+    def test_budgeted_stage_timeout_reaps_its_registered_process(self):
+        user,_=self.guest(); job,_=self.job(user); storage=Storage(self.s.data_dir)
+        self.store.admission_work_begin(job['id'],'timeout','model',self.s.cost_signature,process=identity())
+        ctx=make_context(self.s,storage,job); ctx.run_dir.mkdir(parents=True); ctx.timeout_s=.05
+        ctx.accounting=lambda action,**kw:self.store.admission_record(job['id'],'timeout',action,**kw)
+        runner=CliRunner()
+        with mock.patch.object(runner,'available',return_value=None), \
+                mock.patch.object(runner,'command',return_value=([sys.executable,'-c','import time; time.sleep(60)'],None)):
+            result=runner.run(plan_for('sketch','best')[0],ctx)
+        self.assertEqual(result.code,'timeout')
+        self.assertTrue(self.store._admission_snapshot(job['id'])['processes'][0]['stopped'])
+
+    def test_parallel_settlers_commit_once(self):
+        job,_=self.settlement_job(); self.clock.advance(181)
+        barrier=threading.Barrier(2); auto=self.store.admission_auto_settle
+        def compete(job_id,snapshot):
+            barrier.wait(timeout=10)
+            return auto(job_id,snapshot)
+        with mock.patch.object(self.store,'admission_auto_settle',side_effect=compete), \
+                concurrent.futures.ThreadPoolExecutor(2) as pool:
+            results=list(pool.map(lambda _:settle_admissions(self.store),range(2)))
+        self.assertEqual(sum(r==[job['id']] for r in results),1)
+        self.assertEqual(len([a for a in self.store.audit_list() if a['action']=='auto_settled']),1)
+
+    def test_pending_side_work_and_incomplete_prices_retain_reservations(self):
+        job,_=self.settlement_job(); self.clock.advance(181)
+        self.store.db.execute('UPDATE admissions SET side_done=0 WHERE job_id=?',(job['id'],))
+        self.assertEqual(settle_admissions(self.store),[])
+        self.store.db.execute('UPDATE admissions SET side_done=1 WHERE job_id=?',(job['id'],))
+        row=self.store._admission_snapshot(job['id'])['calls'][0]
+        row['price_usd']=None
+        self.store.db.execute('UPDATE admission_calls SET receipt=? WHERE job_id=?',(json.dumps(row),job['id']))
+        self.assertEqual(settle_admissions(self.store),[])
+        self.assertIsNone(self.store.budget_report()['admissions'][0]['actual_micro'])
+
+    def test_uncertain_work_can_confirm_exit_and_completion_but_cannot_send_again(self):
+        job,sent=self.settlement_job(live=True)
+        self.store.db.execute('INSERT INTO admission_processes VALUES (?,?,?,0)',('work',identity()['host'],123))
+        self.store.admission_record(job['id'],'work','process_stopped',host=identity()['host'],pid=123)
+        self.store.admission_record(job['id'],'work','call',row={**sent,'outcome':'ok','cost_usd':.002})
+        with self.assertRaises(ValueError): self.store.admission_record(job['id'],'work','call',row=sent)
+        self.store.admission_work_end(job['id'],'work',False,worker_stopped=True)
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
+        self.assertEqual(self.store.budget_report()['admissions'][0]['actual_micro'],2000)
+
+    def test_side_setup_exception_still_records_invocation_exit(self):
+        user,_=self.guest(); job,_=self.execute_job(user,FakeRunner(),lambda job:None)
+        def unavailable(claim): raise RuntimeError('Synthetic work folder failure')
+        with self.assertRaises(RuntimeError):
+            run_heldout(self.store,self.s,job,FakeRunner(),unavailable)
+        work=next(w for w in self.store._admission_snapshot(job['id'])['work'] if w['kind']=='heldout')
+        self.assertTrue(json.loads(work['process'])['stopped'])
+        self.clock.advance(61)
+        self.assertEqual(settle_admissions(self.store),[job['id']])
 
 
 class TestGuestHTTP(WebCase):
