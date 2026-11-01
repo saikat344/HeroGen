@@ -43,6 +43,8 @@ FROZEN = {
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
     "turnaround-v1": "e91c9ed957eadec81d24a0bee2c3bbd0c94eaac97dd1afd09b36ec54d6b3f7d1",
     "turnaround-v2": "8b9bb3ebf0d533efe7a80036e266e92bfd996dc3f916cff9361d8de1166fc44b",
+    "cover-redo-v1": "75a790168a42d41ec46216be0193efb3af6f60966a0a87381484d378264be570",
+    "turnaround-redo-v1": "b9f6a99f4ea46a88e7e1957beebb538c9305a28ae2bb09bd4fe5a643744c6ebd",
 }
 
 
@@ -190,7 +192,7 @@ class InstalledPackageTest(unittest.TestCase):
             q = subprocess.run([sys.executable, "-c", INSTALLED_CHECK, str(site)], capture_output=True, text=True,
                                timeout=120, cwd=tmp, env={**os.environ, "PYTHONPATH": str(site)})
             self.assertEqual(q.returncode, 0, q.stderr[-2000:])
-            self.assertIn("versions found: hero-sketch-v1", q.stdout)
+            self.assertIn("hero-sketch-v1", q.stdout)
 
 
 if __name__ == "__main__":
