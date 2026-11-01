@@ -1,0 +1,19 @@
+{
+  "name": "turnaround-v2",
+  "kind": "turnaround",
+  "summary": "Four orthographic views with explicit carried gear and accessory continuity.",
+  "steps": [
+    {
+      "name": "sheet",
+      "endpoint": "images/edits",
+      "model": "muse-image-1.0",
+      "params": {
+        "size": "2560x1024",
+        "n": 1,
+        "output_format": "png"
+      },
+      "prompt": "Character turnaround sheet of this exact character: same costume, colours and proportions. Four full-body views side by side in one horizontal row, all at exactly the same scale, feet on one shared baseline, heads at the same height, evenly spaced with wide empty gaps between the figures. Left to right: 1) front view; 2) right side view, a strict profile showing the character's right side, facing the right edge of the image; 3) back view; 4) left side view, a strict profile showing the character's left side, facing the left edge of the image. Draw it like a 3D model in an A-pose turned on a turntable: in the front and back views the arms are straight and angled out and down at 45 degrees, hands well away from the hips. Turned 90 degrees for the side views, those same arms point sideways toward and away from the viewer, so in profile they are hidden behind the body and only the near arm shows, running down beside the torso; nothing reaches forward. In each side view the head, chest, knees and toes all point the same way. Legs straight and slightly apart. No wind: loose cloth such as scarves, capes, coat tails and straps hangs straight down close to the body, the same in every view. Orthographic projection, no perspective. Plain flat white background, no shadows, no text, no labels, no grid lines. Keep every carried item and accessory, including bags and their straps, attached to the same place on the body in all four views, including both profiles; show each item's visible parts with natural occlusion."
+    }
+  ],
+  "sha256": "8b9bb3ebf0d533efe7a80036e266e92bfd996dc3f916cff9361d8de1166fc44b"
+}

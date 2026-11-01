@@ -41,6 +41,8 @@ FROZEN = {
     "hero-sketch-v2": "baea6e678b205dc10dccefa48c1c19d5da394f01870fd1bd9dac8d075b27294c",
     "same-character-v1": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9",
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
+    "turnaround-v1": "e91c9ed957eadec81d24a0bee2c3bbd0c94eaac97dd1afd09b36ec54d6b3f7d1",
+    "turnaround-v2": "8b9bb3ebf0d533efe7a80036e266e92bfd996dc3f916cff9361d8de1166fc44b",
 }
 
 
@@ -100,6 +102,18 @@ class FrozenVersions(unittest.TestCase):
         v2["name"], v2["sha256"] = v1["name"], v1["sha256"]
         self.assertEqual(v2, v1)
 
+    def test_turnaround_preserves_legacy_and_only_adds_gear_continuity(self):
+        from herogen.pipeline.stages import SHEET_SIZE, TURNAROUND_PROMPT
+
+        before = prompts.load("turnaround-v1").step("sheet")
+        after = prompts.load("turnaround-v2").step("sheet")
+        self.assertEqual(before["prompt"], TURNAROUND_PROMPT)
+        self.assertEqual(before["params"], {"size": SHEET_SIZE, "n": 1, "output_format": "png"})
+        extra = (" Keep every carried item and accessory, including bags and their straps, attached to the same "
+                 "place on the body in all four views, including both profiles; show each item's visible "
+                 "parts with natural occlusion.")
+        self.assertEqual(after, {**before, "prompt": before["prompt"] + extra})
+
 
 class Calibration(unittest.TestCase):
     def test_every_calibration_matches_its_frozen_version(self):
@@ -133,6 +147,9 @@ class Selection(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v2")
         self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
+        self.assertEqual(prompts.selected("turnaround").name, "turnaround-v1")
+        with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v2"}):
+            self.assertEqual(prompts.selected("turnaround").name, "turnaround-v2")
 
     def test_env_override_and_explicit(self):
         with mock.patch.dict(os.environ, {"HEROGEN_PROMPT_SKETCH_VERSION": "no-such-v9"}):
