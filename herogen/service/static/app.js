@@ -154,10 +154,8 @@ async function initVerify() {
 // ---- jobs ----------------------------------------------------------------------------------------------
 
 function renderQuota(u) {
-  if (S.session?.user?.kind === 'guest') {
-    $('#quota').textContent = 'One active generation per workspace.';
-    return;
-  }
+  // Guests have no daily count to show; the server's refusal says when this workspace already has a hero running.
+  if (S.session?.user?.kind === 'guest') { $('#quota').textContent = ''; return; }
   if (!u) return;
   $('#quota').textContent = `${u.jobs_today} of ${u.jobs_per_day} heroes in the last 24 hours, ${u.jobs_total} of ${u.jobs_total_limit} in total.`;
 }
@@ -398,9 +396,10 @@ function updateAccessSummary() {
   const refused = guest && S.session.generation?.accepting === false;
   show('#guestAccessSummary', refused);
   if (!refused) return;
-  const reasons = { generation_paused: 'Live generation is temporarily paused.', cost_bound_unverified: 'Live generation is paused while its cost bound is verified.',
-    generation_budget_exhausted: 'The live-generation budget is currently allocated.', generation_capacity: 'All live-generation slots are occupied. Try again shortly.' };
-  $('#guestAccessText').textContent = `${reasons[S.session.generation.reason] || reasons.generation_paused} One active generation per workspace. Existing results remain available.`;
+  // Say only why generation is closed right now; the per-workspace rule is the server's workspace_active refusal.
+  const reasons = { generation_paused: 'Live generation is paused right now.', cost_bound_unverified: 'Live generation is paused while its cost bound is verified.',
+    generation_budget_exhausted: 'The live-generation budget is used up for now.', generation_capacity: 'Every live-generation slot is busy. Try again in a moment.' };
+  $('#guestAccessText').textContent = `${reasons[S.session.generation.reason] || reasons.generation_paused} You can still explore the generated heroes.`;
 }
 function expireAccess() {
   if (S.session) S.session.signed_in = false;

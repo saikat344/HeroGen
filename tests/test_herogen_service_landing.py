@@ -236,17 +236,18 @@ class TestGuestAccessSummary(ServiceBrowserCase):
         t = self.tab
         self.open_guest_workspace()
         self.assertTrue(t.eval("document.querySelector('#guestAccessSummary').hidden"))
+        self.assertEqual(t.eval("document.querySelector('#quota').textContent"), '')
         policy = self.store.db.execute('SELECT limit_micro, reserve_micro FROM admission_policy WHERE id=1').fetchone()
-        suffix = ' One active generation per workspace. Existing results remain available.'
+        suffix = ' You can still explore the generated heroes.'
         refusals = [
-            ('generation_paused', 'Live generation is temporarily paused.',
+            ('generation_paused', 'Live generation is paused right now.',
              [('UPDATE admission_policy SET enabled=0', ())]),
             ('cost_bound_unverified', 'Live generation is paused while its cost bound is verified.',
              [('UPDATE admission_policy SET code_commit=?', ('b' * 40,))]),
-            ('generation_budget_exhausted', 'The live-generation budget is currently allocated.',
+            ('generation_budget_exhausted', 'The live-generation budget is used up for now.',
              [('INSERT INTO budget_overhead(id, amount_micro, evidence, updated_at) VALUES (1, ?, ?, ?)',
                (policy['limit_micro'] - policy['reserve_micro'] + 1, 'synthetic browser fixture', time.time()))]),
-            ('generation_capacity', 'All live-generation slots are occupied. Try again shortly.',
+            ('generation_capacity', 'Every live-generation slot is busy. Try again in a moment.',
              [('UPDATE admission_policy SET max_active=1', ()),
               ('INSERT INTO admissions(job_id, user_id, client_key, amount_micro, cost_signature, created_at) '
                "VALUES ('fixture-capacity', 'fixture-refusal', 'fixture', ?, 'fixture', ?)",
