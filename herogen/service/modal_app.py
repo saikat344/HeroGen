@@ -11,8 +11,8 @@ What runs where:
   snapshot on the `<app>-meta` volume after every write (`snapshot.py`).
 - `web`: the ASGI app (Starlette), many concurrent requests per container; holds the `<app>-web` secret
   (HEROGEN_SESSION_KEY, HEROGEN_EMAIL_API_KEY); reads and writes the `<app>-data` volume; reads `<app>-legal`.
-  It can call the store's service methods only; admin methods need the `<app>-admin` key (HEROGEN_ADMIN_KEY),
-  which only `StoreService` and `admin_command` hold.
+  It also holds `<app>-admin` (HEROGEN_ADMIN_KEY) to update settings after admin authentication.
+  Stage workers hold no admin key.
 - `sanitize_image`: opens uploads, with no network, no secrets and no volumes.
 - `run_job`: one orchestrator per job attempt; `model_stages` (holds `<app>-model`: MODEL_API_KEY),
   `blender_stages` (Blender 4.5 LTS; SAM 3D through the deployed GPU apps by default, and
@@ -209,8 +209,7 @@ class StoreService:
 
     @modal.method()
     def admin_call(self, key: str, name: str, args: tuple, kwargs: dict):
-        """Admin methods (Store.ADMIN), only with the admin key, which only `admin_command` holds besides this
-        container: the web and worker functions cannot reach them."""
+        """Admin methods (Store.ADMIN), authenticated by the key held by web and admin functions."""
         import hmac
 
         from herogen.service.store import Store, StoreError
