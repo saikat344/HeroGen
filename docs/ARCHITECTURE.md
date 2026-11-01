@@ -529,38 +529,31 @@ paint where silhouettes differ. The separate silhouette and geometry gates still
 the active reference and limits, and `comparison_mask` records the mask rule. A view-bake primary retains the
 original gating checks and limits, error <= 12 and SSIM >= 0.70, with no transfer checks.
 
-Transfer limits are **error <= 20.845, SSIM >= 0.53885**, calibrated on seven matching complete refinements
-with full Stage 4 runs under `roblox-ingame`. The view-bake control uses the comparison textures on the same
-body; the registration control shifts both refined body textures by one quarter of their UV width. Each stage
-must pass every view, equivalently maximum per-view error <= limit and minimum per-view SSIM >= limit.
-The table gives these maximum-error / minimum-SSIM pairs; they need not occur in the same view.
+Transfer limits are **error <= 20.92, SSIM >= 0.53655**, calibrated on seven matching complete refinements
+with full Stage 4 cage transfers under `roblox-ingame`. The view-bake control uses the comparison textures
+on the same body; the registration control shifts both refined body textures by one quarter of their UV
+width. Each stage must pass every view, equivalently maximum per-view error <= limit and minimum per-view
+SSIM >= limit. The table gives these maximum-error / minimum-SSIM pairs; they need not occur in the same view.
 
 | Run | Correct transfer | View-bake control | Shifted refined textures |
 | --- | --- | --- | --- |
-| s001 | 6.42 / 0.7837 | 47.53 / 0.3998 | 61.92 / 0.2321 |
-| s009 | 11.37 / 0.6050 | 32.69 / 0.2560 | 31.99 / 0.3128 |
-| s018 | 3.62 / 0.8522 | 35.25 / 0.4727 | 49.88 / 0.3344 |
-| s029 | 4.64 / 0.7646 | 39.50 / 0.4454 | 50.39 / 0.3286 |
-| s033 | 7.49 / 0.6953 | 30.32 / 0.2661 | 38.61 / 0.2389 |
-| s035 | 3.22 / 0.8547 | 36.56 / 0.3658 | 62.08 / 0.3135 |
-| s036 | 7.61 / 0.7369 | 52.82 / 0.1699 | 50.80 / 0.2001 |
+| s001 | 6.57 / 0.7928 | 47.53 / 0.3998 | 62.01 / 0.2283 |
+| s009 | 11.52 / 0.6004 | 32.69 / 0.2560 | 32.39 / 0.3101 |
+| s018 | 3.66 / 0.8493 | 35.25 / 0.4727 | 50.44 / 0.3285 |
+| s029 | 4.82 / 0.7631 | 39.50 / 0.4454 | 50.30 / 0.3193 |
+| s033 | 7.22 / 0.7074 | 30.32 / 0.2661 | 38.55 / 0.2367 |
+| s035 | 3.36 / 0.8441 | 36.56 / 0.3658 | 62.07 / 0.3030 |
+| s036 | 7.72 / 0.7332 | 52.82 / 0.1699 | 51.33 / 0.1944 |
 
-The worst correct boundaries are 11.37 / 0.6050; nearest control stage boundaries are 30.32 / 0.4727.
-Midpoints give equal margins of 9.475 colour levels and 0.06615 SSIM on each side of those boundaries.
-Every correct view passes, and all fourteen four-view controls fail both aggregate metrics. All control
-per-view colour errors also exceed the limit: the nearest is 24.69, a margin of 3.845. No existing geometry,
-frame or turnaround threshold was changed. These measurements calibrate transfer under `roblox-ingame`,
-not a new claim of turnaround or ground-truth reconstruction accuracy.
-
-Command on each copied best run, after adding the matching refinement record, GLB, source UV NPZ and source PNG:
-
-```sh
-python -m herogen.blender run --run <copied-run> --stages 4 --profile roblox-ingame --force
-```
-
-The midpoint calculation above is over `texture.transfer_metrics` and the same `compare` measurements of
-the two controls, rendered with those contract cameras. The s009 calibration run took about 12.5 minutes,
-versus 11.6 minutes before exact lookup.
+The worst correct boundaries are 11.52 / 0.6004; nearest
+control stage boundaries are 30.32 / 0.4727.
+Midpoints give equal margins of 9.4 colour levels and
+0.06385 SSIM on each side. Every correct view passes, and all fourteen four-view
+controls fail the final predicate, without overlap. Calibration command:
+`python -m herogen.blender run --run <copy> --stages 4 --profile roblox-ingame --force`, followed by the same
+contract-camera render for each control. These are measurements of colour transfer from the validated
+refinement, not acceptance of the mesh's separate silhouette, joint or topology gates. No frame, geometry
+or original turnaround threshold is changed.
 
 Without an eligible refined source, stage 4 colours each LOD's UV atlas by projecting the observed side views (front, back, left, right; a derived
 top view has no colour of its own) onto the body (`herogen/blender/texture.py`). Each texel's surface point is
@@ -583,14 +576,26 @@ all three. The profiles' `texture_max_px` check counts the Head texture with the
 when its area-weighted normal points within 60 degrees of -Y. Scaling whole islands preserves their shape
 and continuous edges. Packing then fits them into the same texture with the same gutter. The view bake's
 packing is unchanged. `head_front_island_scale` records the selected allocation and `bake.*.sampling` records
-the lookup method. On s009, this raises Head UV fill from 47.9% to 59.3% and frontal texel density from
-440 to 706 texels per stud at 1024. Exact lookup raises face-close-up SSIM from 0.6429/0.5911 to 0.7013/0.6234
-at 0/40 degrees. Frontal weighting brings gradient energy relative to the refined close-up from
-0.889/0.655 to 0.960/0.677, with SSIM 0.6962/0.6200. A global 2048 source mip gives SSIM 0.7090/0.6362 but
-reduces gradient energy to 0.759/0.538; it is not used. These are transfer measurements on the same world-space
-head crop at 512 pixels, flat Workbench rendering, using `texture.compare` and masked gradient energy; 40 degrees
-is a camera the atlas was never projected from. The Head stays at 1024 because the texture specification's
-UV-mapping section explicitly states "Maximum Texture Resolution" of 1024 by 1024.
+the lookup method. On s009, this allocation raises Head UV fill from 47.9% to 59.3% and frontal density
+from 440 to 706 texels per stud at 1024; density and packing are unchanged by the cage projection.
+
+Measured exported-Head transfer on the same 512-pixel world-space crop, flat Workbench rendering:
+
+| Projection | Angle | RGB error | SSIM | Gradient energy / reference |
+| --- | ---: | ---: | ---: | ---: |
+| Closest triangle | 0 | 8.98 | 0.6962 | 0.9599 |
+| Closest triangle | 40 | 10.64 | 0.6200 | 0.6772 |
+| Closest triangle | -40 | 14.74 | 0.5845 | 0.8569 |
+| Smooth cage | 0 | 8.61 | 0.6930 | 0.9770 |
+| Smooth cage | 40 | 11.00 | 0.6209 | 0.7161 |
+| Smooth cage | -40 | 13.16 | 0.6226 | 0.8700 |
+
+The reference is the placed refined mesh with its own UVs and painting. compare() uses its existing inset
+mask intersection; gradient energy uses luminance squared gradients within a three-pixel erosion of that
+intersection. The +/-40-degree cameras were never projected from to make the atlas. Global image metrics
+also reflect geometric simplification and smooth correspondence stretch, so they do not replace the
+local fold measurement. No global mip filter is applied. The Head stays at 1024 because the texture
+specification's UV-mapping section explicitly states "Maximum Texture Resolution" of 1024 by 1024.
 
 **Close-ups in the view-baked Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
 image is unchanged (its SHA-256) and the view is a colour view. A malformed record (wrong JSON types, a singular
