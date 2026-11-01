@@ -24,6 +24,20 @@ RF3H = (
     "shadowless lighting: do not add shadows, highlights or shading."
 )
 
+RF2W = (
+    "Turn the first image, a render of a 3D character {view}, into a crisp, high-detail, high-resolution "
+    "render of the same character from exactly the same viewpoint. Keep everything in the first image exactly "
+    "where it is: the same framing and size (do not zoom, crop, recentre or rotate), outline, pose, head angle, "
+    "proportions, hairstyle shape and colours, and the same plain grey background. Match the colours, value "
+    "range, material contrast and wear of the second image: scratches, pitting, rust, grime, dark crevices "
+    "between plates and under straps, and painted edge highlights as in the artwork. Keep crisp eyes (irises, "
+    "pupils, eyelids, lashes), eyebrows, nose, lips and ears wherever they are visible; a clean hairline and "
+    "hair locks; clean clothing edges, seams and folds. The second image is the character's design: make the "
+    "details match it, but never copy its framing, pose or viewing angle, and never add a face or features "
+    "where the first image does not show them. Use flat, even lighting with no cast shadows and no directional "
+    "lighting that would differ between views; keep only the shading, highlights and wear painted in the artwork."
+)
+
 RF4U = (
     "Repaint the first image, a close-up render of a 3D character, with fine surface detail. Keep the exact "
     "outline, geometry, pose, viewpoint, framing and colours of the first image: do not zoom, crop, recentre, "
@@ -55,7 +69,7 @@ RF5U = (
     "illumination with no cast shadows or directional lighting."
 )
 
-PROMPTS = {"RF2R": RF2R, "RF3H": RF3H, "RF4U": RF4U, "RF5U": RF5U}
+PROMPTS = {"RF2R": RF2R, "RF2W": RF2W, "RF3H": RF3H, "RF4U": RF4U, "RF5U": RF5U}
 
 VIEWS = {
     0: "seen from the front",

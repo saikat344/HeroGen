@@ -225,6 +225,7 @@ class RegistrationTests(unittest.TestCase):
         import hashlib
 
         self.assertEqual({k: hashlib.sha256(v.encode()).hexdigest() for k, v in prompts.PROMPTS.items()}, {
+            "RF2W": "aebe4402f963921b91f79ba9fd54b8ff9d0ec0242110b21fa210578b7db4e090",
             "RF2R": "794b08622f4ff650261513c39aee5f8ac9b92e6c9bfaf65a1334c96b86d4b224",
             "RF4U": "8bdcf59595af8968867cbd4c096d29d9dced84a96382a21fa3d4f025e088265e",
             "RF5U": "950c00c50c62bc9d35035a303de4c14622323b2fac5204ff029d87b0a2034791",
@@ -892,6 +893,35 @@ class StageTests(unittest.TestCase):
         self.assertEqual(rec["views"]["close-chest+0"]["tries"], 1)
         self.assert_error_record()
 
+    def test_default_recipe_is_rf2r(self):
+        rec = stage.run_stage3f(self.run, self.client)
+        self.assertEqual(rec["recipes"], ["RF2R", "RF3H"])
+        self.assertEqual(rec["repaint_recipe"], "RF2R")
+        sent = [prompt for prompt, _, _ in self.client.inputs]
+        self.assertTrue(any("Only make it sharp" in text for text in sent))
+        self.assertFalse(any("scratches, pitting, rust" in text for text in sent))
+
+    def test_rf2w_recipe_selects_wear_prompt_and_hair_keeps_rf3h(self):
+        rec = stage.run_stage3f(self.run, self.client, recipe="RF2W")
+        self.assertEqual(rec["recipes"], ["RF2W", "RF3H"])
+        self.assertEqual(rec["repaint_recipe"], "RF2W")
+        sent = [prompt for prompt, _, _ in self.client.inputs]
+        self.assertTrue(any("scratches, pitting, rust" in text for text in sent))
+        self.assertFalse(any("Only make it sharp" in text for text in sent))
+        self.assertTrue(all(view["prompt"] in ("RF2W", "RF3H") for view in rec["views"].values()))
+        self.assertTrue(any(view["prompt"] == "RF3H" for view in rec["views"].values()))
+
+    def test_original_recipe_remains_selectable(self):
+        rec = stage.run_stage3f(self.run, self.client, recipe="RF2R")
+        self.assertEqual(rec["recipes"], ["RF2R", "RF3H"])
+        self.assertTrue(any("Only make it sharp" in text for text, _, _ in self.client.inputs))
+
+    def test_unknown_recipe_is_rejected_before_any_call(self):
+        with self.assertRaises(ValueError):
+            stage.run_stage3f(self.run, self.client, recipe="RF9X")
+        self.assertEqual(self.client.inputs, [])
+        self.assertEqual(self.client.log.calls, [])
+
     def test_no_source_is_skipped(self):
         (self.run / "03-source.glb").unlink()
         rec = stage.run_stage3f(self.run, self.client)
@@ -1042,6 +1072,21 @@ bpy.ops.export_scene.gltf(filepath=str(Path(__file__).with_name("source.glb")), 
 
 
 class RunnerTests(unittest.TestCase):
+    def test_cli_selects_normal_recipe_and_keeps_optional_closeups_off(self):
+        import contextlib
+        import io
+        from herogen.blender.__main__ import main
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "stage-3.json").write_text('{"ok":true}')
+            for args, expected in (([], "RF2R"), (["--refine-recipe", "RF2R"], "RF2R"),
+                                   (["--refine-recipe", "RF2W"], "RF2W")):
+                with mock.patch.object(stage, "run_stage3f", return_value={"ok": True}) as called, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["run", "--run", str(run), "--stages", "3f", *args]), 0)
+                self.assertEqual(called.call_args.kwargs["recipe"], expected)
+                self.assertFalse(called.call_args.kwargs["upscale_texture"])
+
     def test_cli_default_orders_refine_after_mesh_and_before_body(self):
         from herogen.blender.__main__ import main
         import contextlib
