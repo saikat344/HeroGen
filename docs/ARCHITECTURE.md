@@ -2272,7 +2272,7 @@ worker image installs SciPy 1.18.1 (BSD-3-Clause), required by hybrid orientatio
 
 The GPU runners initialize their pinned models in `Model.load`, a Modal container entry hook. Each
 container handles one request at a time and retains the loaded Objects pipeline or Body estimator/FOV model
-between calls. `HEROGEN_OBJECTS_MIN_CONTAINERS` and `HEROGEN_BODY_MIN_CONTAINERS` default to one;
+between calls. `HEROGEN_OBJECTS_MIN_CONTAINERS` and `HEROGEN_BODY_MIN_CONTAINERS` default to zero;
 the matching `MAX_CONTAINERS` settings also default to one. The idle scale-down window is 300 seconds,
 and platform retries are disabled. Deploy both updated runners before the updated bridge. The bridge
 checks the deployed runner source hash and configured GPU against the requested runner before inference;
@@ -2280,6 +2280,13 @@ a mismatch fails loudly. `HEROGEN_OBJECTS_APP` and `HEROGEN_BODY_APP` can name i
 For local calls, `HEROGEN_REMOTE_DEPLOYED=1` selects the same bridge; ordinary `modal run` calls remain
 ephemeral and pay startup again. Stop finite benchmark deployments explicitly after draining their inputs.
 Warm capacity avoids startup only after the entry hook has completed; deployment and recovery still take time.
+
+`herogen.blender.remote.prewarm(kinds=("objects", "body"))` explicitly submits each deployed model's
+lightweight `warm` method with `.spawn()`, returning without waiting for model loading. The container entry
+hook loads the model before `warm` returns. Attempts (including failed submissions) are limited to one per app
+per process per 60 seconds; app-name overrides apply here too. `HEROGEN_PREWARM=0` disables submission.
+Submission failures produce one warning per call and never interrupt the caller. Remote execution failures
+remain on Modal's call logs. This helper is opt-in; the service does not call it automatically.
 
 Stage 3 starts Body inference from the selected front image and mask box beside Objects by default.
 Fitting/remeshing remains unchanged, and Body-to-mesh joint conversion, record updates and acceptance
