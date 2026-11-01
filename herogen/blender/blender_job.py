@@ -13,6 +13,7 @@ import json
 import math
 import sys
 import time
+from pathlib import Path
 
 import bpy
 import numpy as np
@@ -228,6 +229,28 @@ def task_decimate(t):
     return out
 
 
+def task_textured_mesh(t):
+    """Render a mesh already placed in the contract camera frame, retaining its own corner UVs.
+
+    NPZ keys: verts, faces, corner_uv. uv_origin is bottom for Blender UVs, top for load_source's image UVs.
+    Rendering uses the same silhouette and flat Workbench settings as task_body's rest renders.
+    """
+    scene = reset_scene()
+    d = np.load(t["mesh"])
+    uv = d["corner_uv"].copy()
+    if t.get("uv_origin", "bottom") == "top":
+        uv[..., 1] = 1.0 - uv[..., 1]   # load_source uses image-row UVs; Blender uses bottom-up V
+    make_object("Reference", d["verts"], d["faces"], uv=uv, image=t["texture"])
+    out = {"silhouettes": {}, "textured": {}}
+    for cam in t["cameras"]:
+        for key, silhouette in (("silhouettes", True), ("textured", False)):
+            setup_render(scene, cam["resolution"], silhouette=silhouette, texture="flat")
+            path = f'{t["out_dir"]}/{key}-{cam["view"]}.png'
+            render_to(scene, add_camera(cam), path)
+            out[key][cam["view"]] = path
+    return out
+
+
 HEAD_TEXTURE_MATERIAL = "HeadTexture"
 
 
@@ -281,6 +304,21 @@ def task_uv(t):
                                 else t.get("separate_margin", margin))
             bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.0,
                                      area_weight=0.0, correct_aspect=True, scale_to_bounds=False)
+            if names == ["Head"] and t.get("head_front_density", 1.0) != 1.0:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from uv_density import weight_front
+
+                bpy.ops.object.mode_set(mode="OBJECT")
+                me = objs["Head"].data
+                co = np.empty(len(me.vertices) * 3)
+                me.vertices.foreach_get("co", co)
+                faces = np.array([p.vertices[:] for p in me.polygons], dtype=np.int64)
+                uv = np.empty(len(me.loops) * 2)
+                me.uv_layers.active.data.foreach_get("uv", uv)
+                weighted = weight_front(co.reshape(-1, 3), faces, uv.reshape(-1, 3, 2),
+                                        t["head_front_density"])
+                me.uv_layers.active.data.foreach_set("uv", weighted.reshape(-1))
+                bpy.ops.object.mode_set(mode="EDIT")
             bpy.ops.uv.select_all(action="SELECT")
             bpy.ops.uv.pack_islands(rotate=True, margin=group_margin, shape_method="CONCAVE",
                                      margin_method="FRACTION")
@@ -343,7 +381,7 @@ def main():
     for t in job["tasks"]:
         t0 = time.time()
         fn = {"silhouettes": task_silhouettes, "decimate": task_decimate, "body": task_body,
-              "uv": task_uv}[t["task"]]
+              "uv": task_uv, "textured_mesh": task_textured_mesh}[t["task"]]
         r = fn(t)
         r["task"] = t["task"]
         r["seconds"] = round(time.time() - t0, 3)

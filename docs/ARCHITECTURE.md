@@ -468,8 +468,11 @@ Placement distances to the NPZ surface are recorded both for directly mapped poi
 to rounding) and for samples interpolated across the placed refined mesh. The latter exposes new refined edges
 that span multiple source triangles under a non-affine map.
 
-On success, `texture.bake(primary=SourceColour(...))` samples the transformed refined mesh for every covered
-texel of both the shared atlas and the Head texture, at every LOD the profile builds. Stage 2f close-ups are
+On success, `texture.bake(primary=SourceColour(..., exact=True))` samples the transformed refined mesh for every covered
+texel of both the shared atlas and the Head texture, at every LOD the profile builds. It finds the exact closest
+triangle and interpolates its corner UVs with barycentric coordinates. Dense surface samples supply only
+distance bounds to accelerate this search; they never select the UV. This removes the coarse mosaic caused
+by snapping texels to one of 15 samples per source triangle. Stage 2f close-ups are
 not applied to these textures. The existing UV rasterisation, whole-body depth handling and eight iterations
 of island padding remain unchanged. High LOD also writes `atlas-high-views.png` and
 `atlas-head-high-views.png`: the previous view bake, including the raw source fallback and Head close-ups.
@@ -481,9 +484,61 @@ the source hash and completion status prevent reuse after a source replacement o
 and `refined`: both GLB/source hashes, `source_correspondence` with the method, sizes, raw geometry and placed
 surface-distance mean/p95/max (also as fractions of bbox diagonal), sample counts, raw threshold, and any fallback
 reason. The diagnostic `refined_texture` check reports eligibility
-without failing a valid view fallback. Each primary bake records full texel coverage and nearest sampled
+without failing a valid view fallback. Each primary bake records full texel coverage and exact nearest
 colour-source distances separately from the exact frame check. Notes explicitly identify the refined Head
 texture and suppression of close-ups; comparison close-ups are listed separately.
+
+**Texture gates follow the colour source.** Refined-primary `texture_colour_error_<view>` and
+`texture_ssim_<view>` compare the high body's flat rest renders with the placed refined mesh's own painting,
+not the turnaround painting. `refined_colour.load`'s placed vertices, faces and corner UVs are written to a
+reference NPZ; its own image is rendered by Blender's `textured_mesh` task. The loader's image-row V coordinates
+are explicitly flipped to Blender's bottom-up V. Both reference and body use the identical `View.camera()`
+definitions, resolutions and flat Workbench settings. References live under `04-body/rest-renders/refined/`.
+`texture_transfer_views` requires a reference comparison for every contract colour camera; an absent or partial
+reference fails instead of silently switching to turnaround gates.
+
+Both comparisons call the existing `texture.compare`: metric centres lie in the intersection of both masks
+with its existing two-pixel inset. The SSIM Gaussian windows retain their existing neighbouring image context.
+The intersection isolates colour on shared visible surfaces; counting the union would mix background and
+paint where silhouettes differ. The separate silhouette and geometry gates still measure shape differences.
+`texture.rest_metrics` always retains the turnaround numbers. When refined is primary, the corresponding
+`texture_turnaround_colour_error_<view>` / `texture_turnaround_ssim_<view>` checks have `gate: false` and
+`reference: turnaround`. `texture.transfer_metrics` holds the refined comparisons; `texture.gates` identifies
+the active reference and limits, and `comparison_mask` records the mask rule. A view-bake primary retains the
+original gating checks and limits, error <= 12 and SSIM >= 0.70, with no transfer checks.
+
+Transfer limits are **error <= 20.845, SSIM >= 0.53885**, calibrated on seven matching complete refinements
+with full Stage 4 runs under `roblox-ingame`. The view-bake control uses the comparison textures on the same
+body; the registration control shifts both refined body textures by one quarter of their UV width. Each stage
+must pass every view, equivalently maximum per-view error <= limit and minimum per-view SSIM >= limit.
+The table gives these maximum-error / minimum-SSIM pairs; they need not occur in the same view.
+
+| Run | Correct transfer | View-bake control | Shifted refined textures |
+| --- | --- | --- | --- |
+| s001 | 6.42 / 0.7837 | 47.53 / 0.3998 | 61.92 / 0.2321 |
+| s009 | 11.37 / 0.6050 | 32.69 / 0.2560 | 31.99 / 0.3128 |
+| s018 | 3.62 / 0.8522 | 35.25 / 0.4727 | 49.88 / 0.3344 |
+| s029 | 4.64 / 0.7646 | 39.50 / 0.4454 | 50.39 / 0.3286 |
+| s033 | 7.49 / 0.6953 | 30.32 / 0.2661 | 38.61 / 0.2389 |
+| s035 | 3.22 / 0.8547 | 36.56 / 0.3658 | 62.08 / 0.3135 |
+| s036 | 7.61 / 0.7369 | 52.82 / 0.1699 | 50.80 / 0.2001 |
+
+The worst correct boundaries are 11.37 / 0.6050; nearest control stage boundaries are 30.32 / 0.4727.
+Midpoints give equal margins of 9.475 colour levels and 0.06615 SSIM on each side of those boundaries.
+Every correct view passes, and all fourteen four-view controls fail both aggregate metrics. All control
+per-view colour errors also exceed the limit: the nearest is 24.69, a margin of 3.845. No existing geometry,
+frame or turnaround threshold was changed. These measurements calibrate transfer under `roblox-ingame`,
+not a new claim of turnaround or ground-truth reconstruction accuracy.
+
+Command on each copied best run, after adding the matching refinement record, GLB, source UV NPZ and source PNG:
+
+```sh
+python -m herogen.blender run --run <copied-run> --stages 4 --profile roblox-ingame --force
+```
+
+The midpoint calculation above is over `texture.transfer_metrics` and the same `compare` measurements of
+the two controls, rendered with those contract cameras. The s009 calibration run took about 12.5 minutes,
+versus 11.6 minutes before exact lookup.
 
 Without an eligible refined source, stage 4 colours each LOD's UV atlas by projecting the observed side views (front, back, left, right; a derived
 top view has no colour of its own) onto the body (`herogen/blender/texture.py`). Each texel's surface point is
@@ -502,7 +557,18 @@ still hidden by the other's. Roblox's texture specification
 its UV mapping section, and 4096 x 4096 for textures in general. The Marketplace character specification
 (create.roblox.com/docs/art/characters/specifications) caps textures at 2048 x 2048. A 1024 px Head texture is within
 all three. The profiles' `texture_max_px` check counts the Head texture with the atlas: 1024 under `roblox-avatar`'s
-2048 cap.
+2048 cap. Refined-primary Head packing scales frontal UV islands by 2 before packing; an island is frontal
+when its area-weighted normal points within 60 degrees of -Y. Scaling whole islands preserves their shape
+and continuous edges. Packing then fits them into the same texture with the same gutter. The view bake's
+packing is unchanged. `head_front_island_scale` records the selected allocation and `bake.*.sampling` records
+the lookup method. On s009, this raises Head UV fill from 47.9% to 59.3% and frontal texel density from
+440 to 706 texels per stud at 1024. Exact lookup raises face-close-up SSIM from 0.6429/0.5911 to 0.7013/0.6234
+at 0/40 degrees. Frontal weighting brings gradient energy relative to the refined close-up from
+0.889/0.655 to 0.960/0.677, with SSIM 0.6962/0.6200. A global 2048 source mip gives SSIM 0.7090/0.6362 but
+reduces gradient energy to 0.759/0.538; it is not used. These are transfer measurements on the same world-space
+head crop at 512 pixels, flat Workbench rendering, using `texture.compare` and masked gradient energy; 40 degrees
+is a camera the atlas was never projected from. The Head stays at 1024 because the texture specification's
+UV-mapping section explicitly states "Maximum Texture Resolution" of 1024 by 1024.
 
 **Close-ups in the view-baked Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
 image is unchanged (its SHA-256) and the view is a colour view. A malformed record (wrong JSON types, a singular
@@ -658,7 +724,7 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
   as `review/`, `rejected/` or `archive/`, are never scored.
 - **Placement.** Turnaround views use stage 3's mapping: one pixel scale (the front mask's height over the
   body's height), u = 0 on each mask's box centre, feet on its bottom edge. Stage 4 bodies are placed as built
-  (`"frame": "contract"`), so a stage 4 body is scored with the same mapping and metric as stage 4's gates;
+  (`"frame": "contract"`), so a stage 4 body is scored with the same mapping and metric as stage 4's turnaround comparisons;
   other GLBs by their own bounding box (`"frame": "fit"`). A held-out view's yaw is searched (2 degrees, then
   0.5 around the best) 25 degrees each side of the target its name gives (`front-left-30`: 5 to 55;
   `front-right-60`: -85 to -35), except `front-left-34` (the single three-quarter view an earlier stage 2h wrote,
@@ -669,7 +735,8 @@ numpy only, so any GLB can be compared with ours on the same views (`herogen/ble
   `found_yaw_deg` for the view, when it records them.
 - **Measures, per view.** Silhouette IoU; colour error (mean absolute, 0-255) and grey SSIM between a flat render
   of the body's own colours (base-colour texture, factor and vertex colours; nearest surface, no lighting) and
-  the view's image, inside both silhouettes as stage 4's texture gates measure them; `seen_shape` (the shape was
+  the view's image, inside both silhouettes as stage 4's turnaround comparisons measure them (diagnostic when
+  refined colour is primary); `seen_shape` (the shape was
   built from the view), `seen_colour` (the colours were) and `seen` (either), from `sections.json`
   (`shape_views`, `texture.colour_views`) or `--seen` / `--seen-shape`. A held-out view is never seen. A body's
   shape, a ground-truth body's included, is its alpha-clipped surface: faces of an `alphaMode: MASK` material

@@ -33,6 +33,102 @@ def _open_edges(faces):
     return int((c == 1).sum())
 
 
+@unittest.skipUnless(HAVE_DEPS and bl.find_blender(), "Blender is required")
+class TexturedReferenceTests(unittest.TestCase):
+    def test_reference_image_uvs_and_contract_camera_frame(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            verts = np.array([[-.5, 0, 0], [.5, 0, 0], [-.5, 0, 2], [.5, 0, 2]])
+            faces = np.array([[0, 1, 2], [2, 1, 3]])
+            uv = np.array([[0, 1], [1, 1], [0, 0], [1, 0]], float)
+            np.savez(work / "ref.npz", verts=verts, faces=faces, corner_uv=uv[faces])
+            image = np.empty((64, 64, 3), np.uint8)
+            image[:32], image[32:] = [240, 20, 30], [30, 20, 240]
+            Image.fromarray(image).save(work / "ref.png")
+            cam = views.View("front", np.ones((64, 64), bool), 24., 40., 60.).camera()
+            result = bl.run_job({"tasks": [{"task": "textured_mesh", "mesh": str(work / "ref.npz"),
+                "texture": str(work / "ref.png"), "uv_origin": "top", "cameras": [cam],
+                "out_dir": str(work)}]}, work, "reference")["results"][0]
+            mask = views.load_mask(Path(result["silhouettes"]["front"]))
+            np.testing.assert_array_equal(np.flatnonzero(mask.any(0)), np.arange(28, 52))
+            np.testing.assert_array_equal(np.flatnonzero(mask.any(1)), np.arange(12, 60))
+            with Image.open(result["textured"]["front"]) as im:
+                rendered = np.asarray(im.convert("RGB"))
+            np.testing.assert_allclose(rendered[20, 40], image[8, 32], atol=2)
+            np.testing.assert_allclose(rendered[52, 40], image[55, 32], atol=2)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class TextureMetricTests(unittest.TestCase):
+    def test_view_limits_and_boundary_comparisons_are_unchanged(self):
+        from herogen.blender import stage4
+        self.assertEqual((stage4.TEX_ERROR_GATE, stage4.TEX_SSIM_GATE), (12.0, .70))
+        metrics = {"front": {"mean_abs_error": 12., "ssim": .70},
+                   "back": {"mean_abs_error": 12.01, "ssim": .6999}}
+        checks = stage4._texture_source_checks(metrics, None, {"front", "back"})
+        self.assertEqual([c["pass"] for c in checks], [True, True, False, False])
+        self.assertTrue(all(c["gate"] and c["reference"] == "turnaround" for c in checks))
+
+    def test_diagnostics_keep_numbers_but_never_gate(self):
+        from herogen.blender import stage4
+        checks = stage4._texture_checks({"front": {"mean_abs_error": 40., "ssim": .2}},
+                                        12., .70, "turnaround", diagnostic=True)
+        self.assertTrue(all(not c["gate"] for c in checks))
+        self.assertEqual([c["value"] for c in checks], [40., .2])
+        self.assertTrue(all(c["name"].startswith("texture_turnaround_") for c in checks))
+
+    def test_compare_uses_inset_intersection_not_union(self):
+        from herogen.blender import texture
+        mask_a = np.zeros((32, 32), bool)
+        mask_b = mask_a.copy()
+        mask_a[2:25, 2:25] = True
+        mask_b[8:30, 8:30] = True
+        a, b = np.zeros((32, 32, 3)), np.zeros((32, 32, 3))
+        b[mask_b & ~mask_a] = 255
+        metrics = texture.compare(a, mask_a, b, mask_b)
+        self.assertEqual(metrics["mean_abs_error"], 0)
+        self.assertLess(metrics["pixels"], int((mask_a & mask_b).sum()))
+
+    def test_refined_selects_transfer_gates_and_records_ungated_turnaround(self):
+        from herogen.blender import stage4
+        turnaround = {"front": {"mean_abs_error": 40., "ssim": .2}}
+        transfer = {"front": {"mean_abs_error": 2., "ssim": .9}}
+        checks = stage4._texture_source_checks(turnaround, transfer, {"front"})
+        self.assertTrue(all(c["pass"] for c in checks if c["gate"]))
+        active = next(c for c in checks if c["name"] == "texture_colour_error_front")
+        self.assertEqual(active["value"], 2.)
+        self.assertEqual(active["reference"], "refined")
+        self.assertEqual(active["threshold"], stage4.TRANSFER_ERROR_GATE)
+        diagnostic = next(c for c in checks if c["name"] == "texture_turnaround_colour_error_front")
+        self.assertEqual(diagnostic["value"], 40.)
+        self.assertFalse(diagnostic["gate"])
+
+    def test_incomplete_refined_renders_fail_without_switching_reference(self):
+        from herogen.blender import stage4
+        good = {"front": {"mean_abs_error": 0., "ssim": 1.}}
+        for transfer in ({}, good):
+            checks = stage4._texture_source_checks(good, transfer, {"front", "back"})
+            completeness = next(c for c in checks if c["name"] == "texture_transfer_views")
+            self.assertFalse(completeness["pass"])
+            self.assertTrue(completeness["gate"])
+            self.assertTrue(all(c["reference"] == "refined" for c in checks if c["gate"]))
+
+    def test_synthetic_view_bake_and_shifted_paint_are_rejected(self):
+        from herogen.blender import stage4, texture
+        row, col = np.indices((64, 64))
+        stripes = ((row // 8 + col // 8) % 2) * 220. + 15.
+        reference = np.repeat(stripes[..., None], 3, axis=2)
+        mask = np.ones((64, 64), bool)
+        def accepts(image):
+            metrics = {"front": texture.compare(image, mask, reference, mask)}
+            checks = stage4._texture_source_checks({}, metrics, {"front"})
+            return all(c["pass"] for c in checks if c["gate"])
+        self.assertTrue(accepts(reference))
+        self.assertFalse(accepts(np.full_like(reference, 125.)))
+        self.assertFalse(accepts(np.roll(reference, 8, axis=1)))
+
+
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class SyntheticBase(unittest.TestCase):
     @classmethod
@@ -290,6 +386,20 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertIn("close-ups were not applied", recorded["notes"])
         self.assertEqual(info["closeups"]["used"], [])
         self.assertEqual(info["closeups"]["comparison_views_used"], ["front"])
+        self.assertEqual(info["gates"]["reference"], "refined")
+        self.assertEqual(info["head_front_island_scale"], 2.)
+        self.assertIn("intersection", info["comparison_mask"])
+        checks = {c["name"]: c for c in r4["checks"]}
+        self.assertTrue(checks["texture_transfer_views"]["pass"])
+        for view in info["transfer_metrics"]:
+            for metric in ("colour_error", "ssim"):
+                active = checks[f"texture_{metric}_{view}"]
+                self.assertTrue(active["gate"])
+                self.assertTrue(active["pass"], active)
+                self.assertEqual(active["reference"], "refined")
+                self.assertFalse(checks[f"texture_turnaround_{metric}_{view}"]["gate"])
+            self.assertEqual(checks[f"texture_turnaround_colour_error_{view}"]["value"],
+                             info["rest_metrics"][view]["mean_abs_error"])
         self.assertNotIn("closeups", info["bake"]["high"]["head"])
         self.assertEqual(info["bake"]["high_views"]["head"]["closeups"]["views"], ["front"])
         check = next(c for c in r4["checks"] if c["name"] == "refined_texture")
@@ -313,6 +423,7 @@ class TestEndToEndBlender(SyntheticBase):
                 stats = info["bake"][lod]["head"] if section == "Head" else info["bake"][lod]
                 self.assertEqual(stats["texels_primary"], 1)
                 self.assertFalse(stats["closeups_applied"])
+                self.assertEqual(stats["sampling"], "closest-triangle barycentric UV")
         for name in ("atlas-high-views.png", "atlas-head-high-views.png"):
             self.assertTrue((run / "04-body" / name).is_file())
             self.assertFalse(any(name in path for path in r4["outputs"]))
@@ -351,12 +462,20 @@ class TestEndToEndBlender(SyntheticBase):
         checks = {c["name"]: c for c in stage4["checks"]}
         for v in ("front", "back", "left", "right"):
             self.assertTrue(checks[f"texture_colour_error_{v}"]["pass"], checks[f"texture_colour_error_{v}"])
+            self.assertTrue(checks[f"texture_colour_error_{v}"]["gate"])
+            self.assertEqual(checks[f"texture_colour_error_{v}"]["reference"], "turnaround")
+            self.assertEqual(checks[f"texture_colour_error_{v}"]["threshold"], 12.)
+            self.assertEqual(checks[f"texture_ssim_{v}"]["threshold"], .70)
+            self.assertNotIn(f"texture_turnaround_colour_error_{v}", checks)
             self.assertTrue(checks[f"texture_ssim_{v}"]["pass"], checks[f"texture_ssim_{v}"])
             self.assertTrue(checks[f"rest_iou_with_covers_{v}"]["pass"])
             self.assertEqual(checks[f"rest_iou_with_covers_{v}"]["reference"], "turnaround")
             self.assertNotIn(f"rest_iou_with_covers_turnaround_{v}", checks)
         self.assertEqual(body["texture"]["atlas_sizes"], {"high": 1024, "low": 512})
         self.assertEqual(body["texture"]["head_texture_sizes"], {"high": 1024, "low": 512})
+        self.assertEqual(body["texture"]["gates"]["reference"], "turnaround")
+        self.assertEqual(body["texture"]["head_front_island_scale"], 1.)
+        self.assertEqual(body["texture"]["transfer_metrics"], {})
         for lod in ("high", "low"):
             self.assertTrue((self.rundir / "04-body" / f"atlas-head-{lod}.png").exists(), lod)
         self.assertEqual(len(body["covers"]["pieces_high"]), 2)
