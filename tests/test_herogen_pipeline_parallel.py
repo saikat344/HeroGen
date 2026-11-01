@@ -85,7 +85,7 @@ class ParallelPartTests(unittest.TestCase):
                 self.assertEqual({r["outcome"] for r in rec["calls"]}, {"ApiError", "ReplayMiss"})
                 self.assertIn(str(first), rec["error"])
 
-    def test_overlapping_transport_retry_does_not_mix_costs_or_attempts(self):
+    def test_overlapping_transport_failure_is_not_retried_and_keeps_receipts(self):
         barrier = threading.Barrier(2)
         attempts = {"face": 0, "head": 0}
         limiter = mock.Mock()
@@ -108,22 +108,25 @@ class ParallelPartTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": "placeholder"}), \
                 mock.patch.object(client_module, "_open", send), \
                 mock.patch.object(client_module, "decode_sam_output", return_value=[]), \
-                self.assertLogs("herogen.pipeline.client", "WARNING"):
+                self.assertRaises(ApiError) as raised:
             front_part_masks(client, self.image, self.figure)
-        self.assertEqual(attempts, {"face": 2, "head": 1})
-        self.assertEqual(len(client.log.calls), 3)
+        from herogen.service.pipestage import prompt_error_exit
+        self.assertFalse(raised.exception.transient)
+        self.assertEqual(prompt_error_exit(raised.exception), 1)
+        self.assertEqual(attempts, {"face": 1, "head": 1})
+        self.assertEqual(len(client.log.calls), 2)
         face = [r for r in client.log.calls if "segment face" in r["purpose"]]
         head = [r for r in client.log.calls if "segment head" in r["purpose"]]
-        self.assertEqual([r["attempt"] for r in face], [1, 2])
+        self.assertEqual([r["attempt"] for r in face], [1])
         self.assertEqual([r["attempt"] for r in head], [1])
-        self.assertEqual([r["cost_usd"] for r in face], [0, .0025])
+        self.assertEqual([r["cost_usd"] for r in face], [0])
         self.assertEqual([r["cost_usd"] for r in head], [.0025])
-        self.assertEqual(client.log.cost_usd(), .005)
-        self.assertEqual(sorted(settled), [0, .0025, .0025])
+        self.assertEqual(client.log.cost_usd(), .0025)
+        self.assertEqual(sorted(settled), [0, .0025])
         rows = [json.loads(line) for line in (self.root / "calls-ledger.jsonl").read_text().splitlines()]
         complete = [r for r in rows if r["outcome"] != "sent"]
-        self.assertEqual(len(complete), 3)
-        self.assertEqual(sum(r["cost_usd"] for r in complete), .005)
+        self.assertEqual(len(complete), 2)
+        self.assertEqual(sum(r["cost_usd"] for r in complete), .0025)
         self.assertTrue(any(c.kwargs["rate_limited"] for c in limiter.release.call_args_list))
 
     def test_normal_parts_stop_at_replay_miss_before_requesting_head(self):

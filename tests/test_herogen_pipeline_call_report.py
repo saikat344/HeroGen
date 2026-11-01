@@ -23,25 +23,26 @@ class CallReportTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def test_env_switch_and_two_transport_attempts_both_recorded(self):
+    def test_env_switch_stops_after_one_recorded_transport_attempt(self):
         limiter = mock.Mock()
         limiter.acquire.return_value = ("slot", 0)
         from herogen.pipeline.retry import RetryPolicy
         with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "1", "MODEL_API_KEY": "placeholder"}):
             client = ModelClient(self.root / "cache", mode="live", limiter=limiter,
                                  policy=RetryPolicy(max_attempts=8, sleep=lambda s: None, base_s=0))
-            self.assertEqual(client.policy.max_attempts, 2)
+            self.assertEqual(client.policy.max_attempts, 1)
             with mock.patch.object(client_module, "_open", side_effect=urllib.error.HTTPError(
                     "url", 429, "busy", {}, None)) as send:
-                with self.assertRaises(ApiError):
+                with self.assertRaises(ApiError) as raised:
                     client.generate_image("a knight")
-        self.assertEqual(send.call_count, 2)
-        self.assertEqual(len(client.log.calls), 2)
-        self.assertEqual([c["attempt"] for c in client.log.calls], [1, 2])
+        self.assertFalse(raised.exception.transient)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(client.log.calls), 1)
+        self.assertEqual([c["attempt"] for c in client.log.calls], [1])
         self.assertEqual(client.log.cost_usd(), 0)
         self.assertTrue(all(c["wall_seconds"] >= 0 for c in client.log.calls))
 
-    def test_failed_answers_keep_unknown_billing_receipts_for_both_attempts(self):
+    def test_failed_answer_keeps_one_unknown_billing_receipt_without_retry(self):
         from herogen.pipeline.retry import RetryPolicy
         limiter = mock.Mock()
         limiter.acquire.return_value = ("slot", 0)
@@ -53,14 +54,15 @@ class CallReportTests(unittest.TestCase):
             {"status": "failed", "error": {"code": "server_error"}}).encode()
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": "placeholder"}), \
                 mock.patch.object(client_module, "_open", return_value=response) as send:
-            with self.assertRaises(ApiError):
+            with self.assertRaises(ApiError) as raised:
                 client.generate_image("a knight")
-        self.assertEqual(send.call_count, 2)
-        self.assertEqual(len(client.log.calls), 2)
-        self.assertEqual(client.log.cost_usd(), 2 * client_module.PRICE_PER_IMAGE_USD[client_module.IMAGE_MODEL])
+        self.assertFalse(raised.exception.transient)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(client.log.calls), 1)
+        self.assertEqual(client.log.cost_usd(), client_module.PRICE_PER_IMAGE_USD[client_module.IMAGE_MODEL])
         rows = [json.loads(line) for line in (self.root / "cache/calls-ledger.jsonl").read_text().splitlines()]
         complete = [r for r in rows if r["outcome"] != "sent"]
-        self.assertEqual(len(complete), 2)
+        self.assertEqual(len(complete), 1)
         self.assertTrue(all(r["unknown"] for r in complete))
 
     def test_cached_calls_and_replay_misses_have_receipts(self):
