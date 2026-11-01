@@ -462,7 +462,8 @@ class ModelClient:
             raise ClientError(f"{ENV_KEY} is not set; live mode needs it in the environment")
         data = json.dumps(body).encode("utf-8")
         policy = self.policy
-        limiter = self.limiter or retry.SharedLimiter.for_key(api_key)
+        limiter = self.limiter or (retry.SharedRPMLimiter.for_key(api_key, model=model) if self.fast
+                                   else retry.SharedLimiter.for_key(api_key))
         deadline_s = DEADLINE_S.get(model, DEADLINE_S[SAM_MODEL])
         deadline = policy.clock() + deadline_s
         paid_edit = model == IMAGE_MODEL  # each answered Muse call is a new, billed generation
