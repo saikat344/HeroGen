@@ -215,16 +215,15 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
 
     ``user_note``: optional user design guidance (the service's Refine note, cleaned upstream) appended to every
     repaint prompt as quoted data after all rules, so it cannot override framing, outline, silhouette, pose, face
-    and feature preservation or the artwork's fixed details. An empty note changes nothing. Like
-    ``HEROGEN_REFINE_PROFILE``, runners that cannot pass parameters may supply it as ``HEROGEN_REFINE_NOTE``; an
-    explicit non-empty parameter wins. A non-empty note and its hash are recorded in stage-3f.json.
+    and feature preservation or the artwork's fixed details. An empty note changes nothing. The note comes only
+    from this explicit parameter (or the CLI --refine-note flag). A non-empty note and its hash are recorded
+    in stage-3f.json.
     """
     refine_profile = refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")
     if refine_profile not in ("best", "fast"):
         raise ValueError("refine_profile must be best or fast")
     if refine_profile == "fast" and upscale_texture:
         raise ValueError("fast refinement cannot add upscale-texture passes")
-    user_note = user_note or os.environ.get("HEROGEN_REFINE_NOTE", "")
     run = Path(run).resolve()
     output = run / "03-refined.glb"
     pending = run / "03-refined.part.glb"
