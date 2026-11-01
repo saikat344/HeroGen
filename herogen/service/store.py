@@ -28,7 +28,7 @@ from typing import Any
 
 from herogen.service.admission import AdmissionStore, SCHEMA as ADMISSION_SCHEMA, PUBLIC as ADMISSION_PUBLIC, ADMIN as ADMISSION_ADMIN
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
     1: ("ALTER TABLE jobs ADD COLUMN refunded_at REAL",),
@@ -37,6 +37,13 @@ MIGRATIONS = {
     4: ("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'account'",
         "ALTER TABLE jobs ADD COLUMN budget_required INTEGER NOT NULL DEFAULT 0",
         *tuple(s.strip() for s in ADMISSION_SCHEMA.split(';') if s.strip())),
+    5: ("UPDATE users SET kind='guest' WHERE kind='judge'",
+        "DROP TABLE IF EXISTS judge_workspaces", "DROP TABLE IF EXISTS judge_codes",
+        "ALTER TABLE admissions RENAME TO admissions_old",
+        next(stmt.strip() for stmt in ADMISSION_SCHEMA.split(';') if 'CREATE TABLE admissions (' in stmt),
+        "INSERT INTO admissions SELECT job_id,user_id,client_key,amount_micro,cost_signature,actual_micro,main_done,side_required,side_done,closed,created_at,evidence FROM admissions_old",
+        "DROP TABLE admissions_old",
+        next(stmt.strip() for stmt in ADMISSION_SCHEMA.split(';') if 'CREATE TABLE IF NOT EXISTS budget_overhead' in stmt)),
 }
 ID_RE = re.compile(r"^[uji]_[a-z2-7]{26}$")
 ACTIVE_STATES = ("queued", "running")
@@ -455,7 +462,7 @@ class Store(AdmissionStore):
         user = {k: row[k] for k in ("id", "email", "status", "created_at", "terms_version", "quota_daily",
                                     "quota_total", "last_login_at")}
         user['kind'] = row.get('kind', 'account')
-        if user['kind'] == 'judge':
+        if user['kind'] == 'guest':
             user['email'] = None
         return user
 
@@ -471,10 +478,6 @@ class Store(AdmissionStore):
             with self._tx() as c:
                 c.execute("UPDATE sessions SET last_seen_at=? WHERE hash=?", (now, session_hash))
         user = self.user_get(row["user_id"])
-        if user and user.get('kind') == 'judge':
-            access = self.judge_info(user['id'])
-            if not access or not access['valid']:
-                return None
         return user
 
     def session_revoke(self, session_hash: str) -> None:
@@ -591,13 +594,13 @@ class Store(AdmissionStore):
             if user is None or user["status"] != "active":
                 raise StoreError("this account cannot start jobs", "account")
             u = self._usage(c, user_id, jobs_per_day, jobs_total)
-            if u["jobs_total"] >= u["jobs_total_limit"]:
+            if user["kind"] != "guest" and u["jobs_total"] >= u["jobs_total_limit"]:
                 raise QuotaExceeded(f"you have used all {u['jobs_total_limit']} heroes of this beta account")
-            if u["jobs_today"] >= u["jobs_per_day"]:
+            if user["kind"] != "guest" and u["jobs_today"] >= u["jobs_per_day"]:
                 raise QuotaExceeded(f"you have made {u['jobs_per_day']} heroes in the last 24 hours; try again later")
             if u["stored_bytes"] >= storage_max_bytes:
                 raise QuotaExceeded("your saved heroes use all of your storage; delete some to make room")
-            protected = admission_required or user['kind'] == 'judge'
+            protected = admission_required or user['kind'] == 'guest'
             if protected:
                 self._admit(c, job_id, user_id, client_key, code_commit, cost_signature)
             c.execute("INSERT INTO jobs(id, user_id, client_key, kind, input_sha, prompt, name, profile, state, "

@@ -56,21 +56,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="the snapshot file name, as `snapshots` lists it")
     p.add_argument("--allow-empty", action="store_true",
                    help="allow quarantining the last snapshot; the store then starts from an empty database")
-    p = sub.add_parser('judge-code', help='create a judge code; raw code is printed once')
-    p.add_argument('--jobs', type=int, required=True)
-    p.add_argument('--days', type=float, default=14)
-    p.add_argument('--workspaces', type=int, default=8)
-    p.add_argument('--note', default='')
-    sub.add_parser('judge-codes', help='list judge allowances without their secret codes')
-    p = sub.add_parser('revoke-judge-code'); p.add_argument('code_id')
-    p = sub.add_parser('judge-allowance'); p.add_argument('code_id'); p.add_argument('--jobs', type=int, required=True); p.add_argument('--note', required=True)
     p = sub.add_parser('generation-budget', help='configure conservative reservation admission; does not purchase credits')
     p.add_argument('--limit-usd', required=True); p.add_argument('--reserve-usd', required=True)
-    p.add_argument('--max-active', type=int, default=1); p.add_argument('--days', type=float, default=14)
+    p.add_argument('--max-active', type=int, default=5); p.add_argument('--days', type=float, default=14)
     p.add_argument('--cost-signature', required=True); p.add_argument('--commit', required=True); p.add_argument('--bound-note', required=True)
     p.add_argument('--confirm-provider-caps', action='store_true'); p.add_argument('--paused', action='store_true')
     sub.add_parser('generation-policy-signature', help='show the running configuration fingerprint and version')
     sub.add_parser('generation-budget-report')
+    p = sub.add_parser('generation-overhead'); p.add_argument('--actual-usd', required=True); p.add_argument('--evidence', required=True)
     p = sub.add_parser('generation-reconcile'); p.add_argument('job_id'); p.add_argument('--actual-usd', required=True)
     p.add_argument('--evidence', required=True); p.add_argument('--work-stopped', action='store_true')
     return ap
@@ -102,22 +95,12 @@ def run(argv: list[str] | str, store, signer: Signer, snapshots: tuple | None = 
     cannot start."""
     a = parser().parse_args(shlex.split(argv) if isinstance(argv, str) else argv)
     out: list[str] = []
-    if a.cmd in ('judge-code', 'judge-codes', 'revoke-judge-code', 'judge-allowance', 'generation-budget',
-                  'generation-budget-report', 'generation-reconcile', 'generation-policy-signature'):
+    if a.cmd in ('generation-budget', 'generation-budget-report', 'generation-reconcile',
+                  'generation-policy-signature', 'generation-overhead'):
         from herogen.service.admission import micro_usd
-        if a.cmd == 'judge-code':
-            code = new_invite_code()
-            normalized = normalize_invite(code)
-            result = store.judge_code_create(signer.hash('judge-code', normalized), a.jobs, time.time() + a.days * 86400,
-                                             a.workspaces, a.note)
-            return f"{code}  (id {result['id']}, {a.jobs} generations, expires {_when(result['expires_at'])})"
-        if a.cmd == 'judge-codes':
-            return json.dumps(store.judge_codes_list(), indent=2)
-        if a.cmd == 'revoke-judge-code':
-            return 'revoked' if store.judge_code_revoke(a.code_id) else 'no open judge code'
-        if a.cmd == 'judge-allowance':
-            store.judge_code_allowance(a.code_id, a.jobs, a.note)
-            return 'judge allowance updated'
+        if a.cmd == 'generation-overhead':
+            store.budget_overhead(micro_usd(a.actual_usd), a.evidence)
+            return 'cumulative non-job charges recorded'
         if a.cmd == 'generation-budget':
             store.budget_configure(micro_usd(a.limit_usd), micro_usd(a.reserve_usd), a.max_active,
                                    time.time() + a.days * 86400, a.commit, a.bound_note, a.cost_signature,
@@ -130,7 +113,7 @@ def run(argv: list[str] | str, store, signer: Signer, snapshots: tuple | None = 
         if a.cmd == 'generation-budget-report':
             return json.dumps(store.budget_report(), indent=2)
         store.budget_reconcile(a.job_id, micro_usd(a.actual_usd), a.evidence, a.work_stopped)
-        return 'reservation reconciled; judge generation allowance is unchanged'
+        return 'reservation reconciled'
     if a.cmd in ("snapshots", "snapshot-quarantine"):
         from herogen.service.snapshot import quarantine_snapshot, snapshot_files
 

@@ -46,24 +46,19 @@ class TestAdmin(TempDirCase):
         self.assertEqual(admin.run(f"revoke-invite {iid}", store, signer), "revoked")
         store.close()
 
-    def test_judge_commands_keep_secrets_out_of_lists_and_require_verified_budget(self):
+    def test_budget_commands_require_verification_and_report_alerts(self):
         from herogen.service.config import Settings
-        store = Store(self.tmp / 'meta.db')
-        self.addCleanup(store.close)
-        signer = Signer(b'k'*48)
-        out = admin.run('judge-code --jobs 2 --days 14', store, signer)
-        code = out.split()[0]
-        listing = json.loads(admin.run('judge-codes', store, signer))
-        self.assertNotIn(code, json.dumps(listing)); self.assertNotIn('code_hash', listing[0])
-        signature = Settings().cost_signature
-        args = ['generation-budget', '--limit-usd', '100', '--reserve-usd', '10', '--commit', 'a'*40,
-                '--cost-signature', signature, '--bound-note', 'Synthetic fixture']
-        with self.assertRaises(ValueError): admin.run(args, store, signer)
-        admin.run(args + ['--paused'], store, signer)
-        self.assertEqual(json.loads(admin.run('generation-budget-report', store, signer))['policy']['enabled'], 0)
-        admin.run(args + ['--confirm-provider-caps'], store, signer)
-        self.assertTrue(store.admission_status('a'*40, signature)['accepting'])
-        self.assertEqual(admin.run(['revoke-judge-code', listing[0]['id']], store, signer), 'revoked')
+        store=Store(self.tmp/'meta.db'); self.addCleanup(store.close); signer=Signer(b'k'*48)
+        args=['generation-budget','--limit-usd','1000','--reserve-usd','10','--commit','a'*40,
+              '--cost-signature',Settings().cost_signature,'--bound-note','Synthetic fixture']
+        with self.assertRaises(ValueError): admin.run(args,store,signer)
+        admin.run(args+['--paused'],store,signer)
+        report=json.loads(admin.run('generation-budget-report',store,signer))
+        self.assertEqual(report['policy']['max_active'],5); self.assertEqual(report['policy']['enabled'],0)
+        admin.run(args+['--confirm-provider-caps'],store,signer)
+        admin.run(['generation-overhead','--actual-usd','500','--evidence','Synthetic charges'],store,signer)
+        report=json.loads(admin.run('generation-budget-report',store,signer))
+        self.assertIn('budget_50_percent',report['summary']['alerts'])
 
 
 class TestSnapshotCommands(TempDirCase):

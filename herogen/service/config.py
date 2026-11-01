@@ -35,9 +35,7 @@ class Settings:
     meta_path: Path = Path("service-data/meta.db")
     signing_key: bytes = field(default=b"", repr=False)
     gallery_dir: Path | None = None
-    judge_access: bool = False
     public_demo: bool = False
-    public_demo_jobs: int = 1
     # Email
     email_provider: str = "file"
     email_from: str = "HeroGen <signin@example.com>"
@@ -52,7 +50,7 @@ class Settings:
     # Quotas and limits
     jobs_per_day: int = 5
     jobs_total: int = 50
-    max_running_jobs: int = 4
+    max_running_jobs: int = 5
     heldout_concurrency: int = 2      # held-out view runs at once, service-wide (they yield to the jobs' own work)
     max_attempts: int = 2
     user_storage_max_bytes: int = 2 * 1024 ** 3
@@ -128,9 +126,7 @@ class Settings:
 ENV = {
     "mode": "HEROGEN_SERVICE_MODE",
     "gallery_dir": "HEROGEN_SERVICE_GALLERY",
-    "judge_access": "HEROGEN_SERVICE_JUDGE_ACCESS",
     "public_demo": "HEROGEN_SERVICE_PUBLIC_DEMO",
-    "public_demo_jobs": "HEROGEN_SERVICE_PUBLIC_DEMO_JOBS",
     "base_url": "HEROGEN_SERVICE_BASE_URL",
     "data_dir": "HEROGEN_SERVICE_DATA",
     "meta_path": "HEROGEN_SERVICE_META",
@@ -233,7 +229,7 @@ def validate(s: Settings, require_key: bool = True) -> None:
         raise ConfigError(f"{ENV['profiles']} and {ENV['default_profile']} must name profiles in {PROFILES}")
     if not math.isfinite(s.refine_cap_usd) or s.refine_cap_usd < 0:
         raise ConfigError(f"{ENV['refine_cap_usd']} must be finite and nonnegative")
-    for name in ("public_demo_jobs", "link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
+    for name in ("link_ttl_s", "session_ttl_s", "session_idle_s", "jobs_per_day", "jobs_total", "max_running_jobs",
                  "max_attempts", "heldout_concurrency", "upload_max_bytes", "upload_max_pixels", "upload_max_side",
                  "upload_min_side",
                  "prompt_max_chars", "retention_days", "audit_retention_days", "stage_timeout_s",
