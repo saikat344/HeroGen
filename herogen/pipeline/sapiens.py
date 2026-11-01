@@ -145,6 +145,7 @@ class PoseClient:
 
         from herogen.pipeline import sapiens_app
 
+        receipt = None
         try:
             pose = modal.Cls.from_name(sapiens_app.APP_NAME, sapiens_app.CLASS_NAME)()
             receipt = ledger.sent(self.cache_dir, model=POSE_MODEL, endpoint="modal/app_sha256",
@@ -155,6 +156,9 @@ class PoseClient:
             deployed = pose.app_sha256.remote()
             ledger.complete(self.cache_dir, receipt, outcome="ok", cost_usd=(time.monotonic() - started) * PRICE_PER_SECOND)
         except modal.exception.NotFoundError as e:
+            # Lazy deployment lookup can fail inside remote(), before any GPU function starts.
+            if receipt is not None:
+                ledger.complete(self.cache_dir, receipt, outcome="failed", cost_usd=0.0)
             reason = f"no deployment of {sapiens_app.APP_NAME}: {type(e).__name__}: {e}"[:300]
         else:
             if deployed == self._pins["app_sha256"]:
