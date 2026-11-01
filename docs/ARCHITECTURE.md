@@ -443,7 +443,7 @@ itself.
 ## Stage 4 texture: refined colour and view projection
 
 Stage 4 first checks whether stage 3f's refined texture can supply the entire sectioned body
-(`herogen/blender/refined_colour.py`). `stage-3f.json` must have status `complete`, its `source_sha256` must
+(`herogen/blender/refined_colour.py`). `stage-3f.json` must have status `complete` or `cap_reached`, its `source_sha256` must
 match the current `03-source.glb`, and `03-refined.glb` and `blender-work/03-source-uv.npz` must exist. Both GLBs
 are read with stage 3's `sam3d_mesh.load_source`. The raw source's vertices and the NPZ's vertices share an
 exact one-to-one correspondence, with identical faces in identical order. Stage 3's perspective correction
@@ -463,31 +463,29 @@ to rounding) and for samples interpolated across the placed refined mesh. The la
 that span multiple source triangles under a non-affine map.
 
 On success, `texture.bake(primary=SourceColour(..., exact=True))` samples the transformed refined mesh for every covered
-texel of both the shared atlas and the Head texture, at every LOD the profile builds. It casts rays in both
-directions along a continuous cage normal field, taking the nearer outward-facing hit and interpolating that
-triangle's exact corner UVs. Body sections use area-weighted unit vertex normals, barycentrically interpolated
-and normalised at the texel. The Head instead interpolates normals of its bounding ellipsoid: its centre is
-the bounding-box midpoint, and its radii are half the three extents. This removes sharp remeshing creases from
-the cage's directions without changing geometry, UVs or the painting. A flat Head retains mesh normals.
+texel of both the shared atlas and the Head texture, at every LOD the profile builds. Exact closest-triangle
+correspondence retains its corner UVs whenever the point is coincident, or lies within 0.01 studs and the true
+surface normals agree with cosine at least 0.8. Unreliable correspondences, such as a folded cheek's wrong
+nearest sheet, use bounded rays in both directions along barycentrically interpolated area-weighted vertex
+normals. All sections, including the Head, use the actual exterior surface's normals. Interior caps do not
+contribute to those normals. Coincident hits are accepted from either side; farther ray hits must face the
+same outward hemisphere as the target. Misses retain exact closest triangles. Dense surface samples supply
+only search-distance bounds, never UVs.
+
+Each bake calibrates its ray limit on at most 4096 evenly spaced exterior texels: four times the exact nearest
+distance p95, with a floating-point floor for coincident surfaces. Section construction marks interior joint
+caps, and shoulder-cover construction marks reversed inner patches and connecting walls. Those faces receive
+closest-point colour but contribute neither to distance statistics nor to the ray limit. Diagnostics record
+closest, ray, interior and fallback counts, the calibration subset, and exterior travel distances.
 `MeshIndex.ray_first_hit` reuses the uniform-grid DDA and Moller-Trumbore tests, retaining the nearest hit until
 the unvisited cells begin beyond it; a triangle whose bounding box reaches an early cell cannot hide a closer
 hit in a later cell. Equal-distance ties choose the lowest face index.
 
-Each bake measures exact closest-surface distances on at most 4096 evenly spaced covered samples. Its ray
-distance limit is four times their p95, with only a floating-point floor for coincident surfaces. A texel where
-neither ray hits within that limit uses the exact closest triangle. Dense surface samples supply only distance
-bounds to accelerate this fallback; they never select UVs. Back-facing source triangles are excluded from rays:
-inside a folded nose or cheek they can otherwise be closer than the painted exterior. The ellipsoid field was
-selected because ordinary smooth mesh normals still switch source sheets on the remeshed nose. A dense s009
-Head probe at 12 subdivisions per edge finds 175/50 face triangles above spacing ratios 3/8 for closest-point
-lookup, versus 43/18 with the cage. The old cheek seam's ratios of approximately 9-22 fall to 1.1-3.2. At four
-times the sampling density the residual nose ratios stay near 3, while the closest-point jumps grow fourfold;
-the residual is smooth geometric stretch, not the repeated lip. These measurements use the pre-export Head
-and placed refined triangles, with front-facing face centres at y < -0.1; they do not certify hair overhangs
-or exact geometry preservation. Stage 2f close-ups are
-not applied to these textures. The existing UV rasterisation, whole-body depth handling and eight iterations
-of island padding remain unchanged. High LOD also writes `atlas-high-views.png` and
-`atlas-head-high-views.png`: the previous view bake, including the raw source fallback and Head close-ups.
+Stage 2f close-ups are not applied to these textures. UV rasterisation, whole-body depth handling and eight
+iterations of island padding are unchanged. When a view colour or raw source fallback exists, high LOD also
+writes `atlas-high-views.png` and `atlas-head-high-views.png`: the previous view bake, including the raw source
+fallback and Head close-ups. With no view source, that comparison variant is omitted. Refined-primary
+`colour_views` is empty because none of the turnaround views supplied its painting.
 The other view-bake variants are omitted when refined colour is primary. Comparison atlases never enter the
 GLBs, rig, stage output lists or downloads. Stage 3 and stage 3f delete earlier refined outputs on entry;
 the source hash and completion status prevent reuse after a source replacement or an interrupted refinement.
@@ -573,23 +571,54 @@ packing is unchanged. `head_front_island_scale` records the selected allocation 
 the lookup method. On s009, this allocation raises Head UV fill from 47.9% to 59.3% and frontal density
 from 440 to 706 texels per stud at 1024; density and packing are unchanged by the cage projection.
 
-Measured exported-Head transfer on the same 512-pixel world-space crop, flat Workbench rendering:
+Measured exported-Head transfer for s001, s009, s018, s029, s033, s035 and s036, using `roblox-ingame`
+high LOD, `head_front_density=2.0`, the same 1024-pixel Head UVs for every projection, and flat Workbench
+512-pixel renders of exported GLBs. `ff15ade` uses closest triangles; `e4a748c` uses the ellipsoid cage;
+Hybrid uses reliable closest triangles and true smooth surface normals. Each crop targets the exterior
+Head bounds' midpoint, with orthographic scale 1.15 times the larger X/Z extent. Interior caps do not set
+the crop. The camera's forward vector is `(sin(yaw), cos(yaw), 0)`; BodyAtlas remains visible in the crop.
+The reference is the placed refined mesh with its own UVs and painting. `compare()` retains its inset
+silhouette intersection.
 
-| Projection | Angle | RGB error | SSIM | Gradient energy / reference |
+Measurement commands, with the measurement scripts retained alongside the transfer evidence:
+
+```sh
+PYTHONPATH=. python <evidence>/run_batch.py
+PYTHONPATH=. python <evidence>/measure.py s001 s009 s018 s029 s033 s035 s036
+PYTHONPATH=. python <evidence>/crop_trial.py s001 s009 s018 s029 s033 s035 s036
+```
+
+| Character | Yaw | ff15ade RGB / SSIM | e4a748c RGB / SSIM | Hybrid RGB / SSIM |
 | --- | ---: | ---: | ---: | ---: |
-| Closest triangle | 0 | 8.98 | 0.6962 | 0.9599 |
-| Closest triangle | 40 | 10.64 | 0.6200 | 0.6772 |
-| Closest triangle | -40 | 14.74 | 0.5845 | 0.8569 |
-| Smooth cage | 0 | 8.61 | 0.6930 | 0.9770 |
-| Smooth cage | 40 | 11.00 | 0.6209 | 0.7161 |
-| Smooth cage | -40 | 13.16 | 0.6226 | 0.8700 |
+| s001 | 0 | 8.18 / 0.7755 | 17.82 / 0.6408 | 8.18 / 0.7748 |
+| s001 | 40 | 11.51 / 0.5803 | 14.68 / 0.5503 | 11.30 / 0.5794 |
+| s001 | -40 | 7.17 / 0.8184 | 12.63 / 0.7155 | 6.72 / 0.8308 |
+| s009 | 0 | 8.62 / 0.6790 | 8.57 / 0.6718 | 8.68 / 0.6719 |
+| s009 | 40 | 11.89 / 0.5932 | 10.74 / 0.6195 | 11.38 / 0.6042 |
+| s009 | -40 | 10.13 / 0.5855 | 10.23 / 0.5937 | 9.57 / 0.6030 |
+| s018 | 0 | 4.25 / 0.8346 | 7.08 / 0.7831 | 4.15 / 0.8394 |
+| s018 | 40 | 5.07 / 0.7725 | 6.36 / 0.7531 | 5.06 / 0.7726 |
+| s018 | -40 | 4.90 / 0.8345 | 7.78 / 0.7745 | 4.82 / 0.8369 |
+| s029 | 0 | 7.07 / 0.7285 | 9.16 / 0.6878 | 6.93 / 0.7326 |
+| s029 | 40 | 6.37 / 0.7568 | 7.23 / 0.7285 | 6.33 / 0.7587 |
+| s029 | -40 | 7.38 / 0.6581 | 9.18 / 0.6264 | 6.98 / 0.6646 |
+| s033 | 0 | 6.85 / 0.7619 | 8.42 / 0.7339 | 6.21 / 0.7826 |
+| s033 | 40 | 8.71 / 0.6501 | 9.32 / 0.6266 | 8.84 / 0.6454 |
+| s033 | -40 | 7.47 / 0.7228 | 8.51 / 0.6898 | 7.06 / 0.7293 |
+| s035 | 0 | 5.03 / 0.7933 | 5.40 / 0.7659 | 5.00 / 0.7939 |
+| s035 | 40 | 6.60 / 0.7603 | 6.97 / 0.7414 | 6.59 / 0.7572 |
+| s035 | -40 | 7.14 / 0.6621 | 7.11 / 0.6634 | 6.91 / 0.6649 |
+| s036 | 0 | 9.25 / 0.6549 | 11.88 / 0.6155 | 9.29 / 0.6514 |
+| s036 | 40 | 7.41 / 0.7158 | 10.93 / 0.6504 | 7.19 / 0.7234 |
+| s036 | -40 | 7.65 / 0.7006 | 9.40 / 0.6639 | 7.48 / 0.7053 |
 
-The reference is the placed refined mesh with its own UVs and painting. compare() uses its existing inset
-mask intersection; gradient energy uses luminance squared gradients within a three-pixel erosion of that
-intersection. The +/-40-degree cameras were never projected from to make the atlas. Global image metrics
-also reflect geometric simplification and smooth correspondence stretch, so they do not replace the
-local fold measurement. No global mip filter is applied. The Head stays at 1024 because the texture
-specification's UV-mapping section explicitly states "Maximum Texture Resolution" of 1024 by 1024.
+All 21 Hybrid views remain within 0.5 RGB error and 0.01 SSIM of closest-triangle transfer. The s009 +40
+cheek comparison remains worse than the ellipsoid cage: 11.38 / 0.6042 versus 10.74 / 0.6195. The true-normal
+projection therefore does not retain the cage's entire cheek improvement. The full-body transfer gates pass
+on all seven characters, with their existing limits unchanged. The +/-40-degree cameras were not projected
+from to make the atlas. Global image metrics also reflect geometric simplification and smooth correspondence
+stretch. No global mip filter is applied. The Head stays at 1024 because the texture specification's UV-mapping
+section explicitly states "Maximum Texture Resolution" of 1024 by 1024.
 
 **Close-ups in the view-baked Head texture.** Stage 2f's close-ups (`texture.load_closeups`) are used only when their view
 image is unchanged (its SHA-256) and the view is a colour view. A malformed record (wrong JSON types, a singular

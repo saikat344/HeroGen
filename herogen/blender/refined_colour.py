@@ -77,8 +77,8 @@ def load(run: Path, work: Path, height: float) -> tuple[texture.SourceColour | N
         if not isinstance(record, dict):
             return reject("stage-3f.json is not an object")
         info["stage3f_source_sha256"] = record.get("source_sha256")
-        if record.get("status") != "complete":
-            return reject("stage 3f status is not complete")
+        if record.get("status") not in ("complete", "cap_reached"):
+            return reject("stage 3f status is not complete or cap_reached")
         if not raw_path.is_file():
             return reject("no 03-source.glb")
         info["current_source_sha256"] = _sha256(raw_path)

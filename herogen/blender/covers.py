@@ -175,8 +175,13 @@ def add_covers(sections: dict, body_v: np.ndarray, body_f: np.ndarray, owner: st
         cv, cf = cov
         name = side + "UpperArm" if owner == "UpperArm" else "UpperTorso"
         s = out[name]
+        exterior = s.colour_exterior
+        if exterior is None:
+            exterior = np.arange(len(s.faces)) < len(s.faces) - s.cap_triangles
+        # shell() emits the outer patch, reversed inner patch, then connecting walls.
+        outer = np.all(cf < len(cv) // 2, axis=1)
         out[name] = replace(s, verts=np.concatenate([s.verts, cv]), faces=np.concatenate([s.faces, cf + len(s.verts)]),
-                            cap_triangles=s.cap_triangles)
+                            cap_triangles=s.cap_triangles, colour_exterior=np.concatenate([exterior, outer]))
         info[side + "ShoulderCover"] = {"owner": name, "triangles": int(len(cf)),
                                         "radius_studs": round(radius * rim_r, 4), "outset_studs": outset}
     return out, info

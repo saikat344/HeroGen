@@ -66,6 +66,8 @@ class TestCageProjection(unittest.TestCase):
         section = Section('Head', verts, faces, np.zeros(3), [], 0)
         atlas, stats, _ = texture.bake({'Head': section}, {'Head': uv}, {}, 32, primary=self.source)
         projection = stats['primary_projection']
+        self.assertEqual(projection['closest_distance_max'], texture.CLOSEST_DISTANCE)
+        self.assertEqual(projection['closest_normal_cos_min'], texture.CLOSEST_NORMAL_COS)
         self.assertEqual(projection['fallback_fraction'], 1)
         self.assertEqual(projection['fallback_count'], projection['samples'])
         self.assertEqual(projection['max_distance'],
@@ -83,12 +85,12 @@ class TestCageProjection(unittest.TestCase):
         b = np.array([.7, .3, 0]) @ normals[faces[1]]
         np.testing.assert_allclose(a, b, atol=1e-15)
 
-    def test_head_ellipsoid_field_is_continuous_scale_invariant_and_preserves_gradient(self):
+    def test_head_surface_field_is_continuous_scale_invariant_and_preserves_gradient(self):
         top, top_faces = strip(np.array([-1., 0., 1.]), lambda x: .3 + .04*abs(x))
         verts = np.concatenate((top, top * [1, 1, 0] + [0, 0, -.7]))
         faces = np.concatenate((top_faces, top_faces[:, ::-1] + len(top)))
         field, method = texture.cage_normals('Head', verts, faces)
-        self.assertEqual(method, 'bounding ellipsoid')
+        self.assertEqual(method, 'area-weighted vertex normals')
         moved, _ = texture.cage_normals('Head', verts * 7 + [4, -3, 6], faces)
         np.testing.assert_allclose(field, moved, atol=1e-14)
         body, method = texture.cage_normals('UpperTorso', verts, faces)
@@ -110,6 +112,45 @@ class TestCageProjection(unittest.TestCase):
         actual, method = texture.cage_normals('Head', flat, top_faces)
         self.assertEqual(method, 'area-weighted vertex normals')
         np.testing.assert_allclose(actual, texture.vertex_normals(flat, top_faces))
+
+    def test_overhang_coincident_sheet_and_interior_cap(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        face = np.array([[-.3, -.3, 0], [.3, -.3, 0], [.3, .3, 0], [-.3, .3, 0]])
+        brim = np.array([[-.3, .15, .08], [.3, .15, .08], [.3, .32, .05], [-.3, .32, .05]])
+        faces = np.array([[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]])
+        verts = np.vstack([face, brim])
+        uv = np.array([[[.05, .1], [.45, .1], [.45, .9]], [[.05, .1], [.45, .9], [.05, .9]],
+                       [[.55, .1], [.95, .9], [.95, .1]], [[.55, .1], [.55, .9], [.95, .9]]])
+        image = np.zeros((64, 64, 3))
+        image[:, :32] = [220, 175, 145]
+        dark = [35, 20, 15]
+        image[:, 32:] = dark
+        source = texture.SourceColour(verts, faces, uv, image, exact=True)
+        cap = np.array([[-.15, -.3, -.25], [.15, -.3, -.25], [0, -.2, -.25]])
+        exact = SimpleNamespace(verts=np.vstack([verts, cap]), faces=np.vstack([faces, [8, 10, 9]]))
+        cap_uv = np.vstack([uv * [.8, 1], [[[.82, .1], [.98, .1], [.90, .5]]]])
+        atlas, _, _ = texture.bake({'Head': exact}, {'Head': cap_uv}, {}, 256, primary=source)
+        self.assertLessEqual(float(np.abs(atlas[40:216, 120:190].astype(float) - dark).mean()), 5)
+        exact.cap_triangles = 1
+        with mock.patch.object(source, 'project', side_effect=AssertionError('reliable sheet needs no ray')):
+            _, stats, _ = texture.bake({'Head': exact}, {'Head': cap_uv}, {}, 256, primary=source)
+        self.assertEqual(stats['primary_projection']['ray_count'], 0)
+        self.assertLess(stats['primary_projection']['nearest_distance_p95'], 1e-12)
+        self.assertGreater(stats['primary_projection']['interior_count'], 0)
+        remeshed = SimpleNamespace(verts=np.vstack([face + [0, 0, .025], brim]), faces=faces)
+        atlas, _, _ = texture.bake({'Head': remeshed}, {'Head': uv}, {}, 256, primary=source)
+        self.assertLessEqual(float(np.abs(atlas[40:216, 150:235].astype(float) - dark).mean()), 5)
+        # Even the opposite normal must retain the coincident brim, rather than ray through to the face.
+        point = np.array([[0., .22, .08 - (.22 - .15) * .03 / .17]])
+        ids, bary, dist, fallback = source.project(point, np.array([[0., 0., 1.]]), .3)
+        self.assertIn(ids[0], [2, 3])
+        self.assertLess(dist[0], 1e-12)
+        self.assertFalse(fallback[0])
+        colour, _ = source(point)
+        np.testing.assert_allclose(colour, [dark])
+
 
 
 if __name__ == '__main__':
