@@ -52,6 +52,7 @@ from herogen.service.auth import TOKEN_RE, Signer, mask_email, normalize_email
 from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
 from herogen.service.runner import STAGE_LABELS, plan_for
+from herogen.service.progressive import read_progress, version_token
 from herogen.service.storage import SAFE_SEGMENT, Storage
 from herogen.service.store import (
     Conflict,
@@ -578,11 +579,14 @@ class App:
             return None
         rows = {r["stage"]: r for r in await self.call(self.svc.store.job_stages, job_id)}
         files = await self.call(self._files, user_id, job)
+        typical = await self.call(self.svc.store.analytics_stage_times)
         stages = []
         for spec in plan_for(job["kind"], job["profile"]):
             r = rows.get(spec.key)
             stages.append({"key": spec.key, "label": spec.label, "state": r["state"] if r else "pending",
                            "seconds": r["seconds"] if r else None, "cost_usd": r["cost_usd"] if r else None,
+                           "elapsed_seconds": max(0, time.time() - r["started_at"]) if r and r["state"] == "running" and r["started_at"] else None,
+                           "typical_seconds": typical.get(spec.key),
                            "message": r["message"] if r else ""})
         err = None
         if job["error_code"] and job["state"] in ("rejected", "failed", "queued"):
@@ -600,7 +604,8 @@ class App:
                 "export_message": job["export_message"], "export_seconds": job["export_seconds"],
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
                 "code_commit": job["code_commit"] or None, "images": files["images"],
-                "downloads": files["downloads"], "roblox_readme": files["readme"],
+                "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
+                "roblox_readme": files["readme"],
                 "viewer": f"/viewer#run={rid}"}
 
     def _files(self, user_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -609,15 +614,41 @@ class App:
         run = st.run_dir(user_id, job["id"])
         rid = f"{labapi.ROOT_KEY}/{job['id']}"
         with st.volume.reading():
-            images = {k: f"/runs/{rid}/{rel}" for k, rel in labapi.IMAGES.items()
-                      if st.run_file(user_id, job["id"], rel) is not None}
+            def asset(rel: str) -> dict[str, Any] | None:
+                f = st.run_file(user_id, job['id'], rel)
+                if not f:
+                    return None
+                try:
+                    return {"url": f"/runs/{rid}/{rel}?v={version_token(f[0])}", "bytes": f[0].stat().st_size}
+                except OSError:
+                    return None
+
+            images = {k: a['url'] for k, rel in labapi.IMAGES.items() if (a := asset(rel))}
+            # Include all published character views, including top and additional viewing angles.
+            for path in sorted((run / 'views').glob('*.png')):
+                if a := asset(f'views/{path.name}'):
+                    images.setdefault(path.stem, a['url'])
+            rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
+            progress = read_progress(run)
+            models = []
+            if rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb')):
+                models.append({**source, "n": 0, "glb": "03-source.glb", "accepted": []})
+            for version in progress['versions']:
+                if a := asset(version['glb']):
+                    models.append({**version, **a})
             downloads: dict[str, Any] = {}
             done = job["state"] == "succeeded"
             glb = bundle.glb_path(run, "high") if done else None
-            downloads["glb"] = ({"available": True, "url": f"/api/jobs/{job['id']}/download/glb",
-                                 "bytes": glb.stat().st_size} if glb else
-                                {"available": False, "reason": "The body is not finished yet." if not done
-                                 else "This hero has no body file."})
+            if glb and glb.name != '03-source.glb' and not progress['versions']:
+                models.append({"url": f"/runs/{rid}/{glb.relative_to(run)}?v={version_token(glb)}",
+                               "bytes": glb.stat().st_size, "glb": str(glb.relative_to(run)), "n": None, "accepted": []})
+            if models:
+                latest = models[-1]
+                downloads['glb'] = {"available": True, "bytes": latest['bytes'],
+                                    "url": f"/api/jobs/{job['id']}/download/glb?artifact={latest['glb']}&{latest['url'].split('?')[1]}"}
+            else:
+                downloads['glb'] = {"available": False, "reason": "The body is not finished yet." if not done
+                                    else "This hero has no body file."}
             readme = None
             if done:
                 try:
@@ -636,7 +667,7 @@ class App:
                     downloads["roblox"] = {"available": False, "reason": reason}
             else:
                 downloads["roblox"] = {"available": False, "reason": "The body is not finished yet."}
-        return {"images": images, "downloads": downloads, "readme": readme}
+        return {"images": images, "downloads": downloads, "readme": readme, "models": models, "refinement": progress}
 
     def _job_id(self, request: Request) -> str:
         jid = request.path_params["job"]
@@ -761,8 +792,12 @@ class App:
         job = await self.call(self.svc.store.job_get, jid, u["id"])
         if job is None:
             return error(404, "not_found", "No such hero.")
-        if job["state"] != "succeeded":
+        if job["state"] != "succeeded" and request.path_params["what"] != 'glb':
             return error(409, "not_ready", "This hero is not finished.")
+        if job['state'] != 'succeeded':
+            stages = await self.call(self.svc.store.job_stages, jid)
+            if not any(s['stage'] == '3' and s['state'] == 'passed' for s in stages):
+                return error(409, 'not_ready', 'The first shape is not ready yet.')
         what = request.path_params["what"]
         if what not in DOWNLOADS:
             return error(404, "not_found", "Not found.")
@@ -775,7 +810,27 @@ class App:
             with st.volume.reading():
                 if what == "glb":
                     lod = request.query_params.get("lod", "high")
-                    p = bundle.glb_path(run, lod)
+                    artifact = request.query_params.get('artifact')
+                    if job['state'] != 'succeeded':
+                        rows = {r['stage']: r for r in self.svc.store.job_stages(jid)}
+                        if lod != 'high' or rows.get('3', {}).get('state') != 'passed':
+                            return 'The first shape is not ready yet.'
+                        versions = read_progress(run)['versions']
+                        f = st.run_file(u['id'], jid, versions[-1]['glb'] if versions else '03-source.glb')
+                        p = f[0] if f else None
+                    else:
+                        p = bundle.glb_path(run, lod)
+                    if artifact:
+                        rows = {r['stage']: r for r in self.svc.store.job_stages(jid)}
+                        allowed = {v['glb'] for v in read_progress(run)['versions']}
+                        if rows.get('3', {}).get('state') == 'passed':
+                            allowed.add('03-source.glb')
+                        if job['state'] == 'succeeded' and p:
+                            allowed.add(str(p.relative_to(run)))
+                        f = st.run_file(u['id'], jid, artifact) if lod == 'high' and artifact in allowed else None
+                        p = f[0] if f else None
+                    if p and request.query_params.get('v') and request.query_params['v'] != version_token(p):
+                        p = None
                     if p is None:
                         return "This hero has no body file at that level of detail."
                     return p.read_bytes(), "model/gltf-binary", f"herogen-{base}-{lod}.glb"
@@ -844,7 +899,21 @@ class App:
             st = self.svc.storage
             st.volume.refresh()
             with st.volume.reading():
+                lower = rel.lower()
+                if lower == '03-source.glb' or lower.startswith('03-refined') and lower.endswith('.glb'):
+                    if rel != lower:
+                        return None
+                    rows = {r['stage']: r for r in self.svc.store.job_stages(jid)}
+                    if rel == '03-source.glb' and rows.get('3', {}).get('state') != 'passed':
+                        return None
+                    if rel == '03-refined.glb':
+                        if rows.get('3f', {}).get('state') != 'passed':
+                            return None
+                    elif rel != '03-source.glb' and rel not in {v['glb'] for v in read_progress(st.run_dir(u['id'], jid))['versions']}:
+                        return None
                 f = st.run_file(u["id"], jid, rel)
+                if f and request.query_params.get('v') and request.query_params['v'] != version_token(f[0]):
+                    return None
                 return (f[0].read_bytes(), f[1]) if f else None
 
         got2 = await self.call(read)

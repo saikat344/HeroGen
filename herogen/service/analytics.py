@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS analytics_events_at ON analytics_events(at);
 CREATE INDEX IF NOT EXISTS analytics_events_day_event ON analytics_events(day, event);
 """
 
-PUBLIC = {"analytics_record", "analytics_report"}
+PUBLIC = {"analytics_record", "analytics_report", "analytics_stage_times"}
 
 MAX_BATCH = 25
 MIN_DAYS = 1
@@ -83,7 +83,7 @@ MAIN_STAGE_ORDER = ("p", "0", "1", "2", "3", "3f", "4", "6", "5")
 FINAL_JOB_STATES = ("succeeded", "rejected", "failed", "canceled")
 ACTIVE_JOB_STATES = ("queued", "running")
 
-_NO_PROPS = frozenset({"upload_selected", "idea_typed", "create_clicked", "result_viewed"})
+_NO_PROPS = frozenset({"upload_selected", "idea_typed", "create_clicked", "result_viewed", "model_first_shown"})
 _ENUM_PROPS: dict[str, tuple[str, tuple[str, ...]]] = {
     "page_view": ("page", PAGES),
     "suggestion_click": ("id", SUGGESTIONS),
@@ -128,6 +128,10 @@ def validate_batch(payload: Any) -> tuple[str, str, list[tuple[str, str, str]]]:
             if not isinstance(val, str) or val not in allowed:
                 raise ValueError("bad_prop_value")
             cleaned.append((name, key, val))
+        elif name in ("refined_version_shown", "update_clicked"):
+            if set(props) != {"n"} or not isinstance(props["n"], str) or not re.fullmatch(r"[1-9][0-9]{0,8}", props["n"]):
+                raise ValueError("bad_version")
+            cleaned.append((name, "n", props["n"]))
         elif name == "picker_select":
             if set(props.keys()) != {"id"} or not isinstance(props["id"], str) or not SLUG_RE.fullmatch(props["id"]):
                 raise ValueError("bad_picker_id")
@@ -183,7 +187,22 @@ def _finite(values: list[Any]) -> list[float]:
     return sorted(float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
 
 
+def _stage_seconds(rows: list[dict[str, Any]]) -> list[float]:
+    return _finite([r["seconds"] for r in rows if r["state"] in ("passed", "failed", "rejected", "canceled", "unavailable")])
+
+
 class AnalyticsStore:
+    def analytics_stage_times(self) -> dict[str, float]:
+        """The same seven-day stage medians as reporting, after three measured finishes."""
+        rows = self._all("SELECT js.stage, js.state, js.seconds FROM job_stages js JOIN jobs j ON j.id=js.job_id "
+                         "WHERE j.created_at>=?", (self.clock() - DEFAULT_DAYS * 86400,))
+        result = {}
+        for key in MAIN_STAGE_ORDER:
+            seconds = _stage_seconds([r for r in rows if r["stage"] == key])
+            if len(seconds) >= 3:
+                result[key] = _percentile(seconds, .5, 2)
+        return result
+
     def analytics_record(self, visitor_id: str, device: str, items: list[tuple[str, str, str]]) -> int:
         if not isinstance(visitor_id, str) or not VISITOR_RE.fullmatch(visitor_id) or device not in DEVICES:
             raise ValueError("invalid visitor or device")
@@ -335,12 +354,13 @@ class AnalyticsStore:
             counts: dict[str, int] = {}
             for r in rows:
                 counts[r["state"]] = counts.get(r["state"], 0) + 1
-            secs = _finite([r["seconds"] for r in rows if r["seconds"] is not None])
+            secs = _stage_seconds(rows)
             costs = _finite([r["cost_usd"] for r in rows if r["cost_usd"] is not None])
             return {
                 "stage": key,
                 "label": STAGE_LABELS.get(key, key),
                 "runs": len(rows),
+                "timed_runs": len(secs),
                 "passed": counts.get("passed", 0),
                 "failed": counts.get("failed", 0),
                 "rejected": counts.get("rejected", 0),

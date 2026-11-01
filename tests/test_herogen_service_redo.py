@@ -121,7 +121,10 @@ class TestVersions(WebCase):
             versions = r.json()["versions"]
             self.assertEqual({j["id"] for j in versions}, {self.parent, first, second, child})
             parent = next(j for j in versions if j["id"] == self.parent)
-            self.assertEqual(parent["cover_thumbnail_url"], f"/runs/r1/{self.parent}/01-cover.png")
+            from hashlib import sha256
+            cover = self.svc.storage.run_dir(self.uid, self.parent) / '01-cover.png'
+            version = sha256(cover.read_bytes()).hexdigest()
+            self.assertEqual(parent["cover_thumbnail_url"], f"/runs/r1/{self.parent}/01-cover.png?v={version}")
             self.assertEqual(next(j for j in versions if j["id"] == first)["note"], "green coat")
             self.assertEqual(next(j for j in versions if j["id"] == first)["status"], "stopped")
 
