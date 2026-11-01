@@ -289,6 +289,7 @@ function initJobs() {
   if (pending) $('#jobMsg').textContent = 'An earlier hero from this tab was not confirmed. Make it again: if it was saved, you get that hero, not a second one.';
   $('#jobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
+    if ($('#go').disabled) return;
     const msg = $('#jobMsg');
     const fd = new FormData();
     const kind = document.querySelector('input[name=kind]:checked').value;
@@ -307,10 +308,11 @@ function initJobs() {
       fd.append('prompt', prompt.value);
     }
     const values = { prompt: prompt.value, name: $('#name').value, profile: sel.value, file };
+    $('#go').disabled = true;
     if (!S.session.signed_in) {
       try { await keepDraft(values); msg.textContent = 'Your draft is saved.'; }
       catch { msg.textContent = 'Keep this tab open to preserve your draft.'; }
-      if (!S.session.public_demo) { signIn(); return; }
+      if (!S.session.public_demo) { $('#go').disabled = false; signIn(); return; }
       $('#go').disabled = true;
       try { await openGuestWorkspace(); await signedIn(); }
       catch(e) { msg.textContent = e.message; $('#go').disabled = false; return; }
@@ -408,9 +410,13 @@ async function refreshAccess() {
   if (S.session.signed_in) { updateAccessSummary(); renderQuota(S.session.usage); return; }
   expireAccess();
 }
+let guestOpening = null;
 async function openGuestWorkspace() {
-  const result = await api('/api/demo/access', {method:'POST',json:{}});
-  S.csrf = result.csrf; await loadSession();
+  if (!guestOpening) guestOpening = (async () => {
+    const result = await api('/api/demo/access', {method:'POST',json:{}});
+    S.csrf = result.csrf; await loadSession();
+  })();
+  try { await guestOpening; } finally { guestOpening = null; }
 }
 function initGuestAccess() {
   $('#closeGuest').addEventListener('click', () => $('#guestDialog').close());
