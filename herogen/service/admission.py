@@ -6,6 +6,8 @@ latest sent deadline plus 60 seconds has passed (latest worker start plus 60 sec
 Completed calls use known costs; sent calls without completion and unknown calls use full price (Modal calls
 use function timeout times price per second). Missing process/ledger evidence retains the reservation. Automatic
 settlement uses the ledger bound, never a provider invoice; manual reconciliation wins if it commits first.
+Settled phases become a retained baseline; later settlement adds only unsettled phases and cannot lower
+recorded spending.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ import math
 import re
 import json
 
-SCHEMA = '''
+LEGACY_SCHEMA = '''
 CREATE TABLE admission_policy (
  id INTEGER PRIMARY KEY CHECK(id=1), limit_micro INTEGER NOT NULL, reserve_micro INTEGER NOT NULL,
  max_active INTEGER NOT NULL, expires_at REAL NOT NULL, enabled INTEGER NOT NULL, code_commit TEXT NOT NULL,
@@ -36,6 +38,19 @@ CREATE TABLE admission_processes (token TEXT NOT NULL, host TEXT NOT NULL, pid I
  stopped INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(token,host,pid));
 CREATE TABLE IF NOT EXISTS budget_overhead (id INTEGER PRIMARY KEY CHECK(id=1), amount_micro INTEGER NOT NULL, evidence TEXT NOT NULL, updated_at REAL NOT NULL);
 '''
+# Keep historical migration statements unchanged; fresh stores apply the same extension.
+PHASE_MIGRATION = (
+    "ALTER TABLE admissions ADD COLUMN phase INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE admissions ADD COLUMN baseline_micro INTEGER DEFAULT 0",
+    "ALTER TABLE admissions ADD COLUMN settled_phase INTEGER NOT NULL DEFAULT -1",
+    "ALTER TABLE admission_work ADD COLUMN phase INTEGER NOT NULL DEFAULT 0",
+    "UPDATE admissions SET baseline_micro=actual_micro,settled_phase=0 WHERE actual_micro IS NOT NULL",
+    # Older open continuations have no durable split between prior spend and new receipts.
+    # Retain their allocation until operator evidence establishes a cumulative baseline.
+    "UPDATE admissions SET baseline_micro=NULL WHERE actual_micro IS NULL AND job_id IN "
+    "(SELECT id FROM jobs WHERE continued_after>0)",
+)
+SCHEMA = LEGACY_SCHEMA + ';\n'.join(PHASE_MIGRATION) + ';\n'
 PUBLIC = {'guest_open', 'admission_status', 'admission_work_begin', 'admission_work_end',
           'admission_main_done', 'admission_side_prepare', 'admission_side_done'}
 PUBLIC |= {'admission_record', 'admission_candidates', 'admission_auto_settle'}
@@ -124,7 +139,7 @@ class AdmissionStore:
         # spending on this job, including a reconciled amount, before reopening its compute receipt.
         c.execute('INSERT INTO admissions(job_id,user_id,client_key,amount_micro,cost_signature,created_at) VALUES (?,?,?,?,?,?) '
                   'ON CONFLICT(job_id) DO UPDATE SET amount_micro=COALESCE(admissions.actual_micro,admissions.amount_micro)+excluded.amount_micro, '
-                  'actual_micro=NULL,cost_signature=excluded.cost_signature,main_done=0,side_required=1,side_done=0,closed=0,evidence=\'\'',
+                  'phase=admissions.phase+1,actual_micro=NULL,cost_signature=excluded.cost_signature,main_done=0,side_required=1,side_done=0,closed=0,evidence=\'\'',
                   (job_id, user_id, client_key, reserve, cost_signature, self.clock()))
         self._audit(c, user_id, 'generation_reserved', job_id, {'micro_usd': reserve})
 
@@ -132,13 +147,13 @@ class AdmissionStore:
                              process: dict | None = None) -> None:
         from herogen.service.store import StoreError
         with self._tx() as c:
-            row = c.execute('SELECT closed,cost_signature FROM admissions WHERE job_id=?', (job_id,)).fetchone()
+            row = c.execute('SELECT closed,cost_signature,phase FROM admissions WHERE job_id=?', (job_id,)).fetchone()
             if row is None or row['closed'] or row['cost_signature'] != cost_signature:
                 raise StoreError('This generation has no open compute reservation.', 'generation_paused')
             if kind != 'heldout' and c.execute("SELECT 1 FROM admission_work WHERE job_id=? AND kind!='heldout' AND state!='closed'", (job_id,)).fetchone():
                 raise StoreError('Earlier compute has not been confirmed stopped. Operator reconciliation is required.', 'generation_uncertain')
-            c.execute('INSERT INTO admission_work(token,job_id,kind,state,created_at,process) VALUES (?,?,?,?,?,?)',
-                      (token, job_id, kind, 'open', self.clock(), json.dumps(process) if process else ''))
+            c.execute('INSERT INTO admission_work(token,job_id,kind,state,created_at,process,phase) VALUES (?,?,?,?,?,?,?)',
+                      (token, job_id, kind, 'open', self.clock(), json.dumps(process) if process else '', row['phase']))
             if process and process.get('compute_price_per_second'):
                 receipt = self._compute_receipt(token, kind, process)
                 c.execute('INSERT INTO admission_calls(job_id,token,receipt) VALUES (?,?,?)',
@@ -156,7 +171,7 @@ class AdmissionStore:
         with self._tx() as c:
             work = c.execute("SELECT 1 FROM admission_work w JOIN admissions a USING(job_id) "
                              "WHERE w.job_id=? AND token=? AND (state='open' OR (? AND state='uncertain')) "
-                             "AND a.actual_micro IS NULL AND a.closed=0", (job_id, token, finishing)).fetchone()
+                             "AND w.phase=a.phase AND a.actual_micro IS NULL AND a.closed=0", (job_id, token, finishing)).fetchone()
             if not work:
                 raise ValueError('No live reservation for this receipt')
             if action == 'call':
@@ -178,11 +193,17 @@ class AdmissionStore:
                 raise ValueError('Unknown admission receipt')
 
     def _admission_snapshot(self, job_id: str) -> dict:
-        work = self._all('SELECT * FROM admission_work WHERE job_id=? ORDER BY token', (job_id,))
+        admission = self._one('SELECT phase,baseline_micro,settled_phase FROM admissions WHERE job_id=?', (job_id,))
+        # Calls and process groups inherit their phase from the immutable work token. Reconciled
+        # phases remain in the ledger, but neither their costs nor their exit proof are reconsidered.
+        params = (job_id, admission['settled_phase'])
+        work = self._all('SELECT * FROM admission_work WHERE job_id=? AND phase>? ORDER BY token', params)
         processes = self._all('SELECT p.* FROM admission_processes p JOIN admission_work w USING(token) '
-                              'WHERE w.job_id=? ORDER BY token,host,pid', (job_id,))
-        calls = self._all('SELECT receipt FROM admission_calls WHERE job_id=? ORDER BY id', (job_id,))
-        return {'work': work, 'processes': processes, 'calls': [json.loads(r['receipt']) for r in calls]}
+                              'WHERE w.job_id=? AND w.phase>? ORDER BY token,host,pid', params)
+        calls = self._all('SELECT c.receipt FROM admission_calls c LEFT JOIN admission_work w '
+                         'ON w.token=c.token AND w.job_id=c.job_id '
+                         'WHERE c.job_id=? AND (w.phase>? OR w.token IS NULL) ORDER BY c.id', params)
+        return {**admission, 'work': work, 'processes': processes, 'calls': [json.loads(r['receipt']) for r in calls]}
 
     def admission_candidates(self) -> list[dict]:
         with self.lock:
@@ -194,7 +215,10 @@ class AdmissionStore:
     def admission_auto_settle(self, job_id: str, snapshot: dict) -> bool:
         """Compare the worker's stopped-process evidence atomically with manual reconciliation and new work."""
         from herogen.pipeline.ledger import bound
+        if snapshot['baseline_micro'] is None:
+            return False
         cost, calls, full, deadline = bound(snapshot['calls'])
+        cost += snapshot['baseline_micro']
         if not snapshot['work'] or any(not w['process'] for w in snapshot['work']):
             return False
         if not snapshot['calls']:
@@ -317,6 +341,8 @@ class AdmissionStore:
             job = c.execute('SELECT state FROM jobs WHERE id=?', (job_id,)).fetchone()
             if job and job['state'] in ('running', 'queued'):
                 raise ValueError('Cannot reconcile an active job.')
+            if actual_micro < max(row['baseline_micro'] or 0, row['actual_micro'] or 0):
+                raise ValueError('Reconciliation cannot lower previously recorded spending.')
             outstanding = c.execute("SELECT 1 FROM admission_work WHERE job_id=? AND state!='closed'", (job_id,)).fetchone()
             if (not row['closed'] or outstanding) and not work_stopped:
                 raise ValueError('Confirm that all main, side and uncertain remote work has stopped first.')
@@ -324,8 +350,8 @@ class AdmissionStore:
                 c.execute("UPDATE admission_work SET state='closed',finished_at=? WHERE job_id=? AND state!='closed'", (self.clock(), job_id))
             if actual_micro > row['amount_micro']:
                 c.execute('UPDATE admission_policy SET enabled=0 WHERE id=1')
-            c.execute('UPDATE admissions SET actual_micro=?,closed=1,evidence=? WHERE job_id=?',
-                      (actual_micro, evidence[:1000], job_id))
+            c.execute('UPDATE admissions SET actual_micro=?,baseline_micro=?,settled_phase=phase,closed=1,evidence=? WHERE job_id=?',
+                      (actual_micro, actual_micro, evidence[:1000], job_id))
             self._audit(c, 'admin', 'generation_budget_reconciled', job_id,
                         {'actual_micro': actual_micro, 'evidence': evidence[:1000], 'work_stopped': work_stopped})
             if _auto_snapshot is not None:
