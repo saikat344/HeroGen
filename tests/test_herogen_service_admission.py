@@ -404,6 +404,130 @@ class TestAdmission(TempDirCase):
         self.clock.advance(61)
         self.assertEqual(settle_admissions(self.store),[job['id']])
 
+    def redo_pair(self, user, parent_key='parent', child_key='child', note='green coat'):
+        parent,_=self.store.job_create(job_id=new_id('j'),user_id=user['id'],client_key=parent_key,
+            kind='sketch',profile='best',jobs_per_day=10,jobs_total=10,storage_max_bytes=10**10,
+            input_sha='x',code_commit=self.s.code_commit,cost_signature=self.s.cost_signature)
+        claim=self.store.job_claim(parent['id'],'call',60,2)
+        self.store.job_finish(parent['id'],claim['attempt'],'succeeded')
+        self.store.admission_side_done(parent['id'])
+        child,created=self.store.job_create(job_id=new_id('j'),user_id=user['id'],client_key=child_key,
+            kind='sketch',profile='best',jobs_per_day=10,jobs_total=10,storage_max_bytes=10**10,
+            input_sha='x',parent_job=parent['id'],from_stage='1',note=note,
+            code_commit=self.s.code_commit,cost_signature=self.s.cost_signature)
+        self.assertTrue(created)
+        return parent,child
+
+    def begin_full_price_work(self, job_id, token):
+        """A crashed attempt's ledger: an uncompleted sent call, an unknown Modal call, and a
+        recorded process-group exit, with the worker confirmed stopped but the work uncertain."""
+        self.store.admission_work_begin(job_id,token,'model',self.s.cost_signature,process=identity())
+        sent=dict(call_id='call',model='synthetic',endpoint='responses',key='hash',outcome='sent',
+                  deadline=self.clock()+120,price_usd=.01)
+        self.store.admission_record(job_id,token,'call',row=sent)
+        modal=dict(call_id='mcall',model='synthetic',endpoint='modal/infer',key='mhash',outcome='sent',
+                   deadline=self.clock()+120,price_usd=1.8,timeout_s=1800,price_per_second=.001)
+        self.store.admission_record(job_id,token,'call',row=modal)
+        self.store.admission_record(job_id,token,'call',row={**modal,'outcome':'unknown','cost_usd':.001})
+        host=identity()['host']
+        self.store.admission_record(job_id,token,'process_start',host=host,pid=123)
+        self.store.admission_record(job_id,token,'process_stopped',host=host,pid=123)
+        self.store.admission_work_end(job_id,token,False,worker_stopped=True)
+
+    def reservation(self, jid):
+        return next(r for r in self.store.budget_report()['admissions'] if r['job_id']==jid)
+
+    def test_redo_settles_exactly_like_a_plain_job(self):
+        t,_=self.guest(); twin,_=self.job(t)
+        self.begin_full_price_work(twin['id'],'twin'); self.close(twin)
+        u,_=self.guest(); _,child=self.redo_pair(u)
+        claim=self.store.job_claim(child['id'],'call',60,2)
+        self.begin_full_price_work(child['id'],'child')
+        self.store.job_finish(child['id'],claim['attempt'],'stopped')
+        self.assertEqual(settle_admissions(self.store),[])
+        self.clock.advance(181)
+        self.assertCountEqual(settle_admissions(self.store),[twin['id'],child['id']])
+        rows={jid: self.reservation(jid) for jid in (twin['id'],child['id'])}
+        for row in rows.values():
+            self.assertEqual(row['actual_micro'],1_810_000)
+            self.assertTrue(row['closed']); self.assertTrue(row['auto_settled'])
+            self.assertIn('2 calls, 2 charged at full price',row['evidence'])
+        self.assertEqual(self.store.budget_report()['summary']['active'],0)
+
+    def test_auto_settled_stopped_redo_continues_behind_the_fence(self):
+        u,_=self.guest(); _,child=self.redo_pair(u)
+        claim=self.store.job_claim(child['id'],'call',60,2)
+        self.begin_full_price_work(child['id'],'phase0')
+        self.store.job_finish(child['id'],claim['attempt'],'stopped')
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store),[child['id']])
+        self.assertEqual(self.reservation(child['id'])['actual_micro'],1_810_000)
+        continued=self.store.job_continue(child['id'],u['id'],10**10,
+            code_commit=self.s.code_commit,cost_signature=self.s.cost_signature)
+        self.assertEqual(continued['state'],'queued')
+        self.assertEqual(continued['continued_after'],1)
+        row=self.reservation(child['id'])
+        self.assertEqual((row['main_done'],row['side_done'],row['closed']),(0,0,0))
+        self.assertEqual(row['amount_micro'],11_810_000)
+        self.assertIsNone(row['actual_micro'])
+        # A stale phase-0 finalizer cannot close the reopened receipt.
+        self.store.admission_main_done(child['id'],continued_after=0)
+        self.store.admission_side_done(child['id'],continued_after=0)
+        row=self.reservation(child['id'])
+        self.assertEqual((row['main_done'],row['side_done'],row['closed']),(0,0,0))
+        # The continuation runs, finishes, and settles its cumulative ledger.
+        claim=self.store.job_claim(child['id'],'call',60,2)
+        self.store.admission_work_begin(child['id'],'phase1','model',self.s.cost_signature,process=identity())
+        sent=dict(call_id='p1',model='synthetic',endpoint='responses',key='p1hash',outcome='sent',
+                  deadline=self.clock()+120,price_usd=.01)
+        self.store.admission_record(child['id'],'phase1','call',row=sent)
+        self.store.admission_record(child['id'],'phase1','call',row={**sent,'outcome':'ok','cost_usd':.0031})
+        host=identity()['host']
+        self.store.admission_record(child['id'],'phase1','process_start',host=host,pid=124)
+        self.store.admission_record(child['id'],'phase1','process_stopped',host=host,pid=124)
+        self.store.admission_work_end(child['id'],'phase1',True,worker_stopped=True)
+        self.store.job_finish(child['id'],claim['attempt'],'succeeded')
+        self.store.admission_side_done(child['id'],continued_after=1)
+        self.store.admission_main_done(child['id'],continued_after=1)
+        self.assertTrue(self.reservation(child['id'])['closed'])
+        self.clock.advance(181)
+        self.assertEqual(settle_admissions(self.store),[child['id']])
+        row=self.reservation(child['id'])
+        self.assertEqual(row['actual_micro'],1_813_100)
+        self.assertTrue(row['auto_settled'])
+        self.assertIn('3 calls, 2 charged at full price',row['evidence'])
+
+    def test_deleting_redo_job_erases_note_and_settles_or_closes_its_admission(self):
+        u,_=self.guest(); parent,closed=self.redo_pair(u,child_key='closed-child')
+        claim=self.store.job_claim(closed['id'],'call',60,2)
+        self.store.admission_work_begin(closed['id'],'clean','model',self.s.cost_signature,process=identity())
+        self.store.admission_work_end(closed['id'],'clean',True,worker_stopped=True)
+        self.store.job_finish(closed['id'],claim['attempt'],'stopped')
+        self.assertEqual(self.store.job_get(closed['id'])['note'],'green coat')
+        self.assertEqual(self.store.job_delete(closed['id'],u['id'])['note'],'')
+        self.assertEqual(self.store.job_get(closed['id'])['note'],'')
+        row=self.reservation(closed['id'])
+        self.assertEqual((row['main_done'],row['side_done'],row['closed']),(1,1,1))
+        self.assertIsNone(row['actual_micro'])
+        # Uncertain work stays open for auto-settlement after deletion.
+        settled,_=self.store.job_create(job_id=new_id('j'),user_id=u['id'],client_key='settled-child',
+            kind='sketch',profile='best',jobs_per_day=10,jobs_total=10,storage_max_bytes=10**10,
+            input_sha='x',parent_job=parent['id'],from_stage='2',note='blue scarf',
+            code_commit=self.s.code_commit,cost_signature=self.s.cost_signature)
+        claim=self.store.job_claim(settled['id'],'call',60,2)
+        self.begin_full_price_work(settled['id'],'crashed')
+        self.store.job_finish(settled['id'],claim['attempt'],'stopped')
+        self.store.job_delete(settled['id'],u['id'])
+        self.assertEqual(self.store.job_get(settled['id'])['note'],'')
+        row=self.reservation(settled['id'])
+        self.assertEqual((row['main_done'],row['side_done'],row['closed']),(1,1,0))
+        self.clock.advance(181)
+        self.assertCountEqual(settle_admissions(self.store),[closed['id'],settled['id']])
+        self.assertEqual(self.reservation(closed['id'])['actual_micro'],0)
+        row=self.reservation(settled['id'])
+        self.assertEqual(row['actual_micro'],1_810_000)
+        self.assertTrue(row['auto_settled'])
+
 
 class TestGuestHTTP(WebCase):
     def build(self,**kw):
