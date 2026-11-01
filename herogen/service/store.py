@@ -209,7 +209,7 @@ class Store(GenerationStore, AnalyticsStore):
         "job_continue", "job_versions",
         "guest_open", "generation_get",
     }) | ANALYTICS_PUBLIC
-    # Methods only the admin function may invoke (modal_app.StoreService.admin_call, which needs the admin key).
+    # Methods reached through StoreService.admin_call with the hosted admin key.
     ADMIN = frozenset({
         "users_list", "user_set_status", "audit_list", "jobs_admin_list",
         "generation_update",

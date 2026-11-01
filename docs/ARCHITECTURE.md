@@ -71,35 +71,22 @@ CSRF middleware:
 | Endpoint | Behavior |
 | --- | --- |
 | `POST /api/jobs/<id>/redo` | Accepts `stage: "cover"|"turnaround"` and optional `note`; requires the normal `Idempotency-Key`. Copies the owned inactive parent's earlier run data, commits the copy, then creates a new queued job with the parent's input, profile and owner, `parent_job`, `from_stage`, `note`, and `stop_after`. Different requests with one key conflict. |
-| `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains its quota slot and prior spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
+| `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains prior stage spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
 | `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, and `cover_thumbnail_url`, pointing at the existing owner-checked cover route or null. |
 
 The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
 fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
 Version columns are migration 7 (schema version 8), following the existing admission migrations unchanged.
-In public mode, and for every guest or previously budgeted job, redo and continuation use the same atomic
-budget admission as a new hero. A stopped version releases capacity only after its compute is confirmed
-finished, retaining its monetary allocation. Continuation reserves another full job bound for its fresh retry
-allowance, adding it to prior allocations or reconciled spending before reopening the same job's receipt.
-Migration 8 (schema version 9) retains reconciled cumulative spending as `baseline_micro` and marks each
-work token with its admission phase. Its calls and process groups inherit that phase. Settlement adds the
-ledger bound of unsettled phases to the baseline; reconciled phases are never charged or probed again.
-Without prior reconciliation, both phases retain their ledger and stopped-process checks. An older
-unreconciled continuation has no recoverable phase split: migration preserves its allocation and requires
-manual cumulative reconciliation before automatic settlement can resume. Reconciliation cannot lower a
-previously recorded cumulative figure.
-Redo admission uses the same active account, daily/lifetime quota and storage checks as new heroes, in
-one transaction. Both new hero creation and continuation atomically refuse another queued or running
-job in the same user's workspace. Continuation needs storage capacity and the existing request rate limit;
-it does not consume a second quota slot. Sessions can belong to signed-in accounts or private guest
-workspaces. Missing or foreign jobs return the same plain 404 message.
+Redo and continuation use the same transactional generation spend guard as new heroes. Stopped versions
+count at their recorded cost. Continuation checks the guard before requeueing and resumes the existing
+run folder with its earlier stage costs. Multiple heroes may be queued in one guest workspace. Storage
+and request rate limits still apply. Missing or foreign jobs return the same plain 404 message.
 
 Workers resume after the copied passing records even on a new job's first attempt. A redo with
 `stop_after` runs only its model group through the requested stage; no later worker group, held-out view
 or 3D work starts. Passing changes the job to `stopped`, with its actual new cost and storage recorded.
-Continuation resumes after the completed records and runs the ordinary remaining groups and held-out
-work. Rejections, model failures, automatic retries and refunds use the existing outcome policy. A lost
-or ambiguous store acknowledgement keeps the prepared files for reconciliation; refusal or idempotent
+Continuation resumes after the completed records and runs the ordinary remaining groups. Rejections, model failures, automatic retries use the existing outcome policy. A lost
+or ambiguous store acknowledgement keeps the prepared files until retention; refusal or idempotent
 replay removes the unused copy. Retention removes prepared run folders older than a day only when no
 metadata job claims them, covering unconfirmed creations that were never saved.
 
@@ -1547,8 +1534,6 @@ without usage is never counted at $0.
   input at 0. A 200 answer that failed and is retried is priced from the usage it reports, like any answer;
   an attempt with no answer (cut off, timed out, unreadable) and an answer with no usage (an incomplete one,
   say) are counted at the output-token cap ($0.01275 for stage p's 3000), so neither is ever counted at $0.
-  These stage estimates differ from automatic settlement: unanswered or unknown calls retain their entire
-  sent bound, including Muse Spark's maximum input-context charge (see generation admission below).
   Otherwise a Muse Spark call is handled like a SAM 3.1 call: it is retried on a 409, and a 5xx is not counted.
 
 ## Stage p: prompt to sketch
@@ -1916,357 +1901,122 @@ at rest and says so.
 
 ## Service
 
-`herogen/service` is the hosted, invite-only version: people sign in with an emailed link, upload a sketch or
-describe a hero, follow its stages, and download the GLB and a Roblox bundle. It runs on Modal; dev mode runs the
-whole service on one machine with stand-ins.
+The public website is guest-only. `POST /api/demo/access` creates or rotates a private guest session;
+access alone starts no compute. Guests need no terms or adult confirmation. Session cookies preserve
+access to that workspace; clearing them opens a different workspace. Legal pages and footer links remain.
+Gallery routes need no session and never start generation.
 
-```bash
-pip install -r herogen/service/requirements-dev.txt
-python3 -m herogen.service dev                    # http://127.0.0.1:8800, sign-in links printed and in service-data/outbox.jsonl
-python3 -m herogen.service dev --runner local     # the real stage CLIs on this machine (Blender, MODEL_API_KEY)
-python3 -m herogen.service admin invite --count 3 # admin commands against the dev store
-modal deploy -m herogen.service.modal_app         # deploy (see "Deploying" below)
+`web.py` handles HTTP, CSRF/origin checks, upload sanitization, rate limits and owner checks. `store.py`
+is the only metadata writer. `worker.py` dispatches and orchestrates jobs; `runner.py` starts the stage
+CLIs; `storage.py` confines files to each owner's folders. `modal_app.py` hosts these components using
+remote store calls and separate model, Blender and export workers. Runtime models are unchanged.
+
+### Spend guard and queue
+
+Schema version 11 adds migration 10 without changing earlier migrations. It renames `admissions`,
+`admission_work`, `admission_calls`, `admission_processes`, `admission_policy`, `budget_overhead` and
+`refine_budgets` to `legacy_<name>`. Their rows remain intact and unused. Jobs, stages, analytics and
+sessions remain. The new `generation_settings` table has exactly one row: `enabled` (default false),
+`limit_usd` (default zero), `running_estimate_usd` (default 1.50) and `max_running` (initialized from
+`HEROGEN_SERVICE_MAX_RUNNING`, default five). Deploys preserve the row. Settings have no expiry or
+binding to a code commit or cost signature.
+
+Job creation checks the following in the same `BEGIN IMMEDIATE` transaction as the job insert:
+
+```
+spent + (queued_and_running_count + 1) * running_estimate_usd <= limit_usd
 ```
 
-### Components
+`spent` sums recorded `jobs.cost_usd` for every final state, including failed, rejected, canceled and
+stopped jobs, even after file deletion. Queued and running jobs count at the estimate. A final job
+immediately stops counting that estimate; no reconciliation or operator action is required. Lease
+expiry fails a lost worker and records its cumulative stage cost. The sweep performs this expiry;
+guard and settings reads also expire stale leases before counting. The estimate is an admission
+measure based on stage cost records, not a provider invoice or a guaranteed bound on actual charges.
 
-| Part | Where | What it does |
-| --- | --- | --- |
-| Web | `web.py`, Modal `web` | Starlette ASGI app: pages, JSON API, Lab API, downloads. Holds the `<app>-web` secret. |
-| Metadata store | `store.py`, `snapshot.py`, Modal `StoreService` | Users, allowlist, invites, sign-in links, sessions, jobs, stages, audit log. The only writer. |
-| Upload cleaner | `uploads.py`, Modal `sanitize_image` | Opens and re-encodes uploads, with no network, no secrets, no volumes and no access to other Modal resources. |
-| Job orchestrator | `worker.py` `run_job`, Modal `run_job` | One per job attempt: claims the job, runs the stage groups in order, finishes the job. |
-| Stage groups | `worker.py` `run_group`, `runner.py`, Modal `model_stages`, `blender_stages`, `export_stages`, `heldout_stages` (beside the job) | Run the pipeline's own CLIs on a local copy of the job's files, each group in a fresh container. |
-| Sweep, retention | `worker.py` `reconcile`, `purge`, Modal `sweep` (every minute), `retention` (daily 03:17 UTC) | Requeue jobs whose worker died, start queued jobs, delete expired files and records. |
-| Admin | `admin.py`, Modal `admin` entrypoint | Invites, allowlist, users, quotas, jobs, audit log. No admin web page. |
+Disabled generation returns `generation_paused` with “Live generation is paused right now.” Insufficient
+budget returns `generation_budget_exhausted` with “The live-generation budget is used up for now.”
+The existing per-IP and per-user request rate limits remain and return clear HTTP errors. Upload and
+storage limits remain. There are no account job quotas, workspace-active refusals or capacity refusals.
 
-### Decisions
+The dispatcher atomically selects the oldest queued jobs and marks them starting, up to `max_running`,
+counting running and recently dispatched jobs. It retries an unclaimed dispatch after its grace period.
+Extra heroes remain queued. Local worker completion and the hosted orchestrator dispatch the next jobs;
+the periodic sweep also dispatches. The workbench displays “Waiting for a free worker”.
 
-**Web: Starlette (BSD-3-Clause) on Modal's ASGI support.** FastAPI is built on Starlette; the extra it brings
-(pydantic models, OpenAPI) buys nothing for a dozen hand-checked endpoints, and Starlette alone has the pieces
-used here: request-body limits per route (`max_body_size`), the trusted-host check, and multipart parsing through
-python-multipart (Apache-2.0) with limits on files, fields and part size. Dev mode serves the same app with
-uvicorn on 127.0.0.1.
+Each POST `/api/jobs` uses an `Idempotency-Key`. The store returns the same owner's existing job for
+the same key and input before checking the guard; different input under the same key conflicts. The
+browser creates one key per click in memory and disables submission while it is pending. There is no
+IndexedDB draft, sessionStorage pending key, or restore-after-sign-in flow.
 
-**Jobs: an orchestrator and three stage groups, retries owned by the store.** Modal starts an input again after its
-container dies, without a limit, and has no idempotency key, so no function sets Modal `retries` and every job
-function is `nonpreemptible`. Instead:
+### Job execution and failures
 
-- `job_claim` is a worker's first call. It starts the next numbered attempt of a queued job and returns nothing for
-  a job that is running, finished, deleted or unknown, so a duplicate or restarted orchestrator does nothing. A job
-  out of attempts (`max_attempts`, default 2) fails there, before any paid call.
-- Every later update names its attempt, and the store refuses updates from any attempt but the live one; a
-  canceled or deleted job's worker stops at the next stage. A stage group that a restarted container starts more
-  than twice for one attempt stops before running anything (`group_enter`).
-- Each running stage holds a lease covering its timeout plus 10 minutes, and the orchestrator renews the job's lease
-  every 2 minutes to at least 10 minutes ahead for as long as it runs (`worker.LeaseKeeper`, `store.job_renew`),
-  so no copy in or back, cold start or stage costs a live job its lease, however long it takes. The sweep requeues
-  a job whose lease ran out (its worker died: within 10 minutes of the last renewal, or at the end of the running
-  stage's own lease if that is later) or fails it when it is out of attempts. A container that hangs is stopped
-  by its function's timeout, which ends the renewals.
-- When an attempt ends without its worker recording the stage it was running (a cancel, a delete, or the sweep's
-  requeue or failure), the store closes that stage in the same write: "pending" when the job is queued again,
-  "canceled" when it was canceled, "failed" otherwise. Only the live attempt may write a stage, so nothing else
-  would, and the stage would show as running for good.
-- Errors are sorted three ways. A failed gate rejects the job, with the stage's reason; so does a rejected
-  input (a stage-0 or stage-1 record with status `input_rejected`), whose message leads with one plain sentence
-  per failed input check (the model-judged stage-1 checks get the service's own sentence, so the judging model
-  and the photo probability stay in the record and the logs, and only the measured checks are echoed there).
-  A timeout, a network
-  error, or the model or GPU service answering HTTP 429 or 5xx queues another attempt. Anything else (a 4xx, a bad
-  response, a bug) fails the job.
-- A failed job gives its quota back only if it spent nothing (the recorded cost of its stages, model calls and
-  compute together, is zero), and at most twice per user in any 24 hours (`store.REFUNDS_PER_DAY`). A refund gives
-  back the day's slot only; the job still counts toward the lifetime total. A stage that fails after paid calls
-  therefore cannot be used to run paid work past the quota.
-- A retried attempt resumes after the leading stages whose records already passed. Model calls go through the
-  model client's record/replay cache, kept per user, so a repeated call is replayed at no cost.
-- A group works on a local copy of the run folder, its input and the user's caches. After each stage it copies the
-  results back to the data volume and commits, but only while its attempt is still the live one, so a stale worker
-  never overwrites a newer attempt's files.
-- At most `max_running_jobs` jobs run at once (default 4, to stay well inside the Model API's per-team rate limits);
-  the rest wait queued, oldest first.
+The service runs `p` (prompt inputs), `0`, `1`, `2`, `3`, `3f`, `4`, `6` and `5`, with profile-based
+selection. Stage 2 runs through `pipestage.py` so the pipeline CLI cannot append stage 2h. The service
+never plans, invokes, displays or counts 2h. Pipeline and Lab held-out functionality remains available.
+The optional Roblox export and results-page failures remain recorded without discarding the GLB.
+Model errors, including `ApiError` and `ReplayMiss`, remain failed stages and failed jobs.
 
-Stages run as the same commands a person types (`python3 -m herogen.pipeline run`, `python3 -m herogen.blender
-run`), each in a subprocess with a timeout and an environment that holds only what the stage needs:
-`MODEL_API_KEY` reaches the model stages, stage 3 and the held-out views only, and no stage sees the session key or the
-email key. Options that
-only some versions of a stage CLI have (`--profile`, `--remote-cache`) are passed only when that CLI's `--help`
-lists them. A job that starts from a description runs the pipeline's stage `p` through `service/pipestage.py`,
-which reads UTF-8 stdin so the description never appears in process arguments. The pipeline selects the frozen
-prompt versions, draws a design and a full-body edit, and checks the figure and identity (see "Stage p"). It
-writes `stage-p.json`, `p-design.png` and the passing `p-full-body.png` in the run folder. Stage 0 runs without a
-sketch path, taking that image and recording its stage-p origin as the pipeline CLI does; `00-sketch.png` still
-serves the job page and thumbnails. Model calls use the per-user cache, and the stage-p record's cost joins the
-job's cost; replayed calls cost zero. Invalid descriptions, content-policy refusals and failed gates reject the
-job with a rewording message; model/network errors follow the normal error and retry path. The service also
-runs cover and turnaround through `pipestage.py`. Output and error text from these three stages are never
-copied into worker logs or user messages because they can echo descriptions or appearance notes.
-Classification uses only the record's `ok`/`status`, subprocess exit code and timeout flag. The adapter
-returns 6 for a failed stage-p gate (2 for cover/turnaround gates), 3 for input rejection, 4 for content policy,
-5 for a transient model failure and 1 for other errors. Rejections require a matching terminal record;
-usage errors and missing or inconsistent records remain internal failures. Content-policy rejections keep
-their daily quota slot even when the refused request has zero cost. The adapter follows explicit exception
-causes to the client's `ApiError.error_code` and `transient`
-attributes; the client sets these and `http_status` from structured responses and transport/retry state. Neither
-the record's error text nor subprocess output decides these stages' outcomes. Client retry warnings and ledger error
-summaries contain HTTP status or network exception class rather than model error messages.
-Stage rows keep cumulative spending across attempts, and the finished job includes earlier attempts' spending
-even when a retry resumes past completed stages or replays calls for zero new cost. Its cost detail reports that
-carried amount as `previous_work_usd`, including spending from restarted groups in the same attempt. Queued and
-failed retries also retain their recorded spending. Studio character titles use saved job names when present, so a generated
-sketch's fixed file name does not replace the hero's name.
+Claims and stage writes are fenced by attempt number. The orchestrator renews leases, and stage leases
+cover stage timeouts plus a margin. Canceled or deleted workers stop at the next stage boundary. Stale
+leases end the job as failed. Transient reported failures may retry within `max_attempts`, resuming
+passing records. Stage costs accumulate across retries. Hosted groups copy files to local storage and
+commit after stages only while their attempt remains current; deletion during a copy-back removes the
+copied files again. Per-user replay caches avoid repeating completed model calls.
 
-The form applies the selected prompt version's text rules before creating a job (NFKC, controls and slot
-delimiters removed, whitespace collapsed, at least one letter). The description limit is the smaller of
-`HEROGEN_SERVICE_PROMPT_MAX` (default 300) and the selected version's limit (300 for `hero-sketch-v1` and `hero-sketch-v2`); longer
-descriptions are refused, never truncated.
-`HEROGEN_PROMPT_SKETCH_VERSION` and `HEROGEN_SAME_CHARACTER_VERSION` select the pipeline's frozen versions;
-both non-secret selectors are baked into deployed images and passed to stage subprocesses.
-Retries of older description jobs keep completed stage-0 conversions. When only the old service's stage p
-passed, the pipeline stage p runs first: its full-body image and version reference are required by the new stage
-0. This migration makes new pipeline calls rather than treating the old unchecked image as a passing sketch;
-the earlier spending remains counted.
+Texture refinement uses its in-process Budget and `stage-3f.json` persisted spend, default cap $0.80.
+There is no remote budget bridge, pipe, socket, environment variable or metadata-table access.
 
-| Group | Stages | Worker | Secret |
-| --- | --- | --- | --- |
-| model | p (described heroes only), 0, 1, 2 | 2 CPU, 4 GiB, 4.5 h | `<app>-model` |
-| blender | 3, 4 | 8 CPU, 32 GiB, 6.5 h, Blender 4.5.14 LTS | none |
-| export | 6 (Roblox rig: `python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`), 5 (results page) | 2 CPU, 4 GiB, 2.5 h | none |
-| heldout (beside the job) | 2h (held-out views, for scoring) | 2 CPU, 4 GiB, 1.5 h, at most `heldout_concurrency` (2) at once service-wide | `<app>-model` |
+### Authentication and administration
 
-The function timeouts follow the stage timeouts (`HEROGEN_SERVICE_STAGE_TIMEOUT`, 1 h per stage, and
-`HEROGEN_SERVICE_BLENDER_TIMEOUT`, 3 h per Blender stage): each group's function allows all its stages back to back
-plus 30 minutes, and the orchestrator (`run_job`, 14 h with the defaults) allows the job's own three groups plus 30
-minutes; it never waits for the held-out views.
-`modal_app` computes them at deploy time and refuses a configuration over Modal's 24-hour limit.
+Only `/admin/signin` offers email magic links. Requests for addresses outside
+`HEROGEN_SERVICE_ADMIN_EMAILS` send no mail and return the same response as admin requests. Verification
+checks the current admin list again. Tokens are single-use keyed hashes with a short lifetime; a successful
+login rotates CSRF credentials. Sessions for retired non-admin email accounts are ignored; opening guest access starts a guest workspace.
+There are no public email accounts, invites or allowlist administration.
 
-**Held-out views (stage 2h) run beside the job and can never fail or delay it.** No building stage reads
-`heldout/`; the views exist only to score the body on views it was not built from. So:
+`GET /admin`, `GET /api/admin/analytics` and `GET`/`POST /api/admin/generation` require an admin session.
+Unsafe requests require CSRF and same-origin checks. Settings shows accepting/paused status, pause/resume,
+total limit, running estimate, max running, and spent/running/remaining figures. Every settings change is
+audited with the admin user id. The CLI supports:
 
-- The model group runs stage 2 alone (`pipestage.py`, through the same functions the pipeline CLI uses; the CLI
-  itself would follow stage 2 with 2h). Once stage 2 has passed, the orchestrator starts 2h in its own function
-  (`heldout_stages`, started with `spawn` and never awaited) and goes straight on to stages 3, 4, 6 and 5. The GLB
-  and the Roblox bundle are delivered as soon as those finish.
-- 2h runs at most once per job (`store.side_claim`) and is never retried. Whatever happens to it (a failed gate,
-  every view rejected, a Model API error, a timeout, a crash, a lost container, a rate or quota limit) is recorded
-  on the 2h stage only, as passed or "unavailable" with a sentence saying the hero is not affected. Its lease is
-  renewed the same way from the claim to its record (`store.side_renew`), covering the copy in of the user's cache,
-  the run and the copy back; a lost worker is marked unavailable by the sweep within 10 minutes of its last
-  renewal. It never sets the job's state or error, never
-  requeues, retries or refunds it, and never changes whether the job counts toward the quota (its cost is left
-  out of the refund decision).
-- Its cost joins the job's recorded cost (`cost_detail.heldout_usd`), at the job's finish if 2h finished first,
-  else when 2h finishes. A 2h that finishes after the job, including a canceled job, attaches its record and cost
-  and changes nothing else.
-- Files: 2h works on a local copy and writes back only `heldout/` and `stage-2h.json` (and new cache entries), only
-  into a run folder that still exists, and only while its claim holds and the job is not deleted. After each
-  commit it reloads and checks again: deleting a hero or an account marks it deleted in the store before its files
-  are removed, so a delete that landed during the copy back is seen there, and every file the copy back wrote is
-  removed and committed again. The job's own copy back does the same. So a deleted hero's or account's files may
-  reappear only for the moment between those two commits, never for good. The job's own copy back neither copies
-  nor deletes 2h's two paths, so the two never write the same file.
-- Model API share: 2h starts only after the job's own Model API calls (stages p and 0 to 2) are done, and at most
-  `heldout_concurrency` (default 2) held-out runs execute at once across the service (`max_containers` of
-  `heldout_stages`; more wait in Modal's queue), so they yield the API to other jobs' own stages. The pipeline's
-  shared limiter coordinates the processes of one container only (it locks a local file), so across containers
-  this cap is what bounds the held-out views' share.
-- The page lists 2h last as "quality check (held-out views)" and keeps polling while it runs after the job (each
-  stage in the job's JSON says whether it runs beside the job, `side`; only those keep a finished job polling). The
-  results page (stage 5) is written when the job's own path ends, so it shows 2h only if 2h finished first; the
-  viewer always reads the current `stage-2h.json`.
+```
+python3 -m herogen.service admin --data <dir> generation-settings \
+    [--enable|--pause] [--limit-usd X] [--running-estimate-usd Y] [--max-running N]
+```
 
-Stages 6 and 5 are optional: a rejection or
-error there is recorded on the stage and shown as the reason the Roblox bundle is unavailable, and the job still
-delivers its GLB. When the deployed code has no `herogen.roblox` package, stage 6 is recorded as skipped with
-that reason. The export writes `stage-6.json` at the run root with its `outputs` relative to it; an `error` line
-in that record is shown to the user only when it names no path.
+No flags prints current settings JSON. Operational jobs, users/status, audit, analytics-report and
+snapshot commands remain. Reservation, reconciliation, overhead, policy-signature and quota commands
+are removed. The former `/api/admin/generation-budget`, `/api/quota`, `/api/account` and `/signin`
+routes are removed.
 
-**Storage: two Modal Volumes per app, per-user folders.** `<app>-data` holds every user's files under
-`users/<user-id>/` (`inputs/<job-id>.png`, `runs/<job-id>/`, `cache/`, `cache-remote/`; see `storage.py`). User and
-job ids are made by the service (`u_` or `j_` and 26 random base32 characters) and checked against that pattern
-before they touch a path. The only request text that becomes a path is a run-relative file path, accepted only as
-plain name segments of an allowed type (PNG, JPEG, GLB, JSON) that resolve, with no link along the way, inside
-that job's run folder. Each user's storage is limited (`user_storage_max_bytes`, default 2 GiB), counted from the
-recorded size of each finished job. `<app>-legal` holds the published `terms.md` and `privacy.md`.
+The release workflow reads `HEROGEN_SERVICE_ADMIN_EMAILS` from a masked GitHub environment secret.
+A deploying shell value is attached as a runtime Modal secret for `web` and `admin_command`, overriding
+the named web secret; the allowlist never enters image environment layers. It can also be set directly
+in `<app>-web`. `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` is an optional GitHub environment variable
+baked into the image, including the scheduled retention function.
 
-**Metadata store: SQLite, one writer, snapshots on a Volume.** The store needs transactions (a quota check and the
-job it allows, a sign-in link and the account and session it opens), so a key-value store does not fit, and a
-Modal Dict also drops entries after 7 days without use. SQLite cannot keep its own file on a Volume either: Volumes
-have no file locking and the last commit wins. So `StoreService` runs in at most one container
-(`max_containers=1`, one input at a time), keeps the live database on local disk (WAL journal, `synchronous=FULL`)
-and after every write transaction copies it with SQLite's online backup into a new numbered snapshot on
-`<app>-meta`, then commits, before the call returns. Two store containers can still overlap during a deploy, and a
-Volume has no compare-and-swap: a commit that started before a check can land after it. So no file is ever written
-by two containers, and the newest state is decided by file names (`snapshot.py`):
+### Persistence, hosting and retention
 
-- Each store container has a random id. On start it adds a lease file `lease-<epoch>-<id>`, one epoch above every
-  lease it sees, and checks after committing that its lease is the largest (epoch, then id). Each snapshot is a new
-  file `meta-<epoch>-<id>-<generation>.db`; the newest state is the largest (epoch, id, generation) snapshot SQLite
-  can read.
-- Before writing, a store reloads the Volume. It stops for good if a larger lease or a snapshot from a larger epoch
-  exists, and restores and retries the call if the newest snapshot is not the one it holds. After committing it
-  reloads again and reports the write saved only if its lease is still the largest. A call the store cannot
-  complete this way reaches the user as "busy" (below).
-- Snapshots are written in SQLite's rollback-journal mode, so each is one self-contained file: reading it needs no
-  `-wal` or `-shm` file beside it, and none is ever created on the Volume.
+SQLite writes use WAL, `BEGIN IMMEDIATE` and a process lock. Hosted writes snapshot the database to the
+metadata Volume before returning. Snapshot leases prevent a superseded store from acknowledging lost
+writes. Read failures stop restore rather than silently creating an empty store. `snapshots` and
+`snapshot-quarantine` inspect or quarantine unreadable snapshots; quarantining the last copy requires
+`--allow-empty`. The data Volume holds private runs and caches; web and stage workers access metadata
+through the PUBLIC/ADMIN method sets. `generation_update` requires the hosted admin key; the web
+function holds that key so authenticated admin settings changes work remotely. No removed budget
+method is exposed through RemoteStore.
 
-Guaranteed: if a save returns, its snapshot is on the Volume, and every store that starts afterwards restores that
-snapshot or one written later by a store that restored it (directly or through such later snapshots), unless one of
-those snapshots is found corrupt when it is restored. No store container, stale or new, can replace or outrank it:
-a newer store's lease landed after that commit, so the newer store restored it, and everything an older store
-commits afterwards ranks below the newer store's epoch. A save refused before writing is retried after restoring,
-and nothing of it reached the Volume. A save that cannot be confirmed after its commit is reported as failed and not
-retried; that write may still survive. A store that has been superseded never writes again.
+Files are owner-scoped and symlinks/path traversal are refused. Uploaded images are decoded with pixel
+limits, flattened and re-encoded without metadata. Run-file responses use a restrictive sandbox CSP.
+Session, CSRF, sign-in and API request limits remain. Retention removes completed run files and caches
+after the configured period (default 30 days), unclaimed uploads/run folders after a day, expired sessions
+and links, and old audit/analytics rows. Job cost rows remain after file purge.
 
-Reading a snapshot: the store copies it to local disk and uses it only after the copy has the file's size on the
-Volume and SQLite opens it and `PRAGMA integrity_check` passes. If the file cannot be read or opened right now (an
-I/O error, a short read), the store does not start and logs why; it never falls back, so a passing fault cannot drop
-confirmed writes. A file proven corrupt (not a database, a malformed image or a failed integrity check, which is also
-how a torn or partly written file shows) is moved to quarantine on the Volume (`quarantine-<id>-<name>`, which no
-container restores, prunes or counts among the three snapshots kept), logged, and the previous snapshot is restored;
-the writes only that file held are then lost. The store starts from an empty database only on a Volume holding no
-snapshot file, and no quarantined one either unless an operator allowed it ("If the store will not start",
-below).
-
-The schema is versioned (`PRAGMA user_version`): an older database is upgraded in place by the steps in
-`store.MIGRATIONS`, and a version this code does not know is refused at start. A managed Postgres would remove the
-single-writer limit, at the cost of another provider account; every query is in `store.py`, so moving is contained.
-Rate-limit counters live in the store's memory and reset when it restarts.
-
-**Sign-in: invite-only, emailed links, no passwords.**
-
-- A sign-in link carries a 256-bit token in its URL fragment (`/signin#t=...`), which browsers never send to a
-  server or in a Referer. The page shows the masked address and asks for an explicit click, then POSTs the token,
-  so a mail scanner that fetches the link cannot use it up. Links expire after 15 minutes (`link_ttl_s`), work once,
-  and using one cancels every other outstanding link for that address.
-- Links are built from the configured `base_url`, never from the request's Host header.
-- A link is sent only to an active account, an allowlisted address, or an address with a usable invite code (a code
-  may be limited in uses, lifetime and to one address). Before answering, the request does only the rate-limit checks
-  and, when a code is given, checks the code alone (a read that is the same for every address; an unknown, expired,
-  revoked or used-up code is refused). The answer is then the same for every address. Whether the address may sign
-  in, the link (a durable write) and the email all happen after the response, so neither the answer nor its timing
-  says who has an account.
-- Sign-in emails must go out without click tracking: turn off click and open tracking for the sending domain in
-  Resend, or the link is rewritten through the provider's redirect.
-- Creating an account, and signing in after the terms version changes, needs two confirmations: that the person is
-  18 or older, and that they accept the Terms of Service and Privacy Policy (`terms_version`). Without a published
-  version no one can sign in, and in production both documents must be on `<app>-legal`.
-- Sessions are a cookie: `__Host-hg_session`, HttpOnly, Secure, SameSite=Lax, Path=/. They last 30 days at most
-  and end after 7 days unused. Logging out, disabling the account or deleting it revokes the session on the server.
-- Tokens, session ids and invite codes are stored only as HMAC-SHA256 under keys derived from `HEROGEN_SESSION_KEY`,
-  one per purpose, so a copy of the database cannot be replayed as a link or a session.
-- The audit log names accounts by id and addresses and IPs by keyed digests, never in clear.
-
-**CSRF.** Three layers on every POST, PUT, PATCH and DELETE:
-
-1. SameSite=Lax cookies.
-2. An origin check: `Sec-Fetch-Site` must be `same-origin` when present, `Origin` must equal the service's origin when
-   present, and one of the two must be present.
-3. An `X-CSRF-Token` header that must equal the HMAC of the browser's own `__Host-hg_csrf` cookie, a random value set
-   on the first page or session request and replaced at sign-in. The page reads its token from `/api/session`.
-
-**Rate limits** (count per window, settable): sign-in requests 20 per hour per IP and 5 per hour per address; link
-checks and uses 60 per hour per IP; new jobs 20 per hour per user; the whole API 600 per minute per IP, counted in
-each web container. Behind a proxy that sets the client address, `HEROGEN_SERVICE_IP_HEADER` names its header (the
-last entry of a list is used).
-
-**Quota.** Each user may start `jobs_per_day` jobs in any 24 hours (default 5) and `jobs_total` in all (default
-50); admins can set a different quota per user. The check runs in the same transaction that creates the job, before
-any paid call. Every job counts toward both limits, except one canceled before it started; a failed job that spent
-nothing counts toward the lifetime total but not the day's (see "Jobs": at most two such refunds per user per
-day).
-
-**Uploads.**
-
-- An upload is accepted only as PNG, JPEG or WebP. Its type is recognised by its leading bytes; the file name and
-  declared type are ignored.
-- It must be within 12 MiB and 40 megapixels. The pixel count and the memory the decoded image will take (its
-  mode from the header; at most 4 bytes per allowed pixel) are checked before anything is decoded, and Pillow's
-  decompression-bomb warning is an error. It must have one frame and at least 256 pixels on its short side.
-- 16-bit images become 8-bit in integers (the high byte) and 32-bit ones in float32 a block of rows at a time, so
-  converting never makes a full-size float copy; running out of memory is a rejection, not a server error.
-- Pillow opens it with only the matching decoder enabled, verifies it, decodes it, applies the EXIF orientation and
-  converts it to sRGB.
-- What is kept is a new RGB image made from the pixels alone, with transparency on white and at most 2048 pixels on
-  its long side. It is saved as a PNG with no metadata: no EXIF, GPS, XMP, ICC profile, text or time chunks. The
-  client's file name is never stored.
-- Descriptions follow the selected pipeline prompt's rules (NFKC, control and slot delimiters removed,
-  whitespace collapsed; 300 characters by default) and reach stage p on UTF-8 stdin, never a command line.
-  Hero names keep letters, digits, spaces and `' - . _` (at most 60).
-
-**Downloads.** `GET /api/jobs/<id>/download/glb` sends `04-body/high.glb` (`?lod=low` for `low.glb` when the
-profile builds it). `GET /api/jobs/<id>/download/roblox` sends a zip of exactly the files `stage-6.json` lists in its
-`outputs` (`06-roblox/`: the `.rbxmx` rig, `bind_meshes.luau`, the rig test script and the README), each checked
-like a run file, plus `04-body/high.glb`, which the bind script binds, and `stage-6.json` itself. The zip keeps the
-run's layout because the README refers to `../04-body/high.glb` and `../stage-6.json`. It is offered only when
-stage 6 passed. Both are `Content-Disposition:
-attachment` with a file name made from the hero's name.
-
-**Security headers.** Every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, a
-restrictive `Permissions-Policy`, `Cache-Control: no-store` and, on https, `Strict-Transport-Security` (two years).
-Pages get the Lab's CSP: the service's own files, the inline import map by its SHA-256, and the one pinned three.js
-path (`https://cdn.jsdelivr.net/npm/three@0.160.0/`, each module with its integrity hash). Everything else,
-including run files, gets `default-src 'none'; frame-ancestors 'none'; sandbox`. Requests must name an allowed host
-(`HEROGEN_SERVICE_HOSTS`, default the host of `base_url`).
-
-**Observability.** Every request and job event is one JSON log line (`event`, ids, stage, state, seconds, cost),
-never an address, token, description or IP. Each job records the code commit it was started with (baked into the
-image at deploy time, `-dirty` when `herogen/` had uncommitted changes), its wall time and its cost: the stage
-records' model and GPU estimates plus wall seconds times the worker's list price (8 CPU and 32 GiB at
-$0.047 per core-hour and $0.008 per GiB-hour for the Blender worker). Costs are estimates; Modal's and Meta's bills
-are the actuals.
-
-### API
-
-| Method and path | What |
-| --- | --- |
-| `GET /api/session` | Signed in or not, the user and usage, the limits, the CSRF token |
-| `POST /api/auth/request` `{email, invite_code?}` | Send a sign-in link if the address may sign in |
-| `POST /api/auth/link` `{token}` | The masked address of a link and whether terms must be accepted (nothing is used up) |
-| `POST /api/auth/verify` `{token, accept_terms, adult}` | Use the link: create the account if new, open a session |
-| `POST /api/auth/logout` | End the session |
-| `DELETE /api/account` `{confirm: "delete my account"}` | Delete the account and every file now |
-| `GET /api/quota` | Jobs in the last 24 hours and in total, the limits, stored bytes |
-| `GET /api/jobs` | The user's jobs, newest first |
-| `POST /api/jobs` (multipart: `kind` sketch or prompt, `sketch` or `prompt`, `name`, `profile`; header `Idempotency-Key`) | Start a job; the same key returns the same job (200), the same key with a different request is refused (409) |
-| `GET /api/jobs/<id>` | State, stages, the error with its stage and reason, images, downloads, the Roblox README, time, cost, commit |
-| `POST /api/jobs/<id>/cancel`, `DELETE /api/jobs/<id>` | Cancel; delete with its files |
-| `GET /api/jobs/<id>/download/glb`, `.../download/roblox` | Downloads |
-| `GET /api/workspace`, `GET /api/runs/r1/<id>`, `GET /runs/r1/<id>/<path>` | The Lab API over the user's own runs |
-| `POST /api/events` `{visitor_id, device, events}` | Batched first-party UI events (4 KiB body cap, strict allow-list) |
-| `GET /api/admin/analytics?days=N` | Aggregate first-party analytics and pipeline report (`days` 1..90, default 7; admin only) |
-| `GET /api/admin/generation-budget`, `POST /api/admin/generation-budget` | Live-generation admission status and configuration bound to the running commit and cost signature (admin only) |
-
-Errors are `{"error": {"code", "message"}}`, with the message written for the user. When the metadata store is
-restarting or cannot confirm a write, any call answers 503 with `"code": "busy"` and `Retry-After: 5`. For a new job
-that answer means the job may or may not have been saved: its sketch is kept, and sending the same form again with
-the same `Idempotency-Key` returns the saved job (200) or starts it (201), never a second one. The page keeps the key,
-with a hash of the form, in the tab's `sessionStorage` from before it sends the request until the server answers with
-the job (200 or 201) or a 409 (the key belongs to a saved job with a different form). On any other answer (503, another
-5xx, a lost connection, 401, 429, a refused upload) it sends the same key with the next attempt from that tab, also
-after a reload; other tabs and devices make their own keys. A sketch no job claims is deleted by retention after a day. Status polling is every 3
-seconds while a job is queued or running, and after that while its quality check runs.
-
-### Lab API and viewer
-
-The service answers the Lab's JSON API per user (`labapi.py`): each user's runs folder is the one runs root, key
-`r1`, labelled "Your heroes", so a run is `r1/<job-id>` as the Lab names it. It uses the Lab's own code when the
-deployed HeroGen has it (`herogen.lab.workspace.Workspace`, else `herogen.lab.runindex`) and otherwise builds a
-minimal summary with the same field names. `/viewer` serves the Studio page and `/static/` its files when
-`herogen/lab/static/` holds the Studio (`index.html` and `app.js`); otherwise it serves the service's own minimal
-viewer, which reads only that API. Both open `#run=r1/<job-id>`.
-
-The signed-in service page has an optional **Developer mode**. It combines the selected job's service state,
-attempt count, build commit, duration and estimated cost with stage records from `/api/runs/r1/<job-id>`.
-Each expandable stage shows its recorded models, reconstruction sources, code stamp, model-call/replay counts,
-measurements, thresholds and verdicts. Gates and diagnostics are labelled separately; an inferred comparison
-operator is marked as assumed. Live service state and the saved stage-record status remain separate. Fields
-the API does not supply are labelled as unreported, including detailed per-stage retry histories. The full
-viewer link opens the same hero for visual inspection. Requests run only while Developer mode is enabled;
-switching or deleting the selected hero discards pending responses from the previous selection. This feature
-uses the existing authenticated APIs and does not change access rules or quality gates.
+The dev CLI defaults to FakeRunner, local SQLite and a file email outbox. The hosted deployment uses
+`<app>-meta`, `<app>-data` and legal Volumes; web, model and admin secrets are injected only where needed.
+Generation starts paused on a new store and can be configured through the admin UI or CLI. The configured
+runtime selectors and per-stage timeouts are forwarded by deployment tooling.
 
 ### Remote models from a worker
 
@@ -2301,127 +2051,6 @@ remain ordered after that fitting. `run_stage3(..., parallel_models=False)` reta
 An early Objects error drains and accounts any Body result before the existing fallback/stop policy runs.
 Remote cache keys still include the full runner source hash: changing lifecycle code invalidates older
 remote entries, even though the inference parameters and model pins are unchanged.
-
-### Retention
-
-| What | Kept |
-| --- | --- |
-| Uploads, described heroes' sketches, run folders (images, meshes, records) | `retention_days` (default 30) after the job finishes, then deleted; at once when the user deletes the job or account |
-| An uploaded sketch no job claims (a job create the store could not confirm and that was not saved) | A day, then deleted by retention |
-| A job's description and name | Cleared with its files |
-| A job's row (state, times, cost, attempts, error, commit) | Kept for quota and cost accounting, without files, description or name |
-| Model caches (per user: recorded model and remote-model outputs) | `retention_days` after each entry was written; at once when the account is deleted |
-| Sign-in links | Deleted a day after they expire or are used |
-| Sessions | Deleted when they expire, or a day after they are revoked |
-| First-party analytics events (`analytics_events`) | `analytics_retention_days` (default 30), then deleted by retention |
-| Audit log | `audit_retention_days` (default 365) |
-| Account | Until the user deletes it. The address is then replaced by `deleted:<user-id>` and removed everywhere else: sign-in links, the allowlist, invites bound to it (which are revoked) and any audit entry |
-
-### Settings
-
-Non-secret settings are environment variables read at start (`config.py`; on Modal, baked into the image from the
-deploying shell). The main ones:
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `HEROGEN_SERVICE_APP` | `herogen-service` | Modal app name; prefixes every volume and secret |
-| `HEROGEN_SERVICE_MODE` | `dev` | `production` requires https, a real email provider and its key, your own sending domain |
-| `HEROGEN_SERVICE_BASE_URL` | `http://127.0.0.1:8800` | The public origin; sign-in links and the origin check use it |
-| `HEROGEN_SERVICE_DOMAIN` | | Custom domains for the web function (comma-separated) |
-| `HEROGEN_SERVICE_HOSTS` | host of the base URL | Allowed Host headers |
-| `HEROGEN_SERVICE_EMAIL_PROVIDER`, `HEROGEN_SERVICE_EMAIL_FROM` | `file`, `HeroGen <signin@example.com>` | `resend` in production; the From address |
-| `HEROGEN_SERVICE_TERMS_VERSION` | (empty) | The published terms version users accept; empty closes sign-in |
-| `HEROGEN_SERVICE_JOBS_PER_DAY`, `HEROGEN_SERVICE_JOBS_TOTAL` | 5, 50 | Default quota |
-| `HEROGEN_SERVICE_MAX_RUNNING`, `HEROGEN_SERVICE_MAX_ATTEMPTS` | 4, 2 | Jobs running at once; attempts per job |
-| `HEROGEN_SERVICE_HELDOUT_MAX` | 2 | Held-out view runs at once, service-wide |
-| `HEROGEN_SERVICE_RETENTION_DAYS`, `HEROGEN_SERVICE_AUDIT_RETENTION_DAYS` | 30, 365 | Retention |
-| `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` | 30 | Retention in days for `analytics_events` |
-| `HEROGEN_SERVICE_ADMIN_EMAILS` | (empty) | Private comma-separated allowlist for `/admin` and `/api/admin/*` (empty grants nobody); runtime secret, never baked into an image |
-| `HEROGEN_SERVICE_USER_STORAGE`, `HEROGEN_SERVICE_UPLOAD_MAX_BYTES` | 2 GiB, 12 MiB | Size limits |
-| `HEROGEN_SERVICE_PROFILES`, `HEROGEN_SERVICE_PROFILE` | `roblox-ingame,roblox-avatar,best`, `best` | Profiles offered, and the default |
-| `HEROGEN_SERVICE_STAGE3_ARGS` | `--mesh-source sam3d-objects --joints sam3d-body --remote live` | Extra `herogen.blender run` options for stage 3 |
-| `HEROGEN_SERVICE_IP_HEADER` | (empty) | Header holding the client address behind a proxy |
-
-`config.ENV` lists every variable, including the link and session lifetimes, the rate limits and the stage
-timeouts.
-
-| Secret (Modal secret) | Variables | Used by |
-| --- | --- | --- |
-| `<app>-web` | `HEROGEN_SESSION_KEY` (at least 32 random bytes), `HEROGEN_EMAIL_API_KEY`, `HEROGEN_SERVICE_ADMIN_EMAILS` | `web`, `admin_command` |
-| `<app>-model` | `MODEL_API_KEY` | `model_stages`, `blender_stages` (stage 3 only), `heldout_stages` |
-| `<app>-admin` | `HEROGEN_ADMIN_KEY` (at least 32 random bytes) | `StoreService`, `admin_command`: the store's admin methods (invites, allowlist, users, quotas, audit) accept calls only with this key, so the web and worker functions cannot reach them |
-| `huggingface` | `HF_TOKEN` | the SAM 3D apps, only when stage 3 uses them |
-
-The release workflow reads `HEROGEN_SERVICE_ADMIN_EMAILS` from a masked GitHub environment secret.
-A deploying shell value is attached as a runtime Modal secret for `web` and `admin_command`, overriding
-the named web secret; the allowlist never enters image environment layers.
-`HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` is an optional GitHub environment variable baked into the image,
-including the scheduled retention function.
-
-### Deploying
-
-From the repository root, with the secrets and the legal documents in place. Any local use of
-`herogen.service.modal_app` (deploy, `admin`, `selfcheck`) refuses to run unless `HEROGEN_SERVICE_MODE=production`
-and the other production settings are valid:
-
-```bash
-export HEROGEN_SERVICE_MODE=production
-export HEROGEN_SERVICE_BASE_URL=https://<your host>
-export HEROGEN_SERVICE_EMAIL_PROVIDER=resend
-export HEROGEN_SERVICE_EMAIL_FROM="HeroGen <signin@<your sending domain>>"
-export HEROGEN_SERVICE_TERMS_VERSION=<version of the published terms>
-modal volume put herogen-service-legal terms.md /terms.md
-modal volume put herogen-service-legal privacy.md /privacy.md
-modal deploy -m herogen.service.modal_app
-modal run -m herogen.service.modal_app::selfcheck
-modal run -m herogen.service.modal_app::admin --args "invite --count 3"
-```
-
-**If the store will not start.** The store refuses to start when its newest snapshot cannot be read (the log names
-the file and the reason), when every snapshot is quarantined, or when the Volume holds snapshot files this version
-does not recognise. A passing fault clears on the next start. For a file that never becomes readable (a permanent I/O
-error, or corruption SQLite reports as an open error such as "unsupported file format"):
-
-```bash
-modal run -m herogen.service.modal_app::admin --args "snapshots"
-modal run -m herogen.service.modal_app::admin --args "snapshot-quarantine meta-00000004-<id>-0000000123.db"
-```
-
-`snapshot-quarantine` first takes a newer lease (a store still running stops writing), then renames the file to
-`quarantine-<id>-<name>`, so the next store starts from the snapshot before it; the writes only that file held are
-lost. Nothing is deleted. It refuses to quarantine the last snapshot unless `--allow-empty` is added, which lets the
-next store start from an empty database (every account, invite and job record is then gone). Both commands work on
-the `<app>-meta` volume directly, so they run while the store is down, and every use is logged.
-
-Staging is the same with `HEROGEN_SERVICE_APP=herogen-service-staging` (its own secrets
-`herogen-service-staging-web`, `-model` and `-admin`, and its own volumes) and its own base URL. Without a custom domain the
-base URL is the address Modal prints for the `web` function; set it and deploy again.
-
-### Body acceptance measurements
-
-`herogen.blender.body_quality` supplies two acceptance measurements:
-
-- `cross_sections` intersects the mesh at 35%, 45% and 55% of its height. Each score is the XY convex hull's
-  area divided by its axis-aligned bounding rectangle's area; their mean is `rectangularity`. A rectangle
-  scores 1 and a finely tessellated ellipse approaches pi/4. Missing or degenerate sections return no score.
-  This descriptor measures cross-section shape independently of observed-view silhouette agreement; it
-  is not a universal anatomical rule.
-- `visual_score` asks Muse Spark 1.3 whether the body is a usable base for the sketch. The frozen prompt's
-  SHA-256 is `8e054e5d6ba4b8efb4316878ed01c4f9c33eb3d889b5d6edc91f0781ad1ad38c`.
-  A 1280x688 sheet shows the sketch followed by front, left, back, right, +30 and -30 degree grey views.
-  The two oblique views are not construction or registration views. Grey renders use smooth two-sided
-  Lambert shading, an orthographic scale shared across all views, 512px tiles, white background, no
-  simplification and no per-view stretching. The scale fits the widest cardinal/30/60 degree direction.
-  The strict schema returns integer `usable_probability` (0–100) and a nonempty `reason`. The call uses
-  `ModelClient.compare_images`, low reasoning effort, 4000 maximum output tokens (`VISUAL_MAX_OUTPUT_TOKENS`),
-  1280 maximum image side and JPEG quality 90. The cap covers the answer's reasoning tokens; it was raised
-  from 1200, at which measured answers came back incomplete (`max_output_tokens`) and stopped stage 3. An
-  incomplete answer still raises and stops; it is never resampled. The client's cache, retry policy, attempt
-  ledger and token prices apply, and a call whose output usage is missing is priced at the cap.
-  Model errors, missing views, invalid responses and a changed prompt hash raise; none supplies a pass.
-
-Neither measurement alone asserts topology, rigging or export quality. Acceptance thresholds belong to
-an explicitly calibrated policy, separate from these measurement functions.
 
 ## Stage 3f: texture refinement
 
@@ -2542,11 +2171,8 @@ retries, using the configured prices of $0.01 per Muse Image image and $0.0025 p
 cost is checked against the cap. Unknown outcomes count toward spend. Reservations have unique tokens and
 remain charged until explicitly settled. An answered request enters the call log before limiter release,
 settlement or ledger writes can fail. Local runs persist reservation state in the run record before sending.
-The service uses the existing metadata store: each reservation is committed to its Modal Volume snapshot
-before the worker acknowledges it over private inherited subprocess pipes. A replacement worker reads this
-store even if its predecessor never copied its local run back. Store transactions enforce the cap across
-workers and fence stale job attempts. Failed or lost acknowledgements prevent HTTP sends; their reservations
-remain conservatively charged. Older saved runs seed the store once from their cumulative spend.
+The service uses the same in-process Budget. Its stage record persists cumulative spend and pending
+attempts before sending; retries in that run folder load that state. No remote store is consulted.
 `cost_usd` reports the current invocation, as in other stages.
 Cache hits remain usable with a zero cap, and a replay miss remains an error. Records distinguish
 `complete`, `cap_reached`, `skipped`, `running` and `error`.
@@ -2576,227 +2202,32 @@ frame preservation and render passes, skipping when Blender is unavailable or ca
 No live quality score is inferred from these unit tests; held-out mesh scoring remains a separate measurement.
 
 
-### Service entry page
+### Service entry page and workbench
 
-The public entry page accepts a text idea or an image before sign-in. Suggestion buttons fill the text field;
-image cards select a PNG and submit it through the existing multipart `POST /api/jobs` image contract.
-Creating a hero requires a private session, CSRF token, quota checks and idempotency key.
-Public-demo access can create that session without an email account; email access remains at `/admin/signin`.
-A draft, including its image Blob and any uncertain request key, is saved in browser IndexedDB before the
-email sign-in flow and before every submission. Each submission saves the exact input sent to the server.
-Conflicts retire the saved key in both browser stores; an older draft is not restored over a newer pending key. Drafts expire after 24 hours when next read and are removed after a confirmed creation or explicit sign-out.
-If browser storage is unavailable, the page asks the user to keep the original tab open. Returning focus to
-that tab refreshes its session. Sign-in never automatically starts a generation.
+The public entry page accepts a text idea, a starter image or an uploaded sketch. Submission opens a
+guest workspace if needed and sends the form with one in-memory idempotency key. Double clicks are
+disabled while submitting. Starter art and gallery models are external deployment inputs, excluded
+from Git. Missing illustrations are hidden; uploads and text remain usable.
 
-The illustrated entry assets are an external deployment input, excluded from Git. Install the supplied PNG
-bundle under `herogen/service/static/art/`, preserving these filenames: `hero-collage.png`, `trail-keeper.png`,
-`little-inventor.png`, `cloud-sailor.png`, and `garden-guardian.png`. Verify the bundle against its `sha256.json`
-before copying. Include that directory when packaging the service. The hero collage is decorative; the four
-other files are full-body starter images. Missing card images are hidden. Text and local uploads remain
-available without the bundle. These illustrations are starter inputs, not evidence of pipeline output.
+`generation.js` renders only reported main stages, available images and downloads. Queued heroes show
+“Waiting for a free worker”. Polling continues only while queued or running. Failed and rejected stages
+show their recorded reason; saved outputs remain inspectable. Developer mode remains read-only and
+uses the owner-checked Lab API. No separate quality-review section is present.
 
-The static asset handler serves PNG, JPEG and WebP with image MIME types using its existing path confinement
-and symlink rejection. The workshop, viewer, downloads, and read-only developer inspection continue to use the
-existing service endpoints.
-
-
-### Generation workbench
-
-Selecting or creating a job opens a dedicated generation screen at `/#job=<id>`. A confirmed creation
-opens directly from the returned job view. Later library/account refresh failures are reported as such and
-never turn an accepted creation into a request to resubmit. It hides the idea-entry
-screen, renders the ordered main stages supplied by `GET /api/jobs/{id}`, and displays held-out side stages
-separately. The stage count measures passed main stages, not elapsed work or an estimated percentage.
-Pending stages on interrupted jobs are labelled not reached. Skipped, unavailable and failed optional steps
-remain visible even when the main job succeeds. Recorded stage durations, job duration and costs are displayed
-only when supplied. No remaining-time estimate, fabricated quality score, or model attribution is inferred.
-
-The artwork board follows available image URLs until a user selects an image or preview explicitly. Selection
-survives polling; a different job resets it. The inline 3D preview and full-viewer link appear when the GLB
-download is available. The current API exposes that file after successful completion; it does not expose an
-intermediate clay mesh. The workbench therefore keeps actual images visible during reconstruction rather
-than simulating intermediate geometry. Failed image/3D loads have explicit messages and recovery paths.
-
-Returning to ideas invalidates outstanding reads, stops polling and pauses 3D rendering. The service keeps
-running the job independently. Job selection, cancellation and deletion protect against delayed responses
-from an older selection. Inline model loads use their own generation token, discard superseded results,
-dispose replaced geometry/material resources, and pause rendering when hidden. Browser history restores the
-selected job. The library refreshes when opened.
-
-Developer mode remains opt-in and read-only. It loads the selected job's saved Lab records and exposes real
-model provenance, recorded costs, checks and thresholds without replacing missing values with invented data.
-It has a visible close control and Escape support; background polling does not steal artifact selection or
-focus. The held-out review's result remains distinct from the main job's status.
-
-
-### Public results and controlled live access
-
-`HEROGEN_SERVICE_GALLERY` points to an external, curated version-1 `catalog.json` bundle, separate from private
-job storage. Each entry has a slug, title, description, refinement-record commit and SHA-256 hashes for
-`<slug>/sketch.png`, `artwork.png` and `model.glb`. Optional `refinement` measurements contain model names,
-seconds, estimated stage cost and accepted/attempted refinement-view counts. `gallery.py` validates these
-fields, confines file paths, rejects symlinks and verifies artifact bytes before serving them. The Modal web
-image packages the configured bundle under `/public-gallery`, plus the service's static directory. No
-private run directory is published. Generated binaries remain external deployment inputs, excluded from Git.
-
-`theme.js` runs before first paint on `/` and `/gallery/{slug}`, resolving `Auto` (`prefers-color-scheme`),
-`Light` and `Dark` onto `:root[data-theme]`, emitting `hg:theme` for active WebGL scenes and remaining usable
-when `localStorage` is blocked. On `/`, `landing.js` loads `/api/gallery` without credentials, orders
-`woodland-scout` first when published while keeping catalog order for remaining entries, renders an
-independent `createPreview()` scene (`preview.js`) with `Textured`, `Clay` and `Wire` shading modes (using
-service-packaged `/assets/icons/hg-shade-*.svg` icons), snapshots offscreen mesh thumbnails with retry
-recovery, and pauses its WebGL loop while hidden. `GET /api/gallery`, `GET /api/gallery/{slug}`,
-`/gallery/{slug}` and `/gallery-assets/{slug}/{kind}` are read-only and need no session. Public pages
-explicitly identify previously generated results, show their starting sketch/artwork beside the actual
-orbitable GLB, and distinguish refinement records from held-out quality or game-readiness. Gallery access
-never dispatches work or grants private-job access. Reference/model load failures flush stale meshes and
-expose retry controls. Saved refinement evidence is available through an optional details panel.
-
-With `HEROGEN_SERVICE_PUBLIC_DEMO=true`, `POST /api/demo/access` opens a private browser workspace without
-an account or published credential. A valid existing guest session is reused, keeping its history private.
-The create button opens the workspace and submits the saved draft directly; access alone starts no compute.
-Guests have one active generation per workspace and can create again after completion. Legacy email-account
-beta lifetime/daily quotas do not apply to guests; upload/storage/rate limits and shared admission do apply.
-Clearing cookies or switching browsers creates another workspace, so this is not identity or Sybil protection.
-CSRF, origin checks and secure session cookies protect every state-changing request. Operator email/invite
-access remains separate at `/admin/signin` and shares the global admission limits when public mode is enabled.
-There is no Facebook login or special judge-account route.
-
-The metadata schema v9 migrates v1–v8 stores, preserving existing reservations and guest histories while
-retiring the invitation-specific workspace tables. Admission and job insertion run in one SQLite transaction.
-A repeated Idempotency-Key returns the original workspace's job without another reservation. One active
-reservation per workspace is enforced, including canceled work whose remote shutdown is uncertain. A global
-policy limits active generations (default five in the admin CLI); the service dispatcher also defaults to five.
-Changed version/configuration, expired/disabled policy, capacity or insufficient unallocated budget refuses
-new work before dispatch. Capacity returns 503 with Retry-After; no request is silently queued. The UI keeps
-the draft and explains the refusal.
-
-The operator configures `generation-budget` through the existing admin CLI, supplying USD limit and per-job
-reservation, maximum active generations, expiry, exact clean commit, cost-configuration fingerprint and a
-cost-bound evidence note. `generation-policy-signature` reports the running version and fingerprint. Enabling
-requires an explicit confirmation that provider caps were verified. New installations are paused until configured.
-The fingerprint binds profiles, stage arguments, the refine cap, upload dimensions, prompt selectors, retry
-limits, held-out concurrency and timeouts; worker receipts reject a changed fingerprint. The bound must
-include main work, retries, held-out checks and remote work. Changes to external resource deployments or
-prices also require operator re-verification.
-
-Reservations use integer micro-USD and persist across restarts and policy changes. A job's completion releases
-its capacity slot only when main and expected held-out work have finished and all worker receipts are certain.
-Cancellation, deletion, failure and timeout alone never release reserved money. A failed job can still incur
-provider charges. Each paid HTTP attempt first fsyncs a `sent` entry to `calls-ledger.jsonl`: model, endpoint,
-request hash, unique call id, epoch expiry (the remaining call timeout) and full configured price. A completion
-with the same id records its outcome and known cost. For Muse Spark, an unanswered call's full price includes input at
-the [documented 1,048,576-token context limit](https://dev.meta.ai/docs/cookbook/long-context) plus the requested
-output-token cap; a response with incomplete usage retains this bound. Stage cost estimates still use reported
-usage, independently of this conservative settlement bound. Modal receipts record the
-function timeout and GPU price per second; their bounds use the function timeout, including when the local
-wait is shorter. Known Modal costs use at least the caller's wall time, covering startup as well as reported
-inference time; a missing reported Sapiens duration retains its full bound. Unknown GPU prices prevent
-automatic settlement. Replay/cache hits issue no paid receipts.
-No API key or header is recorded. The service acknowledges each receipt in the durable SQLite `admission_calls`
-table before a stage can send; losing a local copy or copying back parallel caches cannot lose this evidence.
-The budget evidence names that database and the job's ledger rows. Paid stage-group and held-out workers also
-record compute bounds and elapsed compute costs, separately from model calls; stage-record totals are not
-added again. Orchestration, idle containers, storage and egress remain non-job overhead.
-
-The minute sweep considers terminal jobs with unreconciled admissions, including uncertain or disappeared
-workers and completed work still holding money, after main and expected side work finish. Every worker invocation must have either returned with an
-explicit stopped receipt or be proven absent on its recorded host. Every stage subprocess runs in a registered
-POSIX process group or Windows job object. On Windows a wrapper waits for durable registration and job
-assignment before starting the stage; the job forbids breakaway and kills descendants on handle close.
-Exit/timeout kills descendants and reaps the direct child. The owning worker waits up to ten seconds for the
-process group to disappear or the Windows job's active process count to reach zero, then records that proof
-durably for sweeps on other hosts. A Windows PID probe uses process handles without console signals;
-a PID alone cannot prove a whole Windows job stopped. Missing exit proof retains the reservation.
-Lease expiry is never process-exit evidence. Missing legacy receipts, an uninspectable foreign host,
-missing prices or malformed/incomplete ledger evidence retain the reservation for manual reconciliation.
-The sweep also waits strictly past the latest sent call expiry plus 60 seconds (or the work's start plus 60 seconds
-when no call was sent). It sums known completed costs, each unanswered `sent`/`unknown` call at full configured
-price, and unknown Modal calls at function timeout times price per second. The sum rounds up to integer
-micro-USD. This is a ledger bound, never a provider invoice. It uses `budget_reconcile(..., work_stopped=True)`
-to close receipts and release the slot and unused reservation, with evidence
-`auto-settled: <n> calls, <k> charged at full price, ledger <path>` and an `auto_settled` audit entry.
-The transaction compares the admission phase, retained baseline and complete unsettled-work/ledger snapshot,
-and requires an unreconciled admission:
-a manual reconciliation that commits first wins, and concurrent sweep calls cannot settle twice.
-`generation-budget-report` identifies auto-settled jobs and exposes reservations and unresolved work;
-`generation-reconcile` remains available with operator evidence and requires confirmation of stopped work
-for uncertain exits. A cost above its reservation pauses new admissions. Guest generations have no separate
-lifetime allowance.
-
-Subprocess budget acknowledgements use inherited private pipes on POSIX and authenticated named pipes on
-Windows. Each Windows bridge has a fresh random address and 256-bit authentication key passed only in the
-stage environment; messages use bounded JSON byte frames, never pickle. A failed durable write returns no
-authorization to send a paid call. Windows requires no inherited file descriptors or POSIX signals.
-
-This ledger limits admitted reservation bounds; it is not an invoice meter or a provider billing cap. Gallery
-hosting, idle containers, storage and egress are not allocated per generation. A real total-spend ceiling also
-requires provider-side limits and funding for all relevant services. `generation-overhead --actual-usd ... --evidence ...` records cumulative non-job charges from provider
-evidence, included in admission totals without double-counting reconciled job charges. `generation-budget-report`
-includes allocated micro-USD, active count, recent failures, unresolved work and basic alert conditions: 50/75/90%
-allocated, insufficient budget, full capacity, missing/expired policy, uncertain work and repeated failures.
-Allocated spending includes outstanding reservation bounds; it is not a measured invoice total. A periodic
-operator monitor can consume this read-only report and provider billing evidence; it must report missing or
-stale evidence rather than invent usage. The CLI neither purchases credits nor changes provider billing. Do not enable a policy on an unverified estimate or claim that its reservation total
-alone guarantees a cross-provider invoice ceiling. A capacity limit counts generation jobs, including their
-pending side work, not individual parallel stage calls. No Facebook identity provider is implemented.
-
-
-`python3 -m herogen.service.monitor --app <deployed-service> --state <private-state.json>` calls only the
-already deployed admin report function; it does not deploy or generate. Modal credentials stay local to the
-operator. The monitor emits JSON with new/resolved alert conditions and an allocated-spending total, persisting
-only deduplication state with owner-only permissions. A missing/unreachable meter is an explicit error, never
-zero spending. A full-capacity alert requires ten continuous minutes; long-running work is flagged at six
-hours. Non-job billing evidence older than a day (or missing) is flagged. External scheduling and notification
-delivery are operator configuration; neither runs inside the public web app. A saved report can be checked
-without any network using `--report <report.json>` instead of `--app`.
-
-For controlled guest generations, an expired main-worker lease fails the job with an explicit uncertain-work
-error instead of automatically re-running potentially live remote compute. The sweep marks its open receipts
-uncertain; side-worker lease loss does the same without changing the main outcome. Automatic settlement under
-the stopped-process and timeout rule above, or manual reconciliation with confirmed shutdown, closes the receipts
-and resolves that alert. A side check that cannot claim a failed/deleted job, or
-cannot be spawned, does not retain a capacity slot when no paid work is running. Failed side spawning records
-an unavailable check. Active or uncertain work still retains its reservation. Account deletion and file purge
-use the same terminal accounting. Deploys forward the optional public-guest/gallery/dispatcher settings through
-the release CLI; gallery environment build steps precede lazy Modal mounts, and host gallery paths are not
-baked into worker environments.
-
+`theme.js` keeps light/dark/system choice usable with blocked storage. `landing.js` and `preview.js`
+render published GLBs with textured, clay and wire shading, dispose replaced resources, and expose
+retry controls on load failure. Gallery routes require no session and never dispatch work.
 
 ### First-party analytics and admin panel
 
-Client telemetry is first-party only, with no external scripts, trackers, CDNs or cookies. `analytics.js`
-batches allow-listed UI events (`page_view`, `suggestion_click`, `starter_select`, `upload_selected`,
-`idea_typed`, `create_clicked`, `create_result`, `shade_toggle`, `picker_select`, `inspect_saved_run`,
-`viewer_drag`, `result_viewed`, `download_click` and `theme_change`) to same-origin `POST /api/events` with
-`X-CSRF-Token`, IP rate limiting and a 4 KiB body limit. Each batch carries only a tab-scoped 32-hex visitor
-identifier held in `sessionStorage`, a coarse device class (`mobile` or `desktop`), event names and short
-allow-listed enum or slug properties. Client errors are swallowed so telemetry never delays or interrupts the
-page; invalid payloads are rejected with HTTP 400 and counted in structured server logs.
+`analytics.js` sends bounded batches of enumerated first-party events to `POST /api/events`, protected
+by CSRF, origin and request limits. A tab-scoped random visitor id lives only in sessionStorage.
+Analytics never stores IP addresses, raw User-Agent, email, prompt, character name, filenames or image
+bytes. Global Privacy Control suppresses event collection. Migration 9's analytics table and retention
+remain unchanged.
 
-The service never records IP addresses, raw `User-Agent` strings, email addresses, prompt text, character
-names, file names or image bytes in `analytics_events`. When Global Privacy Control is active
-(`navigator.globalPrivacyControl` in the browser or `Sec-GPC: 1` on the request), no client events are sent or
-stored. Schema v10 adds `analytics_events` via numbered store migration 9, and the daily retention worker deletes
-rows older than `HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS` (default 30). Job outcomes, user kind (`account` vs
-`guest`), per-stage durations and costs (`p`, `0`, `1`, `2`, `3`, `3f`, `4`, `6`, `5`, plus side stage `2h`
-reported separately) and admission budget figures are computed directly from `jobs`, `job_stages`,
-`admissions`, `budget_overhead` and `users`.
-
-Admin access is controlled by `HEROGEN_SERVICE_ADMIN_EMAILS` (comma-separated, default empty). Only a
-signed-in email account (`kind = 'account'`) on that list is authorised; signed-out visitors, guest workspaces
-and non-listed accounts receive HTTP 403 on `GET /admin`, `GET /api/admin/analytics` and
-`GET`/`POST /api/admin/generation-budget`. Administrators sign in through `/admin/signin`. `/admin` serves two
-accessible tabs (`#settings` and `#analytics`) styled with the shared light/dark theme tokens and inline SVG
-bars:
-
-- **Settings (`#settings`)** displays the plain-English admission status sentence, configured bounds, local
-  expiry time, used/reserved/remaining USD, commit and cost-signature match status, and a read-only table of
-  open reservations (reconciliation remains CLI-only via `generation-reconcile`). Saving posts to
-  `POST /api/admin/generation-budget`, which binds the running service's `code_commit` and `cost_signature`
-  from server configuration, enforces provider-cap confirmation when enabling, and audit-logs the change under
-  the administrator's user id.
-- **Analytics (`#analytics`)** renders daily visitors and page views, the seven-step creation funnel, refusal
-  counts, final job states, per-stage and per-job timing/cost statistics, live-generation budget usage, gallery
-  engagement and device split over 1–90 days (`?days=N`, default 7). `python3 -m herogen.service admin
-  analytics-report [--days N]` prints the identical JSON report from the CLI.
+The admin Analytics tab displays daily visitors/page views, the creation funnel, remaining refusal
+codes, final job states, main-stage timing/cost totals, gallery engagement and device split over 1–90
+days. It has no side-stage table. Spending figures come from the same guard as Settings: recorded
+finished spend, queued/running estimates and remaining budget. `analytics-report [--days N]` prints
+the same report JSON. Both admin tabs retain keyboard navigation and the shared responsive theme.
