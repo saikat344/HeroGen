@@ -840,7 +840,8 @@ class TestStageCommands(TempDirCase):
                                                                            "cost_usd": 0.02}), \
                 mock.patch("sys.stdout"):
             self.assertEqual(pipestage.main(args), 0)
-        failed = pstages.GateFailed(2, {"checks": [{"name": "figures_found", "pass": False}]})
+        failed = pstages.GateFailed(2, {"stage": 2, "ok": False,
+                                      "checks": [{"name": "figures_found", "pass": False}]})
         with mock.patch.object(pstages, "stage2_turnaround", side_effect=failed), \
                 mock.patch("sys.stderr"):
             self.assertEqual(pipestage.main(args), 2)
@@ -881,12 +882,14 @@ class TestStageCommands(TempDirCase):
         spec = next(s for s in PLAN if s.key == "1")
         self.assertEqual(CliRunner.outcome(spec, ctx, 1.0, 1, "", "ClientError: HTTP 503", False).state, "failed")
         out = CliRunner.outcome(spec, ctx, 1.0, 1, "", "HTTP 503 from api", False)
+        self.assertFalse(out.transient, "model error text cannot select retry behavior")
+        out = CliRunner.outcome(spec, ctx, 1.0, 5, "", "", False)
         self.assertTrue(out.transient)
         self.assertEqual(out.code, "model_unavailable")
         (ctx.run_dir / "stage-1.json").write_text(json.dumps({"ok": True, "cost_usd": 0.02}))
         out = CliRunner.outcome(spec, ctx, 1.0, 0, "", "", False)
         self.assertEqual((out.state, out.cost_usd), ("passed", 0.02))
-        (ctx.run_dir / "stage-1.json").write_text(json.dumps({"ok": False, "checks": [
+        (ctx.run_dir / "stage-1.json").write_text(json.dumps({"ok": False, "status": "gate_failed", "checks": [
             {"name": "sketch_mask_area_frac", "value": 0.005, "threshold": 0.01, "pass": False}]}))
         out = CliRunner.outcome(spec, ctx, 1.0, 2, "", "", False)
         self.assertEqual(out.state, "rejected")
