@@ -3,10 +3,22 @@
 import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { draftStore } from '/assets/draft.js';
+import { generationView } from '/assets/generation.js';
 
 const $ = (s) => document.querySelector(s);
-const S = { csrf: null, session: null, current: null, timer: null };
+const S = { csrf: null, session: null, current: null, timer: null, revision: 0 };
 let entry;
+let screen = 'entry';
+function setScreen(next) {
+  screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation');
+  $('#app').classList.toggle('generation-screen', next === 'generation');
+}
+const generation = generationView($, (url) => preview(url));
+function returnToEntry() {
+  ++S.revision; clearTimeout(S.timer); S.current = null;
+  if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
+  developer.update(null); generation.reset(); setScreen('entry'); show('#jobLoading', false);
+}
 function signIn() { show('#signin'); $('#signinDialog').showModal(); }
 async function keepDraft(values = null) {
   const fields = values || { prompt: $('#prompt').value, name: $('#name').value,
@@ -150,23 +162,16 @@ async function refreshList() {
 
 function renderJob(j) {
   developer.update(j);
-  show('#detail');
+  show('#detail', screen === 'generation');
   $('#detailH').textContent = j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero');
   const st = $('#state'); st.textContent = j.state; st.className = `state s-${j.state}`;
   const bits = [`started ${fmtTime(j.created_at)}`, `profile ${j.profile}`];
-  if (j.seconds) bits.push(`took ${fmtSecs(j.seconds)}`);
-  if (typeof j.cost_usd === 'number') bits.push(`cost ${fmtUsd(j.cost_usd)} (estimate)`);
-  if (j.code_commit) bits.push(`code ${j.code_commit.slice(0, 10)}`);
+  if (Number.isFinite(j.seconds)) bits.push(`recorded duration ${fmtSecs(j.seconds)}`);
+  if (Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${fmtUsd(j.cost_usd)}`);
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
   const err = $('#detailErr');
   err.hidden = !j.error; err.textContent = j.error ? j.error.message : '';
-  $('#stages').replaceChildren(...j.stages.map((s) => el('li', { cls: `st-${s.state}` },
-    el('span', { cls: 'dot', 'aria-hidden': 'true' }), el('b', { text: s.label }), el('span', { cls: 'muted', text: ` ${s.state}` }),
-    s.seconds ? el('small', { text: ` ${fmtSecs(s.seconds)}` }) : null,
-    s.message && s.state !== 'passed' ? el('p', { cls: 'small', text: s.message }) : null)));
-  const imgs = [['sketch', 'Sketch'], ['cover', 'Cover art'], ['front', 'Front'], ['left', 'Side'], ['back', 'Back']];
-  $('#images').replaceChildren(...imgs.filter(([k]) => j.images[k]).map(([k, label]) =>
-    el('figure', {}, el('img', { src: j.images[k], alt: label, loading: 'lazy' }), el('figcaption', { text: label }))));
+  generation.update(j);
   const dl = $('#downloads');
   const items = [];
   const g = j.downloads.glb;
@@ -178,16 +183,26 @@ function renderJob(j) {
   $('#readme').textContent = j.roblox_readme || '';
   $('#viewerLink').href = j.viewer;
   show('#cancelJob', j.state === 'queued' || j.state === 'running');
-  if (g.available) preview(g.url); else show('#previewWrap', false);
+  $('#viewerLink').hidden = !g.available;
 }
 
-let previewUrl = null;
+let previewUrl = null, previewRequest = 0, previewModule = null;
 async function preview(url) {
+  if (url && screen !== 'generation') return;
+  if (!url) { ++previewRequest; previewUrl = null; previewModule?.hide(); show('#orbitHint', false); show('#previewError', false); return; }
   if (previewUrl === url) return;
   previewUrl = url;
-  show('#previewWrap');
-  try { (await import('/assets/preview.js')).show($('#preview'), url); }
-  catch (e) { show('#previewWrap', false); console.warn('preview unavailable', e); }
+  const token = ++previewRequest;
+  show('#previewError', false); show('#orbitHint', false);
+  try {
+    previewModule ||= await import('/assets/preview.js');
+    if (token !== previewRequest) return;
+    await previewModule.show($('#preview'), url);
+    if (token === previewRequest) show('#orbitHint');
+  } catch {
+    if (token !== previewRequest) return;
+    previewUrl = null; show('#previewError');
+  }
 }
 
 // Keep polling while the job is queued or running, and after it only while a stage beside it (the quality check)
@@ -197,17 +212,34 @@ function polls(j) {
   return j.state === 'queued' || j.state === 'running' || j.stages.some((s) => s.side && s.state === 'running');
 }
 
-async function openJob(id, reveal = false) {
+function followJob(j, reveal = false) {
   clearTimeout(S.timer);
-  if (S.current !== id) developer.update(null);
+  if (S.current !== j.id) { developer.update(null); generation.reset(); }
+  S.current = j.id;
+  if (reveal) {
+    setScreen('generation');
+    const hash = `#job=${encodeURIComponent(j.id)}`;
+    if (location.hash !== hash) history.pushState(null, '', hash);
+  }
+  renderJob(j); show('#jobLoading', false);
+  if (reveal) {
+    show('#heroLibrary', false); $('#showLibrary').setAttribute('aria-expanded', 'false');
+    window.scrollTo({ top: 0, behavior: 'auto' }); $('#detail').focus({ preventScroll: true });
+  }
+  if (polls(j)) S.timer = setTimeout(() => openJob(j.id).then(refreshList).catch((e) => banner(e.message)), 3000);
+}
+async function openJob(id, reveal = false) {
+  const revision = ++S.revision;
+  clearTimeout(S.timer);
+  if (S.current !== id) { developer.update(null); generation.reset(); show('#detail', false); }
   S.current = id;
+  if (reveal) show('#jobLoading');
   try {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
-    if (S.current !== id) return;
-    renderJob(j);
-    if (reveal) { $('#detail').scrollIntoView({ block: 'start' }); $('#detail').focus({ preventScroll: true }); }
-    if (polls(j)) S.timer = setTimeout(() => openJob(id).then(refreshList), 3000);
-  } catch (e) { banner(e.message); }
+    if (S.current !== id || revision !== S.revision) return;
+    banner(''); followJob(j, reveal);
+  } catch (e) { if (revision === S.revision) banner(e.message); }
+  finally { if (revision === S.revision) show('#jobLoading', false); }
 }
 
 function initJobs() {
@@ -275,12 +307,11 @@ function initJobs() {
     await keepDraft(values).catch(() => banner('Your retry draft could not be saved. Keep this tab open until your hero is confirmed.'));
     try {
       const j = await api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
-      clearPending();
+      clearPending(); ++S.revision; followJob(j, true);
       await draftStore('delete').catch(() => {});
       msg.textContent = '';
-      await refreshList();
-      renderQuota((await loadSession()).usage);
-      openJob(j.id, true);
+      await Promise.all([refreshList(), loadSession().then((session) => renderQuota(session.usage))])
+        .catch((e) => banner(`Your hero is saved. Could not refresh account or library details: ${e.message}`));
     } catch (e) {
       if (e.status === 409) {
         clearPending();
@@ -303,13 +334,26 @@ function initJobs() {
     finally { $('#go').disabled = false; }
   });
   $('#cancelJob').addEventListener('click', async () => {
-    try { renderJob(await api(`/api/jobs/${encodeURIComponent(S.current)}/cancel`, { method: 'POST', json: {} })); await refreshList(); }
-    catch (e) { banner(e.message); }
+    const id = S.current; ++S.revision; clearTimeout(S.timer);
+    $('#cancelJob').disabled = true;
+    try {
+      const job = await api(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', json: {} });
+      if (S.current === id) { renderJob(job); await openJob(id); }
+      await refreshList();
+    } catch (e) { banner(e.message); if (S.current === id) openJob(id); }
+    finally { $('#cancelJob').disabled = false; }
   });
   $('#deleteJob').addEventListener('click', async () => {
     if (!confirm('Delete this hero and all of its files?')) return;
-    try { await api(`/api/jobs/${encodeURIComponent(S.current)}`, { method: 'DELETE', json: {} }); show('#detail', false); developer.update(null); S.current = null; clearTimeout(S.timer); await refreshList(); }
-    catch (e) { banner(e.message); }
+    const id = S.current; ++S.revision; clearTimeout(S.timer);
+    try {
+      await api(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} });
+      if (S.current === id) {
+        show('#detail', false); developer.update(null); generation.reset(); S.current = null;
+        history.replaceState(null, '', '/'); setScreen('entry'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
+      }
+      await refreshList();
+    } catch (e) { banner(e.message); if (S.current === id) openJob(id); }
   });
   $('#deleteAccount').addEventListener('click', async () => {
     try { await api('/api/account', { method: 'DELETE', json: { confirm: $('#confirmDelete').value } }); clearPending(); await draftStore('delete').catch(() => {}); location.replace('/'); }
@@ -323,12 +367,24 @@ async function signedIn() {
   renderQuota(S.session.usage);
   const jobs = await refreshList();
   const want = new URLSearchParams(location.hash.slice(1)).get('job');
-  if (want) openJob(want, true); else if (jobs.length) openJob(jobs[0].id);
+  if (want) await openJob(want, true);
 }
 async function boot() {
   try { await loadSession(); }
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
   initSignin(); initJobs();
+  $('#backToIdeas').addEventListener('click', () => {
+    history.pushState(null, '', '/'); returnToEntry();
+    $('#entryH').tabIndex = -1; $('#entryH').focus();
+  });
+  $('#showLibrary').addEventListener('click', async () => {
+    const open = $('#heroLibrary').hidden; show('#heroLibrary', open); $('#showLibrary').setAttribute('aria-expanded', String(open));
+    if (open) await refreshList().catch((e) => banner(e.message));
+  });
+  window.addEventListener('popstate', () => {
+    const id = new URLSearchParams(location.hash.slice(1)).get('job');
+    if (id) openJob(id, true); else returnToEntry();
+  });
   $('#headerSignIn').addEventListener('click', async () => {
     try { if (location.pathname !== '/signin') await keepDraft(); } catch { $('#jobMsg').textContent = 'Keep this tab open to preserve your draft during sign-in.'; }
     signIn();

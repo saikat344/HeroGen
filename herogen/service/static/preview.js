@@ -3,9 +3,22 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-let state = null;
+let state = null, request = 0;
+function release(model) {
+  model?.traverse((node) => {
+    node.geometry?.dispose();
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (!material) continue;
+      for (const value of Object.values(material)) if (value?.isTexture) value.dispose();
+      material.dispose();
+    }
+  });
+}
+export function hide() { ++request; state?.renderer.setAnimationLoop(null); }
 
-export function show(canvas, url) {
+
+export async function show(canvas, url) {
+  const token = ++request;
   if (!state) {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -25,16 +38,19 @@ export function show(canvas, url) {
     };
     new ResizeObserver(resize).observe(canvas);
     resize();
-    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
   }
-  new GLTFLoader().load(url, (gltf) => {
-    if (state.model) state.scene.remove(state.model);
-    state.model = gltf.scene;
+  state.renderer.setAnimationLoop(() => { state.controls.update(); state.renderer.render(state.scene, state.camera); });
+  if (state.url === url && state.model) return;
+  if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; }
+  state.url = null;
+  await new Promise((resolve, reject) => new GLTFLoader().load(url, (gltf) => {
+    if (token !== request) { release(gltf.scene); resolve(); return; }
+    state.model = gltf.scene; state.url = url;
     state.scene.add(gltf.scene);
     const box = new THREE.Box3().setFromObject(gltf.scene);
     const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
     const d = Math.max(size.x, size.y, size.z) * 2.2;
     state.camera.position.set(centre.x + d * 0.6, centre.y + d * 0.25, centre.z + d);
-    state.controls.target.copy(centre);
-  });
+    state.controls.target.copy(centre); resolve();
+  }, undefined, (error) => { if (token === request) reject(error); else resolve(); }));
 }

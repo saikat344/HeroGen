@@ -84,7 +84,9 @@ export function developerMode(button, panel, getRun) {
     refresh.type = 'button'; refresh.disabled = !job || busy;
     refresh.setAttribute('data-dev-focus', 'refresh');
     refresh.addEventListener('click', load);
-    header.append(refresh); panel.append(header);
+    const close = node('button', 'Close developer mode'); close.type = 'button';
+    close.setAttribute('data-dev-focus', 'close'); close.addEventListener('click', toggle);
+    header.append(refresh, close); panel.append(header);
     panel.append(node('p', 'Inspect the recorded pipeline, measurements and provenance for your selected hero.', 'muted'));
     if (!job) { panel.append(node('p', 'Select a hero to inspect its pipeline.')); return; }
     panel.append(node('h3', job.name || 'Selected hero'));
