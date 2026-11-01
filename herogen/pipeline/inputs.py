@@ -172,6 +172,43 @@ def by_area(instances: list[SamInstance]) -> list[SamInstance]:
     return sorted((i for i in instances if i.mask.any()), key=lambda i: -int(i.mask.sum()))
 
 
+def fast_figure_checks(instances: list[SamInstance], feet: list[SamInstance], height: int
+                       ) -> tuple[list[Check], dict[str, Any]]:
+    """Necessary fast input checks, measured on the one character and feet responses."""
+    from herogen.pipeline.prompt_sketch import FEET_MIN, edge_tolerance_px
+
+    figures = by_area(instances)
+    count = len(figures)
+    checks = [input_check(
+        "sketch_characters_found", count, 1, "==", "reject",
+        f"We need exactly one character in the picture; we found {count}.",
+    )]
+    details = {"character_instances": count, "feet_instances": len(feet), "sam_prompts": ["character", "feet"]}
+    if count != 1:
+        return checks, details
+    box = imaging.bbox(figures[0].mask)
+    top, bottom = box[1], box[3]  # bottom is exclusive
+    mid = (top + bottom) / 2
+    lower = sum(1 for f in feet if f.mask.any() and (f.box[1] + f.box[3]) / 2 > mid)
+    tol = edge_tolerance_px(height)
+    measurements = [
+        C.check("feet_in_lower_half", lower, FEET_MIN, gate=False),
+        C.check("figure_top_gap_px", top, tol, op=">", gate=False),
+        C.check("figure_bottom_gap_px", height - bottom, tol, op=">", gate=False),
+    ]
+    message = ("Show the whole character from head to feet; the head was cut off." if top <= tol else
+               "Show the whole character from head to feet; the feet were cut off." if height - bottom <= tol else
+               "Show the whole character from head to feet; we couldn't see both feet.")
+    # The service recognises this input check. Its fast value is the conjunction of the measured
+    # predicates, rather than the legacy count of feet on the figure; retain every raw measurement.
+    checks += measurements + [input_check(
+        "sketch_feet_on_figure", int(all(c["pass"] for c in measurements)), 1, "==", "reject", message,
+        note="full body in frame: feet_in_lower_half AND figure_top_gap_px AND figure_bottom_gap_px pass",
+    )]
+    details.update(figure_box=list(box), feet_in_lower_half=lower, edge_tolerance_px=tol)
+    return checks, details
+
+
 def character_checks(instances: list[SamInstance], no_character: str) -> tuple[list[Check], dict[str, Any]]:
     """How many characters SAM 3.1 found in the sketch (``instances``, the figure prompt's): exactly one at least
     `OTHER_CHARACTER_MIN_FRAC` of the largest one's area, else reject (``no_character`` is the message for none);

@@ -9,6 +9,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -96,6 +97,7 @@ class _Stage:
         self.calls0 = len(client.log.calls) if client else 0
         self.outputs: list[str] = []
         self.checks: list[dict[str, Any]] = []
+        self.necessary_checks: set[str] = set()
         self.details: dict[str, Any] = {}
         self.notes: list[str] = []
 
@@ -105,7 +107,7 @@ class _Stage:
 
     def _record(self) -> dict[str, Any]:
         if self.fast:
-            informational(self.checks)
+            informational([c for c in self.checks if c["name"] not in self.necessary_checks])
             self.details["fast_lane"] = True
         calls = self.client.log.calls[self.calls0 :] if self.client else []
         live = [c for c in calls if not c["cached"]]
@@ -155,6 +157,8 @@ def _stopping_on_client_error(body: Callable[[], dict[str, Any]], st: _Stage) ->
     with no uncached call propagates without replacing a record."""
     try:
         return body()
+    except InputRejected:
+        raise  # the rejection record is already complete
     except Exception as e:
         if not isinstance(e, ClientError) and not st.fast:
             raise
@@ -256,7 +260,10 @@ def _finish_input_checks(st: _Stage) -> None:
     """Raise `InputRejected` (after writing the record) when an input check rejected the sketch; otherwise
     add each warning's message to the record's notes."""
     if st.fast:
-        informational(st.checks)
+        necessary = [c for c in st.checks if c["name"] in st.necessary_checks]
+        informational([c for c in st.checks if c["name"] not in st.necessary_checks])
+        if inputs.rejections(necessary):
+            raise st.reject_input(inputs.rejection_error(necessary))
         return
     if inputs.rejections(st.checks):
         raise st.reject_input(inputs.rejection_error(st.checks))
@@ -383,10 +390,7 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
         prompt_details["prompt_version"] = prompt_registry.selected("cover_redo").ref()
     st.details = dict(prompt_details)
     if st.fast:
-        reference = _load(run, "redo/parent-cover.png") if run.exists("redo/parent-cover.png") else sketch
-        st.save_image("01-cover.png", client.edit_image(prompt, [reference], size=f"{w}x{h}"))
-        st.notes.append("Fast lane: input judges and model-based cover checks skipped.")
-        return st.finish()
+        return _fast_cover(st, run, client, sketch, prompt)
     # The input checks run first: a sketch they reject costs no paid edit. The photo check comes before every
     # other model call, so no other model (no SAM 3.1 face or head prompt) ever sees a photo of a real person.
     photo, photo_details = inputs.photo_check(inputs.judge_photo(client, sketch))
@@ -427,6 +431,43 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
         "input": input_details,
         **extra,
     }
+    return st.finish()
+
+
+def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.Image, prompt: str
+                ) -> dict[str, Any]:
+    """Check the full-body input once; only generated sketches allow a speculative cover edit."""
+    source = run.read_stage(0) or {}
+    origin = (source.get("details") or {}).get("origin") or {}
+    generated = (source.get("ok") is True and origin.get("stage") == "p"
+                 and (run.read_stage("p") or {}).get("ok") is True
+                 and run.exists("p-full-body.png")
+                 and np.array_equal(np.asarray(sketch), np.asarray(_load(run, "p-full-body.png"))))
+    reference = _load(run, "redo/parent-cover.png") if run.exists("redo/parent-cover.png") else sketch
+    (run.path / "01-cover.png").unlink(missing_ok=True)
+    st.details["input"] = {"generated_sketch": generated}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        characters = pool.submit(client.segment, sketch, "character")
+        feet = pool.submit(client.segment, sketch, "feet")
+        photo = None if generated else pool.submit(inputs.judge_photo, client, sketch)
+        cover = (pool.submit(client.edit_image, prompt, [reference], size=f"{sketch.width}x{sketch.height}")
+                 if generated else None)
+    # All submitted work is drained before a record is written or an error propagates.
+    if photo is not None:
+        check, details = inputs.photo_check(photo.result())
+        st.checks.append(check)
+        st.details["input"]["photo"] = details
+    checks, details = inputs.fast_figure_checks(characters.result(), feet.result(), sketch.height)
+    st.checks += checks
+    st.necessary_checks.update(c["name"] for c in st.checks)
+    st.details["input"].update(details)
+    # Read the speculative result even on rejection, so a model failure is never swallowed.
+    image = cover.result() if cover is not None else None
+    _finish_input_checks(st)
+    if image is None:
+        image = client.edit_image(prompt, [reference], size=f"{sketch.width}x{sketch.height}")
+    st.save_image("01-cover.png", image)
+    st.notes.append("Fast lane: necessary input checks enforced; model-based cover checks skipped.")
     return st.finish()
 
 

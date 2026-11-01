@@ -45,6 +45,11 @@ class ConcurrentAPI(flow.FakeAPI):
     def last_sam_text(self, text):
         self._sam.text = text
 
+    def decode(self, text, size):
+        if self.last_sam_text == "feet":
+            self.last_sam_text = "foot"
+        return super().decode(text, size)
+
 
 class FastPipelineTests(unittest.TestCase):
     def setUp(self):
@@ -52,14 +57,18 @@ class FastPipelineTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def test_images_once_no_judges_no_side_stages_and_report_matches_records(self):
+    def test_images_once_necessary_checks_only_and_report_matches_records(self):
         api = ConcurrentAPI()
         original = api.post
+        sequence = []
         def post(client, endpoint, body, **kw):
+            label = (body["input"][0]["content"][0]["text"] if endpoint == "responses" and "text" not in body
+                     else endpoint)
+            sequence.append((client.stage, label))
             if endpoint == "images/edits" and not body["prompt"].startswith(
                     (stages.COVER_PROMPT, stages.TURNAROUND_PROMPT, stages.TOP_PROMPT)):
                 api.calls.append(endpoint)
-                img = Image.new("RGB", (300, 280), "white")  # intentionally fails all figure checks
+                img = flow.paint(flow.place(flow.figure_mask(200, "front"), (300, 280), (50, 40)))
                 return {"data": [{"b64_json": flow._b64png(img)}]}
             return original(client, endpoint, body)
         failed = {"name": stages.CARVE_GATE, "pass": False, "gate": True, "value": 0, "threshold": .9}
@@ -77,11 +86,21 @@ class FastPipelineTests(unittest.TestCase):
         self.assertEqual(api.calls.count("images/generations"), 1)
         self.assertEqual(api.calls.count("images/edits"), 4)
         self.assertNotIn("question", api.calls)
+        self.assertEqual([label for stage, label in sequence if stage == "p"],
+                         ["images/generations", "images/edits"])
+        self.assertCountEqual([label for stage, label in sequence if stage == 1],
+                              ["character", "feet", "images/edits"])
+        stage2_calls = [label for stage, label in sequence if stage == 2]
+        # This fake top is pixel-identical to the input sketch, so its character response is cached.
+        self.assertEqual(stage2_calls[:3], ["images/edits", "character", "images/edits"])
+        self.assertCountEqual(stage2_calls[3:], ["face", "head"])
         for n in ("p", 0, 1, 2):
             rec = run.read_stage(n)
             self.assertTrue(rec["ok"])
-            self.assertTrue(all(not c["gate"] for c in rec["checks"]))
+            expected_gates = {"sketch_characters_found", "sketch_feet_on_figure"} if n == 1 else set()
+            self.assertEqual({c["name"] for c in rec["checks"] if c["gate"]}, expected_gates)
         rec = run.read_stage(2)
+        self.assertEqual(sum(c["purpose"].startswith("segment character") for c in rec["calls"]), 2)
         self.assertEqual(len(rec["details"]["attempts"]), 1)
         self.assertEqual(rec["details"]["top_method"], IMAGE_MODEL)
         self.assertTrue(any(not c["pass"] for c in rec["checks"]))
@@ -140,8 +159,8 @@ class FastPipelineTests(unittest.TestCase):
         self.assertEqual(code, 1)
         rec = RunFolder(self.root, "miss").read_stage(1)
         self.assertEqual(rec["status"], "error")
-        self.assertEqual(len(rec["calls"]), 1)
-        self.assertEqual(rec["calls"][0]["outcome"], "ReplayMiss")
+        self.assertEqual(len(rec["calls"]), 3)
+        self.assertTrue(all(c["outcome"] == "ReplayMiss" for c in rec["calls"]))
         self.assertIn("no cached", err.getvalue())
 
     def test_remote_shape_and_joints_once_each_in_call_order(self):

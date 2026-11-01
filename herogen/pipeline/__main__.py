@@ -235,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--from-stage", type=int, choices=(1, 2))
     r.add_argument("--note", default="", help="character appearance changes, at most 300 characters")
     r.add_argument("--stop-after", type=int, choices=(1, 2), help="stop before later stages and side work")
-    r.add_argument("--fast", action="store_true", help="speed/demo: one sample, no judges or quality retries")
+    r.add_argument("--fast", action="store_true", help="single pass with necessary input checks and no retries")
     r.add_argument("--live", action="store_true", help="call the Model API (default: replay from the cache)")
     r.add_argument("--runs", default=None, help="runs root (default $HEROGEN_RUNS or ./runs)")
     r.add_argument("--cache", default=None, help="record/replay cache (default <runs>/_cache)")
