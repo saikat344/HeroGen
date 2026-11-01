@@ -436,21 +436,27 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     gate_poses = {k: v for k, v in poses.items() if k not in UNGATED_POSES}
     ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
     cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
-    if cut_search:
-        cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
-                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE,
-                                              workers=cut_workers)
-    else:
-        cut_offsets = {}
-        cut_record = {"method": "not searched: every cut at its joint (comparison run)", "chosen_fraction": {},
-                      "unmoved_worst_gap": cuts.worst_by_joint(ref["verts"], ref["faces"], sk, {}, {"gate": gate_poses},
-                                                               (cover_ref["verts"], cover_ref["faces"]), cover_kw,
-                                                               DOME["high"])["gate"]}
-    ref_sets = {}
-    for label, offs in (("unmoved", {}), ("moved", cut_offsets)):
-        sets = {"heldout": heldout} if label == "unmoved" else {"gate": gate_poses, "heldout": heldout}
-        ref_sets[label] = cuts.worst_by_joint(ref["verts"], ref["faces"], sk, offs, sets,
-                                              (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"])
+    try:
+        if cut_search:
+            cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
+                                                  (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"], GAP_GATE,
+                                                  workers=cut_workers)
+        else:
+            cut_offsets = {}
+            cut_record = {"method": "not searched: every cut at its joint (comparison run)", "chosen_fraction": {},
+                          "unmoved_worst_gap": cuts.worst_by_joint(ref["verts"], ref["faces"], sk, {}, {"gate": gate_poses},
+                                                                   (cover_ref["verts"], cover_ref["faces"]), cover_kw,
+                                                                   DOME["high"])["gate"]}
+        ref_sets = {}
+        for label, offs in (("unmoved", {}), ("moved", cut_offsets)):
+            sets = {"heldout": heldout} if label == "unmoved" else {"gate": gate_poses, "heldout": heldout}
+            ref_sets[label] = cuts.worst_by_joint(ref["verts"], ref["faces"], sk, offs, sets,
+                                                  (cover_ref["verts"], cover_ref["faces"]), cover_kw, DOME["high"])
+    except cuts.UnmeasurableJoints as exc:
+        reason = "These joints could not be separated: " + ", ".join(exc.reasons) + "."
+        rec.add(check("measurable_joints", False, passed=False, note=reason))
+        rec.note(reason)
+        return rec.finish({"status": "rejected", "reason": reason, "joint_reasons": exc.reasons})
     ref_sets["unmoved"]["gate"] = cut_record["unmoved_worst_gap"]
     cut_record["reference_worst_gap"] = {label: {k: {j: round(v, 4) for j, v in d.items()} for k, d in sets.items()}
                                          for label, sets in ref_sets.items()}
