@@ -22,6 +22,7 @@ cells (each triangle in every cell its bounding box overlaps), so each query onl
   (3D DDA) and only their triangles are tested, with `carve.ray_hits`'s Moller-Trumbore arithmetic.
 - `closest(points)`: nearest triangle ids, barycentric coordinates and distances, using the same expanding
   search as `distance`. Shared edges and equal-distance triangles choose the lowest face index.
+- `ray_first_hit(origins, dirs)`: first triangle, barycentrics and t, with an optional maximum t.
 
 Numpy only, so stage 4 needs nothing beyond numpy and Blender.
 """
@@ -312,11 +313,33 @@ class MeshIndex:
 
     def ray_hits(self, origins: np.ndarray, dirs: np.ndarray, t_min: float = 1e-3, step_cells: int = 8) -> np.ndarray:
         """True for each ray (origin, unit direction) that hits a triangle at t > t_min (`carve.ray_hits`)."""
+        return self._ray_query(origins, dirs, t_min, np.inf, step_cells, "both", any_hit=True)[0] >= 0
+
+    def ray_first_hit(self, origins: np.ndarray, dirs: np.ndarray, t_min: float = 0.0,
+                      t_max: float = np.inf, step_cells: int = 8, side: str = "both"
+                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """First hit at t_min < t <= t_max; t is distance for unit directions.
+
+        Equal-t hits choose the lowest triangle id. Misses return (-1, NaN barycentrics, infinity).
+        `side` can restrict hits to front faces (normal opposes ray) or back faces (normal follows ray).
+        A triangle's bounding box can reach an earlier cell than its intersection: keep walking until the
+        unvisited cells start beyond the best t, rather than accepting the first batch's hit.
+        """
+        return self._ray_query(origins, dirs, t_min, t_max, step_cells, side)
+
+    def _ray_query(self, origins, dirs, t_min, t_max, step_cells, side, *, any_hit=False):
+        """Shared traversal; visibility queries retain their early exit on any intersecting triangle."""
         origins = np.asarray(origins, dtype=np.float64).reshape(-1, 3)
         dirs = np.asarray(dirs, dtype=np.float64).reshape(-1, 3)
-        hit = np.zeros(len(origins), dtype=bool)
+        if (dirs.shape != origins.shape or not np.isfinite(origins).all() or not np.isfinite(dirs).all()
+                or not np.isfinite(t_min) or np.isnan(t_max) or t_max < max(t_min, 0)
+                or not isinstance(step_cells, int) or step_cells < 1 or side not in ("both", "front", "back")):
+            raise ValueError("invalid rays, t limits or cell batch size")
+        ids = np.full(len(origins), -1, dtype=np.int64)
+        bary = np.full((len(origins), 3), np.nan)
+        best = np.full(len(origins), np.inf)
         if self.n == 0 or len(origins) == 0:
-            return hit
+            return ids, bary, best
         a = self.tri[:, 0]
         e1 = self.tri[:, 1] - a
         e2 = self.tri[:, 2] - a
@@ -327,10 +350,13 @@ class MeshIndex:
             t2 = (hi - origins) * inv
         tnear = np.nanmax(np.where(np.isnan(np.minimum(t1, t2)), -np.inf, np.minimum(t1, t2)), axis=1)
         tfar = np.nanmin(np.where(np.isnan(np.maximum(t1, t2)), np.inf, np.maximum(t1, t2)), axis=1)
-        t0 = np.maximum(tnear, 0.0)
-        live = np.nonzero(t0 <= tfar)[0]
+        # A parallel ray outside a slab must miss, including zero-length directions.
+        outside = ((dirs == 0) & ((origins < lo) | (origins > hi))).any(axis=1)
+        tfar = np.minimum(tfar, t_max)
+        t0 = np.maximum(tnear, max(t_min, 0.0))
+        live = np.nonzero((t0 <= tfar) & ~outside & (dirs != 0).any(axis=1))[0]
         if not len(live):
-            return hit
+            return ids, bary, best
         # walk the cells from the grid entry (or the origin)
         p0 = origins[live] + t0[live, None] * dirs[live]
         cell = self._index(p0, (0, 1, 2))
@@ -341,6 +367,7 @@ class MeshIndex:
             tmax = np.where(step != 0, (nxt - origins[live]) / d, np.inf)
             tdelta = np.where(step != 0, self.h / np.abs(d), np.inf)
         tend = tfar[live]
+        entry = t0[live].copy()
         rays = live
         while len(rays):
             pairs_r, pairs_c = [], []
@@ -353,6 +380,7 @@ class MeshIndex:
                 pairs_c.append(self._flat(cell[idx], (0, 1, 2)))
                 ax = np.argmin(tmax[idx], axis=1)
                 tnext = tmax[idx, ax]
+                entry[idx] = tnext
                 cell[idx, ax] += step[idx, ax]
                 tmax[idx, ax] += tdelta[idx, ax]
                 out = (tnext > tend[idx]) | (cell[idx, ax] < 0) | (cell[idx, ax] >= self.dims[ax])
@@ -365,18 +393,35 @@ class MeshIndex:
                 pvec = np.cross(dd, eb)
                 det = np.einsum("ik,ik->i", pvec, ea)
                 ok = np.abs(det) > 1e-12
+                if side != "both":
+                    ok &= (det > 0) if side == "front" else (det < 0)
                 inv_det = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
                 tvec = o - a[tt]
                 u = np.einsum("ik,ik->i", tvec, pvec) * inv_det
                 qvec = np.cross(tvec, ea)
                 v = np.einsum("ik,ik->i", dd, qvec) * inv_det
                 t = np.einsum("ik,ik->i", qvec, eb) * inv_det
-                got = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > t_min)
-                hit_local = np.zeros(len(rays), dtype=bool)
-                hit_local[qq[got]] = True
-                hit[rays[hit_local]] = True
-                alive &= ~hit_local
+                got = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > t_min) & (t <= t_max)
+                if any_hit:
+                    hit_local = np.zeros(len(rays), dtype=bool)
+                    hit_local[qq[got]] = True
+                    ids[rays[hit_local]] = 0
+                    alive &= ~hit_local
+                else:
+                    q, f, times = qq[got], tt[got], t[got]
+                    local_best = best[rays].copy()
+                    np.minimum.at(local_best, q, times)
+                    tied = times == local_best[q]
+                    chosen = np.where((local_best < best[rays]) | (ids[rays] < 0), self.n, ids[rays])
+                    np.minimum.at(chosen, q[tied], f[tied])
+                    select = tied & (chosen[q] == f)
+                    ids[rays[q[select]]] = f[select]
+                    bary[rays[q[select]]] = np.column_stack((1 - u[got][select] - v[got][select],
+                                                           u[got][select], v[got][select]))
+                    best[rays] = local_best
+            # The current cell has not been tested yet. At equal t it may contain a lower-index tie.
+            alive &= best[rays] >= entry
             keep = np.nonzero(alive)[0]
-            rays, cell, tmax, tdelta, step, tend = (rays[keep], cell[keep], tmax[keep], tdelta[keep], step[keep],
-                                                     tend[keep])
-        return hit
+            rays, cell, tmax, tdelta, step, tend, entry = (rays[keep], cell[keep], tmax[keep], tdelta[keep],
+                                                         step[keep], tend[keep], entry[keep])
+        return ids, bary, best
