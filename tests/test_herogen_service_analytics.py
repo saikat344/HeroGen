@@ -1,4 +1,4 @@
-"""First-party website analytics, schema v7 migration, retention, admin panel API/CLI and browser behaviour."""
+"""First-party website analytics, schema v10 migration, retention, admin panel API/CLI and browser behaviour."""
 
 from __future__ import annotations
 
@@ -63,13 +63,13 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
             self.assertIn(expected, str(cm.exception))
             self.assertNotIn("not-an-email", str(cm.exception))
 
-    def test_v6_database_migrates_cleanly_to_v7_and_purges_by_retention(self):
-        db_path = self.tmp / "v6.db"
+    def test_v9_database_migrates_cleanly_to_v10_and_purges_by_retention(self):
+        db_path = self.tmp / "v9.db"
         con = sqlite3.connect(str(db_path))
-        v6_schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS analytics_events")[0]
-        con.executescript(v6_schema)
-        con.execute("PRAGMA user_version = 6")
-        con.execute("INSERT INTO allowlist(email, added_at, note) VALUES ('ops@example.com', 1000.0, 'v6 row')")
+        v9_schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS analytics_events")[0]
+        con.executescript(v9_schema)
+        con.execute("PRAGMA user_version = 9")
+        con.execute("INSERT INTO allowlist(email, added_at, note) VALUES ('ops@example.com', 1000.0, 'v9 row')")
         con.commit()
         con.close()
 
@@ -78,7 +78,7 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         store = Store(db_path, clock=clock)
         try:
             ver = store.db.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(ver, 7)
+            self.assertEqual(ver, 10)
             self.assertEqual([r["email"] for r in store.allow_list()], ["ops@example.com"])
 
             store.analytics_record(VID_A, "desktop", [("page_view", "page", "landing")])
