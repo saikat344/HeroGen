@@ -2463,9 +2463,10 @@ The operator configures `generation-budget` through the existing admin CLI, supp
 reservation, maximum active generations, expiry, exact clean commit, cost-configuration fingerprint and a
 cost-bound evidence note. `generation-policy-signature` reports the running version and fingerprint. Enabling
 requires an explicit confirmation that provider caps were verified. New installations are paused until configured.
-The fingerprint binds profiles, stage arguments, upload dimensions, prompt selectors, retry limits and timeouts;
-worker receipts reject a changed fingerprint. The bound must include main work, retries, held-out checks and
-remote work. Changes to external resource deployments or prices also require operator re-verification.
+The fingerprint binds profiles, stage arguments, the refine cap, upload dimensions, prompt selectors, retry
+limits, held-out concurrency and timeouts; worker receipts reject a changed fingerprint. The bound must
+include main work, retries, held-out checks and remote work. Changes to external resource deployments or
+prices also require operator re-verification.
 
 Reservations use integer micro-USD and persist across restarts and policy changes. A job's completion releases
 its capacity slot only when main and expected held-out work have finished and all worker receipts are certain.
