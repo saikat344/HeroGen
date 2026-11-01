@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from herogen.blender.refine import closeups as U, cameras as C, imaging as I, prompts
+try:
+    from herogen.blender.refine import closeups as U, cameras as C, imaging as I, prompts
+    HAVE_REFINE = True
+except ImportError:
+    HAVE_REFINE = False
 
 
 def info():
@@ -15,6 +19,7 @@ def info():
             "body_centre": [0, 0, 0], "head_centre": None, "head_side": None}
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class CloseupCameraTests(unittest.TestCase):
     def test_four_bands_four_yaws_and_threefold_density(self):
         cams = U.cameras_for(info())
@@ -78,6 +83,7 @@ class CloseupCameraTests(unittest.TestCase):
             np.testing.assert_allclose([x.min(), x.max(), y.min(), y.max()], [0, cam["res"][0], 0, cam["res"][1]], atol=1e-9)
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class CropTests(unittest.TestCase):
     def test_known_projection_with_offset_padding_and_non_square_art(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +122,7 @@ class CropTests(unittest.TestCase):
             U.crop_box(cam, art, info())
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class BorderGateTests(unittest.TestCase):
     def test_frame_cut_grey_surface_does_not_become_background(self):
         fig = np.zeros((512, 768), bool)
