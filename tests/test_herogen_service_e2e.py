@@ -203,7 +203,7 @@ class ServiceBrowserCase(TempDirCase):
         self.s = settings(self.tmp, base_url=self.url, allowed_hosts=("127.0.0.1",), **getattr(self, "service_settings", {}))
         self.store = Store(self.s.meta_path)
         if self.s.public_demo:
-            self.store.budget_configure(100_000_000, 10_000_000, 1, time.time()+86400*14, self.s.code_commit,
+            self.store.budget_configure(1_000_000_000, 10_000_000, 5, time.time()+86400*14, self.s.code_commit,
                 'Synthetic browser fixture; no paid work', self.s.cost_signature, provider_caps_verified=True)
         self.sender = FakeSender()
         self.runner = GatedRunner()
@@ -284,7 +284,7 @@ class TestServicePage(ServiceBrowserCase):
             document.querySelector('#name').value = 'Saved draft';
             document.querySelector('#jobForm').requestSubmit();
         }})()""")
-        t.wait("document.querySelector('#judgeDialog').open")
+        t.wait("document.querySelector('#guestDialog').open")
         self.assertTrue(t.eval("/saved/.test(document.querySelector('#jobMsg').textContent)"))
         self.signin()
         t.wait("document.querySelector('#uploadName').textContent === 'draft.png'")
@@ -315,7 +315,7 @@ class TestServicePage(ServiceBrowserCase):
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#entry').hidden")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#judgeDialog').open")
+        t.wait("document.querySelector('#guestDialog').open")
         self.signin()
         self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
         t.eval("document.querySelector('#signOut').click()")
@@ -330,7 +330,7 @@ class TestServicePage(ServiceBrowserCase):
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#entry').hidden")
         t.eval("document.querySelector('#prompt').value='Original idea'; document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#judgeDialog').open")
+        t.wait("document.querySelector('#guestDialog').open")
         self.signin()
         t.eval("""(() => {
             const original=window.fetch;
@@ -547,36 +547,28 @@ if __name__ == "__main__":
 class TestPublicLivePage(ServiceBrowserCase):
     service_settings = {'public_demo': True, 'code_commit': 'a'*40}
 
-    def test_no_account_live_entry_preserves_draft_and_allowance_on_reload(self):
-        t = self.tab
-        t.goto(self.url + '/')
-        t.wait("document.querySelector('#headerSignIn').textContent === 'Try live demo'")
+    def test_create_opens_guest_and_starts_without_an_account_or_code(self):
+        t=self.tab; t.goto(self.url+'/')
+        t.wait("document.querySelector('#headerSignIn').textContent === 'Open workspace'")
         t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("document.querySelector('#judgeDialog').open")
-        self.assertFalse(t.eval("document.querySelector('#judgeCode').required"))
-        self.assertTrue(t.eval("document.querySelector('#judgeCodeFields').hidden"))
-        t.eval("document.querySelector('#judgeForm').requestSubmit()")
-        t.wait("!document.querySelector('#judgeDialog').open && !document.querySelector('#app').hidden")
-        self.assertIn('forest courier', t.eval("document.querySelector('#prompt').value"))
-        self.assertEqual(len(self.store.judge_codes_list()), 1)
-        t.eval("document.querySelector('#jobForm').requestSubmit()")
         t.wait("!document.querySelector('#detail').hidden")
+        self.assertEqual(len(self.store.users_list()),1)
+        self.assertEqual(self.store.users_list()[0]['kind'],'guest')
         self.runner.gate.set()
-        t.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
-        t.goto(self.url + '/')
-        t.wait("/0 generations left/.test(document.querySelector('#judgeAccessText').textContent)")
-        self.assertEqual(len(self.store.judge_codes_list()), 1)
+        t.wait("document.querySelector('#state').textContent === 'succeeded'",timeout=60)
+        t.goto(self.url+'/')
+        t.wait("!document.querySelector('#guestAccessSummary').hidden")
+        self.assertEqual(len(self.store.users_list()),1)
         t.eval("document.querySelector('[data-idea=moon]').click(); document.querySelector('#jobForm').requestSubmit()")
-        t.wait("/used its generation allowance/.test(document.querySelector('#jobMsg').textContent)")
-        self.assertEqual(len(self.store.jobs_admin_list()), 1)
+        t.wait("!document.querySelector('#detail').hidden")
+        self.assertEqual(len(self.store.jobs_admin_list()),2)
+        self.assertEqual(self.tab.errors,[])
 
-    def test_unfunded_public_entry_has_clear_recovery(self):
+    def test_unfunded_public_generation_preserves_draft_with_clear_error(self):
         self.store.db.execute('UPDATE admission_policy SET enabled=0')
-        t = self.tab; t.goto(self.url + '/')
+        t=self.tab; t.goto(self.url+'/')
         t.wait("!document.querySelector('#headerSignIn').disabled")
-        t.eval("document.querySelector('#headerSignIn').click()")
-        t.wait("document.querySelector('#judgeDialog').open")
-        t.eval("document.querySelector('#judgeForm').requestSubmit()")
-        t.wait("/unavailable/.test(document.querySelector('#judgeMsg').textContent)")
-        self.assertTrue(t.eval("document.querySelector('#judgeDialog').open"))
-        self.assertEqual(self.store.judge_codes_list(), [])
+        t.eval("document.querySelector('[data-idea=forest]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait("/temporarily paused/.test(document.querySelector('#jobMsg').textContent)")
+        self.assertEqual(len(self.store.jobs_admin_list()),0)
+        self.assertIn('forest courier',t.eval("document.querySelector('#prompt').value"))

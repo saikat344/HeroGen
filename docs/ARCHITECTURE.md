@@ -2434,26 +2434,23 @@ quality or game-readiness. Gallery access never dispatches work or grants privat
 load failures have retry controls. Saved refinement evidence is available through an optional details panel.
 
 With `HEROGEN_SERVICE_PUBLIC_DEMO=true`, `POST /api/demo/access` opens a private browser workspace without
-an account or published credential. `HEROGEN_SERVICE_PUBLIC_DEMO_JOBS` defaults to one lifetime generation
-per workspace. Re-entry with the same valid session preserves history and allowance. Clearing cookies or using
-another browser can obtain a new workspace: this is explicitly not identity or Sybil protection. Shared spending
-and capacity protection comes from the durable admission ledger, not browser identity. Access creation is
-CSRF/origin protected and IP rate-limited. A workspace's saved results cannot be read or canceled from another
-workspace. Public access has no admin privileges.
+an account or published credential. A valid existing guest session is reused, keeping its history private.
+The create button opens the workspace and submits the saved draft directly; access alone starts no compute.
+Guests have one active generation per workspace and can create again after completion. Legacy email-account
+beta lifetime/daily quotas do not apply to guests; upload/storage/rate limits and shared admission do apply.
+Clearing cookies or switching browsers creates another workspace, so this is not identity or Sybil protection.
+CSRF, origin checks and secure session cookies protect every state-changing request. Operator email/invite
+access remains separate at `/admin/signin` and shares the global admission limits when public mode is enabled.
+There is no Facebook login or special judge-account route.
 
-Optional `HEROGEN_SERVICE_JUDGE_ACCESS=true` enables `POST /api/judge/access` with individual invitation codes.
-The code's allowance is shared across its private browser workspaces and cannot be reset by another browser.
-Codes are purpose-separated HMAC hashes in storage, printed once by the admin CLI and never listed raw.
-This optional invitation path does not presume a private submission field or require publishing a funded code.
-The separate email/invite path at `/admin/signin` preserves operator access; it shares global admission limits
-when either controlled live-access mode is enabled.
-
-The metadata schema v4 migrates v1–v3 stores and adds judge workspaces, allowances, a generation policy,
-reservations and worker receipts. Admission and job insertion run in one SQLite write transaction. A repeated
-Idempotency-Key returns the original workspace's job without consuming another allowance or reservation.
-Capacity, exhausted allowance, expired/revoked access, expired policy, changed version/configuration and
-insufficient unallocated budget refuse a new job before dispatch. Capacity returns 503 with Retry-After;
-no request is silently queued. The UI retains the draft and reports the reason.
+The metadata schema v6 migrates v1–v5 stores, preserving existing reservations and guest histories while
+retiring the invitation-specific workspace tables. Admission and job insertion run in one SQLite transaction.
+A repeated Idempotency-Key returns the original workspace's job without another reservation. One active
+reservation per workspace is enforced, including canceled work whose remote shutdown is uncertain. A global
+policy limits active generations (default five in the admin CLI); the service dispatcher also defaults to five.
+Changed version/configuration, expired/disabled policy, capacity or insufficient unallocated budget refuses
+new work before dispatch. Capacity returns 503 with Retry-After; no request is silently queued. The UI keeps
+the draft and explains the refusal.
 
 The operator configures `generation-budget` through the existing admin CLI, supplying USD limit and per-job
 reservation, maximum active generations, expiry, exact clean commit, cost-configuration fingerprint and a
@@ -2469,12 +2466,26 @@ Cancellation, deletion, failure and timeout never automatically release reserved
 capacity occupied, preventing overlapping replacements. A failed job can still incur provider charges.
 `generation-budget-report` exposes reservations and unresolved work to the operator; `generation-reconcile`
 records a measured cost with provider evidence and requires confirmation of stopped work for uncertain exits.
-An actual cost above its reservation pauses new admissions. Reconciliation never replenishes a generation
-allowance; that is a separate explicit operator action.
+An actual cost above its reservation pauses new admissions. Guest generations have no separate lifetime allowance.
 
 This ledger limits admitted reservation bounds; it is not an invoice meter or a provider billing cap. Gallery
 hosting, idle containers, storage and egress are not allocated per generation. A real total-spend ceiling also
-requires provider-side limits and funding for all relevant services. The CLI neither purchases credits nor
-changes provider billing. Do not enable a policy on an unverified estimate or claim that its reservation total
+requires provider-side limits and funding for all relevant services. `generation-overhead --actual-usd ... --evidence ...` records cumulative non-job charges from provider
+evidence, included in admission totals without double-counting reconciled job charges. `generation-budget-report`
+includes allocated micro-USD, active count, recent failures, unresolved work and basic alert conditions: 50/75/90%
+allocated, insufficient budget, full capacity, missing/expired policy, uncertain work and repeated failures.
+Allocated spending includes outstanding reservation bounds; it is not a measured invoice total. A periodic
+operator monitor can consume this read-only report and provider billing evidence; it must report missing or
+stale evidence rather than invent usage. The CLI neither purchases credits nor changes provider billing. Do not enable a policy on an unverified estimate or claim that its reservation total
 alone guarantees a cross-provider invoice ceiling. A capacity limit counts generation jobs, including their
 pending side work, not individual parallel stage calls. No Facebook identity provider is implemented.
+
+
+`python3 -m herogen.service.monitor --app <deployed-service> --state <private-state.json>` calls only the
+already deployed admin report function; it does not deploy or generate. Modal credentials stay local to the
+operator. The monitor emits JSON with new/resolved alert conditions and an allocated-spending total, persisting
+only deduplication state with owner-only permissions. A missing/unreachable meter is an explicit error, never
+zero spending. A full-capacity alert requires ten continuous minutes; long-running work is flagged at six
+hours. Non-job billing evidence older than a day (or missing) is flagged. External scheduling and notification
+delivery are operator configuration; neither runs inside the public web app. A saved report can be checked
+without any network using `--report <report.json>` instead of `--app`.

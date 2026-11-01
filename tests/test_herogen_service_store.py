@@ -608,6 +608,24 @@ class TestSchema(TempDirCase):
             self.assertIn("claim", cols)
             st.close()
 
+    def test_v4_reservations_and_private_history_survive_simplification(self):
+        from herogen.service import store as module
+        path=self.tmp/'v4.db'
+        schema=module.SCHEMA.replace(module.ADMISSION_SCHEMA,'')
+        old_admission=module.ADMISSION_SCHEMA.replace('user_id TEXT NOT NULL, client_key','user_id TEXT NOT NULL, code_id TEXT, client_key')
+        con=sqlite3.connect(path)
+        for statement in (schema+old_admission).split(';'):
+            if statement.strip(): con.execute(statement)
+        con.execute("INSERT INTO users(id,email,created_at,kind) VALUES ('u_old','workspace:u_old',1,'judge')")
+        con.execute("INSERT INTO sessions(hash,user_id,created_at,expires_at,last_seen_at) VALUES ('old','u_old',1,9999999999,9999999999)")
+        con.execute("INSERT INTO admissions(job_id,user_id,code_id,client_key,amount_micro,cost_signature,created_at) VALUES ('j_old','u_old','code','key',123,'signature',1)")
+        con.execute('PRAGMA user_version=5'); con.commit(); con.close()
+        store=Store(path); self.addCleanup(store.close)
+        self.assertEqual(store.user_get('u_old')['kind'],'guest')
+        self.assertEqual(store.session_get('old',86400)['id'],'u_old')
+        self.assertEqual(store.budget_report()['admissions'][0]['amount_micro'],123)
+        self.assertFalse(store.budget_report()['admissions'][0]['closed'])
+
     def test_an_unknown_version_is_refused(self):
         path = self.tmp / "new.db"
         con = sqlite3.connect(str(path))
