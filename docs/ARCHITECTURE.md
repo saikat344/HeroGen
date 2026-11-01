@@ -2003,7 +2003,9 @@ Spend, estimates, capacity and operator settings are returned only by the authen
 ### Persistence, hosting and retention
 
 SQLite writes use WAL, `BEGIN IMMEDIATE` and a process lock. Hosted writes snapshot the database to the
-metadata Volume before returning. Snapshot leases prevent a superseded store from acknowledging lost
+metadata Volume before returning. Generation status reads use no write transaction or snapshot unless
+a running lease expired; the first such read settles it once. Session reads still refresh last-seen
+time after the configured interval. Snapshot leases prevent a superseded store from acknowledging lost
 writes. Read failures stop restore rather than silently creating an empty store. `snapshots` and
 `snapshot-quarantine` inspect or quarantine unreadable snapshots; quarantining the last copy requires
 `--allow-empty`. The data Volume holds private runs and caches; web and stage workers access metadata

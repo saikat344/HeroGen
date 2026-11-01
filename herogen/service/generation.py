@@ -62,9 +62,14 @@ class GenerationStore:
                              if reason == 'generation_paused' else 'The live-generation budget is used up for now.')}
 
     def generation_get(self):
-        with self._tx() as c:
-            self._expire_leases(c)
-            return self._generation(c)
+        with self.lock:
+            expired = self.db.execute("SELECT 1 FROM jobs WHERE state='running' AND lease_until<=? LIMIT 1",
+                                      (self.clock(),)).fetchone()
+            if expired:
+                with self._tx() as c:
+                    self._expire_leases(c)
+                    return self._generation(c)
+            return self._generation(self.db)
 
     def generation_update(self, *, actor, enabled=None, limit_usd=None, running_estimate_usd=None, max_running=None):
         changes = {}
