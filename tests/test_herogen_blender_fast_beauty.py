@@ -259,17 +259,18 @@ class FaceRuleTests(unittest.TestCase):
             outputs.append(tex.T[3:5, 3:5])
         np.testing.assert_array_equal(*outputs)
 
-    def steep_face(self, occluded_columns=0):
+    def steep_face(self, occluded_columns=0, occluder=3., normal_length=1.):
         """A chin-like plane, steep to the camera, sampled by 4x4 texels per render pixel."""
         cam = cameras.camera('head+0', [0, 0, 1], 0, 2, (8, 8))
         slope = 3.  # depth grows 3 units per unit of height: a 72 degree jaw underside
         u = (np.arange(32) + .5) / 16
         zz, xx = np.meshgrid(2 - u, u - 1, indexing='ij')
         pos = np.stack((xx, slope * (1 - zz), zz), -1)
-        normal = np.broadcast_to(np.array([0, -1, -slope]) / np.hypot(1, slope), pos.shape).copy()
+        normal = np.broadcast_to(np.array([0, -1, -slope]) / np.hypot(1, slope) * normal_length,
+                                 pos.shape).copy()
         centres = 1 + (4 - (np.arange(8) + .5)) / 4
         depth = np.repeat((slope * (1 - centres))[:, None], 8, 1)
-        depth[:, :occluded_columns] -= 3  # a nearer surface, such as hair, hides these pixels
+        depth[:, :occluded_columns] -= occluder  # a nearer surface, such as hair, hides these pixels
         folder = self.work / 'head+0'
         Image.new('L', (8, 8), 255).save(folder / 'face.png')
         self.control.key = 'head+0'
@@ -292,6 +293,19 @@ class FaceRuleTests(unittest.TestCase):
         # Three hidden pixel columns, plus the window's one-pixel silhouette guard.
         self.assertEqual(self.data['face_source']['texels'], 32 * (32 - 16))
         np.testing.assert_allclose(tex.T[:, :12], .9, atol=1e-6)
+
+    def test_steep_jaw_allowance_uses_unit_normals(self):
+        # The decoded normal map is not unit length. A short normal must not widen the allowance
+        # so that an occluder just beyond the true slope's tolerance paints through.
+        unit = self.steep_face(occluded_columns=3, occluder=2.8)
+        self.assertEqual(self.data['face_source']['texels'], 32 * (32 - 16))
+        short = self.steep_face(occluded_columns=3, occluder=2.8, normal_length=.5)
+        self.assertEqual(self.data['face_source']['texels'], 32 * (32 - 16))
+        np.testing.assert_array_equal(short.T, unit.T)
+
+    def test_unit_normals_keeps_direction(self):
+        normals = np.array([[0., 0., .5], [3., 4., 0.], [0., 0., 0.]])
+        np.testing.assert_allclose(B.unit_normals(normals), [[0, 0, 1], [.6, .8, 0], [0, 0, 0]])
 
     def test_steep_jaw_allowance_stops_before_tangency(self):
         k = 4.

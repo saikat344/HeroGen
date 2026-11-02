@@ -2686,9 +2686,13 @@ distance ramp over 12 pixels at 1024 resolution; its local low-frequency colour 
 toward the surrounding rebaked atlas only within that band. This query changes the paint region, not
 view acceptance, retries or numeric gate thresholds. Default heads do not make this skin query.
 The frontal paint's depth test allows for the texel's own surface slope across the 3x3 visibility window
-(half the window on each axis, slope from the texel normal, held at its value 15 degrees before
-tangency). Steep jaw and chin texels are then painted together, rather than as a hatched band of
-alternate painted and unpainted texels. A nearer occluder in the window still rejects them.
+(half the window on each axis, slope from the texel normal renormalised to unit length, held at its
+value 15 degrees before tangency). Steep jaw and chin texels are then painted together, rather than as a
+hatched band of alternate painted and unpainted texels. A nearer surface in the window rejects a texel
+only when it is nearer than the texel by more than the whole tolerance: 3 render pixels plus 0.1% of the
+character's height, plus the slope allowance. The allowance is 0 for a texel facing the camera and
+reaches 1.5 x sqrt(2) x cot(15 degrees), about 7.9 pixels, at the hold, so for the steepest texels an
+occluder must be about 11 pixels plus 0.1% of the height nearer to reject them.
 The three options compose independently in this order. SideBeautyPass first supplies matching turnaround
 references to side/back repaint requests, including beauty requests (`RF16B`, render first, turnaround in
 between, beauty reference last). SideBeautyPass adds no turnaround reference to front candidates; their
