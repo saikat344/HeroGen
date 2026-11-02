@@ -2377,7 +2377,7 @@ lightweight `warm` method with `.spawn()`, returning without waiting for model l
 hook loads the model before `warm` returns. Attempts (including failed submissions) are limited to one per app
 per process per 60 seconds; app-name overrides apply here too. `HEROGEN_PREWARM=0` disables submission.
 Submission failures produce one warning per call and never interrupt the caller. Remote execution failures
-remain on Modal's call logs. This helper is opt-in; the service does not call it automatically.
+remain on Modal's call logs. The website server (`herogen.service`, local `--runner local` and the Modal web app) calls it in a background thread when it accepts a hero that will reach stage 3: a new hero, Try again on a refused input, or a cover or turnaround redo; never on page load and never for a texture redo. The image steps before stage 3 hide most of the cold start, and no traffic means no warm containers.
 
 Stage 3 starts Body inference from the selected front image and mask box beside Objects by default.
 Fitting/remeshing remains unchanged, and Body-to-mesh joint conversion, record updates and acceptance

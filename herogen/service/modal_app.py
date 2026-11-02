@@ -280,7 +280,7 @@ def web():
     from herogen.service.emailer import make_sender
     from herogen.service.storage import ModalVolumeView, Storage
     from herogen.service.uploads import UploadRejected
-    from herogen.service.web import Services, create_app
+    from herogen.service.web import Services, create_app, prewarm_models
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     s = _settings(require_key=True)
@@ -296,7 +296,7 @@ def web():
     svc = Services(settings=s, store=RemoteStore(admin_key=os.environ.get("HEROGEN_ADMIN_KEY")), signer=Signer(s.signing_key),
                    storage=Storage(Path(DATA), ModalVolumeView(data_vol)),
                    sender=make_sender(s.email_provider, api_key=s.email_api_key, sender=s.email_from),
-                   sanitize=sanitize, submit=_submit)
+                   sanitize=sanitize, submit=_submit, prewarm=prewarm_models)
     return create_app(svc)
 
 
