@@ -278,6 +278,14 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(rec['thresholds']['outline'], fixture.refine.GATE)
         self.assertGreaterEqual(len(rec['calls']), 31)  # concurrent attempts can finish before cancellation
 
+    def test_without_spend_cap_fast_runs_and_records_no_budget(self):
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast', cap_usd=None)
+        self.assertEqual(rec['status'], 'complete')
+        self.assertNotIn('budget', rec)
+        self.assertGreater(rec['cost_usd'], 0)
+        self.assertEqual(sum(v['accepted'] for v in rec['views'].values()), 6)
+
     def test_every_fast_pass_stops_after_two_failed_attempts(self):
         original = FakeClient.edit_image
         def edit(child, prompt, images, **kw):
