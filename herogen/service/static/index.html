@@ -10,6 +10,7 @@
 <script src="/assets/theme.js"></script>
 <link rel="stylesheet" href="/assets/tokens.css">
 <link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
   "imports": {
@@ -28,16 +29,25 @@
 <script type="module" src="/assets/app.js"></script>
 </head>
 <body class="entry-page">
-<header class="top">
-  <a class="brand" href="/" aria-label="HeroGen home"><span class="monogram" aria-hidden="true">HG</span> HeroGen</a>
-  <div class="spacer"></div>
-  <nav aria-label="Main"><button type="button" class="link" id="workspaceNav">Workspace</button><button type="button" class="link" id="heroesNav">Your heroes</button><a href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source ↗</a></nav>
-  <button type="button" id="headerSignIn" disabled hidden>This workspace</button>
-  <span id="who" class="who" hidden></span>
-  <button type="button" id="signOut" class="link" hidden>Sign out</button>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header">
+  <a class="brand" href="/" aria-label="HeroGen home"><span class="brand__mark" aria-hidden="true">HG</span><span>HeroGen</span></a>
+  <nav class="nav" id="siteNav" aria-label="Main">
+    <button type="button" class="nav__link" id="workspaceNav" aria-current="page">Create</button>
+    <button type="button" class="nav__link" id="heroesNav">Your heroes</button>
+    <a class="nav__link" href="/#gallery">Gallery</a>
+    <a class="nav__link" href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">Open source<svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-external-link"></use></svg><span class="sr"> (opens in a new tab)</span></a>
+  </nav>
+  <div class="header-end">
+    <button type="button" id="headerSignIn" class="btn btn--secondary btn--s" disabled hidden>This workspace</button>
+    <span id="who" class="workspace-pill" hidden></span>
+    <button type="button" id="signOut" class="btn btn--ghost btn--s" hidden>Sign out</button>
+    <button type="button" class="btn btn--ghost btn--icon theme-toggle" data-theme-toggle aria-label="Theme"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-moon"></use></svg></button>
+    <button type="button" class="btn btn--ghost btn--icon nav-toggle" aria-controls="siteNav" aria-expanded="false" aria-label="Open menu"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-menu"></use></svg></button>
+  </div>
 </header>
 <div id="banner" class="banner" role="alert" hidden></div>
-<main>
+<main id="main" tabindex="-1">
   <p id="loading" class="muted">Loading…</p>
 
   <dialog id="guestDialog" aria-labelledby="guestH"><button type="button" id="closeGuest" class="dialog-close" aria-label="Close guest access">×</button><p class="eyebrow">A private place to create</p><h2 id="guestH">Your guest workspace</h2><p id="accessIntro">No account needed. Extra heroes wait for a free worker.</p><form id="guestForm"><button id="guestGo" class="primary" type="submit">Open my workspace →</button></form><p id="guestMsg" role="status" class="small msg"></p><p class="small muted">Your history is private to this browser. Keep its cookies to return to your heroes.</p></dialog>
@@ -176,6 +186,6 @@
 
   </section>
 </main>
-<footer class="foot"><span>Your idea. Your character. Your game.</span><span class="footer-rule"></span><span>Built with Meta AI <span aria-hidden="true">∞</span></span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></footer>
+<footer class="site-footer"><div class="site-footer__inner"><span class="site-footer__tag">Your idea. Your character. Your game.</span><a href="https://github.com/saikat344/HeroGen" rel="noopener">Open source</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span class="faint">Built with Meta AI models</span></div></footer>
 </body>
 </html>

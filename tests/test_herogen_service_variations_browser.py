@@ -177,7 +177,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
             t.wait("document.querySelector('#stages .st-running')?.dataset.stage === '2'")
             t.wait("document.querySelector('#stageLog').textContent.includes('started')")
             self.assertFalse(t.eval("document.querySelector('#cancelJob').hidden"))
-            self.assertFalse(t.eval("document.querySelector('.top').contains(document.querySelector('#developerMode'))"))
+            self.assertFalse(t.eval("document.querySelector('.site-header').contains(document.querySelector('#developerMode'))"))
             self.assertEqual(t.eval("document.querySelector('#who').textContent"),'Private workspace')
             self.capture_matrix('running')
         finally:
