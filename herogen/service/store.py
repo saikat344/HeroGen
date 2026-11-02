@@ -120,7 +120,7 @@ class Store(GenerationStore, AnalyticsStore):
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "job_renew", "job_model_ready", "job_export_finish",
-        "job_continue", "job_versions",
+        "job_continue", "job_versions", "jobs_stage_states",
         "guest_open", "generation_get",
     }) | ANALYTICS_PUBLIC
     # Methods reached through StoreService.admin_call with the hosted admin key.
@@ -470,6 +470,14 @@ class Store(GenerationStore, AnalyticsStore):
     def job_stages(self, job_id: str) -> list[dict[str, Any]]:
         return self._all("SELECT stage, state, attempt, started_at, seconds, cost_usd, message FROM job_stages "
                          "WHERE job_id=?", (job_id,))
+
+    def jobs_stage_states(self, job_ids: list[str]) -> list[dict[str, Any]]:
+        """(job_id, stage, state) of every stage row of the given jobs, in one query (for list views)."""
+        ids = [j for j in job_ids if valid_id(j, "j")][:500]
+        if not ids:
+            return []
+        return self._all(f"SELECT job_id, stage, state FROM job_stages WHERE job_id IN ({','.join('?' * len(ids))})",
+                         tuple(ids))
 
     def _set_state(self, c: sqlite3.Connection, job: sqlite3.Row | dict, new: str, **cols: Any) -> None:
         old = job["state"]
