@@ -175,6 +175,8 @@ class Tab:
             time.sleep(0.1)
 
     def goto(self, url: str) -> None:
+        # A background tab reports document.hidden, and the pages stop polling while hidden; keep this one in front.
+        self.call("Page.bringToFront")
         self.call("Page.navigate", url=url)
         path = urllib.parse.urlparse(url).path   # the page may drop the fragment (the sign-in link does)
         self.wait(f"location.pathname === {json.dumps(path)} && document.readyState === 'complete'")
@@ -649,8 +651,9 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.tab.goto(self.url + '/#heroes')
         card = ("([...document.querySelectorAll('.hero-card')].find((c) => c.querySelector('.hero-card__name').textContent === %s)"
                 "?.querySelector('.hero-card__note')?.textContent || '')")
-        self.tab.wait(card % json.dumps('Queued hero'))
-        queued = self.tab.eval(card % json.dumps('Queued hero'))
+        # '/#heroes' only changes the fragment, so wait for the re-rendered queued card rather than reading once.
+        queued = self.tab.wait(card % json.dumps('Queued hero')
+                               + ".match(/^(Starts when a worker is free|Next to start|\\d+ heroes? ahead of you)$/)?.[0]")
         self.assertNotRegex(queued, r'Finished in|Model ready in', 'a queued hero has no run time')
         time.sleep(2)   # the second hero waits in the queue; that wait is not its run time
         self.runner.gate.set()
@@ -692,9 +695,9 @@ class TestPublicLivePage(ServiceBrowserCase):
         t.call('Network.setBlockedURLs', urls=['*/api/jobs/j_*'])   # no detail record: only the list answers
         t.goto(self.url + '/#heroes')
         note = "(document.querySelector('.hero-card__note')?.textContent || '')"
-        t.wait(note)
-        self.assertRegex(t.eval(note), r'^Model ready in \d+ s · Roblox files in progress$')
-        self.assertEqual(t.eval("document.querySelector('.hero-pill').textContent"), 'Ready')
+        # '/#heroes' only changes the fragment: the old card can still be on screen, so wait for the expected text.
+        t.wait(note + ".match(/^Model ready in \\d+ s · Roblox files in progress$/)", timeout=30)
+        t.wait("document.querySelector('.hero-pill')?.textContent === 'Ready'", timeout=30)
         t.call('Network.setBlockedURLs', urls=[])
         time.sleep(POLL_S + 1)   # the next poll fetches the detail while the exports are still running
         self.assertRegex(t.eval(note), r'^Model ready in')
