@@ -2650,6 +2650,10 @@ Its face interior copies the selected repaint directly. The outer head-skin boun
 distance ramp over 12 pixels at 1024 resolution; its local low-frequency colour difference is matched
 toward the surrounding rebaked atlas only within that band. This query changes the paint region, not
 view acceptance, retries or numeric gate thresholds. Default heads do not make this skin query.
+The frontal paint's depth test allows for the texel's own surface slope across the 3x3 visibility window
+(half the window on each axis, slope from the texel normal, held at its value 15 degrees before
+tangency). Steep jaw and chin texels are then painted together, rather than as a hatched band of
+alternate painted and unpainted texels. A nearer occluder in the window still rejects them.
 The three options compose independently in this order. SideBeautyPass first supplies matching turnaround
 references to side/back repaint requests, including beauty requests (`RF16B`, render first, turnaround in
 between, beauty reference last). SideBeautyPass adds no turnaround reference to front candidates; their

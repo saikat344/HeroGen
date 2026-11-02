@@ -259,6 +259,46 @@ class FaceRuleTests(unittest.TestCase):
             outputs.append(tex.T[3:5, 3:5])
         np.testing.assert_array_equal(*outputs)
 
+    def steep_face(self, occluded_columns=0):
+        """A chin-like plane, steep to the camera, sampled by 4x4 texels per render pixel."""
+        cam = cameras.camera('head+0', [0, 0, 1], 0, 2, (8, 8))
+        slope = 3.  # depth grows 3 units per unit of height: a 72 degree jaw underside
+        u = (np.arange(32) + .5) / 16
+        zz, xx = np.meshgrid(2 - u, u - 1, indexing='ij')
+        pos = np.stack((xx, slope * (1 - zz), zz), -1)
+        normal = np.broadcast_to(np.array([0, -1, -slope]) / np.hypot(1, slope), pos.shape).copy()
+        centres = 1 + (4 - (np.arange(8) + .5)) / 4
+        depth = np.repeat((slope * (1 - centres))[:, None], 8, 1)
+        depth[:, :occluded_columns] -= 3  # a nearer surface, such as hair, hides these pixels
+        folder = self.work / 'head+0'
+        Image.new('L', (8, 8), 255).save(folder / 'face.png')
+        self.control.key = 'head+0'
+        self.data['face_source'] = {'source': 'beauty'}
+        rgb = np.full((8, 8, 3), .6, np.float32)
+        view = {'cam': cam, 'valid': np.ones((8, 8), bool), 'depth': depth, 'refined': rgb}
+        tex = I.Texture.from_arrays(pos, normal, np.ones((32, 32), bool), np.full((32, 32, 3), .9), 2)
+        with mock.patch.object(I, 'load_accepted_views', return_value=[view]):
+            self.control.paint(tex, self.work, {'head+0': {'accepted': True}})
+        return tex
+
+    def test_steep_jaw_paints_every_visible_texel_without_hatching(self):
+        # The window's nearest neighbour is nearer by the plane's own slope; that is not occlusion.
+        tex = self.steep_face()
+        self.assertEqual(self.data['face_source']['texels'], 32 * 32)
+        np.testing.assert_allclose(tex.T[8:24, 8:24], .6, atol=1e-6)
+
+    def test_steep_jaw_allowance_still_rejects_an_occluder(self):
+        tex = self.steep_face(occluded_columns=3)
+        # Three hidden pixel columns, plus the window's one-pixel silhouette guard.
+        self.assertEqual(self.data['face_source']['texels'], 32 * (32 - 16))
+        np.testing.assert_allclose(tex.T[:, :12], .9, atol=1e-6)
+
+    def test_steep_jaw_allowance_stops_before_tangency(self):
+        k = 4.
+        held = B.window_slope(np.array([np.sin(np.deg2rad(15)), 1e-4]), k)
+        self.assertEqual(held[0], held[1])
+        self.assertEqual(B.window_slope(np.array([1.]), k)[0], 0)
+
     def test_empty_default_face_still_selects_the_complete_default_head(self):
         self.frontal(both=False, mouth=False)
         Image.new('L', (8, 8), 0).save(self.head.tasks[1][3] / 'face.png')
