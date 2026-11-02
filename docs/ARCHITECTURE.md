@@ -159,6 +159,9 @@ prompts, thresholds, retries and acceptance rules are unchanged.
 - Stage 0 records local input checks as informational. Stage 1 segments an upload's `character`,
   `person`, `creature` and `feet` concurrently with the existing real-person photo judge. Segmentation
   uses an autocontrasted luminance copy; the photo judge and cover reference keep the original pixels.
+  Because segmentation runs concurrently with the photo judge, an upload later refused as a photo of a
+  real person may already have been sent to SAM 3.1 (a Model API call); it never reaches Muse Image,
+  whose cover edit waits for the verdict. The full lane keeps its photo-first ordering.
   Each prompt counts figures at least `inputs.OTHER_CHARACTER_MIN_FRAC` of its largest figure's area.
   Two or more substantial characters on any prompt refuse the upload. Otherwise, the largest single
   figure across prompts is used, with confidence breaking coverage ties; responses are never combined

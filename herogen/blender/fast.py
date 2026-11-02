@@ -50,6 +50,7 @@ def run(a, stages):
                                                    profile=a.profile, cut_workers=a.cut_workers, fast=True)),
              ("6", "roblox export", lambda: run_export(a.run / "04-body", a.run / "06-roblox")),
              ("5", "results", lambda: stage5_results(folder))]
+    failed = []
     for stage, name, fn in steps:
         if stage not in stages:
             continue
@@ -75,10 +76,14 @@ def run(a, stages):
         best = final_model(a.run, "best")
         rec["final_model"] = best.relative_to(a.run).as_posix() if best else None
         folder.write_stage(rec)
+        if not rec.get("ok"):
+            failed.append(stage)
         if rec.get("error"):
             print(f"stage {stage} failed: {rec['error']}; keeping {rec['final_model']}", file=sys.stderr)
         else:
             print(f"stage {stage}: complete ({rec.get('seconds')} s)")
     best = final_model(a.run, "best")
-    print(json.dumps({"fast_lane": True, "final_model": best.relative_to(a.run).as_posix() if best else None}))
+    print(json.dumps({"fast_lane": True, "final_model": best.relative_to(a.run).as_posix() if best else None,
+                      "failed_stages": failed}))
+    # Exit 0 whenever a model exists (the result is always delivered); failed_stages names this call's failures.
     return 0 if best else 1
