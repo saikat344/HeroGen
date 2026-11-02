@@ -290,11 +290,11 @@
           <p id="variationError" role="alert" class="field-error actions__error" hidden></p>
         </section>
         </div>
-        <aside class="generation-notes side-panel" aria-labelledby="behindHeading">
+        <section class="generation-notes side-panel" aria-labelledby="behindHeading">
           <div class="side-head"><span class="side-head__icon" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-square-terminal"></use></svg></span><h2 id="behindHeading" class="behind-heading">Behind the build</h2><p class="behind-intro">Understand each step. Shape what comes next.</p></div>
           <div class="behind-tabs tabs" role="tablist" aria-label="Behind the build"><button id="liveTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="livePanel" tabindex="0">Live</button><button id="recipeTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="recipePanel" tabindex="-1">Recipe</button><button id="branchesTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Branches</button></div>
           <div id="livePanel" class="side-body" role="tabpanel" aria-labelledby="liveTab">
-          <section class="live-log"><div class="row"><span class="note-label">Stage events</span><label class="follow-live"><input id="followLive" type="checkbox" checked> Follow live</label></div><ol id="stageLog" aria-label="Recorded stage events"></ol><div class="log-footer"><span id="logStatus" role="status" class="small muted"></span><button id="copyLog" type="button" class="link">Copy log</button></div></section>
+          <section class="live-log"><div class="row"><span class="note-label">Stage events</span><label class="follow-live"><input id="followLive" type="checkbox" checked> Follow live</label></div><ol id="stageLog" aria-label="Recorded stage events" tabindex="0"></ol><div class="log-footer"><span id="logStatus" role="status" class="small muted"></span><button id="copyLog" type="button" class="link">Copy log</button></div></section>
           <section class="work-note"><p class="note-label">On the workbench</p><h2 id="currentStep"></h2><p id="stepDescription"></p><p id="stepMessage" class="small"></p><p class="work-note-foot">Every new result appears here as it becomes available.</p></section>
           <section class="generation-facts"><h2 id="detailH"></h2><p id="detailSub" class="muted small"></p></section>
           </div>
@@ -309,7 +309,7 @@
             <section id="variationFailure" class="banner banner--danger variation-failure" role="alert" aria-labelledby="variationTitle" hidden><svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg><div class="banner__body"><p id="variationTitle" class="banner__title">This attempt failed</p><p class="banner__text">Your previous result is saved.</p><p id="variationReason" class="banner__reason"></p></div><button id="retryFailedVersion" type="button" class="btn btn--secondary btn--s"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Retry</button></section>
           </div>
           <section id="inlineRefine" class="inline-refine" aria-label="Refine this version"></section><button type="button" id="developerMode" class="btn btn--ghost btn--s" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
-        </aside>
+        </section>
       </div>
       <section class="result-section" aria-labelledby="resultsH"><div class="row"><div><p class="note-label">The next chapter</p><h2 id="resultsH">Bring your hero into your world.</h2></div><div class="spacer"></div><a id="viewerLink" class="button" href="/viewer">Open full viewer ↗</a></div><div id="downloads" class="downloads"></div>
         <div id="studio" hidden><h3>Using it in Roblox Studio</h3><ol class="steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details><summary>Read Roblox setup notes</summary><pre id="readme"></pre></details></div>
