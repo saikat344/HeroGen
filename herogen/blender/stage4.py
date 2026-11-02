@@ -219,11 +219,14 @@ def _section_groups(build: dict, profile: str) -> dict:
 
 def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
     """Section -> index of the candidate it is taken from. One budget: the largest candidate whose total fits
-    (else the smallest); no budget: the only candidate; part groups: per group, the candidate with the most
-    triangles in that group that fits the group's budget (else the fewest)."""
+    its budget; no budget: the only candidate; part groups: the most triangles that fit each group's budget.
+    An exhausted ladder is an error, never permission to export an over-budget candidate."""
     budget = build["budget"]
     if budget is None:
         return {n: 0 for n in SECTIONS}
+    shortfalls = _budget_shortfalls(cands, build, profile)
+    if shortfalls:
+        raise ValueError("stage 4 cannot meet triangle budgets after cuts, caps and covers: " + "; ".join(shortfalls))
     if budget != "groups":
         best = None
         for i, c in enumerate(cands):
@@ -239,6 +242,50 @@ def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
         i = max(fits, key=lambda j: counts[j]) if fits else min(range(len(cands)), key=lambda j: counts[j])
         out.update({n: i for n in secs})
     return out
+
+
+def _budget_shortfalls(cands: list[dict], build: dict, profile: str) -> list[str]:
+    budget = build["budget"]
+    if budget is None:
+        return []
+    if budget != "groups":
+        least = min(c["total"] for c in cands)
+        return [f"body {least} > {budget}"] if least > budget else []
+    out = []
+    for group, (secs, limit) in PROFILES[profile]["groups"].items():
+        least = min(sum(len(c["covered"][n].faces) for n in secs) for c in cands)
+        if least > limit:
+            out.append(f"{group} {least} > {limit}")
+    return out
+
+
+def _fit_budget(cands: list[dict], build: dict, profile: str, make_candidate) -> None:
+    """Extend only an exhausted ladder. Measure the finished sections, including caps and covers, after every
+    new whole-body target. Halve down to one triangle, then refine a whole-body bracket at the original
+    ladder's target spacing. Existing fitting ladders are untouched, including candidate order and ties."""
+    if not _budget_shortfalls(cands, build, profile):
+        return
+    targets = sorted({c["target"] for c in cands})
+    spacing = min((b - a for a, b in zip(targets, targets[1:])), default=1)
+    upper = targets[0]
+    while _budget_shortfalls(cands, build, profile):
+        if upper <= 1:
+            # Keep the same explicit failure as selection; no over-budget fallback.
+            _pick(cands, build, profile)
+        lower = max(1, upper // 2)
+        cands.append(make_candidate(lower))
+        if not _budget_shortfalls(cands, build, profile):
+            if build["budget"] != "groups":
+                while upper - lower > spacing:
+                    middle = (lower + upper) // 2
+                    c = make_candidate(middle)
+                    cands.append(c)
+                    if c["total"] <= build["budget"]:
+                        lower = middle
+                    else:
+                        upper = middle
+            return
+        upper = lower
 
 
 def _shape_views(run: Path, vs) -> tuple[str, set[str], dict]:
@@ -547,15 +594,29 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     for lod, build in builds.items():
         cover_src = np.load(outs["cover" + build["cover"]])
         rings, ring_points = DOME[build["dome"]]
-        cands = []
-        for key in ladder[lod]:
+
+        def candidate(key):
             d = np.load(outs[key])
             secs, rig = split.build_sections(d["verts"], d["faces"], sk, cap="dome", rings=rings,
                                              ring_points=ring_points, cut_offsets=cut_offsets)
             covered, cinfo = covers.add_covers(secs, cover_src["verts"], cover_src["faces"], owner=COVER_OWNER,
                                                radius=COVER_RADIUS, outset=COVER_OUTSET, inside=in_masks)
-            cands.append({"key": key, "covered": covered, "bare": secs, "covers": cinfo,
-                          "total": sum(len(s.faces) for s in covered.values()), "decimated": len(d["faces"])})
+            return {"key": key, "target": targets[key], "covered": covered, "bare": secs, "covers": cinfo,
+                    "total": sum(len(s.faces) for s in covered.values()), "decimated": len(d["faces"])}
+
+        def additional_candidate(target):
+            key = f"{lod}{len(ladder[lod])}"
+            targets[key] = target
+            outs[key] = str((work / f"04-dec-{key}.npz").resolve())
+            extra = bl.run_job({"tasks": [{"task": "decimate", "mesh": str(mesh_src.resolve()),
+                                          "targets": {key: target}, "out": {key: outs[key]}}]},
+                               work, f"stage4-decimate-{key}", timeout=timeout)
+            dec["results"][0][key] = extra["results"][0][key]
+            ladder[lod].append(key)
+            return candidate(key)
+
+        cands = [candidate(key) for key in ladder[lod]]
+        _fit_budget(cands, build, profile, additional_candidate)
         pick = _pick(cands, build, profile)
         picks[lod] = {n: cands[i]["key"] for n, i in pick.items()}
         lod_secs[lod] = {n: cands[pick[n]]["covered"][n] for n in SECTIONS}
