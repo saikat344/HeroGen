@@ -87,6 +87,34 @@ class ProgressiveFiles(WebCase):
 
         self.assertEqual(self.finish(jid, BrokenPublisher()), 'succeeded')
 
+    def test_partially_written_versions_are_never_listed_or_served(self):
+        owner = self.signin()
+        jid = self.make_job(owner).json()['id']
+        case = self
+
+        class TruncatedPublisher(FakeRunner):
+            def _stage_3f(self, ctx, run):
+                versions = []
+                self.publish_version(run, versions, 1, ['front'])
+                self.publish_version(run, versions, 2, ['front', 'back'])
+                data = (run / '03-refined-v2.glb').read_bytes()
+                (run / '03-refined-v2.glb').write_bytes(data[:len(data) // 2])  # a producer crash mid-write
+                view = owner.get(f'/api/jobs/{jid}').json()
+                case.assertEqual([m['n'] for m in view['models']], [0, 1])
+                case.assertEqual(view['refinement']['versions'][-1]['n'], 1)
+                case.assertEqual(owner.get(view['models'][-1]['url']).status_code, 200)
+                for url in (f'/runs/r1/{jid}/03-refined-v2.glb',
+                            f'/api/jobs/{jid}/download/glb?artifact=03-refined-v2.glb'):
+                    case.assertEqual(owner.get(url).status_code, 404, url)
+                (run / '03-source.glb').write_bytes(b'glTF')
+                view = owner.get(f'/api/jobs/{jid}').json()
+                case.assertEqual([m['n'] for m in view['models']], [1])
+                case.assertEqual(owner.get(f'/runs/r1/{jid}/03-source.glb').status_code, 404)
+                (run / '03-source.glb').write_bytes(box_glb())
+                super()._stage_3f(ctx, run)
+
+        self.assertEqual(self.finish(jid, TruncatedPublisher()), 'succeeded')
+
     def test_contract_rejects_unsafe_names_bad_types_links_and_non_iso_times(self):
         run = self.tmp / 'publication'
         run.mkdir()

@@ -1,6 +1,6 @@
 """Read the refinement publisher's atomic, read-only progress contract.
 
-Only numbered files named by a valid contract are offered as progressive models. Missing, malformed or
+Only numbered, complete GLB files named by a valid contract are offered as progressive models. Missing, malformed or
 partially available publications leave the first shape usable; they never break a job response.
 """
 
@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from herogen.service.bundle import _inside
+from herogen.service.bundle import _inside, complete_glb
 from herogen.service.storage import SAFE_SEGMENT
 
 
@@ -40,7 +40,8 @@ def read_progress(run: Path) -> dict:
             datetime.fromisoformat(version["time"].replace("Z", "+00:00"))
             previous = n
         return {"versions": [{k: v[k] for k in ("n", "glb", "accepted", "rejected", "pending", "time")}
-                             for v in data["versions"] if _inside(run, v["glb"]) is not None], "done": data["done"]}
+                             for v in data["versions"] if (glb := _inside(run, v["glb"])) is not None
+                             and complete_glb(glb)], "done": data["done"]}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return empty
 

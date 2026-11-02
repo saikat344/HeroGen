@@ -631,7 +631,8 @@ class App:
             rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
             progress = read_progress(run)
             models = []
-            if rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb')):
+            if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
+                    and bundle.complete_glb(run / '03-source.glb')):
                 models.append({**source, "n": 0, "glb": "03-source.glb", "accepted": []})
             for version in progress['versions']:
                 if a := asset(version['glb']):
@@ -831,7 +832,7 @@ class App:
                         p = f[0] if f else None
                     if p and request.query_params.get('v') and request.query_params['v'] != version_token(p):
                         p = None
-                    if p is None:
+                    if p is None or not bundle.complete_glb(p):
                         return "This hero has no body file at that level of detail."
                     return p.read_bytes(), "model/gltf-binary", f"herogen-{base}-{lod}.glb"
                 try:
@@ -912,6 +913,8 @@ class App:
                     elif rel != '03-source.glb' and rel not in {v['glb'] for v in read_progress(st.run_dir(u['id'], jid))['versions']}:
                         return None
                 f = st.run_file(u["id"], jid, rel)
+                if f and lower.endswith('.glb') and not bundle.complete_glb(f[0]):
+                    return None  # a model still being written, or cut short, is never served
                 if f and request.query_params.get('v') and request.query_params['v'] != version_token(f[0]):
                     return None
                 return (f[0].read_bytes(), f[1]) if f else None
