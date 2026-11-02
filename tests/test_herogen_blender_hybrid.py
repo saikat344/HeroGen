@@ -624,6 +624,29 @@ class TestBodyJoints(HybridBase):
         self.assertEqual(before, sk.as_json())
         self.assertEqual(sk.surface_chains, ())
 
+    def test_displaced_sleeve_axis_can_partition_the_existing_arm_surface(self):
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightArm"] = .001
+        for name in ("RightShoulder", "RightElbow", "RightWrist"):
+            sk.joints[name] += [0, .23, 0]
+        rec["joint_sources"] = {"RightShoulder": "sam3d-body"}
+        before = sk.as_json()
+        result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        self.assertEqual(result.surface_chains, ("RightArm",))
+        self.assertEqual(result.as_json(), before)
+        self.assertTrue(all(self.part_counts(result).values()))
+        self.assertTrue(any("closed source sleeve cross section" in note for note in result.notes))
+
+    def test_absent_leg_keeps_its_specific_segment_error(self):
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightLeg"] = 10.
+        for name in ("RightHip", "RightKnee", "RightAnkle"):
+            sk.joints[name] += [0, 10, 0]
+        rec["joint_sources"] = {"RightHip": "sam3d-body"}
+        with self.assertRaisesRegex(ValueError, "RightLeg: no mesh around the recorded RightUpperLeg") as error:
+            body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        self.assertNotIn("sleeve", str(error.exception))
+
     def test_supported_limb_with_no_surface_in_a_distal_band_still_fails(self):
         from copy import deepcopy
         from herogen.blender import SECTIONS, split
