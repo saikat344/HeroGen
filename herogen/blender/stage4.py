@@ -217,42 +217,43 @@ def _section_groups(build: dict, profile: str) -> dict:
     return {"body": SECTIONS}
 
 
-def _pick(cands: list[dict], build: dict, profile: str, *, fast: bool = False) -> dict[str, int]:
-    """Section -> index of the candidate it is taken from. One budget: the largest candidate whose total fits
-    its budget; no budget: the only candidate; part groups: the most triangles that fit each group's budget.
-    The fast lane may exceed an in-game LOD target with the smallest complete candidate within Roblox's
-    per-mesh limit. Full-lane budgets and avatar specification limits remain hard requirements."""
-    budget = build["budget"]
-    if budget is None:
-        return {n: 0 for n in SECTIONS}
-    shortfalls = _budget_shortfalls(cands, build, profile)
-    if shortfalls:
-        if fast and budget != "groups":
-            from ..roblox import MESH_TRIANGLE_LIMIT
+def _valid_parts(candidate: dict, sections=SECTIONS) -> bool:
+    from ..roblox import MESH_TRIANGLE_LIMIT
 
-            valid = [i for i, c in enumerate(cands)
-                     if all(n in c["covered"] and len(c["covered"][n].verts)
-                            and 0 < len(c["covered"][n].faces) <= MESH_TRIANGLE_LIMIT for n in SECTIONS)]
-            if not valid:
-                raise ValueError("stage 4 cannot meet hard Roblox limits after cuts, caps and covers: "
-                                 "no complete 15-part candidate within the per-mesh triangle limit")
-            smallest = min(valid, key=lambda i: cands[i]["total"])
-            return {n: smallest for n in SECTIONS}
-        raise ValueError("stage 4 cannot meet triangle budgets after cuts, caps and covers: " + "; ".join(shortfalls))
-    if budget != "groups":
-        best = None
-        for i, c in enumerate(cands):
-            total = c["total"]
-            if best is None or (total <= budget and (best[1] > budget or total > best[1])) \
-                    or (best[1] > budget and total < best[1]):
-                best = (i, total)
-        return {n: best[0] for n in SECTIONS}
+    covered = candidate["covered"]
+    return all(n in covered and len(covered[n].verts)
+               and 0 < len(covered[n].faces) <= MESH_TRIANGLE_LIMIT for n in sections)
+
+
+def _pick(cands: list[dict], build: dict, profile: str, *, fast: bool = False) -> dict[str, int]:
+    """Take only non-empty sections within the per-mesh limit, after cuts, caps and covers.
+
+    Within those candidates keep the largest that fits each budget. The fast lane may exceed an in-game
+    target with the smallest complete candidate; full-lane and avatar budgets remain hard requirements.
+    """
+    budget = build["budget"]
+    groups = _section_groups(build, profile)
     out = {}
-    for group, (secs, limit) in PROFILES[profile]["groups"].items():
-        counts = [sum(len(c["covered"][n].faces) for n in secs) for c in cands]
-        fits = [i for i, k in enumerate(counts) if k <= limit]
-        i = max(fits, key=lambda j: counts[j]) if fits else min(range(len(cands)), key=lambda j: counts[j])
-        out.update({n: i for n in secs})
+    for group, secs in groups.items():
+        valid = [i for i, c in enumerate(cands) if _valid_parts(c, secs)]
+        if not valid:
+            raise ValueError("stage 4 cannot meet hard Roblox limits after cuts, caps and covers: "
+                             f"no complete {group} candidate within the per-mesh triangle limit")
+        if budget is None:
+            out.update({n: valid[0] for n in secs})
+            continue
+        limit = PROFILES[profile]["groups"][group][1] if budget == "groups" else budget
+        counts = {i: (sum(len(cands[i]["covered"][n].faces) for n in secs) if budget == "groups"
+                      else cands[i]["total"]) for i in valid}
+        fits = [i for i in valid if counts[i] <= limit]
+        if fits:
+            selected = max(fits, key=counts.get)
+        elif fast and budget != "groups":
+            selected = min(valid, key=counts.get)
+        else:
+            raise ValueError("stage 4 cannot meet triangle budgets after cuts, caps and covers: "
+                             + "; ".join(_budget_shortfalls(cands, build, profile)))
+        out.update({n: selected for n in secs})
     return out
 
 
@@ -260,12 +261,15 @@ def _budget_shortfalls(cands: list[dict], build: dict, profile: str) -> list[str
     budget = build["budget"]
     if budget is None:
         return []
-    if budget != "groups":
-        least = min(c["total"] for c in cands)
-        return [f"body {least} > {budget}"] if least > budget else []
     out = []
-    for group, (secs, limit) in PROFILES[profile]["groups"].items():
-        least = min(sum(len(c["covered"][n].faces) for n in secs) for c in cands)
+    for group, secs in _section_groups(build, profile).items():
+        valid = [c for c in cands if _valid_parts(c, secs)]
+        if not valid:
+            out.append(f"{group} has no complete candidate within the per-mesh triangle limit")
+            continue
+        limit = PROFILES[profile]["groups"][group][1] if budget == "groups" else budget
+        least = min(sum(len(c["covered"][n].faces) for n in secs) if budget == "groups" else c["total"]
+                    for c in valid)
         if least > limit:
             out.append(f"{group} {least} > {limit}")
     return out
@@ -292,7 +296,7 @@ def _fit_budget(cands: list[dict], build: dict, profile: str, make_candidate, *,
                     middle = (lower + upper) // 2
                     c = make_candidate(middle)
                     cands.append(c)
-                    if c["total"] <= build["budget"]:
+                    if not _budget_shortfalls([c], build, profile):
                         lower = middle
                     else:
                         upper = middle
