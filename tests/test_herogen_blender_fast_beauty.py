@@ -50,6 +50,7 @@ class FaceRuleTests(unittest.TestCase):
         self.work = Path(self.tmp.name)
         self.data = {'views': {k: {'accepted': False} for k in ('head+0', 'body+0')}}
         self.control = B.FaceControl(self.work, {}, data=self.data)
+        self.control.default_work = self.work / 'ordinary'
         self.default = {'accepted': True, 'prompt': 'RF2R', 'attempts': []}
         folder = self.work / 'head+0/attempt-1'
         folder.mkdir(parents=True)
@@ -58,15 +59,28 @@ class FaceRuleTests(unittest.TestCase):
                                     tasks=[None, (None, None, self.default, folder)])
 
     def frontal(self, key='head+0', *, both=True, mouth=True):
+        for folder in (self.work / key, self.control.default_work / key):
+            folder.mkdir(parents=True, exist_ok=True)
+            EyeQualityTests.face().save(folder / 'refined.png')
         self.data['views'][key] = {'accepted': True, 'prompt': 'RF6B', 'selected_attempt': 0,
             'attempts': [{'accepted': True, 'checks': {'facial_features': {
-                'repaint': {'both_eyes': both, 'mouth': mouth}}}}]}
+                'repaint': {'both_eyes': both, 'mouth': mouth, 'eye_boxes': EyeQualityTests.boxes}}}}]}
 
     def test_complete_beauty_head_wins_over_default(self):
         self.frontal()
         self.control.choose([self.head], self.work)
         self.assertEqual(self.data['face_source'], {'source': 'beauty', 'view': 'head+0', 'attempt': 0})
         self.assertNotIn('face-default-head+0', self.data['views'])
+
+    def test_soft_eye_rejects_beauty_and_selects_the_whole_default_head(self):
+        self.frontal()
+        EyeQualityTests.face(3).save(self.work / 'head+0/refined.png')
+        self.control.choose([self.head], self.work)
+        self.assertEqual(self.data['face_source']['source'], 'default')
+        self.assertTrue(self.data['views']['head+0']['head_only'])
+        check = self.data['beauty_head_candidate']['attempts'][0]['checks']['eye_quality']
+        self.assertFalse(check['accepted'])
+        self.assertLess(check['eyes'][0]['ratios']['laplacian_variance'], 1)
 
     def test_complete_beauty_body_can_anchor_the_face(self):
         self.frontal('body+0')
@@ -95,6 +109,10 @@ class FaceRuleTests(unittest.TestCase):
     def test_missing_head_requests_default_fast_fallback(self):
         self.control.choose([], self.work)
         self.assertEqual(self.data['face_fallback']['reason'], 'head_not_found')
+        self.control.fallback_texture = np.zeros((8, 8, 3))
+        with mock.patch.object(self.control, 'paint_default_head') as paint:
+            self.control.paint(mock.Mock(), self.work, self.data['views'])
+        paint.assert_called_once()
 
     def test_head_slots_never_cancel_each_other_in_either_completion_order(self):
         for order in ((0, 1), (1, 0)):
@@ -152,11 +170,24 @@ class FaceRuleTests(unittest.TestCase):
         with mock.patch('herogen.blender.refine.backend.blender') as render:
             self.control.render_default(self.work, {'name': 'head+0'}, self.work / 'wave-1', 900)
         self.assertEqual(render.call_args.args[1]['texture'], str(self.control.default_base))
-        reference, options = self.control.options(SimpleNamespace(name='head+0'), 1, cover)
+        reference, options = self.control.options(SimpleNamespace(name='head+0', hair=False), 1, cover)
         self.assertIs(reference, cover)
-        self.assertEqual(options['recipe_name'], 'RF2R')
+        self.assertNotIn('recipe_name', options)
         self.assertEqual(options['attempt_start'], 0)
-        self.assertEqual(options['rendered'], self.work / 'wave-1-default-face')
+        self.assertEqual(options['rendered'], self.work / 'ordinary/wave-1')
+
+    def test_every_default_slot_uses_ordinary_frozen_render_and_no_art(self):
+        cover = Image.new('RGB', (8, 8), 'blue')
+        for name, hair in [('body+0', False), ('body+90', False), ('body-90', False),
+                           ('body+180', False), ('upper+180', True)]:
+            reference, options = self.control.options(SimpleNamespace(name=name, hair=hair), 1, cover)
+            self.assertIs(reference, cover)
+            self.assertEqual(options['rendered'], self.control.default_work / ('wave-2' if hair else 'wave-1'))
+            self.assertEqual(options['attempt_start'], 0)
+            self.assertEqual(options['art'], ())
+            self.assertIsNone(options['art_masks'])
+            self.assertNotIn('recipe_name', options)
+            self.assertNotIn('complete_face', options)
 
     def test_selected_face_interior_has_zero_graded_base_contribution(self):
         cam = cameras.camera('head+0', [0, 0, 1], 0, 2, (8, 8))
@@ -229,6 +260,7 @@ class FaceRuleTests(unittest.TestCase):
             Image.fromarray(mask.astype(np.uint8) * 255).save(folder / (name + '.png'))
         Image.new('L', (8, 8), 0).save(folder / 'source-weight.png')
         original = np.full((8, 8, 3), .2, np.float32)
+        self.control.default_work = None
         self.control.default_base = self.work / 'original.png'
         Image.fromarray((original * 255).astype(np.uint8)).save(self.control.default_base)
         tex = I.Texture.from_arrays(pos, normal, np.ones((8, 8), bool), np.full((8, 8, 3), .9), 2)
@@ -252,6 +284,7 @@ class FaceRuleTests(unittest.TestCase):
         normal[..., 1] = -1
         tex = I.Texture.from_arrays(pos, normal, np.ones((8, 8), bool),
                                     np.full((8, 8, 3), .9), 2)
+        self.control.default_work = None
         self.control.default_base = self.work / 'original.png'
         Image.new('RGB', (8, 8), (51, 51, 51)).save(self.control.default_base)
         self.control.source_info = {'height': 2, 'body_centre': [0, 0, 1],
@@ -514,10 +547,11 @@ class FastBeautyStageTests(unittest.TestCase):
         prep = self.run / 'prep'
         prep.mkdir(exist_ok=True)
         Image.new('RGB', (4, 4), 'blue').save(prep / 'base.png')
-        features = {'both_eyes': complete, 'mouth': complete, 'eye_regions': 2 if complete else 0}
+        features = {'both_eyes': complete, 'mouth': complete, 'eye_regions': 2 if complete else 0,
+                    'eye_boxes': [[8, 8, 16, 16], [32, 8, 40, 16]] if complete else []}
         original = stage._view
         def view(*args, **kw):
-            if kw.get('recipe_name') == 'RF2R' and not default:
+            if not default and kw.get('recipe_name') in (None, 'RF2R') and args[4]['name'] == 'head+0':
                 args[7].update(accepted=False, reason='outline moved')
                 return args[2]
             return original(*args, **kw)
@@ -553,7 +587,8 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertTrue(record['views']['head+0']['accepted'])
         self.assertEqual(record['views']['head+0']['prompt'], 'RF2R')
         self.assertFalse(record['beauty_head_candidate']['accepted'])
-        self.assertFalse(record['views']['body+0']['accepted'])
+        self.assertTrue(record['views']['body+0']['accepted'])
+        self.assertEqual(record['views']['body+0']['winning_slot'], 2)
         self.assertEqual(len(record['views']), 6)
 
     def test_no_accepted_frontal_exports_with_default_fast_fallback(self):
@@ -588,7 +623,7 @@ class FastBeautyStageTests(unittest.TestCase):
                 self.run_beauty(complete=False, default=False, cap_usd=5)
         record = json.loads((self.run / 'stage-3f.json').read_text())
         self.assertEqual(record['status'], 'error')
-        self.assertEqual(record['views']['body+90']['reason'], 'ApiError')
+        self.assertEqual(record['default_fast_fallback']['views']['body+90']['reason'], 'ApiError')
         self.assertFalse((self.run / '03-refined.glb').exists())
 
     def test_face_selection_shares_the_checkpoint_writer_lock(self):

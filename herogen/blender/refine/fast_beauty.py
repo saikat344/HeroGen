@@ -69,6 +69,7 @@ class FacePass(Pass):
             if private['accepted']:
                 self.selected = 0
                 self.record['selected_attempt'] = 0
+                self.record['winning_slot'] = 1
                 self.folder.mkdir(parents=True, exist_ok=True)
                 for source in folder.iterdir():
                     if source.is_file():
@@ -85,6 +86,8 @@ class FaceControl:
         self.fallback_texture = None
         self.hair_views = []
         self.default_head_weight = None
+        self.default_work = None
+        self.default_stopped = False
 
     def render_default(self, prep, cam, folder, timeout):
         """Render the same frozen geometry with default fast's original, ungraded atlas."""
@@ -103,8 +106,11 @@ class FaceControl:
         # The RF2R candidate uses the original frozen base and artwork. Its
         # sample index matches default fast's first head attempt for exact cache reuse.
         options = {'face_keep': True, 'save_face': True}
-        if job.name == 'head+0' and index == 1:
-            return cover, {**options, 'recipe_name': 'RF2R', 'attempt_start': 0, 'rendered': self.default_render}
+        if index == 1:
+            rendered = (self.default_work / ('wave-2' if job.hair else 'wave-1')
+                        if self.default_work is not None else self.default_render)
+            return cover, {**options, 'attempt_start': 0, 'rendered': rendered,
+                           'art': (), 'art_masks': None}
         angle = {'head+0': 0, 'body+0': 0, 'body+90': 90, 'body-90': -90,
                  'body+180': 180, 'upper+180': 180}[job.name]
         if beauty.selected_yaw(self.references, angle) is None:
@@ -128,6 +134,15 @@ class FaceControl:
                 selected = next(a for a in record['attempts'] if a.get('accepted'))
                 features = selected.get('checks', {}).get('facial_features', {}).get('repaint', {})
                 if features.get('both_eyes') and features.get('mouth'):
+                    ordinary = self.default_work / key / 'refined.png' if self.default_work is not None else None
+                    if ordinary is None or not ordinary.exists():
+                        quality = {'accepted': False, 'reason': 'ordinary face paint unavailable', 'eyes': []}
+                    else:
+                        with Image.open(work / key / 'refined.png') as candidate, Image.open(ordinary) as default:
+                            quality = eye_quality(candidate, default, features.get('eye_boxes', []))
+                    selected.setdefault('checks', {})['eye_quality'] = quality
+                    if not quality['accepted']:
+                        continue
                     self.key = key
                     self.data['face_source'] = {'source': 'beauty', 'view': key,
                                                 'attempt': record['selected_attempt']}
@@ -148,18 +163,24 @@ class FaceControl:
             with Image.open(target / 'face.png') as face:
                 Image.new('L', face.size, 0).save(target / 'weight.png')
             self.data['views'][self.key] = {**fallback, 'head_only': True, 'selected_attempt': 1,
+                                           'winning_slot': 2,
                                            'attempts': head.record['attempts'], 'tries': head.record['tries']}
             self.data['face_source'] = {'source': 'default', 'view': self.key, 'attempt': 0}
         if self.key is None:
             self.data['face_source'] = {'source': 'default-fast-fallback',
                                         'reason': 'no accepted frontal face repaint'}
+            self.key = 'head+0' if head is not None else 'body+0'
 
     def default_fast(self, client, prep, tex, cams, work, timeout, cover, head_found, recipe, save, user_note):
         """Resolve the ordinary fast atlas, including accepted side/body paint and base residuals."""
         from .fast import waves
 
-        if self.data['face_source']['source'] == 'beauty':
-            return
+        if self.default_work is not None:
+            with self.state_lock:
+                self.data['face_source'].update(view=self.key, atlas_sha256=hashlib.sha256(
+                    (self.default_work / 'texture.png').read_bytes()).hexdigest(),
+                    cap_reached=self.default_stopped)
+            return self.default_stopped
         folder = work / 'default-fast' / 'blender-work' / 'texture-refine'
         folder.mkdir(parents=True, exist_ok=True)
         default = copy.copy(tex)
@@ -184,10 +205,11 @@ class FaceControl:
         default.save(folder / 'texture.png')
         with Image.open(folder / 'texture.png') as image:
             self.fallback_texture = np.asarray(image.convert('RGB'), dtype=np.float32) / 255
+        self.data.setdefault('face_source', {})
         self.prepare_hair_views(client, folder, data['views'], tex.height)
-        self.key = self.key or ('head+0' if head_found else 'body+0')
+        self.default_work, self.default_stopped = folder, stopped
         with self.state_lock:
-            self.data['face_source'].update(view=self.key, atlas_sha256=hashlib.sha256(
+            self.data.setdefault('face_source', {}).update(atlas_sha256=hashlib.sha256(
                 (folder / 'texture.png').read_bytes()).hexdigest(), cap_reached=stopped)
         return stopped
 
