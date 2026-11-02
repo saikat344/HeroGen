@@ -34,7 +34,9 @@ top masks (step 7). Derived and held-out views are never used for either registr
    fold it locally, all of which break planar cutting. It is voxelised by ray parity along Y (a voxel is inside
    when an odd number of surface crossings lie in front of it), blurred, made well-composed (no diagonal-only
    voxel contacts), surfaced with surface nets and Taubin smoothed like the carve, giving one closed manifold
-   surface with the model's shape. The source mesh (with its UVs) is kept for the texture fallback.
+   surface with the model's shape. Height is restored uniformly about the source's registered X/Y centre, including when remeshing drops a
+   detached island that changes the bounding box; the remaining body is never recentered on its new bounds.
+   The source mesh (with its UVs) is kept for the texture fallback.
 7. Register depth: each view's mask is placed by its own bounding box (`views.py`), so a Y-centred mesh lands
    off the side masks whenever the mesh and a mask disagree about a part that sets the depth extent (a tail
    hanging down in the mesh but sweeping back in the drawing, a pack the model left off). The mesh, and the
@@ -465,8 +467,14 @@ def remesh(verts: np.ndarray, faces: np.ndarray, height: float, nz: int = REMESH
     v, f = carve.surface_nets(field, origin, voxel)
     v, f, dropped = carve.keep_large_components(v, f)
     v = carve.taubin(v, f, smooth_iters)
-    v = normalise(v, height)
-    return v, f, {"voxel_size_studs": round(voxel, 5), "voxel_resolution": [int(x) for x in occ.shape],
+    # The front-view joints and textured source already use this X/Y frame. Removing a detached island
+    # can change the bounds asymmetrically; centring again would translate the body away from both.
+    centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
+    z0, z1 = v[:, 2].min(), v[:, 2].max()
+    anchor = np.array([centre[0], centre[1], z0])
+    v = (v - anchor) * height / max(z1 - z0, 1e-12) + [centre[0], centre[1], 0.0]
+    return v, f, {"frame": "source X/Y centre preserved; height restored uniformly",
+                  "voxel_size_studs": round(voxel, 5), "voxel_resolution": [int(x) for x in occ.shape],
                   "voxels_kept": int(occ.sum()), "voxels_raised_well_composed": raised, "dropped_island_faces": dropped, "blur_sigma_voxels": sigma,
                   "taubin_iterations": smooth_iters, "triangles": int(len(f))}
 
