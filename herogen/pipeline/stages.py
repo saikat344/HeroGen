@@ -779,14 +779,17 @@ def stage2_turnaround(
         prompt, version = turnaround_prompt(run)
         # Arbitrary caller-owned budgets may reserve the exact serial spend. Speculation must not
         # exhaust that budget ahead of a necessary call, or change callback order and classification.
-        if (concurrency == 1 or client.before_api_attempt is not None
+        if (st.fast or concurrency == 1 or client.before_api_attempt is not None
                 or client.after_api_attempt is not None):
             return _stage2(st, run, client, height_units, attempts, prompt, version)
         with _TurnaroundRequests(client, _load(run, "01-cover.png"), attempts, concurrency,
                                  prompt=prompt, size=version.step("sheet")["params"]["size"]) as requests:
             return _stage2(st, run, client, height_units, attempts, prompt, version, requests)
 
-    return _stopping_on_client_error(execute, st)
+    record = _stopping_on_client_error(execute, st)
+    if st.fast and not record["ok"]:
+        raise ValueError(record["error"])
+    return record
 
 
 # Stage 3's carve of a sheet's views, gated by stage 3's own silhouette-IoU gate (see `carve_check`).
@@ -891,6 +894,49 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     return used, drawn["raw"], top_checks, details, notes
 
 
+def _fast_sheet_views(st: _Stage, client: ModelClient, cover: Image.Image, prompt: str, size_param: str,
+                     tried: list[dict[str, Any]]) -> tuple:
+    """Recover once from a sheet with no extractable views, independently of quality measurements."""
+    st.details["attempts"] = tried
+    for attempt in range(2):
+        entry: dict[str, Any] = {"attempt": attempt, "extracted": False}
+        tried.append(entry)
+        # Model errors propagate; only local extraction failures justify another sheet.
+        sheet = client.edit_image(prompt, [cover], size=size_param, attempt=attempt)
+        bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
+        thr = imaging.threshold_mask(sheet)
+        fig, fig_method, n_inst = sam_figure_mask(client, sheet)
+        split = {"runs": [], "views": {}, "split_source": fig_method, "sam_coverage": {}}
+        sq: dict[str, Any] = {}
+        size = 0
+        assignment: dict[str, Any] = {}
+        try:
+            split = split_sheet(sheet, fig, thr, fig_method)
+            if len(split["runs"]) != len(SIDE_VIEWS) or len(split["views"]) != len(SIDE_VIEWS):
+                raise ValueError("Could not split the sheet into four figures.")
+            if any(not v["mask"].any() for v in split["views"].values()):
+                raise ValueError("A sheet panel has no figure mask.")
+            named, assignment = assign_views(split["views"])
+            size, sq = square_views(named, bg)
+            if size <= 0 or any(n not in sq or not sq[n]["mask"].any() for n in SIDE_VIEWS):
+                raise ValueError("Could not extract all four character views.")
+        except ValueError as exc:
+            sq = {}
+            entry["extraction_error"] = str(exc)
+        entry.update({
+            "sam_instances": n_inst,
+            "split_source": split["split_source"],
+            "sam_coverage": split["sam_coverage"],
+            "column_runs": [list(r) for r in split["runs"]],
+            "assignment": assignment,
+            "checks": [C.check("figures_found", len(split["runs"]), len(SIDE_VIEWS), op="==")],
+            "extracted": bool(sq),
+        })
+        if sq:
+            break
+    return attempt, sheet, bg, split, n_inst, size, sq, assignment
+
+
 def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float, attempts: int,
             prompt: str, version, requests=None) -> dict[str, Any]:
     step = version.step("sheet")
@@ -899,21 +945,25 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
     tried = []
     kept: tuple = ()
     for attempt in range(1 if st.fast else attempts):
-        sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
-                 if requests is None else requests.sheet(attempt))
-        bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
-        thr = imaging.threshold_mask(sheet)
-        fig, fig_method, n_inst = sam_figure_mask(client, sheet)
-        split = split_sheet(sheet, fig, thr, fig_method)
-        sq: dict[str, Any] = {}
-        size = 0
-        assignment: dict[str, Any] = {}
         orient: list[dict[str, Any]] = []
         orient_notes: list[str] = []
-        if split["views"]:
-            named, assignment = assign_views(split["views"])
-            size, sq = square_views(named, bg)
-            if not st.fast:
+        if st.fast:
+            attempt, sheet, bg, split, n_inst, size, sq, assignment = _fast_sheet_views(
+                st, client, cover, prompt, step["params"]["size"], tried
+            )
+        else:
+            sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
+                     if requests is None else requests.sheet(attempt))
+            bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
+            thr = imaging.threshold_mask(sheet)
+            fig, fig_method, n_inst = sam_figure_mask(client, sheet)
+            split = split_sheet(sheet, fig, thr, fig_method)
+            sq: dict[str, Any] = {}
+            size = 0
+            assignment: dict[str, Any] = {}
+            if split["views"]:
+                named, assignment = assign_views(split["views"])
+                size, sq = square_views(named, bg)
                 orient, orient_notes, assignment["side_fixes"] = orient_sides(sq)
         side_checks = C.side_view_checks(
             {n: v["mask"] for n, v in sq.items()}, figures_found=len(split["runs"])
@@ -932,7 +982,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             )
             # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
             side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
-        tried.append({
+        attempt_details = {
             "attempt": attempt,
             "sam_instances": n_inst,
             "split_source": split["split_source"],
@@ -941,7 +991,11 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             "assignment": assignment,
             **top_details,
             "checks": side_checks,
-        })
+        }
+        if st.fast:
+            tried[-1].update(attempt_details)
+        else:
+            tried.append(attempt_details)
         # Prefer sheets that can pass with an advisory carve. Within each group keep the fewest failed
         # gates, then the smallest summed shortfall; a tie keeps the earlier one.
         non_carve_rank = C.attempt_rank(
@@ -970,8 +1024,11 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         **top_details,
     }
     if len(tried) > 1:
-        st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (sheets with "
-                        "no non-carve gate failures first, then fewest failed gates, then smallest shortfall).")
+        if st.fast:
+            st.notes.append("The first sheet had no extractable views; one recovery sheet was requested.")
+        else:
+            st.notes.append(f"Sheet generated {len(tried)} times; generation {kept_attempt + 1} is kept (sheets with "
+                            "no non-carve gate failures first, then fewest failed gates, then smallest shortfall).")
     # Attempts retain their gated measurements for retries and ranking. Only the kept stage record can
     # become advisory, after retrying is over, and only when no other gated check failed.
     st.checks = [dict(c) for c in side_checks + orient]
@@ -990,8 +1047,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         sq["top"] = {k: top[k] for k in ("image", "mask", "mask_method", "mask_completion") if k in top}
     if not sq:
         if st.fast:
-            st.fail("fast lane: cannot extract four views from the single turnaround request")
-            raise ValueError("fast lane: cannot extract four views from the single turnaround request")
+            return st.fail("We could not draw clean character views from this sketch. "
+                           "Try again, or try a clearer full-body drawing.")
         st.notes.append("Could not split the sheet into four figures.")
         return st.finish()
     if top is None:

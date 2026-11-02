@@ -187,7 +187,11 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   Stage 2 requests one sheet and one top view, retaining local
   diagnostics without gating, ranking alternatives or selecting a replacement top on quality. Required
   figure masks still use segmentation, with one concept request rather than a second concept fallback.
-  Unusable model output (for example, no four figures to extract) is a recorded error, never a regeneration.
+  If four views cannot be extracted, stage 2 requests exactly one recovery sheet with the same prompt and
+  a different sample index. Both attempts are recorded in `stage-2.json`. Quality scores never trigger
+  recovery. If neither sheet can be extracted, it stops with a plain message asking the user to try again
+  or use a clearer full-body drawing; no separate single-view fallback exists. The top view remains its
+  own request after successful sheet extraction. Model errors stop immediately without recovery.
 - Stage 2's front face and head mask requests run concurrently after the front image is ready. Both
   requests finish before the stage writes its record; a failure propagates in face/head prompt order,
   and every failed request retains its receipt. Stage p's design and full-body image requests remain sequential.
