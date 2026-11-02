@@ -65,9 +65,18 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(rec['face_source']['source'], 'beauty')
         self.assertEqual(rec['views']['head+0']['prompt'], 'RF6B')
         self.assertEqual(rec['face_fallback']['prompt'], 'RF2R')
-        self.assertEqual(rec['views']['body+90']['prompt'], 'RF15B')
+        self.assertEqual(rec['views']['body+90']['prompt'], 'RF16B')
         self.assertEqual(rec['views']['body+90']['art_views'], ['back'])
         self.assertNotIn('budget', rec)
+
+    def test_beauty_side_prompt_preserves_the_surface_only_contract(self):
+        from herogen.blender.refine import prompts
+        text = prompts.prompt('RF16B', 180)
+        self.assertTrue(text.startswith(prompts.prompt('RF15B', 180)))
+        self.assertIn(prompts.DESIGN_ONLY, text)
+        self.assertIn('The first image alone determines the shape and position', text)
+        self.assertIn('never copy them', text)
+        self.assertEqual(prompts.ART_VARIANTS['RF6B'], 'RF16B')
 
     def test_beauty_and_palette_apply_after_face_ownership(self):
         events = []

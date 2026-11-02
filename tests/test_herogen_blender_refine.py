@@ -498,6 +498,7 @@ class RegistrationTests(unittest.TestCase):
             "RF13H": "c6526ad6fd0262f6d1a9a4b24ba86229544c079eaa1237e2ab3028cfa02caceb",
             "RF14U": "ddce55ca0dd2abef013cf0043a8dfb209e69c17dd38fe3b96c3b5f9213a8214a",
             "RF15B": "87df7485e7d276abc8a3dc9ee50cddbe4be03c7742518523e3a1adffab042b84",
+            "RF16B": "1eb7757fa2ebda12e59409ba098840799b55133d2d52a71756326a3923e06fab",
         })
         info = {"height": 2, "body_centre": [0, 0, 1], "hi": [1, 1, 2],
                 "head_centre": [0, 0, 1.8], "head_side": 0.4}
