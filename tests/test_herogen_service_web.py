@@ -789,6 +789,19 @@ class TestErrorPages(WebCase):
         self.assertEqual((r.status_code, r.headers["content-type"]), (200, "text/css; charset=utf-8"))
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", r.text), [])
 
+    def test_viewer_run_label_is_styled_in_the_page_stylesheet(self):
+        # .eyebrow is only global-plain now; the fallback /viewer page owns the look of its "Run" label
+        css = Browser(self.app).get("/assets/styles/pages.css").text
+        rule = re.search(r"body\.viewer-body \.viewer-run \.eyebrow \{([^}]*)\}", css)
+        self.assertIsNotNone(rule, "the Run label needs its own rule")
+        self.assertIn("margin: 0", rule.group(1))
+        self.assertIn("var(--text-caption)", rule.group(1))
+        self.assertNotRegex(rule.group(1), r"\d+px")
+        from herogen.service import web
+
+        page = (web.STATIC_DIR / "viewer.html").read_text()
+        self.assertIn('<label class="eyebrow" for="run">Run</label>', page)
+
 
 class TestPages(WebCase):
     def test_description_count_is_wired_to_the_field(self):
