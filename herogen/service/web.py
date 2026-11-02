@@ -80,6 +80,10 @@ EVENTS_LIMIT = 4 * 1024
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
 DOWNLOADS = ("glb", "roblox")
+# What a hero card shows, best first: (source, stage that writes it, run-relative file). The uploaded sketch, kept
+# outside the run folder, is the last fallback for an upload whose stage 0 has not recorded yet.
+THUMB_SOURCES = (("cover", "1", "01-cover.png"), ("sketch", "0", "00-sketch.png"))
+THUMB_CACHE = "private, max-age=31536000, immutable"
 _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
 
 
@@ -494,7 +498,91 @@ class App:
     async def jobs_list(self, request: Request) -> Response:
         u = await self.require_user(request)
         jobs = await self.call(self.svc.store.jobs_list, u["id"])
-        return JSONResponse({"jobs": [self.job_summary(j) for j in jobs]})
+        thumbs = await self.call(self._list_thumbnails, u["id"], jobs)
+        return JSONResponse({"jobs": [{**self.job_summary(j), "thumbnail_url": thumbs.get(j["id"])} for j in jobs]})
+
+    def _thumb_source(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> tuple[str, Path] | None:
+        """(source, file) of the image a hero card shows, or None while it has none. A run image counts once its
+        stage has recorded it and is not running again, as in `_files`; only fixed names are looked up, never a
+        folder listing, so a list of many heroes stays cheap. The caller holds the volume's read lock."""
+        st = self.svc.storage
+        for key, stage, rel in THUMB_SOURCES:
+            if states.get(stage) in ("running", "pending"):
+                continue
+            rec = st.run_file(user_id, job["id"], f"stage-{stage}.json")
+            if not rec:
+                continue
+            try:
+                record = json.loads(rec[0].read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("status") == "running":
+                continue
+            if f := st.run_file(user_id, job["id"], rel):
+                return key, f[0]
+        if job["kind"] == "sketch":
+            p = st.input_path(user_id, job["id"])
+            try:
+                inputs = p.parent.resolve(strict=True)
+                if (inputs / p.name).resolve(strict=True) == inputs / p.name and p.is_file():
+                    return "upload", inputs / p.name
+            except (OSError, RuntimeError):
+                pass
+        return None
+
+    @staticmethod
+    def _thumb_token(key: str, path: Path) -> str:
+        """Changes whenever the shown image does; from file metadata only, so no image is read to list heroes."""
+        stat = path.stat()
+        return hashlib.sha256(f"{key}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ino}".encode()).hexdigest()[:16]
+
+    def _thumb_url(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> str | None:
+        src = self._thumb_source(user_id, job, states)
+        if src is None:
+            return None
+        try:
+            return f"/api/jobs/{job['id']}/thumbnail?v={self._thumb_token(*src)}"
+        except OSError:
+            return None
+
+    def _list_thumbnails(self, user_id: str, jobs: list[dict[str, Any]]) -> dict[str, str | None]:
+        if not jobs:
+            return {}
+        states: dict[str, dict[str, str]] = {}
+        for r in self.svc.store.jobs_stage_states([j["id"] for j in jobs]):
+            states.setdefault(r["job_id"], {})[r["stage"]] = r["state"]
+        st = self.svc.storage
+        st.volume.refresh()
+        with st.volume.reading():
+            return {j["id"]: self._thumb_url(user_id, j, states.get(j["id"], {})) for j in jobs}
+
+    async def job_thumbnail(self, request: Request) -> Response:
+        """The owner's hero card image (`thumbnail_url`); another workspace's hero is a plain 404."""
+        u = await self.require_user(request)
+        jid = self._job_id(request)
+        job = await self.call(self.svc.store.job_get, jid, u["id"])
+        if job is None:
+            return error(404, "not_found", "Not found.")
+
+        def read() -> tuple[bytes, str, str] | None:
+            states = {r["stage"]: r["state"] for r in self.svc.store.job_stages(jid)}
+            st = self.svc.storage
+            st.volume.refresh()
+            with st.volume.reading():
+                src = self._thumb_source(u["id"], job, states)
+                if src is None:
+                    return None
+                try:
+                    return src[1].read_bytes(), "image/png", self._thumb_token(*src)
+                except OSError:
+                    return None
+
+        got = await self.call(read)
+        if got is None:
+            return error(404, "not_found", "Not found.")
+        body, mime, token = got
+        cache = THUMB_CACHE if request.query_params.get("v") == token else "private, no-cache"
+        return Response(body, media_type=mime, headers={"Cache-Control": cache})
 
     @staticmethod
     def job_summary(j: dict[str, Any]) -> dict[str, Any]:
@@ -614,7 +702,8 @@ class App:
             err = {"stage": job["error_stage"], "stage_label": STAGE_LABELS.get(job["error_stage"] or ""),
                    "code": job["error_code"], "message": job["error_message"]}
         rid = f"{labapi.ROOT_KEY}/{job_id}"
-        return {**self.job_summary(job), "prompt": job["prompt"], "started_at": job["started_at"],
+        thumb = await self.call(self._view_thumbnail, user_id, job, {k: r["state"] for k, r in rows.items()})
+        return {**self.job_summary(job), "thumbnail_url": thumb, "prompt": job["prompt"], "started_at": job["started_at"],
                 "attempts": job["attempts"], "stages": stages, "error": err, "seconds": job["seconds"],
                 "cost_usd": job["cost_usd"], "cost_is_estimate": True,
                 "model_ready_at": job["model_ready_at"], "export_state": job["export_state"],
@@ -629,6 +718,10 @@ class App:
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
                 "viewer": f"/viewer#run={rid}"}
+
+    def _view_thumbnail(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> str | None:
+        with self.svc.storage.volume.reading():
+            return self._thumb_url(user_id, job, states)
 
     def _files(self, user_id: str, job: dict[str, Any]) -> dict[str, Any]:
         st = self.svc.storage
@@ -1222,6 +1315,7 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/api/jobs/{job}/retry-input", a.job_retry_input, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/continue", a.job_continue, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/versions", a.job_versions),
+        Route("/api/jobs/{job}/thumbnail", a.job_thumbnail, methods=["GET"]),
         Route("/api/jobs/{job}/cancel", a.job_cancel, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/download/{what:str}", a.download),
         Route("/api/workspace", a.lab_workspace),
