@@ -1,6 +1,7 @@
 """Visitor success at model readiness, with explicit best-effort export outcomes."""
 import json
 import threading
+import unittest
 from unittest.mock import patch
 
 from test_herogen_service_jobs import JobCase
@@ -9,6 +10,11 @@ from herogen.service.bundle import glb_path
 from herogen.service.fakes import FakeRunner
 from herogen.service.runner import CliRunner, PLAN
 from herogen.service.worker import ThreadBackend
+try:
+    from herogen.blender.refine import character, imaging  # noqa: F401 (texture-refine dependencies)
+    HAVE_REFINE = True
+except ImportError:
+    HAVE_REFINE = False
 
 
 class BestEffortTest(JobCase):
@@ -116,6 +122,21 @@ class BestEffortTest(JobCase):
             self.assertIn(str(error), rec['error'])
             self.assertEqual(self.stages(job)['3f']['state'], 'skipped')
 
+    def test_gate_off_never_invokes_spend_checks_or_installs_a_budget(self):
+        test = self
+        class CapCheck(FakeRunner):
+            def run(self, spec, ctx):
+                if spec.key == '3f':
+                    test.assertIsNone(ctx.refine_cap_usd)
+                return super().run(spec, ctx)
+        from herogen.blender import refine
+        self.store.generation_update(actor='fixture', spend_limits_enabled=False, limit_usd=0)
+        self.runner = CapCheck()
+        with patch.object(self.store, '_spend_exhausted', side_effect=AssertionError('spend check')), \
+                patch.object(refine, 'Budget', side_effect=AssertionError('budget installed')):
+            self.assertEqual(self.go(self.new_job()), 'succeeded')
+
+    @unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
     def test_gate_off_full_hero_never_invokes_spend_checks_or_budget_hooks(self):
         from herogen.blender import refine
         from herogen.blender.refine import character
