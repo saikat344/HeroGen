@@ -31,6 +31,89 @@ class RegionPaletteTests(unittest.TestCase):
         np.testing.assert_array_equal(out[self.skin], self.source[self.skin])
         self.assertLess(np.abs(out[~self.skin] - self.art[~self.skin]).mean(), .005)
 
+    @staticmethod
+    def lab_image(values):
+        import cv2
+        return cv2.cvtColor(np.asarray(values, np.float32), cv2.COLOR_Lab2RGB)
+
+    def test_clothing_clusters_keep_blue_dress_and_lavender_robe_separate(self):
+        import cv2
+        # Reverse garment areas in the artwork: pooled quantiles map the minority
+        # blue dress into the majority lavender robe despite their different hues.
+        source = self.lab_image([[(70, 2, -18)] * 8 + [(55, 18, -20)] * 24] * 8)
+        art = self.lab_image([[(78, 0, -20)] * 24 + [(65, 20, -22)] * 8] * 8)
+        masks = {"rest": np.ones(source.shape[:2], bool)}
+        grade = palette.fit(source, art, masks, masks)
+        out = cv2.cvtColor(palette.apply(source, grade, masks, enabled=True), cv2.COLOR_RGB2Lab)
+        expected = cv2.cvtColor(art, cv2.COLOR_RGB2Lab)[0, [0, -1]]
+        original_l = cv2.cvtColor(source, cv2.COLOR_RGB2Lab)[0, [0, -1], 0]
+        self.assertTrue((out[0, [0, -1], 0] > original_l).all())
+        self.assertTrue((out[0, [0, -1], 0] <= expected[:, 0] + .2).all())
+        matched = sorted(grade["rest"]["clusters"], key=lambda c: c["source_centre"][1])
+        np.testing.assert_allclose([c["artwork_centre"] for c in matched], expected, atol=.05)
+        original = cv2.cvtColor(source, cv2.COLOR_RGB2Lab)[0, [0, -1], 1:]
+        graded = out[0, [0, -1], 1:]
+        np.testing.assert_allclose(graded / np.linalg.norm(graded, axis=1)[:, None],
+                                   original / np.linalg.norm(original, axis=1)[:, None], atol=.01)
+        self.assertEqual(len(grade["rest"]["clusters"]), 2)
+        self.assertEqual(json.dumps(grade), json.dumps(palette.fit(source, art, masks, masks)))
+
+    def test_gold_brass_and_gems_retain_exact_source_colour_with_feathering(self):
+        source = self.lab_image([[(75, 10, 50), (60, 25, 35), (50, 40, -30), (40, 2, -15)]] * 8)
+        art = self.lab_image([[(45, 2, 12), (30, 8, 15), (35, 12, -10), (50, 2, -17)]] * 8)
+        masks = {"rest": np.ones(source.shape[:2], bool)}
+        grade = palette.fit(source, art, masks, masks)
+        weights = {"rest": np.tile(np.linspace(0, 1, 8)[:, None], (1, 4))}
+        out = palette.apply(source, grade, masks, enabled=True, weights=weights)
+        np.testing.assert_array_equal(out[:, :3], source[:, :3])
+
+    def test_unmatched_clothing_hue_stays_identical(self):
+        source = self.lab_image([[(60, -20, 10)]] * 8)
+        art = self.lab_image([[(80, 15, -20)]] * 8)
+        masks = {"rest": np.ones(source.shape[:2], bool)}
+        grade = palette.fit(source, art, masks, masks)
+        self.assertEqual(grade["rest"]["clusters"][0]["status"], "unmatched")
+        np.testing.assert_array_equal(palette.apply(source, grade, masks, enabled=True), source)
+
+    def test_muted_accents_cannot_lose_chroma_in_partial_grade(self):
+        import cv2
+        source = self.lab_image([[(55, 6, 22)]] * 8)
+        art = self.lab_image([[(70, 8, 12)]] * 8)
+        masks = {"rest": np.ones(source.shape[:2], bool)}
+        grade = palette.fit(source, art, masks, masks)
+        weights = {"rest": np.linspace(0, 1, 8)[:, None]}
+        out = palette.apply(source, grade, masks, enabled=True, weights=weights)
+        before = np.linalg.norm(cv2.cvtColor(source, cv2.COLOR_RGB2Lab)[..., 1:], axis=2)
+        after = np.linalg.norm(cv2.cvtColor(out, cv2.COLOR_RGB2Lab)[..., 1:], axis=2)
+        self.assertTrue((after >= before).all())
+
+    def test_beauty_base_palette_can_preserve_accents_and_separate_fabrics(self):
+        from herogen.blender.refine import palette as base_palette
+        source = self.lab_image([[(75, 10, 50)] * 8 + [(65, 2, -18)] * 8 + [(50, 18, -20)] * 16] * 32)
+        art = self.lab_image([[(60, 8, 25)] * 8 + [(75, 2, -20)] * 16 + [(60, 20, -22)] * 8] * 32)
+        support = np.ones(source.shape[:2], bool)
+        grade = base_palette.fit(source, support, art, support, preserve_colours=True)
+        self.assertIn("colour_clusters", grade)
+        self.assertNotIn("mix", grade)
+        out = base_palette.apply(source, grade)
+        np.testing.assert_array_equal(out[:, :8], source[:, :8])
+        self.assertTrue(np.isfinite(out).all())
+        self.assertLess(np.abs(out[:, 8:16] - art[:, 8:16]).mean(), .02)
+        ordinary = base_palette.fit(source, support, art, support)
+        self.assertNotIn("colour_clusters", ordinary)
+
+    def test_accent_exclusion_fades_smoothly_before_its_cutoff(self):
+        chroma = np.linspace(19, 31, 241)
+        lab = np.column_stack([np.full_like(chroma, 50), np.zeros_like(chroma), chroma])
+        cluster = {"status": "fitted", "source_centre": [50, 0, 25], "cap_lab": 20,
+                   "curves": [{"source": [0, 100], "target": [10, 110]},
+                              {"source": [-128, 128], "target": [-128, 128]},
+                              {"source": [-128, 128], "target": [-128, 128]}]}
+        out = palette._clothing_target(lab, [cluster])
+        np.testing.assert_array_equal(out[chroma >= 30], lab[chroma >= 30])
+        self.assertLess(np.abs(np.diff(out[:, 0])).max(), .08)
+        self.assertGreater(out[0, 0], lab[0, 0])
+
     def test_cap_is_measured_from_each_regions_quantile_distance(self):
         import cv2
         grades = palette.fit(self.source, self.art, self.masks, self.masks)
