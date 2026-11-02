@@ -246,6 +246,12 @@ class TestStage3BuildLog(SyntheticBase):
         self.assertEqual(log[0]["m"], {"tested": 4, "facing_deg": 180.0, "overlap": 0.93, "front_overlap": 0.951})
         self.assertGreaterEqual(log[0]["s"], 0)
 
+    def test_an_unexpected_record_is_logged_as_unreadable_and_never_raises(self):
+        from herogen.blender import stage3
+
+        _, log = self.logged(lambda: stage3._log("joints_mapped", lambda: stage3._log_joints({"joints": None})))
+        self.assertEqual([(e["kind"], e["what"], e["why"]) for e in log], [("skip", "joints_mapped", "unreadable")])
+
     def test_without_a_build_log_file_nothing_is_written(self):
         from herogen.blender import stage3
 

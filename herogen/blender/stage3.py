@@ -31,6 +31,17 @@ def _joint_id(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _log(what: str, build) -> None:
+    """Emit build-log lines only when the build log is on. Working out a line never fails the stage: an
+    unexpected record shape leaves that detail out and the log says so."""
+    if not events.enabled():
+        return
+    try:
+        build()
+    except Exception:  # noqa: BLE001 - the log describes the stage; it must never change its outcome
+        events.emit("skip", step=STEP, what=what, why="unreadable")
+
+
 def _log_joints(rec: dict) -> None:
     """Which joints SAM 3D Body placed and which came from the outline, and how far each is from the outline
     estimate (when the cross-check ran)."""
@@ -159,13 +170,18 @@ def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
     started = time.monotonic()
     src_verts, info = sam3d_mesh.orient(src, vs.views["front"], img, height, sides=sides,
                                         sides_excluded=excluded)
-    tested = info.get("facing_search") or {}
-    best = tested.get(str(int(info.get("facing_deg", 0)))) or {}
-    events.emit("local", step=STEP, what="facing_search", s=time.monotonic() - started,
-                m={"tested": len(tested), "facing_deg": info.get("facing_deg", 0), **(
-                    {"overlap": best["iou"]} if type(best.get("iou")) in (int, float) else {}),
-                   **({"front_overlap": info["front_iou_final_numpy"]}
-                      if type(info.get("front_iou_final_numpy")) in (int, float) else {})})
+    seconds = time.monotonic() - started
+
+    def facing():
+        tested = info.get("facing_search") or {}
+        best = tested.get(str(int(info.get("facing_deg", 0)))) or {}
+        events.emit("local", step=STEP, what="facing_search", s=seconds,
+                    m={"tested": len(tested), "facing_deg": info.get("facing_deg", 0), **(
+                        {"overlap": best["iou"]} if type(best.get("iou")) in (int, float) else {}),
+                       **({"front_overlap": info["front_iou_final_numpy"]}
+                          if type(info.get("front_iou_final_numpy")) in (int, float) else {})})
+
+    _log("facing_search", facing)
     verts, faces, info["remesh"] = sam3d_mesh.remesh(src_verts, src.faces, height)
     depth_views = {v: vs.views[v] for v in sam3d_mesh.DEPTH_VIEWS if v in vs.views and not _derived(vs, v)}
     dy, info["depth_register"] = sam3d_mesh.register_depth(verts, faces, depth_views)
@@ -246,9 +262,7 @@ def _body_joints(run: Path, vs, height: float, verts, faces, remote, rec: StageR
         extra["distance_to_silhouette"] = dist
         extra["flag_threshold_studs"] = bj.FLAG_STUDS
         extra["flagged"] = sorted(k for k, d in dist.items() if d > bj.FLAG_STUDS)
-    written = bj.write_joints(run / "03-joints.json", "sam3d-body", pts, evidence, extra)
-    _log_joints(written)
-    return written
+    return bj.write_joints(run / "03-joints.json", "sam3d-body", pts, evidence, extra)
 
 
 @contextmanager
@@ -460,7 +474,9 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
                 (run / "03-joints.json").unlink(missing_ok=True)
                 rec.note(f"sam3d-body failed ({error_text(exc, run)[:200]}); fell back to the silhouette joints")
         if joints_used == "silhouette" and skeleton is not None:
-            _log_joints(bj.write_joints(run / "03-joints.json", "silhouette", skeleton.joints, skeleton.evidence))
+            jrec = bj.write_joints(run / "03-joints.json", "silhouette", skeleton.joints, skeleton.evidence)
+        if joints_used == "sam3d-body" or skeleton is not None:
+            _log("joints_mapped", lambda: _log_joints(jrec))
         renders = run / "03-renders"
         renders.mkdir(exist_ok=True)
         cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
@@ -498,13 +514,16 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
         rec.add(check("open_edges", int((counts == 1).sum()), None, passed=bool((counts == 1).sum() == 0)))
         rec.add(check("non_manifold_edges", int((counts > 2).sum()), None, gate=False,
                       note="edges shared by more than two triangles"))
-        placed = {"triangles": tri, "vertices": int(len(verts)), "open_edges": int((counts == 1).sum())}
-        if "front" in ious:
-            placed["front_overlap"] = ious["front"]
-        if used_source == "sam3d-objects":
-            placed["depth_offset_studs"] = round(float((source_info.get("depth_register") or {})
-                                                       .get("offset_studs", 0.0)), 4)
-        events.emit("local", step=STEP, what="mesh_placed", m=placed)
+        def placed():
+            m = {"triangles": tri, "vertices": int(len(verts)), "open_edges": int((counts == 1).sum())}
+            if "front" in ious:
+                m["front_overlap"] = ious["front"]
+            if used_source == "sam3d-objects":
+                m["depth_offset_studs"] = round(float((source_info.get("depth_register") or {})
+                                                      .get("offset_studs", 0.0)), 4)
+            events.emit("local", step=STEP, what="mesh_placed", m=m)
+
+        _log("mesh_placed", placed)
         rec.data["outputs"] = (["03-mesh.glb"] + (["03-source.glb"] if used_source == "sam3d-objects" else [])
                                + (["03-joints.json"] if (run / "03-joints.json").exists() else [])
                                + [f"03-renders/{v}.png" for v in VIEWS if v in vs.views])
@@ -526,7 +545,8 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
         if rec.data.get("fast_lane"):
             informational(rec.data["checks"])
             rec.note("Fast lane: visual acceptance judges skipped; structural checks informational")
-            events.emit("skip", step=STEP, what="acceptance_judges", why="fast_lane")
+            _log("acceptance_judges", lambda: events.emit("skip", step=STEP, what="acceptance_judges",
+                                                          why="fast_lane"))
         elif all(c["pass"] for c in rec.data["checks"] if c.get("gate", True)):
             assess(run, verts, faces, rec, client=quality_client)
         else:

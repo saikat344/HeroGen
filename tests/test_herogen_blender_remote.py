@@ -284,6 +284,28 @@ class Live(Base):
         self.assertEqual(rc._gpu_timings({"load_seconds": 18.9, "total_seconds": 26.7}),
                          {"load_s": 18.9, "infer_s": 7.8})
         self.assertEqual(rc._gpu_result({"runs": {"job": {"glb_faces": True, "texture_size": "n/a (Error)"}}}), {})
+        self.assertEqual(rc._gpu_result({"runs": {"job": {"glb_faces": float("inf")}}}), {})
+
+    def test_an_odd_run_log_never_fails_the_paid_call(self):
+        from herogen.pipeline import events
+        log = self.tmp / "events.jsonl"
+        os.environ.update({events.ENV_FILE: str(log), events.ENV_STEP: "3"})
+        # An odd shape is simply left out of the line.
+        os.environ["FAKE_RUN"] = json.dumps({"load_seconds": 1e400, "runs": ["not", "a", "map"]})
+        result = rc.RemoteClient(self.cache, mode="live", timeout=60, fast=True).objects(self.img, self.msk)
+        self.assertFalse(result.cached)
+        # Anything unforeseen while working out the detail is logged as unreadable, never raised.
+        with mock.patch.object(rc, "_gpu_result", side_effect=OverflowError):
+            result = rc.RemoteClient(self.cache, mode="live", timeout=60, fast=True).body(
+                self.img, [1, 2, 3, 4], "front mask")
+        self.assertFalse(result.cached)
+        got = [events.validate(json.loads(x)) for x in log.read_text().splitlines()]
+        self.assertEqual([(e["kind"], e.get("what"), e.get("why"), e.get("outcome")) for e in got], [
+            ("gpu_wait", "3d_shape", None, None), ("gpu_end", "3d_shape", None, "ok"),
+            ("gpu_wait", "body_joints", None, None), ("skip", "gpu_detail", "unreadable", None),
+            ("gpu_end", "body_joints", None, "ok")])
+        self.assertNotIn("m", got[1])
+        self.assertNotIn("m", got[-1])
 
     def test_body_needs_a_person_box(self):
         c = rc.RemoteClient(self.cache, mode="live", timeout=60)
