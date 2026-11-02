@@ -256,10 +256,10 @@ function fmtClock(v) {
   return h ? `${h} h ${String(m % 60).padStart(2, '0')} min` : m ? `${m} min ${String(s % 60).padStart(2, '0')} s` : `${s} s`;
 }
 function elapsedText(j) {
-  const start = j.started_at || j.created_at, end = j.finished_at;
-  if (!start) return '';
   const now = Date.now() / 1000;
-  if (j.state === 'queued') return `Queued · ${fmtClock(now - j.created_at)} so far`;
+  if (j.state === 'queued') return j.created_at ? `Queued · ${fmtClock(now - j.created_at)} so far` : '';
+  const start = j.started_at, end = j.finished_at;   // run time counts from the start, not from when it was queued
+  if (!start) return '';
   if (j.state === 'running' || !end) return polls(j) ? `Running · ${fmtClock(now - start)} elapsed` : '';
   if (j.state === 'succeeded') return finishedNote(j, fmtClock, start);
   const took = fmtClock(end - start);

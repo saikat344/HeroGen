@@ -662,7 +662,8 @@ class App:
     @staticmethod
     def job_summary(j: dict[str, Any]) -> dict[str, Any]:
         return {"id": j["id"], "kind": j["kind"], "name": j["name"], "profile": j["profile"], "state": j["state"],
-                "created_at": j["created_at"], "finished_at": j["finished_at"], "stage": j["stage"],
+                "created_at": j["created_at"], "started_at": j["started_at"], "finished_at": j["finished_at"],
+                "stage": j["stage"],
                 "stage_label": STAGE_LABELS.get(j["stage"] or "", None),
                 "parent_job": j["parent_job"], "from_stage": j["from_stage"], "note": j["note"],
                 "stop_after": j["stop_after"], "build_all": bool(j["build_all"])}
@@ -779,7 +780,7 @@ class App:
         rid = f"{labapi.ROOT_KEY}/{job_id}"
         thumb = await self.call(self._view_thumbnail, user_id, job, {k: r["state"] for k, r in rows.items()})
         place = (await self.call(self.svc.store.queue_positions, [job_id])).get(job_id) if job["state"] == "queued" else None
-        return {**self.job_summary(job), "thumbnail_url": thumb, **self.queue_fields(place), "prompt": job["prompt"], "started_at": job["started_at"],
+        return {**self.job_summary(job), "thumbnail_url": thumb, **self.queue_fields(place), "prompt": job["prompt"],
                 "attempts": job["attempts"], "stages": stages, "error": err, "seconds": job["seconds"],
                 "cost_usd": job["cost_usd"], "cost_is_estimate": True,
                 "model_ready_at": job["model_ready_at"], "export_state": job["export_state"],
