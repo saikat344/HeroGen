@@ -43,6 +43,70 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertFalse(refine.call_args.kwargs.get("side_beauty"))
         self.assertNotIn("region_palette", refine.call_args.kwargs)
 
+    def refine_kwargs(self, *args, env=None):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        (self.run / "03-source.glb").write_bytes(b"source")
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("HEROGEN_FAST_LANE", "HEROGEN_REFINE_PROFILE", "HEROGEN_SIDE_BEAUTY",
+                              "HEROGEN_REFINE_BEAUTY", "HEROGEN_REFINE_BEAUTY_DIR")}
+        with patch.dict(os.environ, {**clean, **(env or {})}, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                patch("herogen.blender.refine.run_stage3f",
+                      return_value={"ok": True, "status": "complete", "seconds": 0}) as refine:
+            code, err = self._main("--stages", "3f", *args)
+        return code, err, refine.call_args.kwargs if refine.called else None
+
+    @staticmethod
+    def beauty_kwargs(kwargs):
+        return {k: kwargs[k] for k in ("side_beauty", "generate_beauty", "beauty_dir", "region_palette")
+                if k in kwargs}
+
+    def test_fast_product_lanes_default_to_beauty_and_side_beauty(self):
+        for args, env in ((["--fast"], {}), ([], {"HEROGEN_FAST_LANE": "1"}),
+                          (["--refine-profile", "fast"], {}), ([], {"HEROGEN_REFINE_PROFILE": "fast"})):
+            with self.subTest(args=args, env=env):
+                code, _, kwargs = self.refine_kwargs(*args, env=env)
+                self.assertEqual(code, 0)
+                self.assertEqual(self.beauty_kwargs(kwargs), {"side_beauty": True, "generate_beauty": True})
+
+    def test_fast_beauty_off_switches(self):
+        for args, env, expected in (
+                (["--no-side-beauty"], {}, {"side_beauty": False, "generate_beauty": True}),
+                (["--no-refine-beauty"], {}, {"side_beauty": True, "generate_beauty": False}),
+                ([], {"HEROGEN_SIDE_BEAUTY": "0"}, {"side_beauty": False, "generate_beauty": True}),
+                ([], {"HEROGEN_REFINE_BEAUTY": "0"}, {"side_beauty": True, "generate_beauty": False}),
+                (["--side-beauty"], {"HEROGEN_SIDE_BEAUTY": "0"}, {"side_beauty": True, "generate_beauty": True}),
+                (["--refine-beauty-dir", "saved"], {}, {"side_beauty": True, "beauty_dir": Path("saved")}),
+                ([], {"HEROGEN_REFINE_BEAUTY_DIR": "saved"}, {"side_beauty": True, "beauty_dir": "saved"})):
+            for lane in (["--fast"], ["--refine-profile", "fast"]):
+                with self.subTest(args=args, env=env, lane=lane):
+                    code, _, kwargs = self.refine_kwargs(*lane, *args, env=env)
+                    self.assertEqual(code, 0)
+                    self.assertEqual(self.beauty_kwargs(kwargs), expected)
+
+    def test_invalid_or_conflicting_fast_beauty_switches_stop_loudly(self):
+        for args, env, message in (([], {"HEROGEN_REFINE_BEAUTY": "off"}, "HEROGEN_REFINE_BEAUTY must be 0 or 1"),
+                                   ([], {"HEROGEN_SIDE_BEAUTY": "true"}, "HEROGEN_SIDE_BEAUTY must be 0 or 1"),
+                                   (["--no-refine-beauty", "--refine-beauty-dir", "saved"], {},
+                                    "saved beauty folder")):
+            for lane in (["--fast"], ["--refine-profile", "fast"]):
+                with self.subTest(args=args, env=env, lane=lane):
+                    code, err, kwargs = self.refine_kwargs(*lane, *args, env=env)
+                    self.assertEqual(code, 1)
+                    self.assertIsNone(kwargs)
+                    self.assertIn(message, err)
+
+    def test_best_refine_arguments_are_unchanged(self):
+        code, _, kwargs = self.refine_kwargs(env={"HEROGEN_SIDE_BEAUTY": "0", "HEROGEN_REFINE_BEAUTY": "1"})
+        self.assertEqual(code, 0)
+        self.assertEqual(set(kwargs), {"profile", "cap_usd", "timeout", "upscale_texture", "recipe",
+                                       "refine_profile", "user_note", "side_beauty"})
+        self.assertIsNone(kwargs["side_beauty"])  # run_stage3f reads HEROGEN_SIDE_BEAUTY=1 itself, as before
+        self.assertIsNone(kwargs["refine_profile"])
+        code, err, kwargs = self.refine_kwargs("--refine-beauty")
+        self.assertEqual(code, 1)
+        self.assertIn("--refine-beauty needs the fast refine profile", err)
+
     def test_region_palette_cli_is_opt_in_and_reaches_stage_entry(self):
         (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
         for flags, expected in (([], False), (["--refine-region-palette"], True)):

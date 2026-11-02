@@ -251,7 +251,8 @@ prompts, thresholds, retries and acceptance rules are unchanged.
 - Stage 3f uses the frozen-atlas fast refinement schedule described below, with at most two attempts
   per pass and unchanged registration, outline, face and hair gates. Only accepted paint is projected,
   retaining the existing disagreement masks. The fast product CLI passes `refine_profile="fast"`, the
-  explicit `--refine-note` and no refinement USD cap. A missing head skips the head close-up.
+  explicit `--refine-note` and no refinement USD cap, with beauty and SideBeautyPass on by default
+  ("Texture refinement schedules" below). A missing head skips the head close-up.
 - Stage 4 runs once with cut search enabled and `fast=True`, preserving its necessary output and
   nonempty-part gates and its recorded informational quality measurements. The default fast Blender
   invocation also runs stages 6 (export) and 5 (results), in that order, once each. An explicit `--stages` selects only
@@ -774,6 +775,29 @@ the stage subprocess; its default is `best`. With `HEROGEN_FAST_LANE=1` (the pro
 `best` setting becomes `fast`; a configured `fast` stays `fast`. A job with a texture note passes it as
 `--refine-note`. Direct stage callers can pass `refine_profile="fast"`.
 For batch runners, `HEROGEN_REFINE_PROFILE=fast` supplies the stage's fallback when no argument is given.
+
+The fast product path turns on the beauty recipe with generated references and SideBeautyPass by
+default: `herogen.blender run --fast` (or `HEROGEN_FAST_LANE=1`), and the CLI whenever the resolved
+refine profile is `fast` (`--refine-profile fast` or `HEROGEN_REFINE_PROFILE=fast`), which covers every
+service 3f subprocess in the fast lane or with `HEROGEN_SERVICE_REFINE_PROFILE=fast`.
+`herogen.blender.refine.fast_product_options` resolves the switches and passes `side_beauty` and
+`generate_beauty` to `run_stage3f`; the stage function's own defaults stay off, so direct callers and
+`best` are unchanged.
+
+| Switch | Off | Default in the fast product path |
+| --- | --- | --- |
+| SideBeautyPass | `--no-side-beauty` or `HEROGEN_SIDE_BEAUTY=0` | on (`--side-beauty`, `HEROGEN_SIDE_BEAUTY=1`) |
+| Beauty with generated references | `--no-refine-beauty` or `HEROGEN_REFINE_BEAUTY=0` | on (`--refine-beauty`, `HEROGEN_REFINE_BEAUTY=1`) |
+| Saved references instead of generation | omit | `--refine-beauty-dir` or `HEROGEN_REFINE_BEAUTY_DIR` |
+| Region palette | default | off; opt-in as below |
+
+Flags win over the environment. In the fast path the two environment switches accept only `0` or `1`
+(unset or empty means `1`); any other value stops stage 3f with a clear error, as does switching beauty
+off while naming a saved folder. `--refine-beauty` without the fast profile is an error. Under `best`,
+`HEROGEN_SIDE_BEAUTY=1` and `--side-beauty` keep their opt-in meaning and the beauty switches do nothing.
+The service forwards `HEROGEN_SIDE_BEAUTY` and `HEROGEN_REFINE_BEAUTY` to its stage subprocesses and bakes
+them into deployed worker images (`FAST_LANE_ENV`); it never forwards `HEROGEN_REFINE_BEAUTY_DIR` or
+`HEROGEN_REFINE_REGION_PALETTE`.
 Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast uses the same close-up
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
@@ -2508,7 +2532,25 @@ mouth) to be detected inside the registered repaint's face. Missing features rej
 projection and never release the oblique guard. Full refinement may continue within its existing attempt
 limit. A reference with no detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
 it does not measure sharpness, identity or expression, and does not apply when beauty is disabled.
-In the fast profile, beauty remains opt-in through the same `beauty_dir` parameter. Ordinary fast waves
+In the fast profile, beauty is enabled by a saved `beauty_dir` or by `generate_beauty=True`, which the
+fast product path passes by default ("Texture refinement schedules"). Generation writes this run's
+references to `<run>/beauty` with `beauty.generate_fast`, rebuilding the folder on every call (an
+unchanged request replays the model cache). It pays exactly one frozen `BT1` sample for each of the four
+yaws the fast waves request (0, 90, -90 and 180: `head+0` and `body+0` at 0, `body+90`, `body-90`,
+`body+180` and `upper+180` at 180), all four in parallel through isolated clients, with no retry.
+These cardinal yaws use the stage-2 view as guide and its mask as the expected outline, so no diagonal
+mesh guide is needed. Each sample keeps the existing checks unchanged: the saved unregistered outline
+IoU against the stage-2 mask (recorded as `iou` and `accepted` at 0.90), then `load`'s style selection
+(IoU at least 0.70 and, for lateral yaws, correct facing), which decides use exactly as for saved
+references. A sample that selection would use gets its head crop from the same padded SAM head query
+the development `generate` uses; a selected sample with no detected head records `head_detected: false`
+and is unusable rather than an error. The record carries `fallback: "none"`: a camera is served only by
+its nearest generated yaw, so a rejected yaw leaves its views on the standard recipe instead of borrowing
+a yaw 90 degrees away (saved six-yaw folders keep their nearest-usable fallback). Without a usable front
+reference the beauty arm is off for the run, as for a saved folder, and the record notes that standard
+recipes were used. Generation runs beside setup and preparation; its calls count toward the stage's
+cost and cap, a model error drains every yaw and fails the stage loudly, and `beauty_generation` records
+the yaws, attempts, selection, cost and seconds. Ordinary fast waves
 first resolve from the original ungraded base, using the same cover, gates and user note, but only
 attempt zero per pass. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
 back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
@@ -2636,7 +2678,7 @@ orientation evidence permits their use.
 
 Cover-only hair passes use `RF3H`; face and hair gates are recipe-independent.
 With beauty and SideBeautyPass off, every call supplies the current mesh render first and the cover
-second, including hair mode. Opt-in SideBeautyPass (`--side-beauty` or `HEROGEN_SIDE_BEAUTY=1`) requires all four `views/`
+second, including hair mode. SideBeautyPass (`--side-beauty` or `HEROGEN_SIDE_BEAUTY=1`; on by default in the fast product path) requires all four `views/`
 drawings. It conditions only cameras at yaw 90 through 270 degrees (inclusive, modulo 360), including
 rear-quarter head and upper-body hair passes. Near-front cameras keep their original recipes and references:
 `RF2R` or `RF2W` for ordinary passes, and the existing crop plus cover with `RF5U` for upscale close-ups.
