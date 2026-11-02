@@ -141,7 +141,7 @@ class Pass:
                 child._initial_network_attempts = child.network_attempts
             # Every request of this try (the repaint and its SAM 3.1 checks) is logged with its view and try.
             child.purpose = 'repaint'
-            child.event_fields = {'view': self.key, 'try_': index + 1}
+            child.event_fields = {'view': self.key, **({} if buildlog.is_muted() else {'try_': index + 1})}
             private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
             if standard_side:
                 private['reference_style'] = 'turnaround artwork and original cover'
@@ -169,7 +169,7 @@ class Pass:
             # Worker threads start with an empty context; carry this one (the build-log step) into each try.
             future = pool.submit(contextvars.copy_context().run, run)
             self.tasks.append((future, child, private, folder))
-            self.tries.append(child.event_fields['try_'])
+            self.tries.append(index + 1)
             return future
 
         self.prepare, self.launch = prepare, launch

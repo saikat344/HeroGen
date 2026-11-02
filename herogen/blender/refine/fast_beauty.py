@@ -274,9 +274,11 @@ class FaceControl:
 
         self.default_tex, self.default_data = default, data
         self.default_context = {'client': client, 'cams': cams}
-        _, stopped = waves(client, prep, self.default_base, default, cams, folder, data,
-                           timeout, cover, head_found, recipe, checkpoint, self.state_lock,
-                           user_note=user_note, attempts=1, passes=self.default_passes)
+        from . import buildlog
+        with buildlog.muted():   # the main run logs the outcome of every view; this run only supplies a face
+            _, stopped = waves(client, prep, self.default_base, default, cams, folder, data,
+                               timeout, cover, head_found, recipe, checkpoint, self.state_lock,
+                               user_note=user_note, attempts=1, passes=self.default_passes)
         checkpoint(ok=False, status='running')
         # Match the exported default atlas, including its quantization and gutter extension.
         default.save(folder / 'texture.png')
@@ -303,14 +305,16 @@ class FaceControl:
             record = self.default_data['views'][key]
             if record['accepted'] or record['tries'] != 1:
                 raise ValueError(f'Default attempt 1 for {key} needs one rejected attempt 0')
-        run, child, private, folder = job.prepare(1)
-        try:
-            run()
-        finally:
-            # Publish this family before the main slot's request reads the root cache.
-            with self.persistence_lock:
-                publish(self.default_context['client'], child)
-                publish_files(self.root_client, child)
+        from . import buildlog
+        with buildlog.muted():   # the main slot that replays this sample logs its outcome
+            run, child, private, folder = job.prepare(1)
+            try:
+                run()
+            finally:
+                # Publish this family before the main slot's request reads the root cache.
+                with self.persistence_lock:
+                    publish(self.default_context['client'], child)
+                    publish_files(self.root_client, child)
         with self.state_lock:
             self.extensions[key] = (private, folder)
 
