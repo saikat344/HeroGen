@@ -162,6 +162,101 @@ class TestStage3SourceNormals(SyntheticBase):
         self.assertFalse((run / "stage-3.json").exists())
 
 
+class TestStage3BuildLog(SyntheticBase):
+    """Stage 3's local work in the build log: mesh placement, facing search and where each joint came from."""
+    geometry = staticmethod(TestStage3SourceNormals.geometry)
+    run_source = TestStage3SourceNormals.run_source
+
+    def logged(self, fn):
+        from herogen.pipeline import events
+
+        log = self.tmp / f"events-{self.id().rsplit('.', 1)[-1]}.jsonl"
+        log.unlink(missing_ok=True)
+        with patch.dict("os.environ", {"HEROGEN_EVENTS_FILE": str(log)}):
+            result = fn()
+        lines = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        self.assertEqual([events.validate(e) for e in lines], lines)
+        self.assertTrue(all(e["step"] == "3" for e in lines))
+        return result, lines
+
+    def test_placement_and_outline_joints_are_logged(self):
+        from herogen.blender import glb
+        from herogen.blender.record import StageRecord
+
+        run = self.tmp / "logged-source"
+        shutil.copytree(self.rundir, run, dirs_exist_ok=True)
+        verts, faces = self.geometry()
+        source = glb.write_glb(self.tmp / "logged-source.glb", [("Body", verts, faces)])
+        rec = StageRecord(run, 3, "base mesh")
+        rec.data["fast_lane"] = True
+        result, log = self.logged(lambda: self.run_source(source, run, rec))
+        placed = [e for e in log if e.get("what") == "mesh_placed"]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(placed[0]["m"], {"triangles": 4, "vertices": 4, "open_edges": 0,
+                                          "front_overlap": result["mesh"]["iou"]["front"],
+                                          "depth_offset_studs": 0.0})
+        joints = json.loads((run / "03-joints.json").read_text())["joints"]
+        rows = [e for e in log if e.get("what", "").startswith("joint_from_")]
+        self.assertEqual({e["what"] for e in rows}, {"joint_from_outline"})
+        self.assertEqual(len(rows), len(joints))
+        self.assertIn("left_shoulder", {e["name"] for e in rows})
+        summary = [e["m"] for e in log if e.get("what") == "joints_mapped"]
+        self.assertEqual(summary, [{"joints": len(joints), "from_model": 0, "from_outline": len(joints)}])
+        self.assertEqual([(e["what"], e["why"]) for e in log if e["kind"] == "skip"],
+                         [("acceptance_judges", "fast_lane")])
+
+    def test_model_and_outline_joints_are_told_apart_with_their_distance(self):
+        from herogen.blender import stage3
+
+        rec = {"source": "sam3d-body", "joints": {"Neck": [0, 0, 4], "LeftShoulder": [1, 0, 3.6],
+                                                  "LeftElbow": [1, 0, 3.4]},
+               "joint_sources": {"Neck": "sam3d-body", "LeftShoulder": "silhouette (X/Z), mesh (Y)",
+                                 "LeftElbow": "sam3d-body"},
+               "distance_to_silhouette": {"Neck": 0.12, "LeftShoulder": 0.0, "LeftElbow": 0.73},
+               "flag_threshold_studs": 0.5, "flagged": ["LeftElbow"]}
+        _, log = self.logged(lambda: stage3._log_joints(rec))
+        self.assertEqual([(e["what"], e["name"], e["m"]) for e in log[:3]], [
+            ("joint_from_model", "neck", {"off_outline_studs": 0.12, "flagged": 0}),
+            ("joint_from_outline", "left_shoulder", {"off_outline_studs": 0.0, "flagged": 0}),
+            ("joint_from_model", "left_elbow", {"off_outline_studs": 0.73, "flagged": 1})])
+        self.assertEqual(log[3]["m"], {"joints": 3, "from_model": 2, "from_outline": 1, "flagged": 1,
+                                       "flag_studs": 0.5})
+
+    def test_facing_search_reports_the_rotations_tried(self):
+        from herogen.blender import sam3d_mesh, stage3
+        from herogen.blender.record import StageRecord
+
+        run = self.tmp / "facing"
+        shutil.copytree(self.rundir, run, dirs_exist_ok=True)
+        verts, faces = self.geometry()
+        src = SimpleNamespace(faces=faces, corner_uv=np.zeros((len(faces), 3, 2)), texture=None)
+        info = {"facing_search": {"0": {"iou": 0.61}, "90": {"iou": 0.4}, "180": {"iou": 0.93}, "270": {"iou": 0.41}},
+                "facing_deg": 180.0, "front_iou_final_numpy": 0.951}
+        remote = SimpleNamespace(objects=lambda *a, **k: SimpleNamespace(
+            cached=False, entry={"cost_usd_estimate": 0.1}, dir=run, path=lambda name: run / name))
+        with patch.object(sam3d_mesh, "load_source", return_value=src), \
+                patch.object(sam3d_mesh, "pose_views", return_value=({}, {})), \
+                patch.object(sam3d_mesh, "orient", return_value=(verts, info)), \
+                patch.object(sam3d_mesh, "remesh", return_value=(verts, faces, {})), \
+                patch.object(sam3d_mesh, "register_depth", return_value=(0.0, {"offset_studs": 0.0})):
+            _, log = self.logged(lambda: stage3._objects_mesh(run, self.vs, 5.5, remote,
+                                                              StageRecord(run, 3, "base mesh")))
+        self.assertEqual(len(log), 1)
+        self.assertEqual((log[0]["kind"], log[0]["what"]), ("local", "facing_search"))
+        self.assertEqual(log[0]["m"], {"tested": 4, "facing_deg": 180.0, "overlap": 0.93, "front_overlap": 0.951})
+        self.assertGreaterEqual(log[0]["s"], 0)
+
+    def test_without_a_build_log_file_nothing_is_written(self):
+        from herogen.blender import stage3
+
+        from herogen.pipeline import events
+
+        with patch.dict("os.environ", {}) as env, patch.object(events, "_append") as append:
+            env.pop("HEROGEN_EVENTS_FILE", None)
+            stage3._log_joints({"source": "silhouette", "joints": {"Neck": [0, 0, 4]}})
+        append.assert_not_called()
+
+
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class TestStage3Blender(SyntheticBase):
     def test_stage3_silhouette_iou(self):
