@@ -894,6 +894,27 @@ class StageTests(unittest.TestCase):
         self.assertEqual(before["views"], after["views"])
         self.assertNotIn("region_palette", after)
 
+    def test_palette_environment_false_values_disable_export(self):
+        for value in ('0', 'false', 'FALSE', 'off', 'Off'):
+            with self.subTest(value=value), \
+                 mock.patch.dict(os.environ, {'HEROGEN_REFINE_REGION_PALETTE': value}), \
+                 mock.patch('herogen.blender.refine.region_palette.export_texture') as grade, \
+                 mock.patch('herogen.blender.refine.region_palette.prepare_manifest') as prepare:
+                rec = stage.run_stage3f(self.run, self.client, cap_usd=None)
+            grade.assert_not_called()
+            prepare.assert_not_called()
+            self.assertNotIn('region_palette', rec)
+
+    def test_setup_writes_head_mask_only_for_palette_or_beauty(self):
+        self.use_character_setup(head=True)
+        for options in ({}, {'save_palette_masks': True}, {'save_head_mask': True}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                character.setup(self.run / '03-source.glb', work, self.client, **options)
+                self.assertEqual((work / 'probe/head.png').exists(), bool(options))
+                self.assertEqual((work / 'probe/palette-head.png').exists(),
+                                 options.get('save_palette_masks', False))
+
     def test_palette_flag_applies_only_at_export_and_failure_stays_loud(self):
         target = self.run / "graded.png"
         with mock.patch.dict(os.environ, {"HEROGEN_REFINE_REGION_PALETTE": "manifest.json"}), \
@@ -1043,10 +1064,7 @@ class StageTests(unittest.TestCase):
         info = json.loads((self.run / "blender-work/texture-refine/character.json").read_text())
         self.assertIn("head", info["boxes_px"])
         self.assertNotIn("face", info["boxes_px"])
-        with Image.open(self.run / "blender-work/texture-refine/probe/head.png") as image:
-            saved_head = np.asarray(image) > 127
-        self.assertTrue(saved_head[8:24, 24:40].all())
-        self.assertEqual(int(saved_head.sum()), 16 * 16)
+        self.assertFalse((self.run / "blender-work/texture-refine/probe/head.png").exists())
         prep_call = next(call for call in character.blender.call_args_list if call.args[0] == "prep")
         self.assertIsNotNone(prep_call.args[1]["head"])
 

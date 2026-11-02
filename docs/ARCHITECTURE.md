@@ -769,7 +769,8 @@ Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast use
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
 `HEROGEN_REFINE_REGION_PALETTE=path/to/manifest.json` enables an experimental export-time
-palette grade for both schedules. Unset or empty, it makes no additional calls or output changes.
+palette grade for both schedules. Unset, empty, or `0`/`false`/`off` (case-insensitive), it makes no
+additional calls or output changes unless explicitly enabled by the stage parameter or CLI flag.
 It uses only supplied saved masks; it makes no model requests and changes no repaint gates or requests.
 The normal stage entry accepts `region_palette=True`, and the CLI exposes `--refine-region-palette`.
 Equivalently, `HEROGEN_REFINE_REGION_PALETTE=auto` (also `1` or `true`) builds the manifest in
@@ -2515,7 +2516,8 @@ face masks. Accepted ordinary body/side/head/hair paint and unpainted base resid
 the default atlas. Every default-sourced progressive version restores the whole head from that atlas
 after rebaking beauty paint.
 
-Setup saves its existing highest-confidence SAM head mask as `probe/head.png` without another model call.
+When beauty or automatic palette masks are enabled, setup saves its existing highest-confidence SAM
+head mask as `probe/head.png` without another model call. With both options off, setup omits that file.
 Composition closes three-pixel gaps and closes the upper head volume through the face box's chin using
 the head bounds, padded laterally by 10% for ears and rear-head silhouette differences. The existing
 front probe's alpha silhouette is cut at the chin; the connected component with greatest overlap with

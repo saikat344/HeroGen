@@ -521,8 +521,12 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             rec.data["art_views"] = sorted(artwork)
         # All preparation is rebuilt from this invocation's source, never an earlier run's geometry or UVs.
         palette_manifest = os.environ.get("HEROGEN_REFINE_REGION_PALETTE", "")
+        if palette_manifest.lower() in ("0", "false", "off"):
+            palette_manifest = ""
         auto_palette = region_palette or palette_manifest.lower() in ("1", "true", "auto")
         setup_options = {"save_palette_masks": True} if auto_palette else {}
+        if beauty_dir is not None:
+            setup_options["save_head_mask"] = True
         info = C.setup(source, work, client, timeout=timeout, **setup_options)
         closeup_cams = []
         if upscale_texture:
