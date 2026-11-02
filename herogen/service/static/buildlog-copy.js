@@ -200,7 +200,7 @@ const LOCAL = {
   parts_have_surface: (m) => `checked that all ${n(m.parts) || 15} parts own mesh surface${m.recoveries ? ` (${n(m.recoveries)} recovered)` : ' (no recovery needed)'}`,
   cut_search: (m) => `searched for cleaner cut positions${Number.isFinite(m.triangles) ? ` on a ${n(m.triangles)}-triangle copy` : ''}${
     Number.isFinite(m.moved) ? `: ${n(m.moved)} of ${n(m.joints)} cuts moved` : ''}`,
-  pose_test: (m) => `posed the body in ${n(m.poses) || 'several'} poses${Number.isFinite(m.heldout) ? ` (${n(m.heldout)} held out)` : ''}${
+  pose_test: (m) => `posed the body in ${n(m.poses) || 'several'} poses${Number.isFinite(m.extra_poses) ? ` (${n(m.extra_poses)} of them only to check the gaps)` : ''}${
     Number.isFinite(m.gap_high) ? `: joint gaps up to ${studs(m.gap_high)} (high) and ${studs(m.gap_low)} (low)${Number.isFinite(m.limit) ? `, limit ${n(m.limit)}, informational in the fast lane` : ''}` : ''}`,
   atlas: (m) => `packed the texture atlases${Number.isFinite(m.high) ? ` (${n(m.high)} px high, ${n(m.low)} px low)` : ''}`,
   texture_transfer: (m) => `transferred the texture to ${m.lods === 2 ? 'both models' : 'the models'}${Number.isFinite(m.colour_views) ? ` from ${n(m.colour_views)} colour views` : ''}`,
