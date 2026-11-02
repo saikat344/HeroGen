@@ -4,13 +4,20 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
 ID = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')
 TYPES = {'sketch': ('.png', 'image/png'), 'artwork': ('.png', 'image/png'),
          'model': ('.glb', 'model/gltf-binary')}
+# Small images for cards and pickers: `<kind>-thumb`, a WebP whose long side is THUMB_SIDE pixels (never enlarged).
+THUMB_KINDS = ('sketch', 'artwork')
+THUMB_SIDE = 512
+THUMB_QUALITY = 82
+THUMB_SUFFIX = '-thumb'
 
 
 class GalleryUnavailable(ValueError):
@@ -61,6 +68,8 @@ def catalog(root: Path | None) -> list[dict]:
                 if target.stat().st_size > 128 * 1024 * 1024:
                     raise GalleryUnavailable('Public artifact is too large.')
                 assets[kind] = {'url': f'/gallery-assets/{key}/{kind}', 'bytes': target.stat().st_size}
+                if kind in THUMB_KINDS:
+                    assets[kind]['thumb_url'] = f'/gallery-assets/{key}/{kind}{THUMB_SUFFIX}?v={info["sha256"][:16]}'
             commit = item.get('code_commit')
             if not isinstance(commit, str) or not re.fullmatch(r'[a-f0-9]{40}', commit):
                 raise GalleryUnavailable('Public artifact has no source version.')
@@ -97,7 +106,8 @@ def _verified(path: str, expected: str, stamp: tuple) -> bool:
         return hashlib.file_digest(stream, 'sha256').hexdigest() == expected
 
 
-def artifact(root: Path | None, key: str, kind: str) -> tuple[Path, str]:
+def _checked(root: Path | None, key: str, kind: str) -> tuple[Path, str]:
+    """(file, sha256) of a published artifact that passed its integrity check."""
     if kind not in TYPES or root is None or key not in {item['id'] for item in catalog(root)}:
         raise GalleryUnavailable('Public artifact not found.')
     data = json.loads((root / 'catalog.json').read_text())
@@ -108,4 +118,46 @@ def artifact(root: Path | None, key: str, kind: str) -> tuple[Path, str]:
     stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     if not _verified(str(path), info['sha256'], stamp):
         raise GalleryUnavailable('Public artifact failed its integrity check.')
-    return path, TYPES[kind][1]
+    return path, info['sha256']
+
+
+def artifact(root: Path | None, key: str, kind: str) -> tuple[Path, str]:
+    return _checked(root, key, kind)[0], TYPES[kind][1]
+
+
+def thumbnail(root: Path | None, cache: Path, key: str, kind: str) -> tuple[Path, str, bool]:
+    """(WebP file, version token, whether it was made now) for a published image, made on first request.
+
+    The file lives in `cache` (writable, unlike the published gallery), named by the source's hash, so a
+    republished image gets a new one and the older one is removed. It is written to a temporary file in the same
+    folder and renamed into place, so a half-written image is never served."""
+    if kind not in THUMB_KINDS:
+        raise GalleryUnavailable('Public artifact not found.')
+    source, sha = _checked(root, key, kind)
+    token = sha[:16]
+    folder = cache / key
+    dest = folder / f'{kind}-{token}.webp'
+    if dest.is_file() and not dest.is_symlink():
+        return dest, token, False
+    from PIL import Image
+
+    with Image.open(source) as image:
+        image.load()
+        alpha = image.mode in ('RGBA', 'LA', 'PA') or (image.mode == 'P' and 'transparency' in image.info)
+        small = image.convert('RGBA' if alpha else 'RGB')
+    small.thumbnail((THUMB_SIDE, THUMB_SIDE), Image.Resampling.LANCZOS)
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, part = tempfile.mkstemp(dir=folder, prefix=f'.{kind}-', suffix='.part')
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            small.save(stream, format='WEBP', quality=THUMB_QUALITY, method=6)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(part, dest)
+    except BaseException:
+        Path(part).unlink(missing_ok=True)
+        raise
+    for old in folder.glob(f'{kind}-*.webp'):
+        if old != dest:
+            old.unlink(missing_ok=True)
+    return dest, token, True

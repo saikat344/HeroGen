@@ -84,6 +84,7 @@ DOWNLOADS = ("glb", "roblox")
 # outside the run folder, is the last fallback for an upload whose stage 0 has not recorded yet.
 THUMB_SOURCES = (("cover", "1", "01-cover.png"), ("sketch", "0", "00-sketch.png"))
 THUMB_CACHE = "private, max-age=31536000, immutable"
+GALLERY_THUMBS = "gallery-thumbs"   # under the data folder: the published gallery itself is read-only
 _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
 
 
@@ -349,13 +350,37 @@ class App:
         return JSONResponse({"items": items})
 
     async def gallery_asset(self, request: Request) -> Response:
-        from herogen.service.gallery import GalleryUnavailable, artifact
+        from herogen.service.gallery import THUMB_SUFFIX, GalleryUnavailable, artifact
+        kind = request.path_params["kind"]
+        if kind.endswith(THUMB_SUFFIX):
+            return await self._gallery_thumb(request, kind[:-len(THUMB_SUFFIX)])
         try:
             content, mime = await self.call(artifact, self.s.gallery_dir, request.path_params["id"],
                                             request.path_params["kind"])
         except (GalleryUnavailable, OSError, ValueError, KeyError, TypeError):
             return error(404, "not_found", "This public artifact is unavailable.")
         return FileResponse(content, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+
+    async def _gallery_thumb(self, request: Request, kind: str) -> Response:
+        """`/gallery-assets/<id>/<kind>-thumb`: a small WebP of a published image, cached in the data folder."""
+        from herogen.service.gallery import GalleryUnavailable, thumbnail
+
+        def make() -> tuple[Path, str]:
+            vol = self.svc.storage.volume
+            with vol.reading():
+                path, token, made = thumbnail(self.s.gallery_dir, self.s.data_dir / GALLERY_THUMBS,
+                                              request.path_params["id"], kind)
+            if made:
+                vol.commit()
+            return path, token
+
+        try:
+            path, token = await self.call(make)
+        except (GalleryUnavailable, OSError, ValueError, KeyError, TypeError):
+            return error(404, "not_found", "This public artifact is unavailable.")
+        cache = ("public, max-age=31536000, immutable" if request.query_params.get("v") == token
+                 else "public, max-age=3600")
+        return FileResponse(path, media_type="image/webp", headers={"Cache-Control": cache})
 
     async def gallery_page(self, request: Request) -> Response:
         return self.page("gallery.html")
