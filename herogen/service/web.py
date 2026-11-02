@@ -328,12 +328,16 @@ class App:
             body = f"<pre class=\"legal\">{html.escape(text)}</pre>"
             status = 200
         page = (f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" "
-                f"content=\"width=device-width, initial-scale=1\"><title>HeroGen {title}</title><link rel=\"stylesheet\" "
-                f"href=\"/assets/app.css\"></head><body><main class=\"doc\"><p><a href=\"/\">HeroGen</a></p>"
+                f"content=\"width=device-width, initial-scale=1\"><title>HeroGen {title}</title>"
+                f"<link rel=\"icon\" href=\"/assets/icons/favicon.svg\" type=\"image/svg+xml\">"
+                f"<link rel=\"stylesheet\" href=\"/assets/tokens.css\">"
+                f"<link rel=\"stylesheet\" href=\"/assets/app.css\">"
+                f"</head><body><main class=\"doc\"><p><a href=\"/\">HeroGen</a></p>"
                 f"<h1>{title}</h1>{body}</main></body></html>")
+        csp = ("default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; "
+               "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
         return Response(page, status_code=status, media_type="text/html; charset=utf-8",
-                        headers={"Content-Security-Policy": "default-src 'none'; style-src 'self'; "
-                                                            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"})
+                        headers={"Content-Security-Policy": csp})
 
     async def public_gallery(self, request: Request) -> Response:
         from herogen.service.gallery import GalleryUnavailable, catalog
