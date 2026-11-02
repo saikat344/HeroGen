@@ -7,20 +7,27 @@ let landing;
 import { workbenchLog } from '/assets/workbench.js';
 import { generationView, generationState } from '/assets/generation.js';
 import { variationsView } from '/assets/variations.js';
+import { heroesView } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
 const S = { csrf: null, session: null, current: null, timer: null, revision: 0, job: null, shown: null, lostSince: 0 };
 const LOST_BANNER_MS = 30000;
 let entry;
-let screen = 'entry';
+let screen = 'entry';   // 'entry' (landing), 'heroes' (#heroes), or 'generation' (a hero's workspace)
 function setScreen(next) {
   const enteringWorkbench = next === 'generation' && screen !== 'generation';
   screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation'); show('#statusBar', next === 'generation');
+  heroes.setVisible(next === 'heroes');
+  if (next === 'heroes') show('#app');
+  document.title = next === 'heroes' ? 'Your heroes · HeroGen' : 'HeroGen';
   landing?.setVisible(next === 'entry');
   $('#app').classList.toggle('generation-screen', next === 'generation');
+  $('#app').classList.toggle('heroes-screen', next === 'heroes');
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
+const heroes = heroesView($, { api, open: (id) => openJob(id, true), create: () => goCreate(),
+  refresh: () => refreshList().catch((e) => heroes.fail(e)) });
 const liveLog = workbenchLog($, api);
 const generation = generationView($, (url, options) => preview(url, options));
 const variations = variationsView($, { api, select: openJob, key: idemKey,
@@ -40,10 +47,24 @@ const variations = variationsView($, { api, select: openJob, key: idemKey,
     } catch (e) { banner(e.message); }
   }
 });
-function returnToEntry() {
+function leaveWorkbench() {
   ++S.revision; clearTimeout(S.timer); S.current = null; S.job = null; S.shown = null; S.lostSince = 0;
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
-  developer.update(null); generation.reset(); liveLog.reset(); variations.reset(); setScreen('entry'); show('#jobLoading', false);
+  developer.update(null); generation.reset(); liveLog.reset(); variations.reset(); show('#jobLoading', false);
+}
+function returnToEntry() { leaveWorkbench(); setScreen('entry'); }
+// #heroes: the card grid. Without a session there is nothing to list, so it shows the empty state.
+async function showHeroes({ push = true } = {}) {
+  leaveWorkbench(); setScreen('heroes');
+  if (push && location.hash !== '#heroes') history.pushState(null, '', '/#heroes');
+  window.scrollTo({ top: 0, behavior: 'auto' }); $('#heroesH').focus({ preventScroll: true });
+  if (!S.session?.signed_in) { heroes.update([]); return; }
+  heroes.loading();
+  try { await refreshList(); } catch (e) { heroes.fail(e); }
+}
+function goCreate() {
+  history.pushState(null, '', '/'); returnToEntry();
+  $('#prompt').focus();
 }
 function signIn() {
   if (location.pathname === '/admin/signin') { show('#signin'); $('#signinDialog').showModal(); }
@@ -106,10 +127,7 @@ async function loadSession() {
   return S.session;
 }
 
-for (const id of ['heroesNav', 'breadcrumbHeroes']) $(`#${id}`).addEventListener('click', () => {
-  if ($('#app').hidden) { signIn(); return; }
-  $('#showLibrary').click(); $('#heroLibrary').scrollIntoView({block: 'start', behavior: 'smooth'});
-});
+for (const id of ['heroesNav', 'breadcrumbHeroes']) $(`#${id}`).addEventListener('click', () => showHeroes());
 $('#workspaceNav').addEventListener('click', () => $('#backToIdeas').click());
 
 const developer = developerMode($('#developerMode'), $('#developerPanel'),
@@ -156,14 +174,7 @@ async function initVerify() {
 
 async function refreshList() {
   const { jobs } = await api('/api/jobs');
-  const ul = $('#jobs');
-  ul.replaceChildren(...jobs.map((j) => {
-    const b = el('button', { type: 'button', cls: 'jobbtn' }, el('b', { text: j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero') }),
-      el('span', { cls: `state s-${j.state}`, text: j.state }), el('small', { text: fmtTime(j.created_at) }));
-    b.addEventListener('click', () => openJob(j.id, true));
-    return el('li', {}, b);
-  }));
-  show('#noJobs', jobs.length === 0);
+  heroes.update(jobs);
   return jobs;
 }
 
@@ -482,9 +493,8 @@ function initJobs() {
       $('#deleteDialog').close();
       if (S.current === id) {
         show('#detail', false); developer.update(null); generation.reset(); liveLog.reset(); S.current = null; S.job = null; S.shown = null;
-        history.replaceState(null, '', '/'); setScreen('entry'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
-      }
-      await refreshList();
+        history.replaceState(null, '', '/#heroes'); await showHeroes({ push: false });
+      } else await refreshList();
     } catch (e) {
       $('#deleteError').textContent = e.message; $('#deleteError').hidden = false; $('#confirmDelete').disabled = false;
       if (S.current === id) openJob(id);
@@ -511,7 +521,7 @@ function updateAccessSummary() {
 function expireAccess() {
   if (S.session) S.session.signed_in = false;
   returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
-  $('#heroLibrary').hidden = true; $('#jobs').replaceChildren();
+  heroes.update([]);
   show('#guestAccessSummary', false); show('#headerSignIn', false);
   entry?.say('Your workspace session has expired. Create your hero to open a new private workspace.', 'info');
 }
@@ -563,10 +573,7 @@ async function boot() {
     history.pushState(null, '', '/'); returnToEntry();
     $('#entryH').tabIndex = -1; $('#entryH').focus();
   });
-  $('#showLibrary').addEventListener('click', async () => {
-    const open = $('#heroLibrary').hidden; show('#heroLibrary', open); $('#showLibrary').setAttribute('aria-expanded', String(open));
-    if (open) await refreshList().catch((e) => banner(e.message));
-  });
+  $('#showLibrary').addEventListener('click', () => showHeroes());
   document.querySelectorAll('a[href="#gallery"],a[href="/#gallery"]').forEach(link => link.addEventListener('click', event => {
     if (location.pathname !== '/') return;
     event.preventDefault(); history.pushState(null, '', '/#gallery'); returnToEntry();
@@ -575,7 +582,9 @@ async function boot() {
   window.addEventListener('popstate', () => {
     if (location.pathname !== '/') return;
     const id = new URLSearchParams(location.hash.slice(1)).get('job');
-    if (id) openJob(id, true); else { returnToEntry(); if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'}); }
+    if (id) openJob(id, true);
+    else if (location.hash === '#heroes') showHeroes({ push: false });
+    else { returnToEntry(); if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'}); }
   });
   $('#headerSignIn').addEventListener('click', signIn);
   $('#closeSignin').addEventListener('click', () => $('#signinDialog').close());
@@ -589,10 +598,13 @@ async function boot() {
     if (location.pathname === '/admin/signin' && location.hash.startsWith('#t=')) initVerify().catch(e => banner(e.message));
   });
   if (location.pathname === '/admin/signin') { show('#loading', false); if (location.hash) return initVerify(); signIn(); return; }
-  show('#loading', false); show('#entry');
-  trackOnce('page:landing', 'page_view', { page: 'landing' });
+  show('#loading', false);
+  const heroesRoute = location.hash === '#heroes';
+  if (!heroesRoute) { show('#entry'); trackOnce('page:landing', 'page_view', { page: 'landing' }); }
   landing = landingGallery();
-  if (S.session.signed_in) await signedIn();
+  if (heroesRoute) { landing.setVisible(false); setScreen('heroes'); heroes.loading(); $('#heroesH').focus({ preventScroll: true }); }
+  try { if (S.session.signed_in) await signedIn(); else if (heroesRoute) heroes.update([]); }
+  catch (e) { if (heroesRoute) heroes.fail(e); else throw e; }
   if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'});
   window.addEventListener('focus', async () => {
     if (S.session.signed_in) return;

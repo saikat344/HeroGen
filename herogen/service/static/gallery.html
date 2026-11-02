@@ -10,6 +10,7 @@
 <script src="/assets/theme.js"></script>
 <link rel="stylesheet" href="/assets/tokens.css">
 <link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/styles/heroes.css">
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
@@ -28,7 +29,7 @@
 </script>
 <script type="module" src="/assets/gallery-viewer.js"></script>
 </head>
-<body class="entry-page gallery-page">
+<body class="gallery-page">
 <a class="skip-link" href="#main">Skip to main content</a>
 <header class="site-header">
   <a class="brand" href="/" aria-label="HeroGen home"><span class="brand__mark" aria-hidden="true">HG</span><span>HeroGen</span></a>
@@ -43,9 +44,68 @@
     <button type="button" class="btn btn--ghost btn--icon nav-toggle" aria-controls="siteNav" aria-expanded="false" aria-label="Open menu"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-menu"></use></svg></button>
   </div>
 </header>
-<main id="main" tabindex="-1"><p class="eyebrow">Previously generated with HeroGen</p><h1 id="publicTitle">Opening your character…</h1><p id="publicDescription"></p><p class="muted small">A saved project result, not a live generation. Refined mesh; game-readiness is not implied.</p>
-<div class="public-viewer-grid"><section class="artboard"><div class="artboard-top"><span>Inspect the real 3D result</span><button id="reloadPublicModel" type="button">Reload 3D</button></div><canvas id="publicCanvas" aria-label="3D model — drag to orbit and scroll to zoom"></canvas><p id="publicModelStatus" role="status">Loading the 3D model…</p></section><aside class="artboard public-reference"><div class="artboard-top"><span id="referenceLabel">Character artwork</span><button id="referenceToggle" type="button">Show starting sketch</button></div><img id="publicReference" alt="" hidden><p id="referenceStatus" role="status"></p></aside></div>
-<details class="public-record"><summary>Developer Mode · saved refinement record</summary><p class="small muted">Stage-specific evidence from this saved run. Accepted refinement views report the stage’s checks. The exported mesh was subsequently re-exported with corrected normals.</p><dl id="publicRecord"></dl><p id="publicRecordStatus" class="small muted"></p></details>
-<p id="publicVersion" class="small muted"></p><p><a href="/">Create your own hero →</a></p></main>
+<main id="main" tabindex="-1">
+<div class="gd">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="/#gallery">Gallery</a><span aria-hidden="true">/</span><span id="crumbName" aria-current="page">Loading…</span></nav>
+  <div id="galleryDetail">
+    <header class="gd-head">
+      <p class="eyebrow">Previously generated with HeroGen</p>
+      <h1 id="publicTitle" class="display-l">Opening your character…</h1>
+      <p id="publicDescription" class="lede"></p>
+      <p class="gd-honest small muted"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-info"></use></svg><span>A saved project result, not a live generation. Refined mesh; game-readiness is not implied.</span></p>
+    </header>
+    <div class="public-viewer-grid">
+      <section class="viewer gd-stage" aria-label="Inspect the real 3D result">
+        <canvas id="publicCanvas" aria-label="3D model. Drag to orbit and scroll to zoom."></canvas>
+        <div id="publicGhost" class="gd-stage__ghost" aria-hidden="true"><span class="skeleton gd-ghost--head"></span><span class="skeleton gd-ghost--body"></span></div>
+        <div class="viewer__tools">
+          <button id="reloadPublicModel" type="button" class="viewer__btn" aria-label="Reload 3D" title="Reload 3D"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg></button>
+          <button id="publicFullscreen" type="button" class="viewer__btn" aria-label="Fullscreen" title="Fullscreen" hidden><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-maximize-2"></use></svg></button>
+        </div>
+        <p id="publicModelStatus" class="viewer__hint" role="status">Loading the 3D model…</p>
+        <div id="publicShade" class="seg-ctl gd-stage__dock" role="group" aria-label="Model shading" hidden>
+          <button type="button" data-shade="textured" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-textured"></use></svg>Textured</button>
+          <button type="button" data-shade="clay" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-clay"></use></svg>Clay</button>
+          <button type="button" data-shade="wire" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-wire"></use></svg>Wire</button>
+        </div>
+        <div id="publicStageError" class="gd-stage__error" role="alert" hidden>
+          <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg>
+          <p id="publicStageErrorText">The 3D model could not be loaded.</p>
+          <button id="retryPublicModel" type="button" class="btn btn--secondary btn--s">Reload 3D</button>
+        </div>
+      </section>
+      <aside class="panel gd-art" aria-labelledby="referenceLabel">
+        <div class="gd-art__top"><h2 id="referenceLabel">Character artwork</h2><button id="referenceToggle" type="button" class="btn btn--ghost btn--s">Show starting sketch</button></div>
+        <div class="gd-art__plate"><img id="publicReference" alt="" hidden></div>
+        <p id="referenceStatus" class="gd-art__note small muted" role="status"></p>
+      </aside>
+    </div>
+    <section class="panel gd-facts" aria-labelledby="factsH">
+      <h2 id="factsH">Facts about this result</h2>
+      <dl id="publicFacts" class="facts"></dl>
+      <p id="publicFactsStatus" class="facts__none small muted"></p>
+    </section>
+    <details class="public-record"><summary><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-right"></use></svg>Developer Mode · saved refinement record</summary><p class="small muted">Stage-specific evidence from this saved run. Accepted refinement views report the stage’s checks. The exported mesh was subsequently re-exported with corrected normals.</p><dl id="publicRecord"></dl><p id="publicRecordStatus" class="small muted"></p></details>
+    <section class="panel gd-cta" aria-labelledby="ctaH">
+      <div><h2 id="ctaH" class="display-s">Make your own hero</h2><p class="muted">Describe a character or upload a sketch. Yours is built live, one step at a time.</p></div>
+      <a class="btn btn--primary btn--l" href="/"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg>Create a hero</a>
+    </section>
+    <section id="moreHeroes" class="gd-more" aria-labelledby="moreH" hidden>
+      <h2 id="moreH" class="display-m">More from the gallery</h2>
+      <ul id="moreGrid" class="gd-more__grid"></ul>
+    </section>
+  </div>
+  <section id="galleryState" class="empty" hidden>
+    <span class="empty__icon" aria-hidden="true"><svg class="icon icon--xl"><use id="galleryStateIcon" href="/assets/icons/sprite.svg#i-circle-dashed"></use></svg></span>
+    <h1 id="galleryStateTitle" class="display-s"></h1>
+    <p id="galleryStateText" class="muted"></p>
+    <div class="empty__actions">
+      <button id="galleryStateRetry" type="button" class="btn btn--secondary" hidden>Try again</button>
+      <a class="btn btn--primary" href="/#gallery">Back to gallery</a>
+      <a class="btn btn--secondary" href="/">Create your own hero</a>
+    </div>
+  </section>
+</div>
+</main>
 <footer class="site-footer"><div class="site-footer__inner"><span class="site-footer__tag">Your idea. Your character. Your game.</span><a href="https://github.com/saikat344/HeroGen" rel="noopener">Open source</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span class="faint">Built with Meta AI models</span></div></footer>
 </body></html>

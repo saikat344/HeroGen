@@ -475,7 +475,7 @@ class TestServicePage(ServiceBrowserCase):
                 if(/^\/api\/jobs\/[^/]+$/.test(String(url))) await new Promise(resolve=>window.releaseJob=resolve);
                 return response;
             };
-            document.querySelector('#jobs button').click();
+            document.querySelector('#jobs a').click();
         })()""")
         t.wait("typeof window.releaseJob === 'function'")
         t.eval("document.querySelector('#backToIdeas').click(); window.releaseJob()")
