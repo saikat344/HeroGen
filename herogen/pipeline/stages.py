@@ -126,6 +126,8 @@ class _Stage:
 
     def _announce(self, record: dict[str, Any], outcome: str) -> None:
         """The build log's summary of this stage's checks and, when run on its own, its end."""
+        if not events.enabled():
+            return
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
         if checks:
             failed = [c for c in checks if c.get("pass") is False]

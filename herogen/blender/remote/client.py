@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -183,13 +184,16 @@ def body_summary(image: Path, bbox: list, box_source: str, detector: str | None 
 STILL_WAITING_S = 20.0   # a "still waiting for the GPU" build-log line after this long
 
 
-def _gpu_timings(run_log: dict) -> dict:
-    """Model load and inference seconds a runner reported (load > 0 means the model was loaded: a cold start)."""
+def _gpu_timings(run_log) -> dict:
+    """Model load and inference seconds a runner reported (load > 0 means the model was loaded: a cold start);
+    empty for anything else, never an error."""
+    if not isinstance(run_log, dict):
+        return {}
     load, total = run_log.get("load_seconds"), run_log.get("total_seconds")
     out = {}
-    if type(load) in (int, float) and load >= 0:
+    if type(load) in (int, float) and math.isfinite(load) and load >= 0:
         out["load_s"] = round(float(load), 1)
-        if type(total) in (int, float) and total >= load:
+        if type(total) in (int, float) and math.isfinite(total) and total >= load:
             out["infer_s"] = round(float(total) - float(load), 1)
     return out
 
@@ -340,9 +344,10 @@ class RemoteClient:
                 shutil.copy2(f, d / f.name)
             run_log = json.loads((out / "run.json").read_text()) if (out / "run.json").exists() else {}
             (d / "modal.log").write_text(logtext)
-            if call is not None:
+            if call is not None and call.active:
                 call.m.update(_gpu_timings(run_log))
-                call.extra["gpu"] = events.slug(run_log.get("gpu_type") or gpu, "other").replace("_", "-")
+                gpu_type = run_log.get("gpu_type") if isinstance(run_log, dict) else None
+                call.extra["gpu"] = events.slug(gpu_type or gpu, "other").replace("_", "-")
         price = PRICE_PER_SECOND.get(gpu)
         cost = None if price is None else round(wall * price, 4)
         entry = {"request": summary, "gpu": gpu, "wall_seconds": round(wall, 1), "run": run_log,
