@@ -155,8 +155,8 @@
 {"v":1,"t":249621,"kind":"local","step":"4","a":1,"who":"herogen","what":"split_low_start"}
 {"v":1,"t":258373,"kind":"local","step":"4","a":1,"who":"herogen","what":"split_low","s":8.752,"m":{"triangles":5998,"cap_triangles":1934,"cover_triangles":516,"candidates":13,"largest_part":1836,"budget":6000,"body_triangles":2192}}
 {"v":1,"t":258373,"kind":"skip","step":"4","a":1,"who":"herogen","what":"seam_right_elbow","why":"no_shared_rim"}
-{"v":1,"t":258374,"kind":"local","step":"4","a":1,"who":"herogen","what":"pose_test_start","m":{"poses":21,"heldout":9}}
-{"v":1,"t":275265,"kind":"local","step":"4","a":1,"who":"herogen","what":"pose_test","s":16.891,"m":{"poses":21,"heldout":9,"limit":0.15,"gap_high":0.6519,"gap_low":0.5894}}
+{"v":1,"t":258374,"kind":"local","step":"4","a":1,"who":"herogen","what":"pose_test_start","m":{"poses":21,"extra_poses":9}}
+{"v":1,"t":275265,"kind":"local","step":"4","a":1,"who":"herogen","what":"pose_test","s":16.891,"m":{"poses":21,"extra_poses":9,"limit":0.15,"gap_high":0.6519,"gap_low":0.5894}}
 {"v":1,"t":275270,"kind":"local","step":"4","a":1,"who":"herogen","what":"atlas_start"}
 {"v":1,"t":331773,"kind":"local","step":"4","a":1,"who":"herogen","what":"atlas","s":56.503,"m":{"high":1024,"low":512,"head_high":1024,"head_low":512,"packed":1}}
 {"v":1,"t":331821,"kind":"local","step":"4","a":1,"who":"herogen","what":"texture_transfer_start"}
