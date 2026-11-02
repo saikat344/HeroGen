@@ -316,6 +316,13 @@ export function decisionLine(e) {
     case 'view_kept': return e.why === 'spend_cap' || e.why === 'model_error'
       ? `${regionName(e.view)}: kept the original paint (${reasonText(e.why)}).`
       : `${regionName(e.view)}: no try passed${e.why ? ` (${reasonText(e.why)})` : ''}. Keeping the original paint for this view.`;
+    case 'face_source': {
+      const from = Number.isInteger(e.try) ? `, try ${e.try}` : '';
+      if (e.why === 'beauty') return `Face: using the beauty repaint (${regionName(e.view)}${from}).`;
+      if (e.why === 'default') return `Face: using the ordinary repaint (${regionName(e.view)}${from}).`;
+      if (e.why === 'default_fast_fallback') return 'Face: no face repaint was accepted, so the face keeps the paint from the ordinary texture.';
+      return null;
+    }
     case 'extra_try': return `${regionName(e.view)}: the earlier tries were not used, so Muse Image gets one more try${Number.isInteger(e.try) ? ` (try ${e.try})` : ''}.`;
     case 'wave': return `Wave ${n(m.wave) || 1}: asking Muse Image to repaint ${m.views === 1 ? '1 view' : `${n(m.views) || 'several'} views`}${
       Number.isFinite(m.from_version) ? ` from version ${n(m.from_version)}` : ''}, ${n(m.tries) || 2} tries each, all at once${Number.isFinite(e.n) ? ` (${n(e.n)} requests)` : ''}`;
