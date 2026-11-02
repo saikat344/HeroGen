@@ -109,12 +109,21 @@ class Pass:
 
         for index in range(ATTEMPTS):
             view_cover, options = (cover, {}) if view_options is None else view_options(self, index, cover)
+            standard_side = bool(art and index == 1 and options.get('recipe_name') == 'RF6B')
+            if standard_side:
+                # Keep one independent ordinary artwork repaint when beauty references move the pose.
+                view_cover = cover
+                options = {key: value for key, value in options.items()
+                           if key not in ('recipe_name', 'reference_record')}
+                options['attempt_start'] = 0
             attempt_index = options.pop('attempt_start', index)
             attempt_render = options.pop('rendered', rendered)
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
             private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
+            if standard_side:
+                private['reference_style'] = 'turnaround artwork and original cover'
             if art_framing:
                 private['art_framing'] = copy.deepcopy(art_framing)
             folder = self.folder / f'attempt-{index}'
@@ -133,6 +142,9 @@ class Pass:
             private['reason'] = 'cancelled: lower attempt accepted'
         except BudgetStop as exc:
             private['reason'] = str(exc)
+        if private.get('reference_style'):
+            for trial in private['attempts']:
+                trial['reference_style'] = private['reference_style']
         self.completed[index] = private
         self.record['attempts'] = [trial for i in sorted(self.completed)
                                    for trial in self.completed[i]['attempts']]

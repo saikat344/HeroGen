@@ -61,7 +61,7 @@ class CompositionTests(unittest.TestCase):
         with mock.patch.object(stage, 'art_references', side_effect=lambda run, cam, *a:
                 ((('back', Image.new('RGB', (64, 64), 'green')),), {}, {})
                 if stage.side_art_yaw(cam['angle']) else ((), {}, {})):
-            rec = self.run_beauty(side_beauty=True, cap_usd=None)
+            rec = self.run_beauty(side_beauty=True, cap_usd=None, user_note='Keep brown leather.')
         self.assertEqual(rec['face_source']['source'], 'beauty')
         self.assertEqual(rec['views']['head+0']['prompt'], 'RF6B')
         self.assertEqual(rec['face_fallback']['prompt'], 'RF2R')
@@ -77,6 +77,35 @@ class CompositionTests(unittest.TestCase):
         self.assertIn('The first image alone determines the shape and position', text)
         self.assertIn('never copy them', text)
         self.assertEqual(prompts.ART_VARIANTS['RF6B'], 'RF16B')
+
+    def test_rejected_side_beauty_uses_the_existing_ordinary_artwork_slot(self):
+        self.artwork()
+        original = stage._view
+        def repaint(*args, **kwargs):
+            if kwargs.get('art') and kwargs.get('recipe_name') == 'RF6B':
+                args[7].update(accepted=False, reason='outline moved', tries=1,
+                               attempts=[{'try': 1, 'accepted': False, 'reason': 'outline moved'}])
+                return args[2]
+            return original(*args, **kwargs)
+        with mock.patch.object(stage, 'art_references', side_effect=lambda run, cam, *a:
+                ((('back', Image.new('RGB', (64, 64), 'green')),), {}, {})
+                if stage.side_art_yaw(cam['angle']) else ((), {}, {})), \
+             mock.patch.object(stage, '_view', side_effect=repaint):
+            rec = self.run_beauty(side_beauty=True, cap_usd=None, user_note='Keep brown leather.')
+        self.assertEqual(rec['face_source']['source'], 'beauty')
+        for key in ('body+90', 'body-90', 'body+180', 'hair-upper+180'):
+            view = rec['views'][key]
+            self.assertTrue(view['accepted'])
+            self.assertEqual(view['selected_attempt'], 1)
+            self.assertEqual(view['prompt'], 'RF13H' if key.startswith('hair-') else 'RF12R')
+            self.assertEqual(view['reference_style'], 'turnaround artwork and original cover')
+            self.assertLessEqual(view['tries'], fast.ATTEMPTS)
+            self.assertEqual(view['attempts'][1]['try'], 1)
+            self.assertEqual(view['attempts'][1]['reference_style'], view['reference_style'])
+        for text, images, _ in self.client.inputs:
+            self.assertTrue(text.endswith('«Keep brown leather.»'))
+            if 'turnaround artwork for this viewpoint' in text:
+                self.assertEqual(images[-1].getpixel((0, 0)), (0, 0, 255))
 
     def test_beauty_and_palette_apply_after_face_ownership(self):
         events = []
