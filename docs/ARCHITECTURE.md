@@ -2066,7 +2066,7 @@ and links, and old audit/analytics rows. Job cost rows remain after file purge.
 
 The dev CLI defaults to FakeRunner, local SQLite and a file email outbox. The hosted deployment uses
 `<app>-meta`, `<app>-data` and legal Volumes; web, model and admin secrets are injected only where needed.
-Generation starts paused on a new store and can be configured through the admin UI or CLI. The configured
+A new store starts with generation enabled and spend limits off (opt-in); an admin can pause generation or turn spend limits on through the admin UI or CLI. The configured
 runtime selectors and per-stage timeouts are forwarded by deployment tooling.
 
 ### Remote models from a worker
