@@ -217,15 +217,27 @@ def _section_groups(build: dict, profile: str) -> dict:
     return {"body": SECTIONS}
 
 
-def _pick(cands: list[dict], build: dict, profile: str) -> dict[str, int]:
+def _pick(cands: list[dict], build: dict, profile: str, *, fast: bool = False) -> dict[str, int]:
     """Section -> index of the candidate it is taken from. One budget: the largest candidate whose total fits
     its budget; no budget: the only candidate; part groups: the most triangles that fit each group's budget.
-    An exhausted ladder is an error, never permission to export an over-budget candidate."""
+    The fast lane may exceed an in-game LOD target with the smallest complete candidate within Roblox's
+    per-mesh limit. Full-lane budgets and avatar specification limits remain hard requirements."""
     budget = build["budget"]
     if budget is None:
         return {n: 0 for n in SECTIONS}
     shortfalls = _budget_shortfalls(cands, build, profile)
     if shortfalls:
+        if fast and budget != "groups":
+            from ..roblox import MESH_TRIANGLE_LIMIT
+
+            valid = [i for i, c in enumerate(cands)
+                     if all(n in c["covered"] and len(c["covered"][n].verts)
+                            and 0 < len(c["covered"][n].faces) <= MESH_TRIANGLE_LIMIT for n in SECTIONS)]
+            if not valid:
+                raise ValueError("stage 4 cannot meet hard Roblox limits after cuts, caps and covers: "
+                                 "no complete 15-part candidate within the per-mesh triangle limit")
+            smallest = min(valid, key=lambda i: cands[i]["total"])
+            return {n: smallest for n in SECTIONS}
         raise ValueError("stage 4 cannot meet triangle budgets after cuts, caps and covers: " + "; ".join(shortfalls))
     if budget != "groups":
         best = None
@@ -259,7 +271,7 @@ def _budget_shortfalls(cands: list[dict], build: dict, profile: str) -> list[str
     return out
 
 
-def _fit_budget(cands: list[dict], build: dict, profile: str, make_candidate) -> None:
+def _fit_budget(cands: list[dict], build: dict, profile: str, make_candidate, *, fast: bool = False) -> None:
     """Extend only an exhausted ladder. Measure the finished sections, including caps and covers, after every
     new whole-body target. Halve down to one triangle, then refine a whole-body bracket at the original
     ladder's target spacing. Existing fitting ladders are untouched, including candidate order and ties."""
@@ -270,8 +282,8 @@ def _fit_budget(cands: list[dict], build: dict, profile: str, make_candidate) ->
     upper = targets[0]
     while _budget_shortfalls(cands, build, profile):
         if upper <= 1:
-            # Keep the same explicit failure as selection; no over-budget fallback.
-            _pick(cands, build, profile)
+            _pick(cands, build, profile, fast=fast)
+            return
         lower = max(1, upper // 2)
         cands.append(make_candidate(lower))
         if not _budget_shortfalls(cands, build, profile):
@@ -409,6 +421,9 @@ def _record_fast_outputs(rec: StageRecord, lods) -> None:
             if c["name"] in profile_quality:
                 note = "fast lane: profile budget and watertight-part measurements are informational"
                 c["note"] = (c.get("note", "") + "; " if c.get("note") else "") + note
+                if c["name"] in {"triangles_high", "triangles_low"} and not c["pass"]:
+                    lod = c["name"].removeprefix("triangles_")
+                    rec.note(f"{lod}-detail body uses {c['value']:,} triangles, above the {c['threshold']:,} target")
 
     missing = [p for p in rec.data["outputs"] if not (rec.run / p).is_file() or (rec.run / p).stat().st_size == 0]
     rec.add(check("output_files", len(missing), 0, passed=not missing, rule="==", missing_or_empty=missing))
@@ -615,8 +630,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             return candidate(key)
 
         cands = [candidate(key) for key in ladder[lod]]
-        _fit_budget(cands, build, profile, additional_candidate)
-        pick = _pick(cands, build, profile)
+        _fit_budget(cands, build, profile, additional_candidate, fast=fast)
+        pick = _pick(cands, build, profile, fast=fast)
         picks[lod] = {n: cands[i]["key"] for n, i in pick.items()}
         lod_secs[lod] = {n: cands[pick[n]]["covered"][n] for n in SECTIONS}
         bare_secs[lod] = {n: cands[pick[n]]["bare"][n] for n in SECTIONS}
