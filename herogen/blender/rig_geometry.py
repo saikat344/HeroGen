@@ -99,20 +99,6 @@ def reconcile_skeleton(sk, record, verts, faces, front):
             sk.ends[side + "HandTip"] = new
             sk.radii[side + "Arm"] = radius
             changes[side + "HandTip"] = {"source": "source hand along the forearm", "distance_studs": float(np.linalg.norm(new - tip))}
-    # Side drawings can disagree with the front-conditioned mesh. Only replace a backwards endpoint;
-    # preserve consistent endpoints exactly, including on exports made before this reconciliation existed.
-    for side in ("Left", "Right"):
-        ankle, toe = j[side + "Ankle"], sk.ends[side + "Toe"]
-        if toe[1] >= ankle[1]:
-            near = (np.abs(verts[:, 0] - ankle[0]) <= sk.radii["shin"]) & (verts[:, 2] < ankle[2] / 2)
-            if not near.any():
-                raise ValueError(f"no source foot surface below {side}Ankle")
-            ys = verts[near, 1]
-            new = np.array([ankle[0], float(ys.min() + .1 * np.ptp(ys)), toe[2]])
-            if new[1] >= ankle[1]:
-                raise ValueError(f"source foot does not extend forward of {side}Ankle")
-            sk.ends[side + "Toe"] = new
-            changes[side + "Toe"] = {"source": "source foot forward extent", "distance_studs": float(np.linalg.norm(new - toe))}
     return changes
 
 

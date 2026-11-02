@@ -274,9 +274,9 @@ If the selected hips do not straddle Root, their recorded anatomical pair is use
 uses its recorded anatomical alternative. Missing alternatives stop construction. For a corrected hip pair,
 mask widths are measured around the anatomical trunk and legs rather than the displaced silhouette axis.
 A hand endpoint directed back towards the trunk is replaced by the source hand's extent along the forearm,
-with the arm radius measured from source-mesh cross sections. A toe behind its ankle is replaced by the
-forward extent of the nearby source foot. This reconciles inconsistent side drawings without rotating or
-reflecting the front-conditioned mesh. `landmark_repairs` records the sources and distances in studs.
+with the arm radius measured from source-mesh cross sections. Toe endpoints remain unchanged so that
+contradictory facing evidence reaches the stage-6 check. `landmark_repairs` records the sources and distances
+in studs. These repairs do not rotate or reflect the mesh.
 
 After selecting each LOD, a pivot outside either its child or parent vertex bounds (allowing 1e-4 studs for
 rounding) moves to the nearest shared cut edge. Root uses its own section surface. A missing shared edge
