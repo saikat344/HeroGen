@@ -53,6 +53,7 @@ body.doc-body .doc-page .prose h2 { margin: var(--space-10) 0 var(--space-4); fo
 /* ---------- /viewer fallback page (the Lab's page is styled by herogen/lab/static/studio.css) ---------- */
 body.viewer-body > main { max-width: var(--workspace-max); margin: 0 auto; padding: var(--space-8) var(--gutter) var(--space-11); display: flex; flex-direction: column; gap: var(--space-6); }
 body.viewer-body .viewer-run { display: flex; align-items: center; gap: var(--space-4); }
+body.viewer-body .viewer-run .eyebrow { display: block; flex: none; margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); white-space: nowrap; color: var(--color-text-muted); }
 body.viewer-body select { height: var(--control-h-m); width: min(100%, 28rem); padding: 0 var(--space-4); border: var(--border-w) solid var(--color-border-strong); border-radius: var(--radius-m); background: var(--color-surface-3); color: var(--color-text); font: inherit; }
 body.viewer-body .card { margin: 0; padding: var(--space-7); background: var(--color-surface-2); border: var(--border-w) solid var(--color-border); border-radius: var(--radius-xl); box-shadow: var(--shadow-inset-top); }
 body.viewer-body .card h2 { margin: 0 0 var(--space-5); font-family: var(--font-display); font-variation-settings: var(--display-variation); font-size: var(--text-display-s); font-weight: var(--weight-display); }
