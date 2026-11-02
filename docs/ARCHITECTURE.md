@@ -803,31 +803,12 @@ no head-minus-face hair inference occurs. Unknown covered atlas pixels stay unch
 Missing and empty regions are recorded separately and retain their original colours. Missing files,
 invalid masks, mismatched atlas layouts and rendering failures stop the stage with its recorded error.
 
-Skin and hair independently fit 257 marginal quantiles in Lab. Clothing (`rest`) first fits
-up to eight deterministic Lab colour clusters in the render and artwork, weighting lightness
-by one half relative to chroma. Farthest-first initialisation stops when the remaining sample
-is within six weighted Lab units of a centre; Lloyd iterations fit a fixed, evenly spaced
-sample of at most 16,384 pixels. Full region pixels supply each cluster's quantiles. Each source
-cluster selects its nearest artwork cluster in that weighted space, restricted to the same
-neutral/chromatic class (chroma below ten Lab units is neutral) and, for chromatic colours,
-within 30 degrees of hue. Different source clusters may share an artwork cluster; unmatched
-clusters remain unchanged. Clothing retains each pixel's source hue and never reduces its
-chroma. Pixels with source chroma at least 30 Lab units retain their exact RGB values, protecting
-strong gold, brass and gem accents including lightness. A cubic chroma ramp from 20 to 30 Lab
-units fades the correction before full exclusion to avoid cutoff contours. These are deterministic colour rules,
-not semantic metal detection; low-chroma metallic highlights receive the ordinary cluster grade.
-
-Each matched cluster or semantic region bounds its initial Lab displacement by the RMS distance
-between its source and artwork marginal quantile vectors. Repeated source knots are combined.
-The clothing hue/chroma projection cannot increase that displacement. The bound precedes RGB
-gamut conversion and texture quantisation. Clothing additionally measures chroma after 8-bit RGB
-conversion, compensates any deficit for up to four conversions, and retains the original RGB when
-the requested correction cannot preserve its chroma in the RGB gamut. These conversion corrections
-can perturb the pre-conversion bound by the measured quantisation deficit.
-There is no shared clothing curve or fixed mixing coefficient. This is a distribution correction
-bound, not a guarantee that corresponding artwork pixels improve. Cluster centres, matches,
-curves, caps and sample counts are written to `region-palette*/grades.json` and `stage-3f.json`.
-For generated manifests, application coverage uses
+Each region independently fits 257 marginal quantiles in Lab. Repeated source knots are combined.
+Its maximum Lab displacement is the RMS distance between its source and artwork quantile vectors;
+there is no shared body curve, fixed mixing coefficient or manually selected colour cap. The cap applies
+before RGB gamut conversion and texture quantisation. This is a measured distribution correction bound,
+not a guarantee that corresponding artwork pixels improve. Grades and sample counts are written to
+`region-palette*/grades.json` and `stage-3f.json`. For generated manifests, application coverage uses
 the completed render masks projected to the prepared atlas. Saved application masks are intersected with
 the current rendered silhouette before completion and feathering, so rasterization differences at the
 edge cannot assign a correction to background pixels. Explicit legacy manifests use their atlas masks;
@@ -2585,11 +2566,6 @@ both drain because eye-detail selection requires the ordinary paint. `selected_a
 `winning_slot` records the one-based winner. Missing side orientation keeps slot 1 on its usual beauty
 reference and preserves the same ordinary slot 2. This contains rejected enhancements without a third
 enhanced sample or a weakened paint gate.
-Beauty's initial base-atlas calibration toward its selected beauty reference also uses the
-colour-cluster matching, source-hue retention, chroma floor and strong-accent exclusion described
-above. This calibration precedes repainting and can affect residual surfaces where no paint passes;
-export-time region calibration alone cannot protect those residuals from an earlier pooled grade.
-The ordinary schedules without beauty retain their existing calibration behavior.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast

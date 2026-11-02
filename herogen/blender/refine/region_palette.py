@@ -3,8 +3,7 @@
 Regions start from semantic masks; connected skin colour completes the face within the head.
 Unlabelled surface texels retain their values;
 atlas gutters are re-extended at export.
-Clothing uses independently matched colour clusters; skin and hair use semantic regions.
-Each displacement cap is the RMS distance between matched Lab marginal quantiles, measured anew
+The displacement cap is the RMS distance between the region's Lab marginal quantiles, measured anew
 for each export. This bounds the correction; it does not assert pixel correspondence or fidelity.
 """
 from __future__ import annotations
@@ -47,135 +46,6 @@ def _masks(masks, shape):
     return result
 
 
-def _curves(a, b):
-    qa, qb = np.quantile(a, QUANTILES, axis=0), np.quantile(b, QUANTILES, axis=0)
-    curves = []
-    for c in range(3):
-        unique, inverse, count = np.unique(qa[:, c], return_inverse=True, return_counts=True)
-        curves.append({"source": unique.tolist(),
-                       "target": (np.bincount(inverse, weights=qb[:, c]) / count).tolist()})
-    return curves, float(np.sqrt(np.mean(np.sum((qb - qa) ** 2, axis=1))))
-
-
-def _clusters(lab):
-    """Deterministic farthest-first Lab Lloyd clusters, with reduced lighting influence.
-
-    Eight centres bound work; a 6 Lab separation stops flat colours from being split.
-    Chroma gets full weight, lightness half weight. A fixed evenly spaced sample fits
-    centres; all pixels participate in the final distributions and measured counts.
-    """
-    sample = lab[np.linspace(0, len(lab) - 1, min(len(lab), 16384), dtype=int)]
-    scale = np.array([.5, 1., 1.])
-    values = sample * scale
-    centres = [values[np.argmin(np.linalg.norm(values - np.median(values, axis=0), axis=1))]]
-    for _ in range(7):
-        distance = np.min(np.sum((values[:, None] - np.asarray(centres)) ** 2, axis=2), axis=1)
-        if distance.max() <= 6 ** 2:
-            break
-        centres.append(values[distance.argmax()])
-    centres = np.asarray(centres)
-    for _ in range(32):
-        labels = np.argmin(np.sum((values[:, None] - centres) ** 2, axis=2), axis=1)
-        updated = np.asarray([values[labels == i].mean(0) if (labels == i).any() else c
-                              for i, c in enumerate(centres)])
-        if np.max(np.abs(updated - centres)) < .01:
-            centres = updated
-            break
-        centres = updated
-    centres /= scale
-    labels = _labels(lab, centres)
-    centres = centres[np.unique(labels)]
-    return centres, _labels(lab, centres)
-
-
-def _labels(lab, centres):
-    # Chunking bounds atlas-sized temporary arrays.
-    return np.concatenate([np.argmin(np.sum(((part[:, None] - centres) * [.5, 1, 1]) ** 2, axis=2), axis=1)
-                           for part in np.array_split(lab, max(1, (len(lab) + 65535) // 65536))])
-
-
-def _clothing(a, b):
-    source, si = _clusters(a)
-    artwork, ai = _clusters(b)
-    result = []
-    for i, centre in enumerate(source):
-        chroma = np.linalg.norm(centre[1:])
-        art_chroma = np.linalg.norm(artwork[:, 1:], axis=1)
-        hue = np.arctan2(centre[2], centre[1])
-        art_hue = np.arctan2(artwork[:, 2], artwork[:, 1])
-        angle = np.abs(np.arctan2(np.sin(art_hue - hue), np.cos(art_hue - hue)))
-        # Neutral fabric cannot own a coloured fabric's grade, nor vice versa.
-        compatible = ((art_chroma < 10) == (chroma < 10)) & ((angle <= np.pi / 6) | (chroma < 10))
-        distance = np.linalg.norm((artwork - centre) * [.5, 1, 1], axis=1)
-        j = int(np.argmin(np.where(compatible, distance, np.inf)))
-        entry = {"source_centre": centre.tolist(), "source_pixels": int((si == i).sum()),
-                 "status": "unmatched"}
-        if compatible.any():
-            curves, cap = _curves(a[si == i], b[ai == j])
-            entry.update(status="fitted", artwork_cluster=j, artwork_centre=artwork[j].tolist(),
-                         artwork_pixels=int((ai == j).sum()), curves=curves, cap_lab=cap)
-        result.append(entry)
-    return result
-
-
-def _mapped(lab, grade):
-    target = np.column_stack([np.interp(lab[:, c], curve["source"], curve["target"])
-                              for c, curve in enumerate(grade["curves"])])
-    delta = target - lab
-    cap = float(grade["cap_lab"])
-    if not np.isfinite(cap) or cap < 0:
-        raise ValueError("palette cap must be finite and nonnegative")
-    delta *= np.minimum(1, cap / np.maximum(np.linalg.norm(delta, axis=1), np.finfo(float).tiny))[:, None]
-    return lab + delta
-
-
-def _clothing_target(lab, clusters):
-    labels = _labels(lab, np.asarray([c["source_centre"] for c in clusters]))
-    target = lab.copy()
-    for i, cluster in enumerate(clusters):
-        hit = labels == i
-        if hit.any() and cluster["status"] == "fitted":
-            target[hit] = _mapped(lab[hit], cluster)
-    # Preserve every pixel's chroma floor and exact source hue. Strongly chromatic accents
-    # (gold, brass, saturated gems) are excluded altogether, including their lightness.
-    chroma = np.linalg.norm(lab[:, 1:], axis=1)
-    target_chroma = np.linalg.norm(target[:, 1:], axis=1)
-    target[:, 1:] = lab[:, 1:] * np.maximum(1, target_chroma / np.maximum(chroma, 1e-8))[:, None]
-    # Fade the correction before full accent exclusion, avoiding a hard colour
-    # contour where a shaded metal or dyed fabric crosses the chroma cutoff.
-    t = np.clip((chroma - 20) / 10, 0, 1)
-    strength = 1 - t * t * (3 - 2 * t)
-    target = lab + (target - lab) * strength[:, None]
-    target[chroma >= 30] = lab[chroma >= 30]
-    return target
-
-
-def _colour_rgb(lab, target, original):
-    """Keep the chroma floor through RGB gamut conversion and 8-bit export.
-
-    Lab/RGB lookup tables and quantisation can otherwise lose chroma even on a
-    hue-preserving Lab ray. Correct only the measured deficit; retain the source
-    when the requested lightness/chroma cannot be represented in the RGB gamut.
-    """
-    shape = target.shape
-    source_chroma = np.linalg.norm(lab[..., 1:], axis=-1)
-    unchanged = np.all(target == lab, axis=-1)
-    target = target.astype(np.float32).copy()
-    for _ in range(4):
-        rgb = np.round(cv2.cvtColor(target.reshape(-1, 1, 3), cv2.COLOR_Lab2RGB) * 255) / 255
-        decoded = cv2.cvtColor(rgb, cv2.COLOR_RGB2Lab).reshape(shape)
-        chroma = np.linalg.norm(decoded[..., 1:], axis=-1)
-        bad = (chroma < source_chroma) & ~unchanged
-        if not bad.any():
-            break
-        current = np.linalg.norm(target[..., 1:][bad], axis=-1)
-        target[..., 1:][bad] *= ((current + source_chroma[bad] - chroma[bad] + .05)
-                               / np.maximum(current, 1e-8))[..., None]
-    rgb = rgb.reshape(shape)
-    rgb[unchanged | bad] = original[unchanged | bad]
-    return rgb
-
-
 def fit(source, artwork, source_masks, artwork_masks):
     """Fit independent marginal Lab quantile maps; return JSON-serialisable measured caps.
 
@@ -197,14 +67,16 @@ def fit(source, artwork, source_masks, artwork_masks):
         if not len(a) or not len(b):
             result[name] = {"status": "empty_mask", **counts}
             continue
-        curves, cap = _curves(a, b)
         qa, qb = np.quantile(a, QUANTILES, axis=0), np.quantile(b, QUANTILES, axis=0)
+        curves = []
+        for c in range(3):
+            unique, inverse, count = np.unique(qa[:, c], return_inverse=True, return_counts=True)
+            target = np.bincount(inverse, weights=qb[:, c]) / count
+            curves.append({"source": unique.tolist(), "target": target.tolist()})
         result[name] = {"status": "fitted", **counts, "curves": curves,
-                        "cap_lab": cap,
+                        "cap_lab": float(np.sqrt(np.mean(np.sum((qb - qa) ** 2, axis=1)))),
                         "rms_L": float(np.sqrt(np.mean((qb[:, 0] - qa[:, 0]) ** 2))),
                         "rms_ab": float(np.sqrt(np.mean(np.sum((qb[:, 1:] - qa[:, 1:]) ** 2, axis=1))))}
-        if name == "rest":
-            result[name]["clusters"] = _clothing(a, b)
     return result
 
 
@@ -239,19 +111,14 @@ def apply(rgb, grades, masks, *, enabled=False, weights=None):
             continue
         pixels = original[mask].reshape(-1, 1, 3)
         lab = cv2.cvtColor(pixels, cv2.COLOR_RGB2Lab).reshape(-1, 3)
-        target = (_clothing_target(lab, grade["clusters"]) if "clusters" in grade else _mapped(lab, grade))
+        target = np.column_stack([np.interp(lab[:, c], curve["source"], curve["target"])
+                                  for c, curve in enumerate(grade["curves"])])
         delta = target - lab
+        delta *= np.minimum(1, cap / np.maximum(np.linalg.norm(delta, axis=1), np.finfo(float).tiny))[:, None]
         if weights is not None:
             delta *= np.asarray(weights.get(name, np.zeros(mask.shape)))[mask, None]
-        if "clusters" in grade:
-            out[mask] = _colour_rgb(lab, lab + delta, original[mask])
-        else:
-            out[mask] = cv2.cvtColor((lab + delta).astype(np.float32).reshape(-1, 1, 3),
-                                    cv2.COLOR_Lab2RGB).reshape(-1, 3)
-        unchanged = np.all(delta == 0, axis=1)
-        values = out[mask]
-        values[unchanged] = original[mask][unchanged]
-        out[mask] = values
+        out[mask] = cv2.cvtColor((lab + delta).astype(np.float32).reshape(-1, 1, 3),
+                                cv2.COLOR_Lab2RGB).reshape(-1, 3)
     if weights is not None:
         out[total == 0] = original[total == 0]
     return out
