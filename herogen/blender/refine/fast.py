@@ -470,11 +470,15 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                                 and error is None and face_error is None):
                             # Face selection rejecting a gate-accepted beauty head counts as a
                             # failed beauty sample: with slot 2 rejected, the head pays slot 3.
-                            with state_lock:
-                                head = face_control.face_conditional(jobs, work)
+                            try:
+                                with state_lock:
+                                    head = face_control.face_conditional(jobs, work)
+                            except Exception as exc:
+                                # Like face selection below: drain every submitted future, then raise.
+                                face_error, head = exc, None
                             if head is not None:
                                 firsts.add(launch_conditional(head, wave_index))
-                    if face_control is not None and error is None:
+                    if face_control is not None and error is None and face_error is None:
                         try:
                             with state_lock:
                                 face_control.choose(jobs, work)

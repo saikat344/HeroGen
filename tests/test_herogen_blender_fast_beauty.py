@@ -1017,6 +1017,41 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['default_fast_fallback']['views']['body+90']['reason'], 'ApiError')
         self.assertFalse((self.run / '03-refined.glb').exists())
 
+    def test_face_conditional_error_drains_wave_one_before_raising(self):
+        import time
+        original = stage._view
+        def view(*args, **kwargs):
+            folder = args[6]
+            if args[4]['name'] == 'body+90' and folder.name == 'attempt-1' and 'default-fast' not in folder.parts:
+                # An unresolved wave-1 retry, still running when the head's verdict fails.
+                time.sleep(.3)
+                raise ApiError('late side retry failure')
+            return original(*args, **kwargs)
+        verdicts = []
+        def broken(*args, **kwargs):
+            verdicts.append(1)
+            raise ValueError('Eye comparison needs identical view dimensions')
+        with mock.patch.object(stage, '_view', side_effect=view), \
+             mock.patch.object(B, 'eye_quality', side_effect=broken):
+            # The late model error is collected and raised: the verdict error waited for the drain.
+            with self.assertRaisesRegex(ApiError, 'late side retry failure'):
+                self.run_beauty(cap_usd=5)
+        self.assertTrue(verdicts)
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(record['views']['body+90']['reason'], 'ApiError')
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
+    def test_face_conditional_error_alone_stays_loud(self):
+        with mock.patch.object(B, 'eye_quality', side_effect=ValueError('Eye comparison needs nonempty boxes')):
+            with self.assertRaisesRegex(ValueError, 'nonempty boxes'):
+                self.run_beauty(cap_usd=5)
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertTrue(all(v['reason'] != 'incomplete' for v in record['views'].values()
+                            if v['tries']))
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
     def test_face_selection_shares_the_checkpoint_writer_lock(self):
         budgets = []
         initialize, select = stage.Budget.__init__, B.FaceControl.choose
