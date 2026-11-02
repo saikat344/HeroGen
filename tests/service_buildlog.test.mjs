@@ -84,6 +84,7 @@ test('texture views, reasons and speakers read as plain text', () => {
       m: {median_px: 4.67, median_limit: 6, p90_px: 18, p90_limit: 16}}),
     ev(4, 'decision', '3f', {what: 'view_result', view: 'body+90', try: 1, ok: true, m: {overlap: 0.93, median_px: 3.6}}),
     ev(4, 'decision', '3f', {what: 'view_kept', view: 'head+0', ok: false}),
+    ev(4, 'decision', '3f', {what: 'extra_try', view: 'body+0', try: 3}),
     ev(5, 'local', '3f', {what: 'views_rendered', m: {cameras: 5}}),
     ev(6, 'version', '3f', {n: 1, passed: 3, of: 6}),
     ev(7, 'skip', '3f', {what: 'texture_refine', why: 'spend_cap'})];
@@ -93,11 +94,12 @@ test('texture views, reasons and speakers read as plain text', () => {
     ['kept', 'Repainting the side view −90°, try 2: not needed, the other try passed (already paid for)'],
     ['kept', 'Front, try 1: not used (outline moved too far: 90th percentile 18.0 px (limit 16))'],
     ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, median drift 3.6 px)'],
-    ['kept', 'Face close-up: neither try passed. Keeping the original paint for this view.'],
+    ['kept', 'Face close-up: no try passed. Keeping the original paint for this view.'],
+    ['info', 'Front: both tries were rejected, so Muse Image gets one more try (try 3).'],
     ['info', 'Rendered the 3D shape from 5 cameras'],
     ['passed', 'Your model now shows version 1 (3 of 6 views repainted).'],
     ['skipped', 'Texture refine reached its spending cap. Showing the best texture so far.']]);
-  assert.equal(rowsOf(model, '3f')[5].who, 'herogen');
+  assert.equal(rowsOf(model, '3f')[6].who, 'herogen');
   assert.match(copyText(model), /i HeroGen \(local\): rendered the 3D shape from 5 cameras$/m);
   assert.equal(copy.regionName('hair-upper+180'), 'Upper hair, back');
   assert.equal(copy.regionName('body+45'), 'One view');
@@ -412,7 +414,7 @@ test('the replayed fox-samurai run (3D shape to Roblox rig) renders end to end i
   assert.ok(joints3.checks.some(c => c.text === 'Left shoulder from the outline · 0.66 studs from the outline estimate (differs by more than 0.5 studs)'));
   // Texture refine: every try and view decision in words.
   for (const want of ['Face close-up, try 1: not used (outline moved too far: median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))',
-    'Side view +90°: kept the repaint from try 1', 'Front: neither try passed (outline moved too far). Keeping the original paint for this view.',
+    'Side view +90°: kept the repaint from try 1', 'Front: no try passed (outline moved too far). Keeping the original paint for this view.',
     'Side view −90°, try 2: not needed, the other try passed (stopped before it was paid for)',
     'Your model now shows version 1 (3 of 6 views repainted; 3 still being judged).']) assert.ok(texts(refine).includes(want), want);
   assert.ok(texts(refine).some(t => t.startsWith('Upper hair, back, try 1: accepted (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)')));
