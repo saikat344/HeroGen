@@ -181,6 +181,10 @@ class FastJointRecordTests(unittest.TestCase):
                 self.assertIn("original measurement; fast lane:", c["note"])
                 self.assertIn("informational", c["note"])
                 self.assertIn("Some shape or texture details may need refinement.", rec.data["notes"])
+                if name.startswith("triangles_"):
+                    lod = name.removeprefix("triangles_")
+                    self.assertIn(f"{lod}-detail body uses {value:,} triangles, above the {threshold:,} target",
+                                  rec.data["notes"])
 
     def test_full_profile_budgets_and_watertight_parts_stay_hard_failures(self):
         from herogen.blender.record import check
