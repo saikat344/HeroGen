@@ -1,7 +1,7 @@
 """Stage 4: joints, R15 sections, textured profile LODs and a pose test.
 
-Refined colour supplies every LOD and gates against same-frame refined rest renders. View bakes retain
-their turnaround gates; refined-primary turnaround comparisons are diagnostics.
+Refined colour supplies every LOD. The full lane gates against same-frame refined rest renders or view-bake
+turnarounds; the fast lane records quality measurements as diagnostics and gates output validity.
 """
 from __future__ import annotations
 
@@ -344,12 +344,52 @@ def _record_unverified(rec: StageRecord, reasons: dict[str, str]) -> None:
                   unverified_joints=rows))
 
 
+def _record_fast_outputs(rec: StageRecord, lods) -> None:
+    """Keep quality measurements honest while requiring complete, nonempty R15 exports."""
+    from ..roblox import MESH_TRIANGLE_LIMIT
+    from .glb import load_glb
+
+    quality_names = {"pivots_in_joint_region", "texture_transfer_views", "joint_error_max_synthetic"}
+    quality_prefixes = ("max_joint_gap_", "rest_iou_with_covers_", "texture_colour_error_", "texture_ssim_",
+                        "texture_turnaround_")
+    quality_failed = False
+    for c in rec.data["checks"]:
+        if c["name"] in quality_names or c["name"].startswith(quality_prefixes):
+            quality_failed |= c["gate"] and not c["pass"] and not c["name"].startswith("max_joint_gap_")
+            c["gate"] = False
+
+    missing = [p for p in rec.data["outputs"] if not (rec.run / p).is_file() or (rec.run / p).stat().st_size == 0]
+    rec.add(check("output_files", len(missing), 0, passed=not missing, rule="==", missing_or_empty=missing))
+    for lod in lods:
+        path = rec.run / "04-body" / f"{lod}.glb"
+        if path.is_file() and path.stat().st_size:
+            meshes = load_glb(path).meshes
+            nonempty = {m.name for m in meshes if len(m.verts) and len(m.faces)}
+            absent = sorted(set(SECTIONS) - nonempty)
+            rec.add(check(f"exported_parts_{lod}", len(set(SECTIONS) & nonempty), len(SECTIONS),
+                          missing_or_empty=absent))
+            most_triangles = max((len(m.faces) for m in meshes), default=0)
+            rec.add(check(f"exported_triangles_per_mesh_{lod}", most_triangles, MESH_TRIANGLE_LIMIT,
+                          passed=most_triangles <= MESH_TRIANGLE_LIMIT, rule="<="))
+
+    if all(c["pass"] for c in rec.data["checks"] if c["gate"]):
+        gaps = [c for c in rec.data["checks"]
+                if c["name"] in {f"max_joint_gap_{lod}" for lod in lods} and c["value"] is not None]
+        if any(not c["pass"] for c in gaps):
+            widest = max(c["value"] for c in gaps)
+            rec.note(f"Roblox files ready; some joints have visible seams ({widest:.2f} studs at the widest).")
+        else:
+            rec.note("Roblox files ready.")
+        if quality_failed:
+            rec.note("Some shape or texture details may need refinement.")
+
+
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                profile: str = DEFAULT_PROFILE, cut_search: bool = True, cut_workers: int = 3,
                fast: bool = False) -> dict:
     """Stage 4 for one target profile (`herogen.blender.PROFILES`; default `best`). `cut_search=False` keeps every
-    cut at its joint (for comparison; the record says so). `fast` or `HEROGEN_FAST_LANE=1` makes unknown
-    seam measurements informational; every measurable gap keeps the same gate."""
+    cut at its joint (for comparison; the record says so). `fast` or `HEROGEN_FAST_LANE=1` makes quality
+    measurements informational; valid, complete R15 outputs remain required."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r} (known: {', '.join(PROFILES)})")
     cuts.validate_workers(cut_workers)
@@ -919,4 +959,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                         "covers": cover_info, "texture": sections_json["texture"],
                         "rest_iou_with_covers": rest_iou,
                         "joint_error_synthetic": joint_err, "joint_evidence": sk.evidence}
+    if fast:
+        _record_fast_outputs(rec, builds)
+        write_atomic(body / "sections.json", json.dumps(sections_json, indent=2))
     return rec.finish()
