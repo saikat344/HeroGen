@@ -36,7 +36,8 @@ def captured_events(step="4"):
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "events.jsonl"
         try:
-            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": step}):
+            from herogen.pipeline import events
+            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": step}), events.step(None):
                 yield out
         finally:
             if path.exists():

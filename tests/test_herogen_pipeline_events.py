@@ -26,6 +26,7 @@ def lines(path: Path) -> list[dict]:
 
 class EventsTest(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(events.reset_step, events.set_step(None))   # no step left over from another test
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / events.FILE
