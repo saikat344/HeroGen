@@ -166,8 +166,12 @@ just one view, so the views stay consistent. All existing gates and retries stil
 The optional note describes changes to the character's colours, materials, gear or character style. It is
 cleaned like the character brief, quoted between `«»`, and limited to 300 characters after cleaning; longer
 notes are refused. The slot says the note cannot instruct the image, layout, number of views or checks.
-`cover-redo-v1` and `turnaround-redo-v1` freeze the note prompts and hashes. Without a note, existing prompt
-bytes and prompt selection stay unchanged. `redo.json` and the stage records identify the parent, redo
+`cover-redo-v1` and `turnaround-redo-v2` freeze the note prompts and hashes. The default sheet prompt is
+`turnaround-v3`, which asks for arms clear of the body ending in visible hands, props stowed on the back or belt
+and opposite-facing profiles; with one attempt per input it gave 27 of 30 complete rigged exports on a 30-input
+set. `turnaround-v1` and `turnaround-v2` stay selectable with `HEROGEN_TURNAROUND_VERSION`, and
+`turnaround-redo-v2` builds on the v3 sheet prompt. Without a note, existing prompt bytes and prompt
+selection stay unchanged. `redo.json` and the stage records identify the parent, redo
 stage and cleaned note. `--stop-after 1|2` also omits later side work; without it the CLI follows its normal
 selected stages, including held-out views and face sources after stage 2.
 
