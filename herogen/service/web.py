@@ -41,6 +41,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from herogen.pipeline import events as buildlog
 from herogen.service import bundle, labapi, pages
 from herogen.service.analytics import (
     DEFAULT_DAYS,
@@ -53,7 +54,7 @@ from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
 from herogen.service.runner import STAGE_LABELS, plan_for
 from herogen.service.progressive import read_progress, version_token
-from herogen.service.storage import SAFE_SEGMENT, Storage
+from herogen.service.storage import SAFE_SEGMENT, ModalVolumeView, Storage
 from herogen.service.store import (
     Conflict,
     NotFound,
@@ -86,6 +87,16 @@ THUMB_SOURCES = (("cover", "1", "01-cover.png"), ("sketch", "0", "00-sketch.png"
 THUMB_CACHE = "private, max-age=31536000, immutable"
 GALLERY_THUMBS = "gallery-thumbs"   # under the data folder: the published gallery itself is read-only
 _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
+# The build log (`job_events`): an opaque cursor "<byte offset>.<newest attempt seen>", a page of at most
+# EVENTS_PAGE_MAX events and EVENTS_PAGE_BYTES of file, and "done" only once a finished job's last lines can have
+# reached this container (a Modal volume view refreshes at most every few seconds).
+EVENTS_CURSOR = re.compile(r"^(\d{1,12})\.(\d{1,2})$")
+EVENTS_PAGE = 500
+EVENTS_PAGE_MAX = 1000
+EVENTS_PAGE_BYTES = 256 * 1024
+EVENTS_DONE_GRACE_S = 10.0
+EVENTS_ROUTE = re.compile(r"^/api/jobs/[^/]+/events$")
+FINISHED_STATES = ("succeeded", "rejected", "failed", "canceled", "stopped")
 
 
 @dataclass
@@ -1059,6 +1070,52 @@ class App:
                              "cover_thumbnail_url": files["images"].get("cover")})
         return JSONResponse({"versions": versions})
 
+    async def job_events(self, request: Request) -> Response:
+        """The job's build log from a cursor (see `herogen.pipeline.events`): owner only, a plain 404 otherwise.
+        Every line is validated again and re-serialised; a partial last line waits for the next poll."""
+        u = await self.require_user(request)
+        jid = self._job_id(request)
+        raw = request.query_params.get("after")
+        got = EVENTS_CURSOR.match(raw) if raw is not None else None
+        if raw is not None and got is None:
+            return error(400, "bad_cursor", "This build log position is not valid.")
+        offset, newest = (int(got[1]), int(got[2])) if got else (0, 0)
+        try:
+            limit = int(request.query_params.get("limit", EVENTS_PAGE))
+        except ValueError:
+            return error(400, "bad_limit", f"limit must be a number from 1 to {EVENTS_PAGE_MAX}.")
+        if not 1 <= limit <= EVENTS_PAGE_MAX:
+            return error(400, "bad_limit", f"limit must be a number from 1 to {EVENTS_PAGE_MAX}.")
+        job = await self.call(self.svc.store.job_get, jid, u["id"])
+        if job is None:
+            return error(404, "not_found", "No such hero.")
+
+        def read() -> tuple[list[tuple[int, dict[str, Any]]], int, bool]:
+            st = self.svc.storage
+            st.volume.refresh()
+            path = st.run_dir(u["id"], jid) / buildlog.FILE
+            with st.volume.reading():   # read whole bytes while the volume view is held, never stream
+                if path.is_symlink() or path.parent.is_symlink():
+                    return [], offset, False
+                return buildlog.read(path, offset, limit=limit, max_bytes=EVENTS_PAGE_BYTES)
+
+        page, cursor, more = await self.call(read)
+        out = []
+        for _end, ev in page:
+            attempt = ev.get("a")
+            if attempt is not None:
+                if attempt < newest:
+                    continue   # written by a stale worker after a newer attempt began
+                newest = attempt
+            out.append(ev)
+        ended = job["export_finished_at"] if job["state"] == "succeeded" else job["finished_at"]
+        grace = EVENTS_DONE_GRACE_S if isinstance(self.svc.storage.volume, ModalVolumeView) else 0.0
+        done = (job["state"] in FINISHED_STATES and not more
+                and not (job["state"] == "succeeded" and job["export_state"] == "running")
+                and (ended is None or self.now() - ended >= grace))
+        return JSONResponse({"v": buildlog.VERSION, "events": out, "cursor": f"{cursor}.{newest}", "more": more,
+                             "done": done}, headers={"Cache-Control": "no-store"})
+
     async def job_cancel(self, request: Request) -> Response:
         u = await self.require_user(request)
         try:
@@ -1320,7 +1377,10 @@ def api_rate_guard(app_state: App):
 
     def wrap(app):
         async def guard(scope, receive, send):
-            if scope["type"] == "http" and scope.get("path", "").startswith(("/api/", "/runs/")):
+            path = scope.get("path", "") if scope["type"] == "http" else ""
+            # The build-log poll is exempt (owner-scoped and cheap): viewers on one venue network share an address.
+            exempt = scope.get("method") == "GET" and EVENTS_ROUTE.match(path) is not None
+            if path.startswith(("/api/", "/runs/")) and not exempt:
                 req = Request(scope)
                 rule = app_state.s.rate_api_ip
                 ok, retry = app_state.svc.local_rates.hit(f"api:{app_state.client_ip(req)}", rule[0], rule[1])
@@ -1403,6 +1463,7 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/api/jobs/{job}/retry-input", a.job_retry_input, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/continue", a.job_continue, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/versions", a.job_versions),
+        Route("/api/jobs/{job}/events", a.job_events, methods=["GET"]),
         Route("/api/jobs/{job}/thumbnail", a.job_thumbnail, methods=["GET"]),
         Route("/api/jobs/{job}/cancel", a.job_cancel, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/download/{what:str}", a.download),
