@@ -553,6 +553,21 @@ with the measured heights, row interval and crotch evidence. Stage 3 records tha
 was skipped and can still save SAM 3D Body joints. Stage 4 records an explicit error and stops before Blender;
 joint positions alone cannot replace the missing section measurements. It does not fabricate a torso band.
 
+Before cutting, stage 4 checks part labels on the source mesh and every decimation candidate that can become
+an exported LOD, including the cut-search reference. If a part has no vertices, it tries the fewest recorded
+anatomical shoulder/hip replacements that restore all parts. During recovery, a silhouette root whose segment
+points opposite the recorded anatomical segment must also be replaced, even if it owns a small surface patch.
+A limb still lost to radius-weighted torso
+ownership can instead use unweighted nearest-bone distance to partition the existing surface, retaining the
+joint-plane cuts. If its costume-radius root offset would reach beyond the next joint, the recovered chain's
+root cut uses the recorded shoulder or hip instead. This requires both recorded upper/lower segment midpoints
+inside the source mesh; otherwise
+stage 4 fails with the limb and unsupported segment named. It also fails if the existing surface cannot supply
+every joint-plane band. The same partition serves all LODs, both lanes, and cut-search candidates. Stage 4's
+notes record the replacements and any surface partition. Characters whose part labels are already nonempty
+keep their selected joints and original labelling. This recovery adds no exterior surface and changes no gap
+or export thresholds.
+
 ## Stage 4 texture: refined colour and view projection
 
 Stage 4 first checks whether stage 3f's refined texture can supply the entire sectioned body

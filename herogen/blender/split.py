@@ -55,6 +55,7 @@ class Rig:
     chain: dict          # section -> chain name
     x0: float
     crotch_z: float
+    surface_chains: tuple[str, ...] = ()
 
 
 def build_rig(sk: Skeleton, cut_offsets: dict | None = None) -> Rig:
@@ -84,6 +85,9 @@ def build_rig(sk: Skeleton, cut_offsets: dict | None = None) -> Rig:
         # a radius out 0.10 / 0.13-0.17, one radius out 0.08 / 0.09-0.12. The pivot (the cut's centre, as in
         # R15) then sits about 0.8 cut radii from the estimated anatomical joint.
         planes[side + "Shoulder"] = (sh + SHOULDER_CUT_OFFSET * ra * d1, d1)
+        if side + "Arm" in sk.surface_chains and SHOULDER_CUT_OFFSET * ra >= np.linalg.norm(el - sh):
+            # A merged costume's radius can move the root cut past the elbow, erasing the upper segment.
+            planes[side + "Shoulder"] = (sh, d1)
         planes[side + "Elbow"] = (el, _unit(d1 + d2))
         planes[side + "Wrist"] = (wr, _unit(d2 + d3))
         hip, kn, an, toe = j[side + "Hip"], j[side + "Knee"], j[side + "Ankle"], e[side + "Toe"]
@@ -97,6 +101,8 @@ def build_rig(sk: Skeleton, cut_offsets: dict | None = None) -> Rig:
         # an oblique cut through the hip joint and the crotch 0.10 / 0.19 studs, this cut 0.07 / 0.13.
         dl = _unit(kn - hip)
         planes[side + "Hip"] = (hip + HIP_CUT_OFFSET * rl * dl, dl)
+        if side + "Leg" in sk.surface_chains and HIP_CUT_OFFSET * rl >= np.linalg.norm(kn - hip):
+            planes[side + "Hip"] = (hip, dl)
         planes[side + "Knee"] = (kn, _unit(_unit(kn - hip) + _unit(an - kn)))
         planes[side + "Ankle"] = (an, _unit(an - kn))
         for s in ("UpperArm", "LowerArm", "Hand"):
@@ -106,7 +112,7 @@ def build_rig(sk: Skeleton, cut_offsets: dict | None = None) -> Rig:
     for jn, off in (cut_offsets or {}).items():     # a cut moved along its own normal (see stage 4)
         p, n = planes[jn]
         planes[jn] = (p + float(off) * n, n)
-    return Rig(bones, planes, chain, x0, cz)
+    return Rig(bones, planes, chain, x0, cz, sk.surface_chains)
 
 
 def joint_between(a: str, b: str) -> str | None:
@@ -146,12 +152,18 @@ class Labeller:
         names = list(rig.bones)
         nd = np.stack([ndd[s] for s in names], axis=1)
         nearest = np.array([rig.chain[s] for s in names])[np.argmin(nd, axis=1)]
+        surface_nearest = None
+        if rig.surface_chains:
+            distances = np.stack([seg_dist(pts, a, b) for a, b, _ in rig.bones.values()], axis=1)
+            surface_nearest = np.array([rig.chain[s] for s in names])[np.argmin(distances, axis=1)]
         lab = np.full(len(pts), -1, dtype=np.int64)
         x = pts[:, 0]
         for side in ("Left", "Right"):
             # past the shoulder plane, anything hugging the upper arm (within 1.4 arm radii of its bone) is
             # arm even where the torso bone is nearer, so the shoulder cut stays on the plane at the armpit
             near_arm = (nearest == side + "Arm") | (ndd[side + "UpperArm"] < 1.4)
+            if side + "Arm" in rig.surface_chains:
+                near_arm = surface_nearest == side + "Arm"
             arm = near_arm & (pd[side + "Shoulder"] > 0)
             lab[arm & (pd[side + "Elbow"] <= 0)] = SID[side + "UpperArm"]
             lab[arm & (pd[side + "Elbow"] > 0) & (pd[side + "Wrist"] <= 0)] = SID[side + "LowerArm"]
@@ -159,6 +171,8 @@ class Labeller:
         free = lab < 0
         for side, sgn in (("Left", 1), ("Right", -1)):
             leg = free & ((x - rig.x0) * sgn >= 0) & (pd[side + "Hip"] > 0)
+            if side + "Leg" in rig.surface_chains:
+                leg &= surface_nearest == side + "Leg"
             lab[leg & (pd[side + "Knee"] <= 0)] = SID[side + "UpperLeg"]
             lab[leg & (pd[side + "Knee"] > 0) & (pd[side + "Ankle"] <= 0)] = SID[side + "LowerLeg"]
             lab[leg & (pd[side + "Ankle"] > 0)] = SID[side + "Foot"]
@@ -180,6 +194,8 @@ class Labeller:
             g = pts[:, 0] - self.rig.x0
             return g if sa.startswith("Left") else -g
         nd = self.nd(pts)
+        if self.rig.chain[sa] in self.rig.surface_chains or self.rig.chain[sb] in self.rig.surface_chains:
+            nd = {s: seg_dist(pts, a, b) for s, (a, b, _) in self.rig.bones.items()}
         return nd[sb] - nd[sa]
 
 
