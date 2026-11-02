@@ -139,6 +139,31 @@ class FaceRuleTests(unittest.TestCase):
             self.assertEqual(job.record['tries'], 2)
             self.assertEqual([a['face_candidate'] for a in job.record['attempts']], ['beauty', 'default'])
 
+    def test_conditional_slot_is_due_only_after_two_gate_rejections(self):
+        def job(*outcomes):
+            job = fast.Pass('body+90', 'body+90', False, {'attempts': []}, self.work / 'selected')
+            job.slots, job.conditional = 2, 1
+            for index, outcome in enumerate(outcomes):
+                future = Future()
+                record = {'accepted': outcome == 'accepted', 'reason': outcome,
+                          'attempts': [{'accepted': outcome == 'accepted', 'reason': outcome}]}
+                if outcome == 'budget':
+                    future.set_exception(BudgetStop('cap'))
+                elif outcome == 'cancelled':
+                    future.cancel()
+                else:
+                    future.set_result(None)
+                job.tasks.append((future, None, record, self.work / f'candidate-{index}'))
+                job.completed[index] = record
+            return job
+        self.assertTrue(job('outline moved', 'outline moved').conditional_due())
+        for outcomes in (('accepted', 'outline moved'), ('outline moved', 'accepted'),
+                         ('outline moved', 'budget'), ('outline moved', 'cancelled'),
+                         ('outline moved', 'incomplete'), ('outline moved',),
+                         ('outline moved', 'outline moved', 'outline moved')):
+            with self.subTest(outcomes=outcomes):
+                self.assertFalse(job(*outcomes).conditional_due())
+
     def test_two_eye_regions_and_mouth_are_required(self):
         image = Image.new('RGB', (20, 20))
         face = np.ones((20, 20), bool)
@@ -600,7 +625,23 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(head['recipe_name'], 'RF6B')
         self.assertNotIn('surface_reference_mask', head)
 
-    def run_beauty(self, *, complete=True, default=True, **kwargs):
+    @staticmethod
+    def slot_kind(kw):
+        return 'beauty' if kw.get('recipe_name') else kw.get('attempt_start', 0)
+
+    @classmethod
+    def rejecting(cls, original, reject):
+        """Make the real request, then reject the sample at the gate when `reject(view, kind)`."""
+        def view(*args, **kw):
+            result = original(*args, **kw)
+            record = args[7]
+            if reject(args[4]['name'], cls.slot_kind(kw)) and record['accepted']:
+                record.update(accepted=False, reason='outline moved')
+                record['attempts'][-1].update(accepted=False, reason='outline moved')
+            return result
+        return view
+
+    def run_beauty(self, *, complete=True, default=True, reject=None, **kwargs):
         folder, _ = self.beauty_folder()
         self.tex.idx = np.arange(16)
         prep = self.run / 'prep'
@@ -614,6 +655,8 @@ class FastBeautyStageTests(unittest.TestCase):
                 args[7].update(accepted=False, reason='outline moved')
                 return args[2]
             return original(*args, **kw)
+        if reject is not None:
+            view = self.rejecting(view, reject)
         with mock.patch.object(stage, '_artwork_grade', return_value=None), \
              mock.patch.object(beauty, 'frontal_features', return_value=features), \
              mock.patch.object(B.FaceControl, 'paint') as paint, \
@@ -622,12 +665,16 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertGreater(paint.call_count, 0)
         return record
 
-    def assert_paid_samples(self, *, all_flags=False):
-        # Use the real request-key cache and fake only the paid transport. The fixture's
-        # usual edit override counts cache replays as paid, so it cannot prove this cap.
+    def paid_run(self, *, all_flags=False, reject=None, beauty=True):
+        """Run with the real request-key cache and fake only the paid transport.
+
+        The fixture's usual edit override counts cache replays as paid, so it cannot prove this cap.
+        Every edit is recorded with its view, slot folder, run (nested default-head or main) and key.
+        """
         self.client.mode = 'live'
         paid = Counter()
         ordinary = Counter()
+        edits = []
         lock = threading.Lock()
         render = self.render_many
         def distinct_render(mode, args, log, **kwargs):
@@ -646,12 +693,21 @@ class FastBeautyStageTests(unittest.TestCase):
                 paid[view] += 1
                 if 'face-source' in client.cache_dir.parts:
                     ordinary[view] += 1
+                self.assertLessEqual(paid[view], 3, f'fourth paid sample for {view}')
             png = body['images'][0]['image_url'].split(',', 1)[1]
             return {'data': [{'b64_json': png}]}
+        def edit(client, *args, **kwargs):
+            result = ModelClient.edit_image(client, *args, **kwargs)
+            call = client.log.calls[-1]
+            parts = client.cache_dir.parts
+            with lock:
+                edits.append({'view': parts[-2], 'slot': parts[-1], 'nested': 'face-source' in parts,
+                              'attempt': kwargs.get('attempt', 0), 'key': call['key'], 'cached': call['cached']})
+            return result
         self.client.cache_dir.mkdir()
         self.assertFalse(list(self.client.cache_dir.iterdir()))
         fixture.StageTests.closeup_artwork(self)
-        with mock.patch.object(fixture.FakeClient, 'edit_image', ModelClient.edit_image), \
+        with mock.patch.object(fixture.FakeClient, 'edit_image', edit), \
              mock.patch.object(fixture.FakeClient, '_post', post), \
              mock.patch.object(self, 'render_many', side_effect=distinct_render), \
              mock.patch.object(stage, 'art_references', side_effect=lambda run, cam, *a:
@@ -660,21 +716,97 @@ class FastBeautyStageTests(unittest.TestCase):
              mock.patch('herogen.blender.refine.region_palette.prepare_manifest', return_value='manifest.json'), \
              mock.patch('herogen.blender.refine.region_palette.export_texture',
                         side_effect=lambda m, p, t, *a, **kw: (t, {})):
-            record = self.run_beauty(cap_usd=None, side_beauty=all_flags, region_palette=all_flags)
-        expected = {('hair-' if hair else '') + name for wave in fast.WAVES for name, hair in wave}
-        self.assertEqual(set(paid), expected)
-        self.assertEqual(ordinary, Counter({view: 1 for view in expected}))
-        self.assertTrue(all(count <= 2 for count in paid.values()), paid)
+            if beauty:
+                record = self.run_beauty(cap_usd=None, side_beauty=all_flags, region_palette=all_flags,
+                                         reject=reject)
+            else:
+                with mock.patch.object(stage, '_view', side_effect=self.rejecting(stage._view, reject)):
+                    record = self.run_fast(cap_usd=None)
         self.assertEqual(sum(paid.values()), sum(c['kind'] == 'edit' and not c['cached']
                                                for c in self.client.log.calls))
+        return record, paid, ordinary, edits
+
+    expected_views = property(lambda self: {('hair-' if hair else '') + name
+                                            for wave in fast.WAVES for name, hair in wave})
+
+    def assert_paid_samples(self, *, all_flags=False):
+        record, paid, ordinary, edits = self.paid_run(all_flags=all_flags)
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 2 for view in expected}))
+        self.assertEqual(ordinary, Counter({view: 1 for view in expected}))
         self.assertTrue(all(view['tries'] == 1 for view in record['default_fast_fallback']['views'].values()))
         self.assertTrue(any(c['kind'] == 'edit' and c['cached'] for c in self.client.log.calls))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
 
     def test_uncached_beauty_pays_at_most_two_samples_per_view(self):
         self.assert_paid_samples()
 
     def test_uncached_all_three_pays_at_most_two_samples_per_view(self):
         self.assert_paid_samples(all_flags=True)
+
+    def test_accepted_default_slot_pays_exactly_two_samples_per_view(self):
+        record, paid, ordinary, edits = self.paid_run(reject=lambda view, kind: kind == 'beauty')
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 2 for view in expected}))
+        self.assertEqual(ordinary, Counter({view: 1 for view in expected}))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+        self.assertEqual({k: v['winning_slot'] for k, v in record['views'].items()},
+                         {view: 2 for view in expected})
+        self.assertEqual(record['face_source'], {'source': 'default', 'view': 'head+0', 'attempt': 0,
+                                                 **{k: record['face_source'][k] for k in record['face_source']
+                                                    if k not in ('source', 'view', 'attempt')}})
+
+    def assert_double_rejection(self, all_flags):
+        record, paid, ordinary, edits = self.paid_run(
+            all_flags=all_flags, reject=lambda view, kind: kind in ('beauty', 0))
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 3 for view in expected}))
+        # The default-head run pays ordinary attempts 0 and 1; the main slots replay both.
+        self.assertEqual(ordinary, Counter({view: 2 for view in expected}))
+        for view in expected:
+            nested = {e['attempt']: e['key'] for e in edits if e['nested'] and e['view'] == view}
+            main = {e['slot']: e for e in edits if not e['nested'] and e['view'] == view}
+            self.assertEqual(set(nested), {0, 1})
+            self.assertEqual(main['attempt-1']['key'], nested[0])
+            self.assertEqual(main['attempt-2']['key'], nested[1])
+            self.assertEqual(main['attempt-2']['attempt'], 1)
+            self.assertTrue(main['attempt-1']['cached'] and main['attempt-2']['cached'])
+            self.assertEqual(record['views'][view]['winning_slot'], 3)
+            fallback = record['default_fast_fallback']['views'][view]
+            self.assertEqual((fallback['accepted'], fallback['tries'], fallback['selected_attempt']),
+                             (True, 2, 1))
+        self.assertEqual(record['face_source']['source'], 'default')
+        self.assertEqual(record['face_source']['attempt'], 1)
+        self.assertEqual(record['views']['head+0']['selected_attempt'], 2)
+        atlas = self.run / 'blender-work/texture-refine/default-fast/blender-work/texture-refine/texture.png'
+        import hashlib
+        self.assertEqual(record['face_source']['atlas_sha256'],
+                         hashlib.sha256(atlas.read_bytes()).hexdigest())
+
+    def test_double_rejection_pays_one_shared_third_sample(self):
+        self.assert_double_rejection(False)
+
+    def test_double_rejection_with_all_flags_pays_one_shared_third_sample(self):
+        self.assert_double_rejection(True)
+
+    def test_every_rejection_never_pays_a_fourth_sample(self):
+        record, paid, ordinary, edits = self.paid_run(reject=lambda view, kind: True)
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 3 for view in expected}))
+        self.assertEqual(ordinary, Counter({view: 2 for view in expected}))
+        self.assertFalse(any(v['accepted'] for v in record['views'].values()))
+        self.assertTrue(all(v['tries'] == 3 for v in record['views'].values()))
+        self.assertEqual(record['face_source']['source'], 'default-fast-fallback')
+        self.assertFalse([e for e in edits if e['slot'] not in ('attempt-0', 'attempt-1', 'attempt-2')])
+
+    def test_plain_fast_never_launches_a_conditional_slot(self):
+        record, paid, ordinary, edits = self.paid_run(beauty=False, reject=lambda view, kind: True)
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 2 for view in expected}))
+        self.assertFalse(ordinary)
+        self.assertEqual(sorted((e['slot'], e['attempt']) for e in edits),
+                         sorted([('attempt-0', 0), ('attempt-1', 1)] * len(expected)))
+        self.assertTrue(all(v['tries'] == 2 and not v['accepted'] for v in record['views'].values()))
 
     def test_complete_beauty_front_is_kept_and_progress_and_note_survive(self):
         record = self.run_beauty(user_note=NOTE, cap_usd=5)
