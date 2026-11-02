@@ -245,6 +245,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     budget = Budget(client, cap_usd, prior, state=old_budget) if cap_usd is not None else None
     if budget is not None:
         prior = budget.state["spent_usd_total"]
+    # Guards the record and budget state. Without spend limits there is no budget, but fast waves still share it.
+    state_lock = budget.lock if budget is not None else threading.RLock()
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(upscale_texture=upscale_texture, refine_profile=refine_profile),
                     estimate_max_samples_usd=cost_estimate(True, upscale_texture, refine_profile=refine_profile),
@@ -298,7 +300,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             previous_settle(cost)
 
     def save(**extra):
-        with budget.lock:
+        with state_lock:
             return locked_save(**extra)
 
     def locked_save(**extra):
@@ -369,7 +371,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if refine_profile == "fast":
             from .fast import waves
             current, stopped = waves(client, prep, current, tex, cams, work, rec.data, timeout,
-                                     cover, head_found, recipe, save, budget.lock, user_note=user_note)
+                                     cover, head_found, recipe, save, state_lock, user_note=user_note)
         else:
             for step, (name, hair) in enumerate(sequence):
                 key = ("hair-" if hair else "") + name
