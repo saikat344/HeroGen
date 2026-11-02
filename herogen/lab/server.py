@@ -167,7 +167,13 @@ def safe_service_asset(name: str) -> tuple[Path, str] | None:
     parts = decoded.split("/")
     if not (decoded in SERVICE_ASSET_FILES or (len(parts) > 1 and parts[0] in SERVICE_ASSET_FOLDERS)):
         return None
-    return safe_static_file(name, SERVICE_STATIC_DIR)
+    found = safe_static_file(name, SERVICE_STATIC_DIR)
+    if found is None:
+        return None
+    # Symlinks included, the file must stay inside the allowed file or folder, not just the service's static folder.
+    root = SERVICE_STATIC_DIR.resolve()
+    allowed = root / decoded if decoded in SERVICE_ASSET_FILES else root / parts[0]
+    return found if found[0].is_relative_to(allowed) else None
 
 
 class LabHandler(BaseHTTPRequestHandler):
