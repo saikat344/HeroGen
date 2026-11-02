@@ -17,3 +17,12 @@ class GenerationTest(unittest.TestCase):
                                  'tests/service_preview.test.mjs'], cwd=Path(__file__).resolve().parents[1],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+@unittest.skipUnless(shutil.which('node'), 'Node is required for Build log checks')
+class BuildLogTest(unittest.TestCase):
+    def test_build_log_rows_copy_and_fallback(self):
+        for name in ('tests/service_buildlog.test.mjs', 'tests/service_workbench.test.mjs'):
+            result = subprocess.run([shutil.which('node'), '--experimental-vm-modules', '--test', name],
+                                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
