@@ -378,12 +378,6 @@ class CompareThroughServerTest(unittest.TestCase):
         self.assertFalse((self.cache / client_mod.LEDGER).exists())  # refused before any attempt
 
 
-def _png_b64() -> str:
-    buf = io.BytesIO()
-    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
 class BuildLogEventsTest(unittest.TestCase):
     """A fake transport drives the real request path; the build log's event sequence is asserted."""
 
@@ -392,7 +386,7 @@ class BuildLogEventsTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.events = Path(self.tmp.name) / events.FILE
         self.limiter = retry.SharedLimiter(Path(self.tmp.name) / "limiter", "k")
-        self.image = (200, {}, {"data": [{"b64_json": _png_b64()}]})
+        self.image = (200, {}, {"data": [{"b64_json": _png_b64("red")}]})
 
     def _generate(self, fast, *answers, stage=None):
         queue = list(answers)
