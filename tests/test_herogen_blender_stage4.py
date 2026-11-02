@@ -36,7 +36,54 @@ def _open_edges(faces):
 
 @unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
 class FastJointRecordTests(unittest.TestCase):
-    def test_unverified_seams_are_informational_but_measured_gaps_still_gate(self):
+    def finish_fast(self, rec, empty_part=False, triangles=1):
+        from types import SimpleNamespace
+        from herogen.blender.stage4 import _record_fast_outputs
+
+        meshes = [SimpleNamespace(name=n, verts=[(0, 0, 0)], faces=[] if empty_part and n == "RightHand"
+                                  else [(0, 0, 0)] * triangles) for n in SECTIONS]
+        with mock.patch("herogen.blender.glb.load_glb", return_value=SimpleNamespace(meshes=meshes)):
+            _record_fast_outputs(rec, ("high", "low"))
+        return rec.finish()
+
+    def make_record(self, tmp):
+        from herogen.blender.record import StageRecord, check
+
+        rec = StageRecord(Path(tmp), 4, "game body")
+        (rec.run / "04-body").mkdir()
+        rec.data["outputs"] = [f"04-body/{lod}.glb" for lod in ("high", "low")]
+        for p in rec.data["outputs"]:
+            (rec.run / p).write_bytes(b"glTF")
+        rec.add(check("sections_non_empty", 15, 15))
+        return rec
+
+    def test_fast_measured_gap_failure_is_informational_with_visible_note(self):
+        from herogen.blender.record import check
+        from herogen.blender.stage4 import _gap_check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self.make_record(tmp)
+            rec.add(_gap_check("max_joint_gap_high", .417))
+            rec.add(_gap_check("max_joint_gap_low", .387))
+            for name in ("pivots_in_joint_region", "rest_iou_with_covers_front", "texture_colour_error_front",
+                         "texture_ssim_front", "texture_transfer_views", "joint_error_max_synthetic"):
+                rec.add(check(name, 0, passed=False))
+            result = self.finish_fast(rec)
+            self.assertTrue(result["ok"])
+            checks = {c["name"]: c for c in result["checks"]}
+            for name in ("max_joint_gap_high", "max_joint_gap_low"):
+                self.assertFalse(checks[name]["gate"])
+                self.assertFalse(checks[name]["pass"])
+                self.assertEqual(checks[name]["threshold"], .15)
+            self.assertEqual(checks["max_joint_gap_high"]["value"], .417)
+            self.assertEqual(checks["max_joint_gap_low"]["value"], .387)
+            self.assertTrue(all(not c["gate"] for c in result["checks"][1:9]))
+            self.assertIn("Roblox files ready; some joints have visible seams (0.42 studs at the widest)",
+                          result["notes"])
+            self.assertIn("Some shape or texture details may need refinement.", result["notes"])
+            self.assertEqual(json.loads((rec.run / "stage-4.json").read_text()), result)
+
+    def test_unverified_seams_do_not_change_full_lane_measured_gap_gates(self):
         from herogen.blender.record import StageRecord
         from herogen.blender.stage4 import GAP_GATE, _gap_check, _record_unverified
 
@@ -54,6 +101,17 @@ class FastJointRecordTests(unittest.TestCase):
                 self.assertTrue(result["checks"][1]["gate"])
                 self.assertEqual(result["checks"][1]["threshold"], .15)
 
+    def test_fast_seam_note_uses_the_measurement_result_before_rounding(self):
+        from herogen.blender.stage4 import GAP_GATE, _gap_check
+
+        for gap, visible in ((GAP_GATE, False), (GAP_GATE + .000001, True)):
+            with self.subTest(gap=gap), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                rec.add(_gap_check("max_joint_gap_high", gap))
+                result = self.finish_fast(rec)
+                self.assertTrue(result["ok"])
+                self.assertEqual("visible seams" in result["notes"], visible)
+
     def test_no_measured_gaps_is_unknown_rather_than_zero(self):
         from herogen.blender.stage4 import _gap_check, _max_gap
 
@@ -69,14 +127,78 @@ class FastJointRecordTests(unittest.TestCase):
         self.assertFalse(result["gate"])
 
     def test_unverified_seam_does_not_excuse_an_empty_final_part(self):
-        from herogen.blender.record import StageRecord, check
+        from herogen.blender.record import check
         from herogen.blender.stage4 import _record_unverified
 
         with tempfile.TemporaryDirectory() as tmp:
-            rec = StageRecord(Path(tmp), 4, "game body")
+            rec = self.make_record(tmp)
             _record_unverified(rec, {"RightWrist": "empty section RightHand"})
             rec.add(check("sections_non_empty", 14, 15))
-            self.assertFalse(rec.finish()["ok"])
+            result = self.finish_fast(rec)
+            self.assertFalse(result["ok"])
+            self.assertNotIn("Roblox files ready", result["notes"])
+
+    def test_missing_or_empty_output_stays_a_hard_failure(self):
+        for empty in (True, False):
+            with self.subTest(empty=empty), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                p = rec.run / "04-body/low.glb"
+                if empty:
+                    p.write_bytes(b"")
+                else:
+                    p.unlink()
+                result = self.finish_fast(rec)
+                self.assertFalse(result["ok"])
+                c = next(c for c in result["checks"] if c["name"] == "output_files")
+                self.assertTrue(c["gate"])
+                self.assertEqual(c["missing_or_empty"], ["04-body/low.glb"])
+
+    def test_empty_exported_r15_part_stays_a_hard_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self.make_record(tmp)
+            result = self.finish_fast(rec, empty_part=True)
+            self.assertFalse(result["ok"])
+            for c in result["checks"]:
+                if c["name"].startswith("exported_parts_"):
+                    self.assertTrue(c["gate"])
+                    self.assertFalse(c["pass"])
+                    self.assertEqual(c["value"], 14)
+                    self.assertEqual(c["missing_or_empty"], ["RightHand"])
+
+    def test_invalid_topology_and_profile_limits_stay_hard_failures(self):
+        from herogen.blender.record import check
+
+        for name in ("open_edges", "watertight_parts", "triangles_high", "triangles_total", "triangles_Head",
+                     "texture_max_px"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                rec.add(check(name, 1, passed=False))
+                self.assertFalse(self.finish_fast(rec)["ok"])
+                c = next(c for c in rec.data["checks"] if c["name"] == name)
+                self.assertTrue(c["gate"])
+
+    def test_exported_mesh_over_roblox_limit_stays_a_hard_failure(self):
+        from herogen.roblox import MESH_TRIANGLE_LIMIT
+
+        for triangles, expected in ((MESH_TRIANGLE_LIMIT, True), (MESH_TRIANGLE_LIMIT + 1, False)):
+            with self.subTest(triangles=triangles), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                result = self.finish_fast(rec, triangles=triangles)
+                self.assertEqual(result["ok"], expected)
+                for c in result["checks"]:
+                    if c["name"].startswith("exported_triangles_per_mesh_"):
+                        self.assertTrue(c["gate"])
+                        self.assertEqual(c["pass"], expected)
+
+    def test_export_reader_failure_stays_loud(self):
+        from herogen.blender.stage4 import _record_fast_outputs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self.make_record(tmp)
+            with mock.patch("herogen.blender.glb.load_glb", side_effect=ValueError("invalid GLB")):
+                with self.assertRaisesRegex(ValueError, "invalid GLB"):
+                    _record_fast_outputs(rec, ("high", "low"))
+            self.assertFalse((rec.run / "stage-4.json").exists())
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender(), "Blender is required")
@@ -365,7 +487,7 @@ class TestSections(SyntheticBase):
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
 class TestEndToEndBlender(SyntheticBase):
-    def test_fast_rimless_mesh_exports_fifteen_parts_and_preserves_gap_failure(self):
+    def test_fast_rimless_mesh_exports_fifteen_parts_with_informational_gap_failure(self):
         from herogen.blender import glb, stage4
 
         run = self.tmp / "rimless"
@@ -395,7 +517,7 @@ class TestEndToEndBlender(SyntheticBase):
         def violated(*args, **kwargs):
             result = measure(*args, **kwargs)
             for row in result.values():
-                # Waist retains a shared rim in this mesh. Its actual gate must still run.
+                # Waist retains a shared rim in this mesh. Its gap must still be measured.
                 self.assertIn("Waist", row)
                 row["Waist"] = stage4.GAP_GATE + .01
             return result
@@ -403,7 +525,7 @@ class TestEndToEndBlender(SyntheticBase):
         with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "1"}), \
                 mock.patch.object(pose, "joint_gaps", side_effect=violated):
             result = stage4.run_stage4(run, cut_search=False)
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
         recorded = json.loads((run / "stage-4.json").read_text())
         unknown = {row["joint"]: row for row in recorded["unverified_joints"]}
         self.assertIn("RightElbow", unknown)
@@ -411,10 +533,13 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertIn("right elbow seam", unknown["RightElbow"]["message"])
         checks = {c["name"]: c for c in recorded["checks"]}
         self.assertFalse(checks["measurable_joints"]["gate"])
-        self.assertTrue(checks["max_joint_gap_high"]["gate"])
+        self.assertFalse(checks["max_joint_gap_high"]["gate"])
         self.assertFalse(checks["max_joint_gap_high"]["pass"])
+        self.assertIn("Roblox files ready; some joints have visible seams (0.16 studs at the widest)",
+                      recorded["notes"])
         self.assertEqual(checks["sections_non_empty"]["value"], 15)
         body = json.loads((run / "04-body" / "sections.json").read_text())
+        self.assertEqual(body["checks"], recorded["checks"])
         self.assertTrue(all(s["triangles_high"] > 0 for s in body["sections"]))
         meshes = glb.load_glb(run / "04-body" / "high.glb").meshes
         self.assertEqual({m.name for m in meshes}, set(SECTIONS))
