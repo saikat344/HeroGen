@@ -203,7 +203,8 @@ def enabled() -> bool:
 
 @contextlib.contextmanager
 def step(key: Any) -> Iterator[None]:
-    token = _step.set(str(key))
+    """The step for events in this block; ``None`` clears it, so the stage's environment decides."""
+    token = _step.set(None if key is None else str(key))
     try:
         yield
     finally:
@@ -212,7 +213,7 @@ def step(key: Any) -> Iterator[None]:
 
 def set_step(key: Any) -> contextvars.Token:
     """Set the step for the rest of this context (a stage function that owns its thread); `reset_step` undoes it."""
-    return _step.set(str(key))
+    return _step.set(None if key is None else str(key))
 
 
 def reset_step(token: contextvars.Token) -> None:

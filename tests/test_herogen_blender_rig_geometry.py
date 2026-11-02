@@ -12,6 +12,7 @@ from unittest import mock
 
 import numpy as np
 
+from herogen.pipeline import events  # noqa: E402
 from herogen.blender import body_joints, carve, joints, rig_geometry, split, synth, views
 
 
@@ -21,7 +22,7 @@ def captured_events():
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "events.jsonl"
         try:
-            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": "4"}):
+            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": "4"}), events.step(None):
                 yield out
         finally:
             if path.exists():
