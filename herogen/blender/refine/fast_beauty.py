@@ -27,6 +27,16 @@ def window_slope(facing, k):
     return I.VIS_WINDOW / 2 * np.sqrt(2) * np.sqrt(1 - cos * cos) / cos / k
 
 
+def unit_normals(normals):
+    """Texel normals at unit length.
+
+    The prepared normal map is decoded as `rgb * 2 - 1` and is not renormalised, so a short normal
+    would understate the texel's facing and overstate the slope allowance.
+    """
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    return normals / np.maximum(length, 1e-12)
+
+
 def eye_quality(candidate, default, boxes):
     """Compare corresponding eye detail at a fixed scale, without another model call.
 
@@ -625,7 +635,7 @@ class FaceControl:
         xi, yi = np.clip(xi, 0, w - 1), np.clip(yi, 0, h - 1)
         front = ndimage.minimum_filter(np.where(view['valid'], view['depth'], np.inf), size=I.VIS_WINDOW)
         _, _, forward = axes(view['cam'])
-        facing = -(tex.N @ forward)
+        facing = -(unit_normals(tex.N) @ forward)
         k = px_per_unit(view['cam'])
         visible = (inside & region[yi, xi] & view['valid'][yi, xi]
                    & (d <= front[yi, xi] + 3 / k + .001 * tex.height + window_slope(facing, k))
