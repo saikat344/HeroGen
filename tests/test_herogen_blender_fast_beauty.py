@@ -975,47 +975,99 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['face_source']['atlas_sha256'],
                          hashlib.sha256(atlas.read_bytes()).hexdigest())
 
-    def logged_paid_run(self, **kwargs):
-        """`paid_run` with the build log on: the run's record and its view outcome lines, per view."""
+    def logged(self, run):
+        """Run with the build log on; the log's lines, each inside the schema."""
         from herogen.pipeline import events
         log = self.run / 'events.jsonl'
         with mock.patch.dict('os.environ', {events.ENV_FILE: str(log)}):
-            record, *_ = self.paid_run(**kwargs)
-        lines = [json.loads(line) for line in log.read_text().splitlines()]
+            try:
+                result = run()
+            finally:
+                lines = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         self.assertEqual([events.validate(e) for e in lines], lines)
-        outcomes = {}
+        return result, lines
+
+    @staticmethod
+    def outcomes(lines):
+        """Per view: its extra-try, selected and kept lines as (what, try, launched tries)."""
+        out = {}
         for e in lines:
             if e['kind'] == 'decision' and e['what'] in ('view_selected', 'view_kept', 'extra_try'):
-                outcomes.setdefault(e['view'], []).append((e['what'], e.get('try'), (e.get('m') or {}).get('tries')))
-        repaints = [e for e in lines if e['kind'] == 'call_start' and e['who'] == 'muse-image']
-        # The default-head sub-run's requests are real calls too, logged without a try number.
-        self.assertTrue(all('try' in e or e.get('view') for e in repaints))
-        starts = Counter((e['view'], e['try']) for e in repaints if 'try' in e)
+                out.setdefault(e['view'], []).append((e['what'], e.get('try'), (e.get('m') or {}).get('tries')))
+        return out
+
+    def logged_paid_run(self, **kwargs):
+        """`paid_run` with the build log on: the record, view outcome lines and repaint call ends."""
+        (record, paid, *_), lines = self.logged(lambda: self.paid_run(**kwargs))
+        ends = [e for e in lines if e['kind'] == 'call_end' and e['who'] == 'muse-image' and e['what'] == 'repaint']
+        # Every paid repaint appears exactly once as a paid call row; replays of it are reused rows at $0.
+        self.assertEqual(sum(e['outcome'] != 'reused' for e in ends), sum(paid.values()))
+        self.assertTrue(all(e['usd'] == 0 for e in ends if e['outcome'] == 'reused'))
         self.assertFalse([e for e in lines if e['kind'] == 'decision' and e['what'] == 'wave' and e['n'] < 10
                           and e['m']['wave'] == 1])   # only the main run's waves are announced
+        paid_tries = Counter((e['view'], e.get('try')) for e in ends if e['outcome'] != 'reused')
+        # One line says where the face paint comes from, matching the record.
+        source = record['face_source']
+        faces = [(e['why'], e.get('view'), e.get('try')) for e in lines
+                 if e['kind'] == 'decision' and e['what'] == 'face_source']
+        chosen = source['source'] in ('beauty', 'default')
+        self.assertEqual(faces, [(source['source'].replace('-', '_'), source['view'] if chosen else None,
+                                  record['views'][source['view']]['winning_slot'] if chosen else None)])
         # The face close-up's beauty slots choose their own winner and log no view outcome.
-        return record, outcomes, starts, sorted(self.expected_views - {'head+0'})
+        return record, self.outcomes(lines), paid_tries, sorted(self.expected_views - {'head+0'})
 
     def test_build_log_selects_an_accepted_conditional_third_try(self):
-        record, outcomes, starts, views = self.logged_paid_run(reject=lambda view, kind: kind in ('beauty', 0))
+        record, outcomes, paid, views = self.logged_paid_run(reject=lambda view, kind: kind in ('beauty', 0))
         for view in views:
             self.assertEqual(record['views'][view]['winning_slot'], 3)
             # Two rejections start a third try; it wins, and the view is never reported as keeping its paint.
             self.assertEqual(outcomes[view], [('extra_try', 3, None), ('view_selected', 3, 3)])
-            self.assertEqual(starts[view, 3], 1)
+            # The default-head run pays the third sample first, and that payment is logged as try 3.
+            self.assertEqual(paid[view, 3], 1)
 
     def test_build_log_without_a_needed_third_try(self):
-        record, outcomes, starts, views = self.logged_paid_run()
+        record, outcomes, paid, views = self.logged_paid_run()
         for view in views:
             slot = record['views'][view]['winning_slot']
             self.assertEqual(outcomes[view], [('view_selected', slot, 2)])
-            self.assertEqual(starts[view, 3], 0)
+            self.assertEqual(paid[view, 3], 0)
 
     def test_build_log_counts_the_third_try_when_every_try_is_rejected(self):
-        record, outcomes, starts, views = self.logged_paid_run(reject=lambda view, kind: True)
+        record, outcomes, paid, views = self.logged_paid_run(reject=lambda view, kind: True)
         for view in views:
             self.assertEqual(record['views'][view]['tries'], 3)
             self.assertEqual(outcomes[view], [('extra_try', 3, None), ('view_kept', None, 3)])
+            self.assertEqual(paid[view, 3], 1)
+
+    def test_build_log_after_a_face_verdict_error_ends_every_try(self):
+        import time
+        original = stage._view
+        def view(*args, **kwargs):
+            folder = args[6]
+            if args[4]['name'] == 'body+90' and folder.name == 'attempt-1' and 'default-fast' not in folder.parts:
+                time.sleep(.3)
+                raise ApiError('late side retry failure')
+            return original(*args, **kwargs)
+        def broken(*args, **kwargs):
+            raise ValueError('Eye comparison needs identical view dimensions')
+        def run():
+            with mock.patch.object(stage, '_view', side_effect=view), \
+                 mock.patch.object(B, 'eye_quality', side_effect=broken), \
+                 self.assertRaisesRegex(ApiError, 'late side retry failure'):
+                self.run_beauty(cap_usd=5)
+        _, lines = self.logged(run)
+        results = Counter((e['view'], e['try']) for e in lines if e['kind'] == 'decision' and e['what'] == 'view_result')
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        launched = [(key, n) for key, v in record['views'].items() if v['tries'] and key != 'head+0'
+                    for n in (1, 2)]
+        # Every launched try has exactly one end: judged, cancelled or failed.
+        self.assertEqual({k: results[k] for k in launched}, {k: 1 for k in launched})
+        failed = [e for e in lines if e['kind'] == 'decision' and e['what'] == 'view_result'
+                  and e['view'] == 'body+90' and e['try'] == 2]
+        self.assertEqual([(e['ok'], e['why']) for e in failed], [(False, 'model_error')])
+        outcomes = self.outcomes(lines)
+        for key, _ in launched:
+            self.assertEqual(len([o for o in outcomes.get(key, []) if o[0] != 'extra_try']), 1, key)
 
     def test_double_rejection_pays_one_shared_third_sample(self):
         self.assert_double_rejection(False)
