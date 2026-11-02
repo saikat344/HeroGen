@@ -27,8 +27,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
+# Run locally from the repository, the checkout root goes on the path. In a Modal container the script sits at
+# /root/modal_smoke.py with `herogen` added to the image, so there is no checkout root to add.
+_parents = Path(__file__).resolve().parents
+ROOT = _parents[2] if len(_parents) > 2 and (_parents[2] / "herogen").is_dir() else None
+if ROOT is not None and str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from herogen.pipeline import events  # noqa: E402
