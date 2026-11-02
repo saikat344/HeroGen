@@ -17,6 +17,8 @@ class TestVariationsBrowser(ServiceBrowserCase):
 
     def test_tree_compare_and_mobile_list_select_the_version(self):
         root = self.ready(); t = self.tab
+        # A fixed desktop size, so the compare dialog's two canvases sit side by side in view whatever the window.
+        t.call('Emulation.setDeviceMetricsOverride', width=1440, height=900, deviceScaleFactor=1, mobile=False)
         self.screenshot('variations-result.png')
         t.eval("document.querySelector('#refineVersion').click()")
         self.assertTrue(t.eval("document.querySelector('#refineNoteWrap').hidden"))
