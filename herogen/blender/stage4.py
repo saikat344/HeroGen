@@ -339,7 +339,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         rec.finish()
         raise
     rec.add(shape_check)
-    sk = joints.estimate(vs, height)
+    try:
+        sk = joints.estimate(vs, height)
+    except joints.JointEstimationError as exc:
+        reason = (f"stage 4 cannot construct R15 sections: {exc}. "
+                  "SAM 3D Body joint positions alone do not supply the silhouette radii, hand/toe endpoints "
+                  "and crotch height needed for sectioning")
+        rec.note(reason)
+        rec.finish({"ok": False, "status": "error", "error": reason})
+        raise joints.JointEstimationError(reason) from exc
     silhouette_joints = sk.as_json()
     jrec = body_joints.load_joints(run / "03-joints.json")
     joints_source = "silhouette"

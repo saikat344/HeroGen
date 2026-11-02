@@ -543,6 +543,13 @@ kept under `sources`, and joints more than 0.5 studs apart are listed in `flagge
 the file holds the silhouette finder's joints only (`"source": "silhouette"`), and stage 4 finds them again
 itself.
 
+Stage 4 still needs the silhouette skeleton's part radii, hand/toe endpoints and crotch height when it uses
+SAM 3D Body joint positions. If the silhouette's crotch/armpit estimates leave no waist search rows (for
+example, short arms below the crotch prior on a robed figure), joint estimation raises `JointEstimationError`
+with the measured heights, row interval and crotch evidence. Stage 3 records that the optional arm-depth prior
+was skipped and can still save SAM 3D Body joints. Stage 4 records an explicit error and stops before Blender;
+joint positions alone cannot replace the missing section measurements. It does not fabricate a torso band.
+
 ## Stage 4 texture: refined colour and view projection
 
 Stage 4 first checks whether stage 3f's refined texture can supply the entire sectioned body
