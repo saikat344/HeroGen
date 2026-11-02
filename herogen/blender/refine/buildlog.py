@@ -6,6 +6,8 @@ Without a build-log file (`herogen.pipeline.events`) every function is a no-op.
 """
 from __future__ import annotations
 
+import functools
+
 from herogen.pipeline import events
 
 STEP = "3f"
@@ -23,6 +25,19 @@ WHY = {
     "not attempted: model error": "model_error",
     "not attempted: face unavailable": "face_unavailable",
 }
+
+
+def _quiet(fn):
+    """Emit only when the build log is on, and never let working out a line fail the stage."""
+    @functools.wraps(fn)
+    def emit(*args, **kwargs):
+        if not events.enabled():
+            return
+        try:
+            fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - the log describes the stage; it must never change its outcome
+            events.emit("skip", step=STEP, what="build_log_detail", why="unreadable")
+    return emit
 
 
 def why(reason) -> str:
@@ -63,6 +78,7 @@ def view_key(cam: dict, hair: bool) -> str:
     return ("hair-" if hair else "") + str(cam.get("name", ""))
 
 
+@_quiet
 def try_result(view: str, trial: dict, ok: bool, reason=None, limits=None, number=None) -> None:
     """One try judged against its gates (accepted, or rejected with the reason). ``number`` is the try's slot
     when it runs as one of several parallel tries; otherwise the record's own try number."""
@@ -70,32 +86,38 @@ def try_result(view: str, trial: dict, ok: bool, reason=None, limits=None, numbe
                 why=None if ok else why(reason), m=measures(trial, limits) or None)
 
 
+@_quiet
 def try_cancelled(view: str, number: int, private: dict, calls: list) -> None:
-    """A hedged try stopped because a lower try was accepted. ``paid`` is 1 when its repaint request had already
-    been billed, 0 when it was stopped before the request."""
+    """A hedged try stopped because a lower try was accepted. ``paid`` is 1 when any request of the try (its
+    repaint or the SAM 3.1 checks on it) may already have been billed, 0 when it was stopped before any;
+    ``paid_usd`` is their estimate. Reused (cached) answers cost nothing. A request logged without its own cost
+    (the full-lane client, a timeout that may have been billed) counts at its list price."""
+    from herogen.pipeline.client import call_cost
     trial = (private.get("attempts") or [{}])[-1]
-    from herogen.pipeline.client import IMAGE_MODEL
-    paid = any(c.get("model") == IMAGE_MODEL and not c.get("cached") and (c.get("cost_usd") or 0) > 0
-               for c in calls)
+    spent = sum(call_cost(c) for c in calls if not c.get("cached"))
     events.emit("decision", step=STEP, what="view_result", view=view, try_=trial.get("try", number), ok=False,
-                why="lower_try_accepted", m={**measures(trial), "paid": int(paid)})
+                why="lower_try_accepted", m={**measures(trial), "paid": int(spent > 0), "paid_usd": round(spent, 6)})
 
 
+@_quiet
 def view_selected(view: str, number: int, tries: int) -> None:
     """The view keeps the repaint of try ``number`` (the lowest accepted try)."""
     events.emit("decision", step=STEP, what="view_selected", view=view, try_=number, ok=True, m={"tries": tries})
 
 
+@_quiet
 def view_kept(view: str, reason, tries: int) -> None:
     """No try passed: the view keeps its original paint."""
     events.emit("decision", step=STEP, what="view_kept", view=view, ok=False, why=why(reason),
                 m={"tries": tries} if tries else None)
 
 
+@_quiet
 def view_skipped(view: str, reason) -> None:
     events.emit("skip", step=STEP, what="view", view=view, why=why(reason))
 
 
+@_quiet
 def wave(number: int, views: int, tries: int, from_version: int = 0) -> None:
     m = {"wave": number, "views": views, "tries": tries}
     if from_version:
@@ -103,15 +125,18 @@ def wave(number: int, views: int, tries: int, from_version: int = 0) -> None:
     events.emit("decision", step=STEP, what="wave", n=views * tries, m=m)
 
 
+@_quiet
 def rendered(number: int, cameras: int, seconds: float) -> None:
     events.emit("local", step=STEP, what="views_rendered", s=seconds, m={"wave": number, "cameras": cameras})
 
 
+@_quiet
 def head_probe(found: bool, seconds: float) -> None:
     """The front render was searched for the head (the face close-up needs it)."""
     events.emit("local", step=STEP, what="head_probe", ok=bool(found), s=seconds)
 
 
+@_quiet
 def version(n: int, wave_number, accepted: int, views: int, rejected: int, pending: int) -> None:
     m = {"rejected": rejected, "pending": pending}
     if type(wave_number) is int:
@@ -119,6 +144,7 @@ def version(n: int, wave_number, accepted: int, views: int, rejected: int, pendi
     events.emit("version", step=STEP, n=n, passed=accepted, of=views, m=m)
 
 
+@_quiet
 def skipped(reason: str) -> None:
     """The whole step kept its unrefined texture (``spend_cap``, ``views_rejected``)."""
     events.emit("skip", step=STEP, what="texture_refine", why=reason)
