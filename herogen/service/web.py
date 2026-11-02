@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import html
 import json
 import logging
 import math
@@ -42,7 +41,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from herogen.service import bundle, labapi
+from herogen.service import bundle, labapi, pages
 from herogen.service.analytics import (
     DEFAULT_DAYS,
     MAX_DAYS,
@@ -79,6 +78,7 @@ JSON_LIMIT = 16 * 1024
 EVENTS_LIMIT = 4 * 1024
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
+NON_PAGE_PREFIXES = ("/api/", "/assets/", "/static/", "/runs/", "/gallery-assets/")
 DOWNLOADS = ("glb", "roblox")
 # What a hero card shows, best first: (source, stage that writes it, run-relative file). The uploaded sketch, kept
 # outside the run folder, is the last fallback for an upload whose stage 0 has not recorded yet.
@@ -321,23 +321,29 @@ class App:
             if p.is_file():
                 text = p.read_text(encoding="utf-8").replace("{{retention_days}}", str(self.s.retention_days))
                 text = text.replace("{{terms_version}}", self.s.terms_version)
-        if text is None:
-            body = f"<p>The {title} has not been published yet.</p>"
-            status = 404
-        else:
-            body = f"<pre class=\"legal\">{html.escape(text)}</pre>"
-            status = 200
-        page = (f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" "
-                f"content=\"width=device-width, initial-scale=1\"><title>HeroGen {title}</title>"
-                f"<link rel=\"icon\" href=\"/assets/icons/favicon.svg\" type=\"image/svg+xml\">"
-                f"<link rel=\"stylesheet\" href=\"/assets/tokens.css\">"
-                f"<link rel=\"stylesheet\" href=\"/assets/app.css\">"
-                f"</head><body><main class=\"doc\"><p><a href=\"/\">HeroGen</a></p>"
-                f"<h1>{title}</h1>{body}</main></body></html>")
-        csp = ("default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; "
-               "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-        return Response(page, status_code=status, media_type="text/html; charset=utf-8",
-                        headers={"Content-Security-Policy": csp})
+        return self.html_page(title, pages.legal_main(title, text), "doc-body", 200 if text is not None else 404)
+
+    def html_page(self, title: str, main: str, body_class: str, status: int = 200) -> Response:
+        """A server-rendered page in the marketing header and footer, with the no-inline-code page CSP."""
+        return Response(pages.shell(title, main, body_class), status_code=status,
+                        media_type="text/html; charset=utf-8", headers={"Content-Security-Policy": pages.PAGE_CSP})
+
+    async def error_page(self, request: Request, status: int) -> Response:
+        """The HTML 404 or 500 for a page route; the 404 shows one lazy-loaded gallery hero when there is one."""
+        art = None
+        if status == 404 and self.s.gallery_dir is not None:
+            try:
+                from herogen.service.gallery import catalog
+                items = await self.call(catalog, self.s.gallery_dir)
+                if items:
+                    # Stable per path, so a reload shows the same hero and different dead links show different ones.
+                    art = items[sum(request.url.path.encode()) % len(items)]
+            except Exception:  # the art is a garnish: never let the gallery turn a 404 into something else
+                art = None
+        heading = "Page not found" if status == 404 else "Something went wrong"
+        resp = self.html_page(heading, pages.error_main(status, art), "error-body", status)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def public_gallery(self, request: Request) -> Response:
         from herogen.service.gallery import GalleryUnavailable, catalog
@@ -1243,6 +1249,13 @@ class App:
     async def not_found(self, request: Request) -> Response:
         return error(404, "not_found", "Not found.")
 
+    @staticmethod
+    def is_page_request(request: Request) -> bool:
+        """A GET for a page: not the API and not a file route, which keep their JSON errors."""
+        path = request.url.path
+        return (request.method in ("GET", "HEAD") and not path.startswith(NON_PAGE_PREFIXES)
+                and path not in ("/api", "/healthz"))
+
 
 def csrf_guard(app_state: App):
     """Pure ASGI middleware refusing unsafe methods that are cross-site or lack a valid CSRF token."""
@@ -1310,11 +1323,15 @@ def create_app(svc: Services) -> SecurityHeaders:
     async def http_error(request: Request, exc: HTTPException) -> Response:
         codes = {401: "signed_out", 403: "forbidden", 404: "not_found", 405: "method", 413: "too_large",
                  415: "media_type"}
+        if exc.status_code == 404 and a.is_page_request(request):
+            return await a.error_page(request, 404)
         msg = {401: "Open your guest workspace to continue.", 413: "The request is too large."}.get(exc.status_code, str(exc.detail))
         return error(exc.status_code, codes.get(exc.status_code, "bad_request"), msg)
 
     async def server_error(request: Request, exc: Exception) -> Response:
         log.exception("unhandled error on %s %s", request.method, request.url.path)
+        if a.is_page_request(request):
+            return await a.error_page(request, 500)
         return error(500, "internal", "Something went wrong on our side. Please try again.")
 
     async def store_error(request: Request, exc: StoreError) -> Response:

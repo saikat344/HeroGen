@@ -22,7 +22,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from herogen.lab import runindex  # noqa: E402
-from herogen.lab.server import CDN_PREFIX, STATIC_DIR, content_security_policy, make_server, safe_run_file  # noqa: E402,E501
+from herogen.lab.server import (CDN_PREFIX, STATIC_DIR, content_security_policy, make_server,  # noqa: E402
+                                safe_run_file, safe_service_asset)
 
 
 def tiny_png(rgb=(200, 40, 40), size=2) -> bytes:
@@ -519,6 +520,22 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(all(s in ("'self'", CDN_PREFIX) or s.startswith("'sha256-") for s in script_src), script_src)
         self.assertEqual(directives["connect-src"].split(), ["'self'", "blob:", "data:", CDN_PREFIX])
 
+    def test_design_system_files_from_the_service(self):
+        """The page's HeroGen header and tokens: exactly the shared design-system files, never the service's code."""
+        for path, ctype in [("/assets/tokens.css", "text/css"), ("/assets/theme.js", "text/javascript"),
+                            ("/assets/site-header.js", "text/javascript"), ("/assets/icons/sprite.svg", "image/svg+xml"),
+                            ("/assets/fonts/Figtree-Variable.latin.woff2", "font/woff2")]:
+            status, headers, body = self.raw_response(path)
+            self.assertEqual(status, 200, path)
+            self.assertTrue(headers["Content-Type"].startswith(ctype), path)
+            self.assertTrue(body, path)
+        for path in ["/assets/app.js", "/assets/index.html", "/assets/shell.html", "/assets/styles/pages.css",
+                     "/assets/", "/assets/fonts", "/assets/fonts/../app.js", "/assets/fonts/%2e%2e/app.js",
+                     "/assets/%2e%2e/server.py", "/assets/tokens.css/x", "/assets/icons/%00.svg"]:
+            status, headers, _ = self.raw_response(path)
+            self.assertEqual(status, 404, path)
+            self.assertEqual(headers["Content-Type"], "application/json", path)
+
     def test_page_only_with_its_csp(self):
         # The page is HTML only at / and /index.html, both with the CSP; /static/ never serves HTML, however the
         # name is spelled (the disk may be case-insensitive, and the name is decoded before the lookup).
@@ -772,11 +789,17 @@ class PageReferencesTest(unittest.TestCase):
             self.assertRegex(digest, r"^sha384-[A-Za-z0-9+/]{64}$", url)
         # The CSP hash covers the import map exactly as served, integrity included.
         self.assertIn("'sha256-", content_security_policy(html))
-        for url in self.URL.findall(html):
+        # Links the reader follows (the header's "Open source" link) load nothing; every other reference is a load.
+        loads = re.sub(r"<a\b[^>]*>", "", html)
+        for url in self.URL.findall(loads):
             self.assertTrue(url.startswith(CDN_PREFIX) or url.startswith("http://www.w3.org/"), url)
-        for attr in re.findall(r"""(?:src|href)=["']([^"']+)["']""", html):
+        for attr in re.findall(r"""(?:src|href)=["']([^"']+)["']""", loads):
             self.assertFalse(re.match(r"^[a-z]+:|^//", attr), attr)
-            if not attr.startswith("#"):
+            if attr.startswith("/assets/"):
+                # The HeroGen design system (tokens, theme, header script, fonts, icons) comes from the service's
+                # static folder; the Lab serves exactly these files at /assets/ itself.
+                self.assertIsNotNone(safe_service_asset(attr[len("/assets/"):].split("#")[0]), attr)
+            elif not attr.startswith("#"):
                 self.assertTrue((STATIC_DIR.parent / attr).is_file(), attr)  # every referenced file ships
         self.assertNotRegex(html, r"<style|style=", "inline styles would need 'unsafe-inline' in the CSP")
 
