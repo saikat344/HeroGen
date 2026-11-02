@@ -6,6 +6,7 @@ cleanly without it. Nothing generated here is written inside the repository.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import importlib.util
 import os
@@ -26,6 +27,27 @@ except ImportError:  # pragma: no cover
 
 if HAVE_DEPS:
     from herogen.blender import SECTIONS, bl, carve, cuts, joints, pose, split, synth, views
+
+
+@contextlib.contextmanager
+def captured_events(step="4"):
+    """Build-log events written inside the block; the list fills when the block ends."""
+    out = []
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "events.jsonl"
+        try:
+            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": step}):
+                yield out
+        finally:
+            if path.exists():
+                out.extend(json.loads(line) for line in path.read_text().splitlines())
+
+
+# Sub-steps of a stage-4 run in the order they happen; each timed one is preceded by its `<what>_start`.
+STAGE4_PHASES = ("body_start", "landmarks", "colour_sources", "decimate_start", "decimate", "cut_search_start",
+                 "cut_search", "split_high_start", "split_high", "split_low_start", "split_low", "pose_test_start",
+                 "pose_test", "atlas_start", "atlas", "texture_transfer_start", "texture_transfer", "export_start",
+                 "export")
 
 
 def _open_edges(faces):
@@ -230,6 +252,107 @@ class FastJointRecordTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid GLB"):
                     _record_fast_outputs(rec, ("high", "low"))
             self.assertFalse((rec.run / "stage-4.json").exists())
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class BuildLogEventTests(unittest.TestCase):
+    def test_every_proportion_note_of_the_joint_estimate_is_one_structured_event(self):
+        import re
+        from herogen.blender import stage4
+
+        notes = ["Crotch clamped to its range (0.328 H -> 0.380 H)", "Left wrist from arm narrowing at 0.65 of the arm",
+                 "no clear waist; waist at 45% from crotch to armpit",
+                 "no shoulder line found; shoulder line at 0.82 H",
+                 "Right arm never separates from the torso; armpit at 0.72 H", "Left arm: too few pixels (12)",
+                 "no gap between the legs; crotch from proportions (0.47 H)",
+                 "no foot visible in the side view; ankle at 0.06 H", "no side view; ankle at 0.06 H",
+                 "joints from 03-joints.json (source sam3d-body)"]
+        with captured_events() as got:
+            self.assertEqual(stage4.emit_proportions(notes), 9)
+        self.assertEqual([(e["what"], e["why"]) for e in got], [
+            ("proportion_crotch", "clamped"), ("proportion_left_wrist", "wrist_narrowing"),
+            ("proportion_waist", "waist_prior"), ("proportion_shoulder_line", "shoulder_prior"),
+            ("proportion_right_armpit", "armpit_prior"), ("proportion_left_arm", "arm_few_pixels"),
+            ("proportion_crotch", "crotch_prior"), ("proportion_ankle", "ankle_prior"),
+            ("proportion_ankle", "no_side_view")])
+        self.assertEqual(got[0]["m"], {"from_h": .328, "to_h": .38})
+        self.assertEqual(got[1]["m"], {"fraction": .65})
+        self.assertTrue(all(e["kind"] == "local" and e["who"] == "herogen" and e["step"] == "4" for e in got))
+        # a new note in the joint estimate needs its own pattern, or it would never reach the build log
+        source = (Path(__file__).resolve().parents[1] / "herogen" / "blender" / "joints.py").read_text()
+        self.assertEqual(len(re.findall(r"notes\.append\(", source)), len(stage4.PROPORTION_NOTES))
+
+    def test_checks_report_hard_limits_and_informational_measurements_separately(self):
+        from herogen.blender import stage4
+        from herogen.blender.record import StageRecord, check
+        from herogen.pipeline import events
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = StageRecord(Path(tmp), 4, "game body")
+            rec.add(check("sections_non_empty", 15, 15))
+            rec.add(check("open_edges", 0, 0, passed=True, rule="=="))
+            rec.add(check("shape_views", ["front"]))
+            rec.add(check("max_joint_gap_high", .65, stage4.GAP_GATE, passed=False, gate=False, rule="<="))
+            rec.add(check("pivots_in_joint_region", 13, 15, rule=">=", gate=False))
+            rec.add(check("measurable_joints", False, passed=False, gate=False))
+            with captured_events() as got:
+                stage4._finish(rec)
+        for e in got:
+            self.assertEqual(events.validate(e), e)
+        checks = [e for e in got if e["kind"] == "check"]
+        self.assertEqual([e["name"] for e in checks], [c["name"] for c in rec.data["checks"]])
+        by = {e["name"]: e for e in checks}
+        self.assertEqual(by["sections_non_empty"], {**by["sections_non_empty"], "ok": True, "gate": True, "op": ">=",
+                                                    "m": {"value": 15, "limit": 15}})
+        self.assertEqual(by["open_edges"]["op"], "==")
+        self.assertNotIn("m", by["shape_views"])          # a list of view names is not a measurement
+        self.assertNotIn("op", by["shape_views"])
+        self.assertEqual((by["max_joint_gap_high"]["op"], by["max_joint_gap_high"]["m"]),
+                         ("<=", {"value": .65, "limit": stage4.GAP_GATE}))
+        self.assertEqual(by["measurable_joints"]["m"], {"value": 0})
+        summary = got[-1]
+        self.assertEqual(summary["kind"], "checks")
+        self.assertEqual((summary["n"], summary["passed"], summary["gated"]), (6, 3, 3))
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(summary["advisory"], ["max_joint_gap_high", "pivots_in_joint_region", "measurable_joints"])
+
+    def test_measurements_are_plain_finite_numbers(self):
+        from herogen.roblox.record import measures
+
+        got = measures({"a": np.float64(.5), "b": np.int64(2), "c": np.bool_(True), "d": "front", "e": float("nan"),
+                        "f": None, "g": [1, 2]})
+        self.assertEqual(got, {"a": .5, "b": 2, "c": 1})
+        self.assertEqual([type(v) for v in got.values()], [float, int, int])
+        self.assertIsNone(measures({"view": "front"}))
+
+    def test_a_failed_hard_limit_is_named_in_the_summary(self):
+        from herogen.blender import stage4
+        from herogen.blender.record import StageRecord, check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = StageRecord(Path(tmp), 4, "game body")
+            rec.add(check("sections_non_empty", 14, 15))
+            with captured_events() as got:
+                self.assertFalse(stage4._finish(rec)["ok"])
+        self.assertEqual((got[-1]["failed"], got[-1]["gated"], got[-1]["passed"]), (["sections_non_empty"], 1, 0))
+
+    def test_without_an_events_file_nothing_is_written(self):
+        from herogen.blender import stage4
+        from herogen.pipeline import events
+
+        with mock.patch.dict(os.environ), mock.patch.object(events, "_append", side_effect=AssertionError("written")):
+            os.environ.pop("HEROGEN_EVENTS_FILE", None)
+            self.assertEqual(stage4.emit_proportions(["no side view; ankle at 0.06 H"]), 1)
+            stage4.emit_unverified({"RightElbow": "no shared rim between RightLowerArm and RightUpperArm"})
+
+    def test_seams_that_cannot_be_measured_are_skipped_measurements(self):
+        from herogen.blender import stage4
+
+        with captured_events() as got:
+            stage4.emit_unverified({"RightElbow": "no shared rim between RightLowerArm and RightUpperArm",
+                                    "LeftWrist": "empty section LeftHand"})
+        self.assertEqual([(e["kind"], e["what"], e["why"]) for e in got],
+                         [("skip", "seam_left_wrist", "empty_section"), ("skip", "seam_right_elbow", "no_shared_rim")])
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender(), "Blender is required")
@@ -556,9 +679,21 @@ class TestEndToEndBlender(SyntheticBase):
             return result
 
         with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "1"}), \
-                mock.patch.object(pose, "joint_gaps", side_effect=violated):
+                mock.patch.object(pose, "joint_gaps", side_effect=violated), captured_events() as got:
             result = stage4.run_stage4(run, cut_search=False)
         self.assertTrue(result["ok"])
+        # the build log says the seam is unmeasured, and counts the failed gap as informational, not a hard limit
+        self.assertIn(("skip", "seam_right_elbow", "no_shared_rim"),
+                      [(e["kind"], e.get("what"), e.get("why")) for e in got])
+        self.assertIn(("skip", "cut_search", "disabled"), [(e["kind"], e.get("what"), e.get("why")) for e in got])
+        summary = got[-1]
+        self.assertEqual(summary["kind"], "checks")
+        self.assertEqual(summary["n"], len(result["checks"]))
+        self.assertEqual(summary["gated"], sum(c["gate"] for c in result["checks"]))
+        self.assertEqual(summary["failed"], [])
+        self.assertIn("max_joint_gap_high", summary["advisory"])
+        gap = next(e for e in got if e["kind"] == "check" and e["name"] == "max_joint_gap_high")
+        self.assertEqual((gap["ok"], gap["gate"], gap["op"]), (False, False, "<="))
         recorded = json.loads((run / "stage-4.json").read_text())
         unknown = {row["joint"]: row for row in recorded["unverified_joints"]}
         self.assertIn("RightElbow", unknown)
@@ -790,9 +925,11 @@ class TestEndToEndBlender(SyntheticBase):
 
         r3 = run_stage3(self.rundir, nz=128, timeout=300, mesh_source="carve", joints_source="silhouette", quality_client=quality_client())
         self.assertTrue(r3["ok"], r3["checks"])
-        r4 = run_stage4(self.rundir, timeout=600, profile="roblox-ingame")
+        with captured_events() as got:
+            r4 = run_stage4(self.rundir, timeout=600, profile="roblox-ingame")
         self.assertTrue(r4["ok"], r4["checks"])
         self.assertEqual(r4["profile"]["name"], "roblox-ingame")
+        self.assert_stage4_events(got, r4)
         body = json.loads((self.rundir / "04-body" / "sections.json").read_text())
         self.assertEqual([s["name"] for s in body["sections"]], list(SECTIONS))
         self.assertEqual(body["form"], "rigid")
@@ -847,6 +984,43 @@ class TestEndToEndBlender(SyntheticBase):
             self.assertEqual(sorted(m["name"] for m in gltf["materials"]), ["BodyAtlas", "HeadTexture"], lod)
             self.assertEqual(len(gltf["meshes"]), 15, lod)
 
+
+    def assert_stage4_events(self, got, r4):
+        from herogen.blender import PIVOT_JOINT, ident
+        from herogen.pipeline import events
+
+        for e in got:
+            self.assertEqual(events.validate(e), e)
+            self.assertEqual((e["step"], e["who"]), ("4", "herogen"))
+        local = [e["what"] for e in got if e["kind"] == "local"]
+        phases = [w for w in local if w in STAGE4_PHASES]
+        self.assertEqual(phases, list(STAGE4_PHASES))
+        timed = {e["what"]: e for e in got if e["kind"] == "local" and e["what"] in STAGE4_PHASES}
+        for w in ("landmarks", "colour_sources") + STAGE4_PHASES[4::2]:   # each finished sub-step is timed
+            self.assertGreaterEqual(timed[w]["s"], 0, w)
+        # the 15 parts with triangles per LOD, then the totals, then each joint, all after the export
+        tail = local[local.index("export") + 1:]
+        self.assertEqual(tail, [f"part_{ident(n)}" for n in SECTIONS] + ["parts_total"]
+                         + [f"joint_{ident(PIVOT_JOINT[n])}" for n in SECTIONS])
+        body = json.loads((self.rundir / "04-body" / "sections.json").read_text())
+        parts = {e["what"]: e["m"] for e in got if e.get("what", "").startswith("part_")}
+        for row in body["sections"]:
+            self.assertEqual(parts[f"part_{ident(row['name'])}"], {"high": row["triangles_high"],
+                                                                   "low": row["triangles_low"]})
+        total = next(e["m"] for e in got if e.get("what") == "parts_total")
+        self.assertEqual((total["high"], total["low"], total["high_budget"], total["low_budget"]),
+                         (r4["body"]["lods"]["high"]["triangles"], r4["body"]["lods"]["low"]["triangles"], 24000, 6000))
+        self.assertEqual(timed["split_high"]["m"]["cap_triangles"], r4["body"]["lods"]["high"]["cap_triangles"])
+        # every recorded check, in record order, then one summary with the hard and informational counts
+        checks = [e for e in got if e["kind"] == "check"]
+        self.assertEqual([e["name"] for e in checks], [c["name"] for c in r4["checks"]])
+        self.assertEqual([e["gate"] for e in checks], [c["gate"] for c in r4["checks"]])
+        self.assertEqual(got[-1]["kind"], "checks")
+        self.assertEqual((got[-1]["n"], got[-1]["gated"], got[-1]["passed"]),
+                         (len(r4["checks"]), sum(c["gate"] for c in r4["checks"]),
+                          sum(c["pass"] for c in r4["checks"])))
+        self.assertLess(max(i for i, e in enumerate(got) if e["kind"] == "local"),
+                        min(i for i, e in enumerate(got) if e["kind"] == "check"))
 
     def test_cli_runs_stage_4_alone_from_the_glb(self):
         import subprocess

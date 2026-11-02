@@ -9,15 +9,18 @@ import colorsys
 import json
 import os
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
+from ..pipeline import events
 from . import (DEFAULT_PROFILE, HEIGHT_STUDS, PARENT, PIVOT_JOINT, PROFILES, SECTIONS, VIEWS, bl, body_joints,
-               covers, cuts, joints, pose, rig_geometry, split, texture)
+               covers, cuts, ident, joints, pose, rig_geometry, split, texture)
 from .carve import winding_inside
 from .stage3 import IOU_GATE, MESH_SOURCES, iou
+from ..roblox.record import emit_checks, measures
 from .views import load_mask
 from .record import StageRecord, check, write_atomic
 from .stage3 import work_dir
@@ -237,6 +240,7 @@ def _pick(cands: list[dict], build: dict, profile: str, *, fast: bool = False) -
     for group, secs in groups.items():
         valid = [i for i, c in enumerate(cands) if _valid_parts(c, secs)]
         if not valid:
+            _emit("error", "mesh_triangle_limit", code="stage_error")
             raise ValueError("stage 4 cannot meet hard Roblox limits after cuts, caps and covers: "
                              f"no complete {group} candidate within the per-mesh triangle limit")
         if budget is None:
@@ -251,6 +255,8 @@ def _pick(cands: list[dict], build: dict, profile: str, *, fast: bool = False) -
         elif fast and budget != "groups":
             selected = min(valid, key=counts.get)
         else:
+            _emit("error", "triangle_budget", code="stage_error",
+                  m={"triangles": min(counts.values()), "budget": limit})
             raise ValueError("stage 4 cannot meet triangle budgets after cuts, caps and covers: "
                              + "; ".join(_budget_shortfalls(cands, build, profile)))
         out.update({n: selected for n in secs})
@@ -455,6 +461,94 @@ def _record_fast_outputs(rec: StageRecord, lods) -> None:
             rec.note("Some shape or texture details may need refinement.")
 
 
+# Build-log events (herogen.pipeline.events; a no-op unless the service names an events file). Stage 4 calls no
+# model, so every line is HeroGen's own work. Names of parts and joints travel as identifiers (`LeftUpperArm` ->
+# `left_upper_arm`) inside `what`; the numbers are the ones this stage records anyway.
+
+# The fixed sentences `joints.estimate` notes when a proportion decides a landmark: (pattern, reason, landmark or
+# None for the first group, measurement names for the remaining groups).
+PROPORTION_NOTES = (
+    (re.compile(r"(\w+) clamped to its range \(([\d.]+) H -> ([\d.]+) H\)"), "clamped", None, ("from_h", "to_h")),
+    (re.compile(r"(Left|Right) wrist from arm narrowing at ([\d.]+) of the arm"), "wrist_narrowing", "{}Wrist",
+     ("fraction",)),
+    (re.compile(r"no clear waist; waist at (\d+)% from crotch to armpit"), "waist_prior", "Waist", ("percent",)),
+    (re.compile(r"no shoulder line found; shoulder line at ([\d.]+) H"), "shoulder_prior", "ShoulderLine", ("h",)),
+    (re.compile(r"(Left|Right) arm never separates from the torso; armpit at ([\d.]+) H"), "armpit_prior",
+     "{}Armpit", ("h",)),
+    (re.compile(r"(Left|Right) arm: too few pixels \((\d+)\)"), "arm_few_pixels", "{}Arm", ("pixels",)),
+    (re.compile(r"no gap between the legs; crotch from proportions \(([\d.]+) H\)"), "crotch_prior", "Crotch", ("h",)),
+    (re.compile(r"no foot visible in the side view; ankle at ([\d.]+) H"), "ankle_prior", "Ankle", ("h",)),
+    (re.compile(r"no side view; ankle at ([\d.]+) H"), "no_side_view", "Ankle", ("h",)),
+)
+
+
+def _emit(kind: str, what: str | None = None, m: dict | None = None, **fields) -> None:
+    events.emit(kind, who="herogen", what=what, m=measures(m) if m else None, **fields)
+
+
+def _since(t0: float) -> float:
+    return round(time.monotonic() - t0, 3)
+
+
+def emit_proportions(notes: list[str]) -> int:
+    """One event per proportion that decided a landmark; returns how many were sent."""
+    sent = 0
+    for note in notes:
+        for pattern, why, landmark, keys in PROPORTION_NOTES:
+            hit = pattern.fullmatch(note)
+            if hit is None:
+                continue
+            groups = hit.groups()
+            if landmark is None:
+                landmark, values = groups[0], groups[1:]
+            elif "{}" in landmark:
+                landmark, values = landmark.format(groups[0]), groups[1:]
+            else:
+                values = groups
+            _emit("local", "proportion_" + ident(landmark), why=why,
+                  m={k: float(v) for k, v in zip(keys, values)})
+            sent += 1
+            break
+    return sent
+
+
+def emit_unverified(reasons: dict[str, str]) -> None:
+    """A seam whose gap cannot be measured is a skipped measurement, never a pass or a failure."""
+    for joint, reason in sorted(reasons.items()):
+        why = ("no_shared_rim" if reason.startswith("no shared rim") else
+               "empty_section" if reason.startswith("empty section") else "unmeasurable")
+        _emit("skip", "seam_" + ident(joint), why=why)
+
+
+def emit_parts(sections_json: dict, lod_info: dict, sources: dict, flagged, evidence: dict) -> None:
+    """Triangles per R15 part (high / low), the totals against the budgets, and each part's joint pivot with
+    where the joint came from."""
+    from ..roblox import MESH_TRIANGLE_LIMIT
+
+    rows = sections_json["sections"]
+    for row in rows:
+        _emit("local", "part_" + ident(row["name"]),
+              m={k: row[f"triangles_{k}"] for k in ("high", "low") if row[f"triangles_{k}"] is not None})
+    total = {"limit": MESH_TRIANGLE_LIMIT,
+             "largest": max(max(r["triangles_high"], r["triangles_low"] or 0) for r in rows)}
+    for lod, info in lod_info.items():
+        total[lod] = info["triangles"]
+        if isinstance(info["budget"], int):
+            total[f"{lod}_budget"] = info["budget"]
+    _emit("local", "parts_total", m=total)
+    for row in rows:
+        joint = row["joint"]
+        x, y, z = row["pivot"]
+        _emit("local", "joint_" + ident(joint), m={
+            "x": x, "y": y, "z": z, "from_body": int(sources.get(joint) == "sam3d-body"),
+            "recorded": int(str(evidence.get(joint, "")).startswith("recorded")), "differs": int(joint in flagged)})
+
+
+def _finish(rec: StageRecord, extra: dict | None = None) -> dict:
+    emit_checks(rec.data["checks"])
+    return rec.finish(extra)
+
+
 def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                profile: str = DEFAULT_PROFILE, cut_search: bool = True, cut_workers: int = 3,
                fast: bool = False) -> dict:
@@ -471,6 +565,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     # An earlier record must not outlive a run that stops: nothing after stage 4 may read a stale pass.
     (run / "stage-4.json").unlink(missing_ok=True)
     rec = StageRecord(run, 4, "game body")
+    _emit("local", "body_start", m={"parts": len(SECTIONS), "lods": len(builds)})
     work = work_dir(run)
     mesh_npz = work / "03-mesh.npz"
     mesh_src = mesh_npz if mesh_npz.exists() else run / "03-mesh.glb"
@@ -481,9 +576,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         mesh_source, shape_views, shape_check = _shape_views(run, vs)
     except ValueError as exc:
         rec.add(check("shape_views", None, passed=False, note=str(exc)))
-        rec.finish()
+        _emit("error", "shape_views", code="stage_error")
+        _finish(rec)
         raise
     rec.add(shape_check)
+    t0 = time.monotonic()
     try:
         sk = joints.estimate(vs, height)
     except joints.JointEstimationError as exc:
@@ -494,13 +591,17 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         # The record's error is the sentence the service shows; the note above keeps the measurements.
         shown = ("The game body could not find this character's waist or limbs in its outline, "
                  "for example under a long robe or with a very short torso, so the Roblox parts could not be cut.")
-        rec.finish({"ok": False, "status": "error", "error": shown})
+        _emit("error", "joint_estimation", code="stage_error")
+        _finish(rec, {"ok": False, "status": "error", "error": shown})
         raise joints.JointEstimationError(reason) from exc
     silhouette_joints = sk.as_json()
+    proportion_notes = list(sk.notes)
     jrec = body_joints.load_joints(run / "03-joints.json")
     joints_source = "silhouette"
+    sources = {}
     if jrec is not None and jrec.get("source") == "sam3d-body":
         sk = body_joints.apply_to_skeleton(sk, jrec)
+        sources = {k: str(v) for k, v in (jrec.get("joint_sources") or {}).items()}
         if mesh_npz.exists():
             with np.load(mesh_npz) as mesh:
                 source_verts = mesh["verts"]
@@ -511,9 +612,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             source_verts, source_faces = load_glb(mesh_src).merged()
         sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts, source_faces)
         joints_source = "sam3d-body"
+    from_body = sum(1 for k in sk.joints if sources.get(k) == "sam3d-body")
+    _emit("local", "landmarks", s=_since(t0),
+          m={"joints": len(sk.joints), "from_body": from_body, "from_outline": len(sk.joints) - from_body,
+             "flagged": len((jrec or {}).get("flagged") or []) if sources else 0})
+    emit_proportions(proportion_notes)
     source = None
     from . import refined_colour
 
+    t0 = time.monotonic()
     primary, refined_info = refined_colour.load(run, work, height)
     rec.add(check("refined_texture", "refined" if primary is not None else "views", gate=False,
                   passed=primary is not None, **refined_info))
@@ -531,6 +638,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         with _Image.open(src_tex) as im:
             source = texture.SourceColour(d["verts"], d["faces"], d["corner_uv"],
                                           np.asarray(im.convert("RGB"), dtype=np.float64))
+    _emit("local", "colour_sources", s=_since(t0),
+          m={"refined": int(primary is not None), "source_texture": int(source is not None)})
     budgets = {lod: b["budget"] for lod, b in builds.items()}
     if profile == "best":
         rec.note("profile best: no triangle budget, the high body keeps the stage 3 mesh's full detail, no low LOD")
@@ -560,9 +669,20 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         if key != "coverlow" or any(b["cover"] == "low" for b in builds.values()):
             targets[key] = n_tri
             outs[key] = str((work / f"04-dec-{key}.npz").resolve())
+    _emit("local", "decimate_start")
+    t0 = time.monotonic()
     dec = bl.run_job({"tasks": [{"task": "decimate", "mesh": str(mesh_src.resolve()), "targets": targets,
                                  "out": outs}]}, work, "stage4-decimate", timeout=timeout)
     rec.data["tools"] = [f"blender {dec['blender']}"]
+    made = dec["results"][0]
+    dec_m = {"source_triangles": next((r["triangles_in"] for r in made.values()
+                                       if isinstance(r, dict) and "triangles_in" in r), None)}
+    for lod, keys in ladder.items():
+        sizes = [targets[k] for k in keys if targets[k] != UNDECIMATED]
+        dec_m[f"candidates_{lod}"] = len(keys)
+        if sizes:
+            dec_m[f"{lod}_min"], dec_m[f"{lod}_max"] = min(sizes), max(sizes)
+    _emit("local", "decimate", s=_since(t0), m={k: v for k, v in dec_m.items() if v is not None})
     if joints_source == "sam3d-body":
         # A handful of source vertices can disappear during decimation. Resolve on every mesh that can
         # become an exported body, before the cut search, so all LODs and candidates share one partition.
@@ -572,6 +692,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                 candidates.append(mesh["verts"])
         sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts, source_faces,
                                             lod_vertices=tuple(candidates))
+        # every part owns surface on the source mesh and on each decimation candidate
+        _emit("local", "parts_have_surface", m={
+            "parts": len(SECTIONS), "meshes": len(candidates) + 1,
+            "recoveries": sum(1 for n in sk.notes if n.startswith(body_joints.RECOVERY_NOTES))})
         del source_verts, source_faces, candidates
     for n in sk.notes:
         rec.note(n)
@@ -603,6 +727,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     gate_poses = {k: v for k, v in poses.items() if k not in UNGATED_POSES}
     ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
     cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
+    if cut_search:
+        _emit("local", "cut_search_start", m={"triangles": int(len(ref["faces"]))})
+    else:
+        _emit("skip", "cut_search", why="disabled")
+    t0 = time.monotonic()
     try:
         if cut_search:
             cut_offsets, cut_record = cuts.choose(ref["verts"], ref["faces"], sk, gate_poses,
@@ -626,19 +755,31 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         reason = ", ".join(exc.reasons) + " could not be separated."
         rec.add(check("measurable_joints", False, passed=False, note=reason))
         rec.note(reason)
-        return rec.finish({"ok": False, "status": "rejected", "reason": reason, "joint_reasons": exc.reasons})
+        emit_unverified(exc.reasons)
+        _emit("error", "unmeasurable_joints", code="rejected", m={"joints": len(exc.reasons)})
+        return _finish(rec, {"ok": False, "status": "rejected", "reason": reason, "joint_reasons": exc.reasons})
     ref_sets["unmoved"]["gate"] = cut_record["unmoved_worst_gap"]
     cut_record["reference_worst_gap"] = {label: {k: {j: round(v, 4) for j, v in d.items()} for k, d in sets.items()}
                                          for label, sets in ref_sets.items()}
     moved = {j: f for j, f in cut_record["chosen_fraction"].items() if f}
     rec.note("cuts moved along their normals (fractions of the child bone's radius): "
              + (", ".join(f"{j} {f:+.2f}" for j, f in moved.items()) if moved else "none"))
+    moved_joints = {j: o for j, o in cut_offsets.items() if o}
+    if cut_search:
+        _emit("local", "cut_search", s=_since(t0),
+              m={"triangles": int(len(ref["faces"])), "joints": len(cuts.JOINTS), "moved": len(moved_joints)})
+    for j, o in moved_joints.items():
+        fraction = cut_record["chosen_fraction"].get(next(k for k in cut_record["chosen_fraction"]
+                                                          if j in cuts.joints_of(k)))
+        _emit("local", "cut_" + ident(j), m={"fraction": fraction, "studs": round(float(o), 4)})
 
     # Covers are shaped from a coarse decimation of the body (2.7k triangles for the high settings' covers, 1.2k
     # for the low settings') so they stay cheap; they count in the budgets.
     chosen, lod_secs, bare_secs, lod_info, cover_info, picks = {}, {}, {}, {}, {}, {}
     pivot_repairs = {}
     for lod, build in builds.items():
+        _emit("local", f"split_{lod}_start")
+        t0 = time.monotonic()
         cover_src = np.load(outs["cover" + build["cover"]])
         rings, ring_points = DOME[build["dome"]]
 
@@ -672,6 +813,10 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         for name, repair in pivot_repairs[lod].items():
             if "pivot_fallback" in repair:
                 rec.note(f"{lod} {name} pivot fallback: {repair['pivot_fallback']}")
+            why = ("no_shared_edge" if "pivot_fallback" in repair else
+                   "shared_cut_edge" if repair["source"] == "shared cut edge" else "root_surface")
+            _emit("recover", f"pivot_{ident(name)}_{lod}", why=why,
+                  m={"distance_studs": round(float(repair["distance_studs"]), 4)})
         owner = cands[pick[COVER_OWNER]]
         cover_info[lod] = owner["covers"]
         groups = _section_groups(build, profile)
@@ -688,6 +833,17 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         if len(groups) > 1:
             lod_info[lod]["triangles_by_group"] = {g: sum(len(lod_secs[lod][n].faces) for n in secs)
                                                    for g, secs in groups.items()}
+        info = lod_info[lod]
+        split_m = {"triangles": info["triangles"], "cap_triangles": info["cap_triangles"],
+                   "cover_triangles": info["cover_triangles"], "candidates": len(cands),
+                   "largest_part": max(len(s.faces) for s in lod_secs[lod].values())}
+        if isinstance(build["budget"], int):
+            split_m["budget"] = build["budget"]
+            split_m["body_triangles"] = info["body_triangles_after_decimation"]
+            if info["triangles"] > build["budget"]:
+                # the fast lane keeps the smallest complete body when no candidate fits the in-game target
+                _emit("decision", f"over_budget_{lod}", m={"triangles": info["triangles"], "budget": build["budget"]})
+        _emit("local", f"split_{lod}", s=_since(t0), m=split_m)
 
     # Pose test. Gated: the gap that stays visible with the covers on (both LODs). Reported alongside: the
     # visible gap without covers, the purely geometric gap without covers, and flat caps.
@@ -695,6 +851,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         for secs in bare_secs.values():
             unverified.update(cuts.unmeasurable_joints(secs))
         _record_unverified(rec, unverified)
+        emit_unverified(unverified)
+    _emit("local", "pose_test_start", m={"poses": len(poses), "heldout": len(heldout)})
+    t0 = time.monotonic()
     measured = ({lod: {PIVOT_JOINT[s] for s, p in PARENT.items() if p is not None}
                       - cuts.unmeasurable_joints(secs).keys() for lod, secs in bare_secs.items()} if fast else {})
     gap_kw = {lod: {"joints": js} for lod, js in measured.items()}
@@ -709,6 +868,12 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                                    cut_offsets=cut_offsets)
     flat_secs = {n: flat_by_key[picks["high"][n]][n] for n in SECTIONS}
     gaps_flat = pose.joint_gaps(flat_secs, poses, **gap_kw.get("high", {}))
+    pose_m = {"poses": len(poses), "heldout": len(heldout), "limit": GAP_GATE}
+    for lod, g in gaps.items():
+        worst = _max_gap((v for p, row in g.items() if p not in UNGATED_POSES for v in row.values()), True)
+        if worst is not None:
+            pose_m[f"gap_{lod}"] = round(float(worst), 4)
+    _emit("local", "pose_test", s=_since(t0), m=pose_m)
 
     # UV atlases (Blender smart project, all sections of a LOD packed together), then colour projection.
     body = run / "04-body"
@@ -742,6 +907,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                "separate_margin": {k: UV_GUTTER_PX / HEAD_TEXTURE[k] for k in lods}}]},
                    work, "stage4-uv", timeout=timeout)
 
+    _emit("local", "atlas_start")
+    t0 = time.monotonic()
     pack(list(lod_paths))
     repack = []
     for lod, b in builds.items():
@@ -761,6 +928,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         pack(repack)
     for lod in builds:
         lod_info[lod]["atlas_size"] = atlas_size[lod]
+    _emit("local", "atlas", s=_since(t0), m={**{lod: atlas_size[lod] for lod in builds},
+                                             **{f"head_{lod}": HEAD_TEXTURE[lod] for lod in builds},
+                                             "packed": 1 + bool(repack)})
     for stale in body.glob("atlas-head-*.png"):
         stale.unlink()
     for stale in body.glob("atlas-*-no-closeup.png"):
@@ -782,6 +952,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         rec.note(f"close-ups: {n}")
     atlas_paths, head_paths, tex_stats, zbuf = {}, {}, {}, None
     from PIL import Image
+    _emit("local", "texture_transfer_start")
+    t0 = time.monotonic()
     for lod in builds:
         u = np.load(uv_paths[lod])
         uvs = {k.split("__")[0]: u[k] for k in u.files}
@@ -838,6 +1010,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                     tex_stats[f"{lod}_{tag.replace('-', '_')}"] = {**vstats, **({"trust": kw["trust"]}
                                                                                   if "trust" in kw else {})}
 
+    _emit("local", "texture_transfer", s=_since(t0),
+          m={"lods": len(atlas_paths), "refined": int(primary is not None), "colour_views": len(colour_views),
+             "source_fallback": int(primary is None and source is not None)})
     # Blender: textured GLBs, rest renders from the contract cameras, pose renders.
     rest_cams = [vs.views[v].camera() for v in VIEWS if v in vs.views]
     # Render the mesh received by stage 4, before decimation/cutting, with the very same cameras.
@@ -863,6 +1038,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     pivots = {n: s.pivot for n, s in lod_secs["high"].items()}
     pose_jobs = [{"name": name, "matrices": {n: m.tolist() for n, m in pose.world_matrices(loc, pivots).items()}}
                  for name, loc in poses.items()]
+    _emit("local", "export_start", m={"lods": len(builds), "poses": len(pose_jobs)})
+    t0 = time.monotonic()
     res = bl.run_job({"tasks": reference_tasks + [{
         "task": "body", "lods": {k: str(v.resolve()) for k, v in lod_paths.items()},
         "glb": {lod: str((body / f"{lod}.glb").resolve()) for lod in builds},
@@ -873,6 +1050,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         "rest_cameras": rest_cams, "rest_dir": str((body / "rest-renders").resolve())}]},
         work, "stage4-body", timeout=timeout)
     bres = res["results"][-1]
+    _emit("local", "export", s=_since(t0), m={"lods": len(builds), "pose_renders": len(bres["pose_renders"]),
+                                              "rest_renders": len(bres["rest_textured"])})
     stage3_silhouettes = res["results"][0]["renders"] if reference_cams else {}
     refined_renders = res["results"][-2] if primary is not None else None
 
@@ -1050,6 +1229,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         "checks": rec.data["checks"],
     }
     write_atomic(body / "sections.json", json.dumps(sections_json, indent=2))
+    emit_parts(sections_json, lod_info, sources, (jrec or {}).get("flagged") or [] if sources else [], sk.evidence)
     rec.data["outputs"] = ([f"04-body/{lod}.glb" for lod in builds] + ["04-body/sections.json"]
                            + [str(v.relative_to(run)) for v in atlas_paths.values()]
                            + [v.relative_to(run).as_posix() for v in head_paths.values()]
@@ -1077,4 +1257,4 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     if fast:
         _record_fast_outputs(rec, builds)
         write_atomic(body / "sections.json", json.dumps(sections_json, indent=2))
-    return rec.finish()
+    return _finish(rec)

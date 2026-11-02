@@ -1,14 +1,31 @@
 """Rig landmark regressions on generated geometry, with no inference or saved character assets."""
 from __future__ import annotations
 
+import contextlib
 import copy
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from herogen.blender import body_joints, carve, joints, rig_geometry, split, synth, views
+
+
+@contextlib.contextmanager
+def captured_events():
+    out = []
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "events.jsonl"
+        try:
+            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": "4"}):
+                yield out
+        finally:
+            if path.exists():
+                out.extend(json.loads(line) for line in path.read_text().splitlines())
 
 
 class LandmarkTests(unittest.TestCase):
@@ -89,6 +106,35 @@ class LandmarkTests(unittest.TestCase):
         self.assertEqual(set(changes), {"RightArmRadius"})
         self.assertGreater(self.sk.radii["RightArm"], .1)
         self.assertEqual(self.sk.as_json(), before)
+
+    def test_each_repair_is_a_recovery_event_with_its_reason_and_distance(self):
+        self.sk.joints["RightHip"] = np.array([.8, .4, 2.8])
+        self.sk.joints["LeftHip"] = np.array([1., 0., 2.8])
+        self.sk.joints["RightShoulder"] = np.array([-.1, 0., 2.9])
+        self.sk.ends["LeftHandTip"] = self.sk.joints["LeftWrist"] + [.4, 0, .3]
+        with captured_events() as got:
+            changes = self.reconcile()
+        self.assertEqual([(e["kind"], e["what"], e["why"]) for e in got], [
+            ("recover", "landmark_left_hip", "hips_cross_pelvis"),
+            ("recover", "landmark_right_hip", "hips_cross_pelvis"),
+            ("recover", "landmark_right_shoulder", "shoulder_elbow_order"),
+            ("recover", "landmark_left_hand_tip", "hand_direction")])
+        for e in got:
+            name = e["what"].removeprefix("landmark_").title().replace("_", "")
+            self.assertAlmostEqual(e["m"]["distance_studs"], changes[name]["distance_studs"], places=4)
+
+    def test_a_remeasured_arm_radius_reports_both_radii(self):
+        self.sk.radii["RightArm"] = .001
+        with captured_events() as got:
+            changes = self.reconcile()
+        self.assertEqual([(e["what"], e["why"]) for e in got], [("landmark_right_arm_radius", "radius_below_forearm")])
+        self.assertEqual(got[0]["m"], {"before_studs": .001,
+                                       "after_studs": round(changes["RightArmRadius"]["after_studs"], 4)})
+
+    def test_consistent_landmarks_log_nothing(self):
+        with captured_events() as got:
+            self.assertEqual(self.reconcile(), {})
+        self.assertEqual(got, [])
 
     def test_missing_anatomical_alternative_is_loud(self):
         self.sk.joints["RightShoulder"] = np.array([0., 0., 1.])

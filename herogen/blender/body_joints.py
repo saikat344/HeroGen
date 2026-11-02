@@ -38,7 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import raster
+from ..pipeline import events
+from . import ident, raster
 from .record import write_atomic
 from .views import View
 
@@ -55,6 +56,8 @@ JOINT_NAMES = ("HeadTop", "Neck", "Waist", "Root") + tuple(LIMBS)
 Y_METHODS = ("mesh", "mhr3d")
 LIMB_ROOTS = ("LeftShoulder", "RightShoulder", "LeftHip", "RightHip")
 FLAG_STUDS = 0.5
+# How the notes of `nonempty_limb_roots` start when it had to recover a part's surface.
+RECOVERY_NOTES = ("anatomical limb root fallback", "merged limb surface partition")
 HEADTOP_DEPTH_DROP = 0.15     # studs below the head top where HeadTop's depth is read
 
 
@@ -216,6 +219,12 @@ def apply_to_skeleton(sk, rec: dict):
     return sk
 
 
+def _emit_empty_parts(parts) -> None:
+    """The failure line: which R15 parts are left without mesh surface (count, and each part's identifier)."""
+    events.emit("error", who="herogen", what="empty_parts", code="stage_error",
+                m={"parts": len(parts), **{ident(p): 1 for p in parts[:15]}})
+
+
 def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | None = None,
                         *, lod_vertices: tuple = ()):
     """Keep the selected joints unless they leave an R15 part without mesh vertices.
@@ -255,6 +264,10 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | No
             candidate.evidence[name] = "recorded SAM 3D Body anatomical limb root; " + reason
         if names:
             candidate.notes.append("anatomical limb root fallback (" + ", ".join(names) + "): " + reason)
+        for name in names:
+            events.emit("recover", who="herogen", what="limb_root_" + ident(name),
+                        why="reversed_root" if name in reversed_selected else "empty_parts",
+                        m={"empty_parts": len(missing)})
         return candidate
 
     missing = empty(sk)
@@ -309,8 +322,12 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | No
                         if support is not None:
                             candidate.notes.append(f"{section} supported by a closed source sleeve cross section "
                                                    f"({support['offset_studs']:.4f} studs from bone midpoint)")
+                            events.emit("recover", who="herogen", what="sleeve_" + ident(section),
+                                        why="hollow_sleeve", m={"offset_studs": round(support["offset_studs"], 4),
+                                                                "radius_studs": round(support["radius_studs"], 4)})
                             continue
                     detail = "no local closed sleeve cross section supports it; " if kind == "Arm" else ""
+                    events.emit("error", who="herogen", what="limb_absent_" + ident(chain), code="stage_error")
                     raise ValueError(f"stage 4 cannot recover {chain}: no mesh around the recorded {section} "
                                      f"segment midpoint; {detail}limb surface is absent or joints lie outside the mesh")
         candidate.surface_chains = tuple(sorted(set(candidate.surface_chains) | chains))
@@ -319,8 +336,13 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | No
             describe(candidate, names)
             candidate.notes.append("merged limb surface partition by nearest recorded bone segment: "
                                    + ", ".join(sorted(chains)))
+            for chain in sorted(chains):
+                events.emit("recover", who="herogen", what="merged_limb_" + ident(chain), why="nearest_bone",
+                            m={"empty_parts": len(missing)})
             return candidate
+        _emit_empty_parts(remaining)
         raise ValueError("stage 4 cannot recover R15 parts: " + ", ".join(remaining)
                          + "; no existing mesh surface in the recorded limb's joint-plane bands")
+    _emit_empty_parts(missing)
     raise ValueError("stage 4 joints leave R15 parts without source vertices: " + ", ".join(missing)
                      + "; no recorded anatomical limb-root combination gives every part vertices")

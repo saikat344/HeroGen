@@ -8,12 +8,15 @@ Nothing generated here is written inside the repository.
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_herogen_body_quality import quality_client
 
@@ -47,6 +50,19 @@ def rotation(yaw: float, pitch: float) -> np.ndarray:
     rz = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
     rx = np.array([[1, 0, 0], [0, np.cos(b), -np.sin(b)], [0, np.sin(b), np.cos(b)]])
     return rz @ rx
+
+
+@contextlib.contextmanager
+def captured_events():
+    out = []
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "events.jsonl"
+        try:
+            with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(path), "HEROGEN_EVENTS_STEP": "4"}):
+                yield out
+        finally:
+            if path.exists():
+                out.extend(json.loads(line) for line in path.read_text().splitlines())
 
 
 class HybridBase(unittest.TestCase):
@@ -570,9 +586,12 @@ class TestBodyJoints(HybridBase):
         before = deepcopy(sk)
         vertices, triangles = self.verts.copy(), self.faces.copy()
         self.assertEqual(self.part_counts(sk)["RightUpperArm"], 0)
-        result = body_joints.nonempty_limb_roots(sk, rec, vertices, triangles)
+        with captured_events() as got:
+            result = body_joints.nonempty_limb_roots(sk, rec, vertices, triangles)
         self.assertEqual(result.surface_chains, ("RightArm",))
         self.assertEqual(sk.surface_chains, ())
+        self.assertEqual([(e["kind"], e["what"], e["why"]) for e in got][-1:],
+                         [("recover", "merged_limb_right_arm", "nearest_bone")])
         self.assertTrue(all(self.part_counts(result).values()))
         self.assertEqual(result.as_json(), before.as_json())
         self.assertEqual(result.radii, before.radii)
@@ -619,8 +638,11 @@ class TestBodyJoints(HybridBase):
             sk.joints[name] += [0, 10, 0]
         rec["joint_sources"] = {"RightShoulder": "sam3d-body"}
         before = sk.as_json()
-        with self.assertRaisesRegex(ValueError, "RightArm: no mesh around the recorded RightUpperArm"):
+        with self.assertRaisesRegex(ValueError, "RightArm: no mesh around the recorded RightUpperArm"), \
+                captured_events() as got:
             body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        self.assertEqual([(e["kind"], e["what"], e["code"]) for e in got],
+                         [("error", "limb_absent_right_arm", "stage_error")])
         self.assertEqual(before, sk.as_json())
         self.assertEqual(sk.surface_chains, ())
 
@@ -631,11 +653,15 @@ class TestBodyJoints(HybridBase):
             sk.joints[name] += [0, .23, 0]
         rec["joint_sources"] = {"RightShoulder": "sam3d-body"}
         before = sk.as_json()
-        result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        with captured_events() as got:
+            result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
         self.assertEqual(result.surface_chains, ("RightArm",))
         self.assertEqual(result.as_json(), before)
         self.assertTrue(all(self.part_counts(result).values()))
         self.assertTrue(any("closed source sleeve cross section" in note for note in result.notes))
+        sleeves = [e for e in got if e["what"].startswith("sleeve_")]
+        self.assertTrue(sleeves)
+        self.assertTrue(all(e["why"] == "hollow_sleeve" and e["m"]["radius_studs"] > 0 for e in sleeves))
 
     def test_absent_leg_keeps_its_specific_segment_error(self):
         sk, rec = self.selected_skeleton()

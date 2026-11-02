@@ -3,8 +3,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import PARENT
+from ..pipeline import events
+from . import PARENT, ident
 from .meshindex import MeshIndex
+
+
+def _repaired(landmark: str, why: str, **m) -> None:
+    """A build-log line for one landmark this module replaced (HeroGen's own geometry, no model call)."""
+    events.emit("recover", who="herogen", what="landmark_" + ident(landmark), why=why,
+                m={k: round(float(v), 4) for k, v in m.items()})
 
 
 def sleeve_support(verts, faces, a, b):
@@ -138,6 +145,8 @@ def reconcile_skeleton(sk, record, verts, faces, front):
         j[name] = np.asarray(anatomical[name], float)
         changes[name] = {"source": "recorded anatomical joint", "distance_studs": float(np.linalg.norm(j[name] - old))}
         sk.evidence[name] = "recorded anatomical joint: silhouette limb root contradicts the limb topology"
+        _repaired(name, "hips_cross_pelvis" if name.endswith("Hip") else "shoulder_elbow_order",
+                  distance_studs=changes[name]["distance_studs"])
     if hip_bad:
         if not j["RightHip"][0] < root_x < j["LeftHip"][0]:
             raise ValueError("recorded anatomical hips do not straddle the pelvis")
@@ -167,6 +176,8 @@ def reconcile_skeleton(sk, record, verts, faces, front):
                 changes[side + "ArmRadius"] = {"source": "source mesh at the recorded forearm",
                                                "before_studs": float(sk.radii[side + "Arm"]),
                                                "after_studs": radius}
+                _repaired(side + "ArmRadius", "radius_below_forearm", before_studs=sk.radii[side + "Arm"],
+                          after_studs=radius)
                 sk.radii[side + "Arm"] = radius
         if wrong_tip:
             direction = wrist - elbow
@@ -184,6 +195,7 @@ def reconcile_skeleton(sk, record, verts, faces, front):
             sk.ends[side + "HandTip"] = new
             sk.radii[side + "Arm"] = radius
             changes[side + "HandTip"] = {"source": "source hand along the forearm", "distance_studs": float(np.linalg.norm(new - tip))}
+            _repaired(side + "HandTip", "hand_direction", distance_studs=changes[side + "HandTip"]["distance_studs"])
     return changes
 
 

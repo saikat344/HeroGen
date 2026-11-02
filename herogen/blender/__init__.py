@@ -11,6 +11,8 @@ writes the GLB files and renders.
 """
 from __future__ import annotations
 
+import re
+
 # Contract: R15-style rigid sections, in contract order.
 SECTIONS = (
     "Head", "UpperTorso", "LowerTorso",
@@ -72,3 +74,8 @@ PROFILES = {
 DEFAULT_PROFILE = "best"
 
 VIEWS = ("front", "back", "left", "right", "top")
+
+
+def ident(name: str) -> str:
+    """A part or joint name as a build-log event identifier: `LeftUpperArm` -> `left_upper_arm`."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
