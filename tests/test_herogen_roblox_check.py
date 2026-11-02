@@ -98,6 +98,17 @@ class CheckerTest(unittest.TestCase):
         info = next(c for c in checks if c["name"] == "meshes_bound")
         self.assertEqual((info["value"], info["gate"]), (0, False))
 
+    def test_every_check_records_the_comparison_it_passes_on(self):
+        path = self.root / "good.rbxmx"
+        path.write_text(self.good)
+        for c in check_rig(self.body, path):
+            if c["threshold"] is None:
+                self.assertIsNone(c["rule"], c["name"])
+                continue
+            passes = {"<": c["value"] < c["threshold"], "<=": c["value"] <= c["threshold"],
+                      "==": c["value"] == c["threshold"], ">": c["value"] > c["threshold"]}[c["rule"]]
+            self.assertEqual(passes, c["pass"], c["name"])
+
     # Corrupted rigs: each must fail the checks named.
 
     def test_c0_offset(self):

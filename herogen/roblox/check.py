@@ -7,8 +7,9 @@ The checker shares no code with the writer, so a writer bug can't hide itself:
 - part extents come from the GLB's POSITION accessor min/max (which glTF requires), not from the vertices the
   writer reads, and pivots and the toe points come from `sections.json`.
 
-`check_rig` returns stage-record checks: {"name", "value", "threshold", "pass", "gate", "detail"}. Tolerance
-checks pass when value <= threshold; count checks when value == threshold.
+`check_rig` returns stage-record checks: {"name", "value", "threshold", "rule", "pass", "gate", "detail"}.
+`rule` is the comparison the check passes on: tolerance checks pass when value <= threshold, count checks when
+value == threshold, the orientation checks on a strict `<` or `>`; a check without a threshold has no rule.
 """
 from __future__ import annotations
 
@@ -192,13 +193,14 @@ def check_rig(body: Path, rig_path: Path, glb_name: str = "high.glb") -> list[di
 def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
     checks: list[dict] = []
 
-    def add(name, value, threshold, passed, detail="", gate=True):
-        checks.append({"name": name, "value": value, "threshold": threshold, "pass": bool(passed),
+    def add(name, value, threshold, passed, detail="", gate=True, rule="=="):
+        checks.append({"name": name, "value": value, "threshold": threshold,
+                       "rule": rule if threshold is not None else None, "pass": bool(passed),
                        "gate": gate, "detail": detail})
 
     def tol(name, value, threshold, detail=""):
         value = float(value)
-        add(name, round(value, 9), threshold, np.isfinite(value) and value <= threshold, detail)
+        add(name, round(value, 9), threshold, np.isfinite(value) and value <= threshold, detail, rule="<=")
 
     def count(name, value, want, detail=""):
         add(name, value, want, value == want, detail)
@@ -344,7 +346,7 @@ def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
     tol("section_extents_match_glb", w_size, POS_TOL, "studs")
     tol("section_centres_match_glb", w_centre, POS_TOL, "studs")
     tol("rotations_proper", w_rot, ROT_TOL, "every CFrame orthonormal with determinant +1")
-    add("triangles_per_mesh", max_tris, TRI_LIMIT, max_tris <= TRI_LIMIT, "most triangles in one section")
+    add("triangles_per_mesh", max_tris, TRI_LIMIT, max_tris <= TRI_LIMIT, "most triangles in one section", rule="<=")
 
     # HipHeight: height above the floor = 0.5 * RootPart.Size.Y + HipHeight, floor = lowest foot vertex
     feet = [boxes[f]["lo"][1] for f in ("LeftFoot", "RightFoot") if f in boxes]
@@ -355,7 +357,7 @@ def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
         lowest = min(b["lo"][1] for b in boxes.values())
         tol("feet_lowest", min(feet) - lowest, POS_TOL, "studs any section reaches below the feet")
     else:
-        add("hip_height", None, POS_TOL, False, "needs the Humanoid, HumanoidRootPart and both feet")
+        add("hip_height", None, POS_TOL, False, "needs the Humanoid, HumanoidRootPart and both feet", rule="<=")
 
     # facing and handedness, from the body itself (toes ahead of the ankles; up is +Y)
     try:
@@ -366,7 +368,7 @@ def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
     except (KeyError, ZeroDivisionError, FloatingPointError):
         fwd = None
     add("faces_minus_z", None if fwd is None else round(float(fwd[2]), 4), -0.9,
-        fwd is not None and fwd[2] < -0.9, "forward Z, from the toes ahead of the ankles")
+        fwd is not None and fwd[2] < -0.9, "forward Z, from the toes ahead of the ankles", rule="<")
     lu, ru = parts.get("LeftUpperArm"), parts.get("RightUpperArm")
     dot = None
     if fwd is not None and lu is not None and ru is not None:
@@ -374,12 +376,12 @@ def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
         rl = ru.cframe()[:3, 3] - lu.cframe()[:3, 3]
         dot = float(rl @ right / np.linalg.norm(rl))
     add("not_mirrored", None if dot is None else round(dot, 4), 0.9, dot is not None and dot > 0.9,
-        "Right* parts on the character's right: cos(RightUpperArm - LeftUpperArm, right)")
+        "Right* parts on the character's right: cos(RightUpperArm - LeftUpperArm, right)", rule=">")
     head = parts.get("Head")
     ff = head.child("FaceFrontAttachment", "Attachment") if head else None
     dz = None if ff is None else round(float((head.cframe() @ ff.cframe())[2, 3] - head.cframe()[2, 3]), 4)
     add("face_front_on_front", dz, 0.0, dz is not None and dz < 0,
-        "FaceFrontAttachment Z minus the head centre's Z (negative: on the front)")
+        "FaceFrontAttachment Z minus the head centre's Z (negative: on the front)", rule="<")
 
     # accessory attachments and scale type
     acc_missing, acc_outside, no_type = [], [], []
