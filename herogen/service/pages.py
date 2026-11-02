@@ -69,8 +69,8 @@ def legal_main(title: str, text: str | None) -> str:
     return head + "".join(meta) + f'</header><div class="prose">{"".join(body)}</div></article>'
 
 
-def error_main(status: int, art: dict[str, str] | None = None) -> str:
-    """The 404 or 500 body. `art` is one gallery item ({"id", "title"}), shown lazily; omitted when unavailable."""
+def error_main(status: int, art: dict | None = None) -> str:
+    """The 404 or 500 body. `art` is one gallery item ({"id", "title", "assets"}); omitted when unavailable."""
     if status == 404:
         eyebrow, heading = "Error 404", "This page wandered off."
         lead = "The link may be old or mistyped. Your heroes are right where you left them."
@@ -81,8 +81,12 @@ def error_main(status: int, art: dict[str, str] | None = None) -> str:
     if art:
         key = html.escape(art["id"], quote=True)
         title = html.escape(art["title"], quote=True)
-        figure = (f'<figure class="error-art"><img src="/gallery-assets/{key}/artwork" width="320" height="480" '
-                  f'alt="{title}, a hero made with HeroGen" loading="lazy" decoding="async" fetchpriority="low">'
+        # The small WebP when the catalog lists one: the art sits above the fold, so it loads at once.
+        artwork = (art.get("assets") or {}).get("artwork") or {}
+        thumb = artwork.get("thumb_url")
+        src = html.escape(thumb, quote=True) if thumb else f"/gallery-assets/{key}/artwork"
+        figure = (f'<figure class="error-art"><img src="{src}" width="320" height="480" '
+                  f'alt="{title}, a hero made with HeroGen" decoding="async">'
                   f'<figcaption>{title}, made with HeroGen</figcaption></figure>')
     return (f'<section class="error-page error-page--{status}" aria-labelledby="errorTitle">'
             f'<span class="error-page__mark" aria-hidden="true">HG</span>'

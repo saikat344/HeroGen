@@ -4,6 +4,7 @@ isolation, path safety, deletion, the Lab API and the legal pages."""
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import os
@@ -672,17 +673,19 @@ class TestErrorPages(WebCase):
             self.assertEqual((r.status_code, r.headers["content-type"].startswith("text/html")),
                              (404, True), path)
 
-    def test_the_404_shows_one_lazy_gallery_hero(self):
+    def test_the_404_shows_one_gallery_hero_from_its_small_thumbnail(self):
         self.with_gallery()
         b = Browser(self.app)
         r = b.get("/nope")
         self.assertEqual(r.status_code, 404)
         imgs = re.findall(r"<img[^>]*>", r.text)
         self.assertEqual(len(imgs), 1)
-        self.assertIn('src="/gallery-assets/ranger/artwork"', imgs[0])
-        self.assertIn('loading="lazy"', imgs[0])
+        src = re.search(r'src="([^"]+)"', imgs[0]).group(1)
+        self.assertTrue(src.startswith("/gallery-assets/ranger/artwork-thumb?v="), src)
+        self.assertNotIn('loading="lazy"', imgs[0])   # above the fold: a lazy image showed an empty frame
         self.assertRegex(imgs[0], r'width="\d+" height="\d+"')
-        self.assertEqual(b.get("/gallery-assets/ranger/artwork").status_code, 200)
+        thumb = b.get(html.unescape(src))
+        self.assertEqual((thumb.status_code, thumb.headers["content-type"]), (200, "image/webp"))
         self.assert_page_csp(r, "/nope with art")
 
     def test_a_broken_gallery_never_breaks_the_404(self):
