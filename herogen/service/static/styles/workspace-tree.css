@@ -60,6 +60,22 @@
 .build-log .st-skipped > .bl-mark, .build-log .st-skipped > details > .bl-head .bl-mark { color: var(--color-warning); }
 .build-log .st-pending > details > .bl-head { color: var(--color-text-muted); }
 .build-log .is-late .bl-meta, .build-log .is-late .bl-note { color: var(--color-warning); }
+/* A check summary opens into the full list of checks. */
+.build-log .bl-check-sum { display: block; }
+.build-log .bl-fold-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 0 var(--space-3); list-style: none; cursor: pointer; border-radius: var(--radius-s); }
+.build-log .bl-fold-head::-webkit-details-marker { display: none; }
+.build-log .bl-fold-head:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }
+.build-log .bl-fold-head .bl-chev { align-self: center; }
+.build-log .bl-fold[open] > .bl-fold-head .bl-chev { transform: rotate(90deg); }
+.build-log .bl-checks { display: grid; gap: var(--space-1); margin: var(--space-2) 0 var(--space-1); padding-left: var(--space-6); font-size: var(--text-caption); }
+.build-log .bl-check { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 var(--space-3); align-items: baseline; overflow-wrap: anywhere; }
+.build-log .bl-check.st-passed > .bl-mark { color: var(--color-success); }
+.build-log .bl-check.st-failed > .bl-mark { color: var(--color-danger); }
+.build-log .bl-check.st-failed > .bl-text { color: var(--color-danger-text); }
+.build-log .bl-check.st-muted { color: var(--color-text-muted); }
+.build-log .st-passed > .bl-fold > .bl-fold-head > .bl-mark { color: var(--color-success); }
+.build-log .st-failed > .bl-fold > .bl-fold-head > .bl-mark { color: var(--color-danger); }
+.build-log .st-failed > .bl-fold > .bl-fold-head .bl-text { color: var(--color-danger-text); }
 @media (prefers-reduced-motion: no-preference) {
   .build-log .st-running > .bl-mark .icon, .build-log .st-running > details > .bl-head .bl-mark .icon { animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
   .build-log .bl-chev { transition: transform var(--dur-base) var(--ease-standard); }

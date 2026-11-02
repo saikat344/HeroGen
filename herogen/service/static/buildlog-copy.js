@@ -174,7 +174,7 @@ const n = (v) => Number.isFinite(v) ? v.toLocaleString('en-US', {maximumFraction
 const px = (v) => Number.isFinite(v) ? `${v.toFixed(1)} px` : null;
 const pct = (v) => Number.isFinite(v) ? `${Math.round(v <= 1 ? v * 100 : v)} %` : null;
 
-const listOf = (v) => Array.isArray(v) ? v.length : 0;
+export const listOf = (v) => Array.isArray(v) ? v.length : 0;
 
 // Local work and the pipeline's own decisions. Each returns one sentence, or null when there is nothing honest to
 // say (the row is then left out rather than invented).
@@ -189,6 +189,25 @@ const LOCAL = {
   joints_mapped: (m) => `mapped ${n(m.joints) || 'the'} joints into the front view${Number.isFinite(m.from_model) && Number.isFinite(m.from_outline)
     ? `: ${n(m.from_model)} from SAM 3D Body, ${n(m.from_outline)} from the outline` : ''}${Number.isFinite(m.flagged)
     ? `; ${n(m.flagged)} differ from the outline estimate by more than ${n(m.flag_studs ?? 0.5)} studs` : ''}`,
+  body_start: (m) => `turning the 3D shape into the ${n(m.parts) || 15} rigid parts Roblox R15 expects${Number.isFinite(m.lods) ? `, in ${n(m.lods)} levels of detail` : ''}. No model is called here`,
+  landmarks: (m) => `loaded ${n(m.joints) || 'the'} joint landmarks${Number.isFinite(m.from_body) ? ` (${n(m.from_body)} from SAM 3D Body${Number.isFinite(m.from_outline) ? `, ${n(m.from_outline)} from the outline` : ''})` : ''}${
+    m.flagged ? `; ${n(m.flagged)} differ from the outline estimate` : ''}`,
+  colour_sources: (m) => `gathered the colour sources (${m.refined ? 'refined texture' : 'original texture'}${m.refined && m.source_texture ? ' and the original texture' : ''})`,
+  decimate: (m) => `reduced the ${Number.isFinite(m.source_triangles) ? `${n(m.source_triangles)}-triangle ` : ''}mesh to candidate sizes${
+    Number.isFinite(m.candidates_high) ? `: ${n(m.candidates_high)} for the high-detail model (${n(m.high_min)} to ${n(m.high_max)})` : ''}${
+    Number.isFinite(m.candidates_low) ? ` and ${n(m.candidates_low)} for the low-detail model (${n(m.low_min)} to ${n(m.low_max)})` : ''}`,
+  parts_have_surface: (m) => `checked that all ${n(m.parts) || 15} parts own mesh surface${m.recoveries ? ` (${n(m.recoveries)} recovered)` : ' (no recovery needed)'}`,
+  cut_search: (m) => `searched for cleaner cut positions${Number.isFinite(m.triangles) ? ` on a ${n(m.triangles)}-triangle copy` : ''}${
+    Number.isFinite(m.moved) ? `: ${n(m.moved)} of ${n(m.joints)} cuts moved` : ''}`,
+  pose_test: (m) => `posed the body in ${n(m.poses) || 'several'} poses${Number.isFinite(m.heldout) ? ` (${n(m.heldout)} held out)` : ''}${
+    Number.isFinite(m.gap_high) ? `: joint gaps up to ${studs(m.gap_high)} (high) and ${studs(m.gap_low)} (low)${Number.isFinite(m.limit) ? `, limit ${n(m.limit)}, informational in the fast lane` : ''}` : ''}`,
+  atlas: (m) => `packed the texture atlases${Number.isFinite(m.high) ? ` (${n(m.high)} px high, ${n(m.low)} px low)` : ''}`,
+  texture_transfer: (m) => `transferred the texture to ${m.lods === 2 ? 'both models' : 'the models'}${Number.isFinite(m.colour_views) ? ` from ${n(m.colour_views)} colour views` : ''}`,
+  export: (m) => `exported ${m.lods === 2 ? 'both models' : 'the models'}${Number.isFinite(m.pose_renders) ? ` and ${n(m.pose_renders)} pose renders` : ''}`,
+  parts_total: (m) => `${n(m.high)} of ${n(m.high_budget)} triangles (high), ${n(m.low)} of ${n(m.low_budget)} (low); largest part ${n(m.largest)} (limit ${n(m.limit)})`,
+  rig_write: (m) => `wrote HeroGen-R15.rbxmx: ${n(m.parts) || 15} MeshParts, ${n(m.motors) || 15} Motor6D joints${Number.isFinite(m.attachments) ? `, ${n(m.attachments)} accessory attachments` : ''}${
+    Number.isFinite(m.hip_height) ? `, HipHeight ${m.hip_height.toFixed(3)} studs` : ''}`,
+  studio_scripts: (m) => `wrote ${n(m.files) || 3} Studio helper files (bind_meshes.luau, rig_test.server.luau, README.txt)`,
   landmarks_loaded: (m) => `loaded ${n(m.joints) || 'the'} joint landmarks${Number.isFinite(m.from_model) ? ` (${n(m.from_model)} from SAM 3D Body)` : ''}`,
   decimated: (m) => `reduced the ${n(m.source_triangles) || ''} triangle mesh to fit the in-game budget${Number.isFinite(m.high) && Number.isFinite(m.low)
     ? `: ${n(m.high)} triangles (high), ${n(m.low)} (low)` : ''}`.replace('the  triangle', 'the'),
@@ -201,8 +220,64 @@ const LOCAL = {
   views_rendered: (m) => `rendered the 3D shape from ${n(m.cameras ?? m.views) || 'several'} ${m.cameras === 1 ? 'camera' : 'cameras'}${Number.isFinite(m.wave) ? ` for wave ${n(m.wave)}` : ''}`,
 };
 // Local lines are written without the speaker; the panel shows a HeroGen chip and "Copy log" adds "HeroGen (local): ".
+const words = (id) => typeof id === 'string' && /^[a-z0-9_]+$/.test(id) ? id.replaceAll('_', ' ') : null;
+const LODS = {high: 'high-detail', low: 'low-detail'};
+const lodName = (id) => LODS[id] || 'one';
+const studs = (v) => Number.isFinite(v) ? `${v.toFixed(2)} studs` : null;
 const jointName = (name) => typeof name === 'string' && /^[a-z_]+$/.test(name) ? name.replaceAll('_', ' ') : 'a joint';
+const RUNNING = {decimate: 'reducing the mesh to fit the in-game budget', cut_search: 'searching for cleaner cut positions',
+  pose_test: 'posing the body to test the joints', atlas: 'packing the texture atlases', texture_transfer: 'transferring the texture to the game body',
+  export: 'exporting the game body'};
+export const isLongStep = (name) => Boolean(RUNNING[name]) || /^split_(high|low)$/.test(name);
+// Rows that fold together: the 15 parts (with their total), and the joints (with the mapping summary).
+export function foldOf(e) {
+  const what = String(e.what || '');
+  if (/^part_[a-z_]+$/.test(what)) return 'parts';
+  if (what === 'parts_total') return 'parts_summary';
+  if (/^joint_from_(model|outline)$/.test(what) || (/^joint_[a-z_]+$/.test(what) && Number.isFinite(e.m?.x))) return 'joints';
+  if (what === 'joints_mapped') return 'joints_summary';
+  return null;
+}
+export function foldTitle(kind, ms, summary) {
+  if (kind === 'parts') return `${n(ms.length)} parts${summary ? ` · ${summary}` : ''}`;
+  if (summary) return `${n(ms.length)} joints · ${summary.replace(/^Mapped \d+ joints into the front view: /, '')}`;
+  const fromBody = ms.filter(m => m.from_body).length, differs = ms.filter(m => m.differs).length;
+  return `${n(ms.length)} joints · ${n(fromBody)} from SAM 3D Body, ${n(ms.length - fromBody)} from the outline${differs ? ` · ${n(differs)} differ from the outline estimate by more than 0.5 studs` : ''}`;
+}
+// The running sentence of a long local sub-step (`<name>_start`), shown until `<name>` arrives.
+export function localRunning(name) {
+  const split = /^split_(high|low)$/.exec(name);
+  if (split) return `splitting the ${lodName(split[1])} model into its 15 parts`;
+  return RUNNING[name] || 'working on this step (no model call)';
+}
+const PROPORTION = {
+  clamped: (who, m) => `${who} height clamped from ${m.from_h?.toFixed(3)} H to ${m.to_h?.toFixed(3)} H`,
+  wrist_narrowing: (who, m) => `${who} placed where the arm narrows${Number.isFinite(m.fraction) ? ` (${pct(m.fraction)} along it)` : ''}`,
+  waist_prior: (who, m) => `no clear ${who.toLowerCase()} found; placed ${Number.isFinite(m.percent) ? `${n(m.percent)} %` : 'part'} of the way from crotch to armpit`,
+  no_side_view: (who, m) => `${who}: no side view, estimated${Number.isFinite(m.h) ? ` at ${m.h.toFixed(3)} H` : ''}`,
+  arm_few_pixels: (who, m) => `${who}: too few arm pixels${Number.isFinite(m.pixels) ? ` (${n(m.pixels)})` : ''}, estimated from typical proportions`,
+};
+// Part, joint, cut and level-of-detail names travel in `what` after a prefix.
+function prefixed(e) {
+  const m = e.m || {}, what = String(e.what || '');
+  let x;
+  if ((x = /^part_([a-z_]+)$/.exec(what)) && words(x[1])) return `${words(x[1])}: ${n(m.high)} / ${n(m.low)} triangles (high / low)`;
+  if ((x = /^joint_([a-z_]+)$/.exec(what)) && words(x[1]) && Number.isFinite(m.x)) return `${words(x[1])} joint at (${m.x.toFixed(2)}, ${m.y.toFixed(2)}, ${
+    m.z.toFixed(2)}) from ${m.from_body ? 'SAM 3D Body' : 'the outline'}${m.differs ? ' · differs from the outline estimate by more than 0.5 studs' : ''}`;
+  if ((x = /^cut_([a-z_]+)$/.exec(what)) && words(x[1]) && x[1] !== 'search') return `moved the ${words(x[1])} cut ${Number.isFinite(m.fraction)
+    ? `${m.fraction > 0 ? '+' : '−'}${Math.abs(m.fraction).toFixed(2)} radius` : ''}${Number.isFinite(m.studs) ? ` (${m.studs > 0 ? '+' : '−'}${Math.abs(m.studs).toFixed(2)} studs)` : ''}`;
+  if ((x = /^split_(high|low)$/.exec(what))) return `split the ${lodName(x[1])} model into 15 parts${Number.isFinite(m.triangles) ? `: ${n(m.triangles)}${
+    Number.isFinite(m.budget) ? ` of ${n(m.budget)}` : ''} triangles` : ''}${Number.isFinite(m.body_triangles) ? ` (${n(m.body_triangles)} body, ${n(m.cap_triangles)} caps, ${n(m.cover_triangles)} shoulder covers)` : ''}${
+    Number.isFinite(m.largest_part) ? `, largest part ${n(m.largest_part)}` : ''}`;
+  if ((x = /^proportion_([a-z_]+)$/.exec(what)) && words(x[1])) {
+    const who = upper(words(x[1])), say = PROPORTION[e.why];
+    return say ? say(who, m) : `${who} estimated from typical proportions`;
+  }
+  return null;
+}
 export function localLine(e) {
+  const named = prefixed(e);
+  if (named) return `${named}${Number.isFinite(e.s) && e.s >= 0.05 ? ` · ${seconds(e.s)}` : ''}`;
   if (e.what === 'joint_from_model' || e.what === 'joint_from_outline') {
     const m = e.m || {};
     return `${jointName(e.name)} from ${e.what === 'joint_from_model' ? 'SAM 3D Body' : 'the outline'}${Number.isFinite(m.off_outline_studs)
@@ -244,26 +319,56 @@ export function decisionLine(e) {
       Number.isFinite(m.from_version) ? ` from version ${n(m.from_version)}` : ''}, ${n(m.tries) || 2} tries each, all at once${Number.isFinite(e.n) ? ` (${n(e.n)} requests)` : ''}`;
     case 'recovery_sheet': return `The first sheet had no usable views. Asking Muse Image for one more sheet; the fast lane makes one extra attempt only.`;
     case 'complete_figure': return 'The drawing is cropped at the feet, so Muse Image is asked to complete the figure.';
+    case 'over_budget_high': case 'over_budget_low': return `The ${lodName(e.what.slice(12))} model is over its budget (${n(m.triangles)} against ${n(m.budget)} triangles); the fast lane kept the smallest complete body.`;
     default: return null;
   }
 }
 
-// A step's check summary: `n` checks, `passed`, and the names of failed hard and informational checks.
-export function checksLine(e) {
-  if (!Number.isFinite(e.n)) return null;
-  const failed = listOf(e.failed), advisory = listOf(e.advisory);
-  const passed = Number.isFinite(e.passed) ? e.passed : e.n - failed - advisory;
-  const bits = [failed && `${n(failed)} hard ${failed === 1 ? 'limit' : 'limits'} failed`,
-    advisory && `${n(advisory)} informational only in the fast lane`].filter(Boolean);
-  return `${n(passed)} of ${n(e.n)} checks passed${bits.length ? ` (${bits.join(', ')})` : ''}`;
-}
+// Plain meanings for the rig checks an independent reader runs on the Roblox file.
+const CHECK_MEANINGS = {
+  xml_well_formed: 'rig file is valid Roblox XML', one_root_model: 'one root Model', humanoid_r15: 'Humanoid is R15',
+  humanoid_scale_values: 'body-scale values present', root_part: 'HumanoidRootPart is an invisible Part and the PrimaryPart',
+  sections_r15_names: 'exactly the 15 R15 parts', joints_named_and_linked: 'Motor6D joints link each part to its parent',
+  rig_attachment_pairs: 'joint attachment pairs', attachments_at_pivots: 'attachments sit on the joint pivots',
+  attachment_pairs_coincide: 'both attachments of each joint coincide', motor_c0_c1_equal_attachments: 'Motor6D C0/C1 equal the attachments',
+  joint_chain_reachable: 'every part is reachable from the root', joints_inside_parts: 'every joint pivot lies inside both its parts',
+  rest_pose_position: 'rest pose reproduces part positions', rest_pose_rotation: 'rest pose reproduces part rotations',
+  section_extents_match_glb: 'part sizes match the model file', section_centres_match_glb: 'part centres match the model file',
+  rotations_proper: 'no mirrored rotations', triangles_per_mesh: 'largest part under the per-mesh triangle limit',
+  hip_height: 'HipHeight puts the feet on the floor', feet_lowest: 'nothing reaches below the feet',
+  faces_minus_z: 'character faces forward', not_mirrored: "right arm is on the character's right",
+  face_front_on_front: 'face attachment is on the front of the head', accessory_attachments: 'accessory attachments present and inside their parts',
+  avatar_part_scale_type: 'all parts use the Classic scale type', meshes_bound: 'meshes bound (0 until the Studio script runs)',
+};
+const CHECK_GROUP = {4: 'body', 6: 'rig'};
 const OPS = {'<': 'under', '<=': 'at most', '==': 'exactly', '>=': 'at least', '>': 'over', '!=': 'not'};
-// One recorded check, for a failure or a near miss: the measured value against its limit.
+const value = (v) => !Number.isFinite(v) ? null : Math.abs(v) >= 1000 ? n(v) : Number(v.toPrecision(4)).toString();
+const checkName = (name) => typeof name === 'string' && /^[a-z0-9_]+$/.test(name) ? name : 'check';
+// One recorded check: its name, what it means when known, the measured value against its limit, and the verdict.
 export function checkLine(e) {
-  const m = e.m || {}, name = typeof e.name === 'string' ? e.name.replaceAll('_', ' ') : 'a check';
-  const measured = Number.isFinite(m.value) ? `measured ${n(m.value)}` : 'not measured';
-  const limit = Number.isFinite(m.limit) ? `, needs ${OPS[e.op] || ''} ${n(m.limit)}`.replace('  ', ' ') : '';
-  return `${upper(name)}: ${e.ok ? 'passed' : e.gate === false ? 'did not pass (informational)' : 'failed'} · ${measured}${limit}`;
+  const m = e.m || {}, name = checkName(e.name), meaning = CHECK_MEANINGS[name];
+  const measured = value(m.value) != null ? `measured ${value(m.value)}` : 'not measured';
+  const limit = value(m.limit) != null ? `, needs ${OPS[e.op] ? `${OPS[e.op]} ` : ''}${value(m.limit)}` : '';
+  const verdict = e.ok ? 'passed' : e.gate === false ? 'not met (informational)' : 'failed';
+  return `${name}${meaning ? ` (${meaning})` : ''}: ${verdict} · ${measured}${limit}`;
+}
+// A step's check summary, from its individual checks when they were recorded, else from the summary event.
+export function checksLine(e, list = [], step = null) {
+  const what = CHECK_GROUP[step] ? `${CHECK_GROUP[step]} checks` : 'checks';
+  let gated, gatedFailed, info, infoMissed;
+  if (list.length && !(e && Number.isFinite(e.n) && e.n !== list.length)) {
+    gated = list.filter(c => c.gate === true).length; gatedFailed = list.filter(c => c.gate === true && !c.ok).length;
+    info = list.length - gated; infoMissed = list.filter(c => c.gate !== true && !c.ok).length;
+  } else if (e && Number.isFinite(e.n)) {
+    const failed = listOf(e.failed);
+    gated = Number.isFinite(e.gated) ? e.gated : e.n - listOf(e.advisory); gatedFailed = failed;
+    info = e.n - gated; infoMissed = Number.isFinite(e.passed) ? Math.max(0, e.n - e.passed - failed) : listOf(e.advisory);
+  } else return null;
+  const head = gated ? (gatedFailed ? `${n(gatedFailed)} of ${n(gated)} required ${what} failed` : `${n(gated)} of ${n(gated)} required ${what} passed`)
+    : `${n(info)} informational ${what}`;
+  const tail = gated && info ? ` · ${n(info)} informational${infoMissed ? ` (${n(infoMissed)} not met in the fast lane)` : ''}`
+    : !gated && infoMissed ? ` (${n(infoMissed)} not met)` : '';
+  return `${head}${tail}`;
 }
 
 export function versionLine(e) {
@@ -279,7 +384,12 @@ const STEP_SKIPS = {
   rough_shape: 'Texture refine was skipped because the 3D shape is rough.',
   views_rejected: 'Kept the unrefined texture because its views did not pass the checks.',
 };
+const SEAM = {no_shared_rim: 'no shared rim between its parts, so its seam cannot be measured (shown as unverified, not a failure)',
+  empty_section: 'one of its parts is empty, so its seam cannot be measured', unmeasurable: 'its seam cannot be measured on this character'};
 export function skipLine(e) {
+  const seam = /^seam_([a-z_]+)$/.exec(String(e.what || ''));
+  if (seam && words(seam[1])) return `${upper(words(seam[1]))}: ${SEAM[e.why] || 'its seam was not measured'}.`;
+  if (e.what === 'cut_search') return 'The cut search is turned off; cuts stay at the joints.';
   if (e.what === 'identity_checks') return 'The fast lane keeps this sketch without the extra identity checks.';
   if (e.what === 'acceptance_judges') return 'The fast lane skips the visual acceptance judges; structural checks are informational.';
   if (e.what === 'view') return `${regionName(e.view)}: skipped (${reasonText(e.why)}).`;
@@ -288,8 +398,19 @@ export function skipLine(e) {
   return e.why === 'fast_lane' ? 'The fast lane leaves this part out.' : 'This part was skipped.';
 }
 
-const RECOVERS = {merged_limb: 'A limb had merged into the body; its part was rebuilt from the nearest bone.'};
-export const recoverLine = (e) => RECOVERS[e.what] || 'HeroGen recovered and carried on.';
+const LANDMARK_FIX = {hips_cross_pelvis: 'the hips crossed the pelvis', shoulder_elbow_order: 'the elbow sat above the shoulder',
+  hand_direction: 'the hand pointed back at the body', radius_below_forearm: 'the arm radius was below the forearm'};
+export function recoverLine(e) {
+  const what = String(e.what || ''), m = e.m || {};
+  let x;
+  if ((x = /^merged_limb_([a-z_]+)$/.exec(what)) && words(x[1])) return `The ${words(x[1])} had merged into the body; its parts were rebuilt from the nearest bone.`;
+  if (what === 'merged_limb') return 'A limb had merged into the body; its part was rebuilt from the nearest bone.';
+  if ((x = /^limb_root_([a-z_]+)$/.exec(what)) && words(x[1])) return `Repaired the ${words(x[1])} joint (${e.why === 'reversed_root' ? 'it pointed the wrong way' : 'its parts were empty'}).`;
+  if ((x = /^sleeve_([a-z_]+)$/.exec(what)) && words(x[1])) return `The ${words(x[1])} was a hollow sleeve; the arm was found inside it${Number.isFinite(m.offset_studs) ? ` (${studs(m.offset_studs)} in)` : ''}.`;
+  if ((x = /^landmark_([a-z_]+)$/.exec(what)) && words(x[1])) return `Repaired the ${words(x[1])} landmark (${LANDMARK_FIX[e.why] || 'it was out of place'}).`;
+  if ((x = /^pivot_([a-z_]+)_(high|low)$/.exec(what)) && words(x[1])) return `Placed the ${words(x[1])} pivot in the ${lodName(x[2])} model another way${Number.isFinite(m.distance_studs) ? ` (${studs(m.distance_studs)} away)` : ''}.`;
+  return 'HeroGen recovered and carried on.';
+}
 
 // An error row: the step's own plain message when the job record has one, else the code in words.
 export function errorLine(e, stage) {
