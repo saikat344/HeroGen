@@ -2741,7 +2741,9 @@ its atlas from every accepted record before later publications use it. The neste
 attempt one only when attempt zero and the enhanced sample were both rejected.
 Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes (for the head,
 when slot 2 passes or face selection accepts slot 1), and three (one enhanced, two ordinary) only when
-both are rejected, never more, including when SideBeautyPass and region palette are also on.
+both are rejected, never more, including when SideBeautyPass and region palette are also on. The one
+identical resend of a beauty-only request after a transient error (below) is the only extra send; it repeats
+a request rather than drawing a new sample.
 The lowest passing slot wins (1, then 2, then 3); higher body/hair slots are cancelled when a lower slot
 wins. Head candidates drain because eye-detail selection requires the ordinary paint; the lowest
 accepted default slot (2, then 3) is the head's default candidate. Wave 1 chooses the face source only
@@ -2771,7 +2773,8 @@ make does not fail stage 3f. These requests are:
   `body+180` and hair `upper+180`, sending `RF12R`, `RF12W` or `RF13H`). That view has no conditional
   slot, so its existing slot 2 decides. Front views send plain fast's own request there and stay loud.
 One transient retry: a beauty-only request (any of the above, image edit or SAM query) that fails with a
-timeout or read timeout, a dropped or refused connection, or an HTTP 5xx is resent once, identically,
+timeout or read timeout, a dropped or refused connection, or an HTTP 5xx (except 501 and 505, which the
+client never retries) is resent once, identically,
 through the same budget reservation, limiter and spend hooks; a budget stop or cancellation there behaves
 as for any request. "Transient" comes from the error's `http_status` and the client's `network_error` (the
 transport failure class when no HTTP answer came back), never from message text. An answered resend

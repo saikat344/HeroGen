@@ -145,11 +145,14 @@ def _contained(error: dict) -> dict:
 def retried(entry: dict, *, view: str | None = None, number: int | None = None, yaw: int | None = None) -> None:
     """A beauty-only request failed with a transient error (``code``, ``m.http_status``) and was resent once,
     identically: ``ok`` says whether the resend answered. A view's try (``view``, ``try``) or a beauty
-    reference (``m.yaw``). A failed resend is then contained like any beauty-only error."""
+    reference (``m.yaw``). A failed resend is then contained like any beauty-only error; a resend that a budget
+    stop or cancellation ended instead is logged as ``stopped``."""
     status = entry.get("http_status")
-    ok = entry.get("retry") == "ok"
+    retry = entry.get("retry")
+    ok = retry == "ok"
+    why = None if ok else "model_error" if isinstance(retry, dict) and retry.get("error") == "ApiError" else "stopped"
     events.emit("decision", step=STEP, what="model_retry", view=view, try_=number, ok=ok,
-                why=None if ok else "model_error", code=_code(entry),
+                why=why, code=_code(entry),
                 m={"retry": 1, **({"yaw": yaw} if yaw is not None else {}),
                    **({"http_status": status} if type(status) is int else {})})
 
