@@ -129,6 +129,7 @@ class RetryThroughServerTest(unittest.TestCase):
                 _, error = self._call(Script(answer), muse=True)
                 self.assertEqual((error.http_status, error.error_code, error.transient),
                                  (status, code, transient))
+                self.assertIsNone(error.network_error)   # an HTTP answer came back
                 self.assertNotIn(description, '\n'.join(self.logs) + self.ledger_text())
 
     def test_failed_answer_exposes_structured_code_without_message_parsing(self):
@@ -266,6 +267,7 @@ class RetryThroughServerTest(unittest.TestCase):
                 self.assertLogs("herogen.pipeline.client", "WARNING"), self.assertRaises(ApiError) as cm:
             client.segment(IMAGE, "character")
         self.assertIn("after 8 attempts", str(cm.exception))
+        self.assertEqual((cm.exception.http_status, cm.exception.network_error), (None, "ConnectionRefusedError"))
         self.assertEqual({r["outcome"] for r in self.ledger()}, {"failed"})
         self.assertEqual(client.log.calls, [])  # nothing reached the model, nothing may be billed
 
@@ -553,6 +555,7 @@ class ReadDeadlineTest(unittest.TestCase):
                 self.assertLess(seconds, 1.5)  # cut off near the deadline (the margin is for a loaded machine)
                 self.assertIn("TimeoutError", str(e))
                 self.assertIn("deadline", str(e))
+                self.assertEqual((e.http_status, e.network_error), (None, "TimeoutError"))
                 self.assertEqual([(r["attempt"], r["outcome"], r["status"]) for r in self.ledger()],
                                  [(1, "unknown", None)])
                 self.assertEqual([c.get("outcome") for c in self.client.log.calls], ["unknown"])  # may be billed

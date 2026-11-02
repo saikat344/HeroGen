@@ -882,6 +882,7 @@ class FastBeautyStageTests(unittest.TestCase):
         self.client.mode = 'live'
         paid = Counter()
         errored = Counter() if errored is None else errored
+        resendable = Counter()
         ordinary = Counter()
         edits = []
         lock = threading.Lock()
@@ -901,13 +902,17 @@ class FastBeautyStageTests(unittest.TestCase):
             nested = 'face-source' in client.cache_dir.parts
             error = fail(view, client.cache_dir.parts[-1], nested) if fail is not None else None
             with lock:
+                # At most three samples per view, plus one resend of the enhanced slot 1's transient error.
+                allowance = 3 + bool(resendable[view])
                 if error is not None:
                     errored[view] += 1
+                    if not nested and client.cache_dir.parts[-1] == 'attempt-0' and fast.transient(error):
+                        resendable[view] += 1
                 else:
                     paid[view] += 1
                     if nested:
                         ordinary[view] += 1
-                self.assertLessEqual(paid[view] + errored[view], 3, f'fourth sent sample for {view}')
+                self.assertLessEqual(paid[view] + errored[view], allowance, f'extra sent sample for {view}')
             if error is not None:
                 raise error
             png = body['images'][0]['image_url'].split(',', 1)[1]
@@ -1198,16 +1203,35 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertTrue(all(v['tries'] == 2 and not v['accepted'] for v in record['views'].values()))
 
     # Beauty-only model errors in the fast profile, in the three shapes seen in held-out runs.
-    TIMEOUT = ApiError('images/edits failed after 1 attempts: TimeoutError: The read operation timed out')
+    TIMEOUT = ApiError('images/edits failed after 1 attempts: TimeoutError: The read operation timed out',
+                       network_error='TimeoutError')
     SERVER = ApiError('images/edits failed after 1 attempts: HTTP 500: internal server error', http_status=500)
     POLICY = ApiError('images/edits failed: HTTP 400: filtered (not retried)', http_status=400,
                       error_code='content_policy_violation')
 
     @staticmethod
-    def enhanced(error, *views):
-        """Fail the main run's slot-1 (enhanced) edit of each named view (every view when none is named)."""
-        return lambda view, slot, nested: (error if slot == 'attempt-0' and not nested
-                                           and (not views or view in views) else None)
+    def enhanced(error, *views, once=False):
+        """Fail the main run's slot-1 (enhanced) edit of each named view (every view when none is named).
+
+        With `once`, only each view's first send fails, so a resend answers."""
+        failed = set()
+        def fail(view, slot, nested):
+            if slot != 'attempt-0' or nested or (views and view not in views) or (once and view in failed):
+                return None
+            failed.add(view)
+            return error
+        return fail
+
+    @staticmethod
+    def code(error):
+        status = error.http_status
+        return (f'http_{status // 100}xx' if status else 'timeout' if error.network_error == 'TimeoutError'
+                else 'network' if error.network_error else None)
+
+    @staticmethod
+    def fields(error):
+        return {'error': 'ApiError', 'http_status': error.http_status, 'error_code': error.error_code,
+                'network_error': error.network_error, 'message': str(error)}
 
     def contained_run(self, fail, **kwargs):
         """`paid_run` with the build log on: the record, sent samples per view and the build-log lines."""
@@ -1220,8 +1244,9 @@ class FastBeautyStageTests(unittest.TestCase):
 
     def assert_contained(self, record, lines, view, error, *, slot_after, prompts, request='image edit'):
         """One contained error on `view`'s slot 1: in the view, its attempt, the run list and the build log."""
-        expected = {'slot': 1, 'request': request, 'error': 'ApiError', 'http_status': error.http_status,
-                    'error_code': error.error_code, 'message': str(error), 'fallback': 'ordinary slots'}
+        retried = request == 'image edit' and fast.transient(error)   # the failing edit was resent once
+        expected = {'slot': 1, 'request': request, **self.fields(error), **({'retried': True} if retried else {}),
+                    'fallback': 'ordinary slots'}
         found = [e for e in record['contained_errors'] if e['view'] == view]
         self.assertEqual(len(found), 1)
         self.assertIn(found[0].pop('prompt'), prompts)
@@ -1238,14 +1263,25 @@ class FastBeautyStageTests(unittest.TestCase):
                    and e['view'] == view and e['try'] == 1]
         status = error.http_status
         self.assertEqual([(e['ok'], e['why'], e.get('code'), e['m']) for e in results],
-                         [(False, 'model_error', None if status is None else f'http_{status // 100}xx',
-                           {'fallback': 1, **({'http_status': status} if status else {})})])
+                         [(False, 'model_error', self.code(error),
+                           {'fallback': 1, **({'http_status': status} if status else {}),
+                            **({'retried': 1} if retried else {})})])
+        # A resent transient error: both attempts on the view, its attempt, the run list and the build log.
+        resends = [e for e in record['retries'] if e['view'] == view]
+        self.assertEqual(resends, [{'view': view, 'slot': 1, 'request': 'image edit', **self.fields(error),
+                                    'retry': self.fields(error)}] if retried else [])
+        self.assertEqual(failed[0].get('retries'),
+                         [{k: v for k, v in resends[0].items() if k not in ('view', 'slot')}] if retried else None)
+        logged = [(e['ok'], e['why'], e.get('code'), e['m']) for e in lines if e['kind'] == 'decision'
+                  and e['what'] == 'model_retry' and e.get('view') == view]
+        self.assertEqual(logged, [(False, 'model_error', self.code(error),
+                                   {'retry': 1, **({'http_status': status} if status else {})})] if retried else [])
 
     def test_enhanced_side_timeout_falls_back_to_slot_two(self):
         record, sent, errored, _, lines = self.contained_run(self.enhanced(self.TIMEOUT, 'body+90'),
                                                              all_flags=True)
-        self.assertEqual(errored, Counter({'body+90': 1}))
-        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assertEqual(errored, Counter({'body+90': 2}))   # the timeout and its one resend
+        self.assertEqual(sent, Counter({view: 3 if view == 'body+90' else 2 for view in self.expected_views}))
         self.assert_contained(record, lines, 'body+90', self.TIMEOUT, slot_after=2, prompts=('RF16B',))
         self.assertEqual(len(record['contained_errors']), 1)
         self.assertEqual(self.outcomes(lines)['body+90'], [('view_selected', 2, 2)])
@@ -1253,8 +1289,8 @@ class FastBeautyStageTests(unittest.TestCase):
 
     def test_enhanced_head_server_error_is_a_failed_beauty_sample(self):
         record, sent, errored, edits, lines = self.contained_run(self.enhanced(self.SERVER, 'head+0'))
-        self.assertEqual(errored, Counter({'head+0': 1}))
-        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assertEqual(errored, Counter({'head+0': 2}))
+        self.assertEqual(sent, Counter({view: 3 if view == 'head+0' else 2 for view in self.expected_views}))
         # As for a rejected beauty head: the accepted beauty body+0 owns the face, slot 2 stays the default candidate.
         self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=None, prompts=('RF6B',))
         head = record['views']['head+0']
@@ -1267,9 +1303,14 @@ class FastBeautyStageTests(unittest.TestCase):
     def test_enhanced_head_error_without_a_beauty_body_uses_the_ordinary_head(self):
         record, sent, errored, edits, lines = self.contained_run(
             self.enhanced(self.SERVER, 'head+0'), reject=lambda view, kind: view == 'body+0' and kind == 'beauty')
-        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assertEqual(sent, Counter({view: 3 if view == 'head+0' else 2 for view in self.expected_views}))
         self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=2, prompts=('RF6B',))
         self.assertEqual((record['face_source']['source'], record['face_source']['attempt']), ('default', 0))
+        # The default head replaces the view's record but keeps its slot-1 error and resend on record.
+        head = record['views']['head+0']
+        self.assertTrue(head['head_only'])
+        self.assertEqual([e['slot'] for e in head['contained_errors']], [1])
+        self.assertEqual([(e['slot'], e['http_status']) for e in head['retries']], [(1, 500)])
         self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
 
     def test_enhanced_front_content_policy_error_falls_back_to_slot_two(self):
@@ -1277,13 +1318,15 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
         self.assert_contained(record, lines, 'body+0', self.POLICY, slot_after=2, prompts=('RF18B',))
         self.assertEqual(record['views']['body+0']['prompt'], 'RF2R')
+        self.assertEqual(errored, Counter({'body+0': 1}))   # a 4xx is never resent
+        self.assertEqual(record['retries'], [])
 
     def test_enhanced_error_with_rejected_slot_two_pays_the_conditional_third(self):
         # An errored slot 1 counts as a failed beauty sample: with slot 2 rejected, slot 3 follows, never a fourth.
         record, sent, errored, edits, lines = self.contained_run(
             self.enhanced(self.SERVER, 'head+0', 'body+90'),
             reject=lambda view, kind: view in ('head+0', 'body+90') and kind == 0)
-        self.assertEqual(sent, Counter({view: 3 if view in ('head+0', 'body+90') else 2
+        self.assertEqual(sent, Counter({view: 4 if view in ('head+0', 'body+90') else 2   # with the resends
                                         for view in self.expected_views}))
         self.assert_contained(record, lines, 'body+90', self.SERVER, slot_after=3, prompts=('RF6B',))
         self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=None, prompts=('RF6B',))
@@ -1297,8 +1340,8 @@ class FastBeautyStageTests(unittest.TestCase):
     def test_enhanced_errors_on_every_view_keep_two_samples_each(self):
         record, sent, errored, edits, lines = self.contained_run(self.enhanced(self.TIMEOUT), all_flags=True)
         expected = self.expected_views
-        self.assertEqual(errored, Counter({view: 1 for view in expected}))
-        self.assertEqual(sent, Counter({view: 2 for view in expected}))
+        self.assertEqual(errored, Counter({view: 2 for view in expected}))
+        self.assertEqual(sent, Counter({view: 3 for view in expected}))
         self.assertEqual(sorted(e['view'] for e in record['contained_errors']), sorted(expected))
         self.assertTrue(all(record['views'][view]['winning_slot'] == 2 for view in expected))
         self.assertEqual(record['face_source']['source'], 'default')
@@ -1332,7 +1375,7 @@ class FastBeautyStageTests(unittest.TestCase):
         error, = record['contained_errors']
         self.assertEqual(error, {'view': 'body+180', 'slot': 1, 'prompt': 'RF12R', 'request': 'image edit',
                                  'error': 'ApiError', 'http_status': 400, 'error_code': 'content_policy_violation',
-                                 'message': str(self.POLICY), 'fallback': 'slot 2'})
+                                 'network_error': None, 'message': str(self.POLICY), 'fallback': 'slot 2'})
         rear = record['views']['body+180']
         self.assertEqual((rear['winning_slot'], rear['prompt']), (2, 'RF12R'))
         self.assertEqual(rear['contained_errors'], [{k: v for k, v in error.items() if k != 'view'}])
@@ -1347,12 +1390,22 @@ class FastBeautyStageTests(unittest.TestCase):
 
     def assert_loud(self, fail, error=None, **kwargs):
         error = error or self.SERVER
+        sends = Counter()
+        def counted(view, slot, nested):
+            failure = fail(view, slot, nested)
+            if failure is not None:
+                sends[view, slot, nested] += 1
+            return failure
         with self.assertRaises(type(error)) as caught:
-            self.paid_run(fail=fail, **kwargs)
+            self.paid_run(fail=counted, **kwargs)
         self.assertIs(caught.exception, error)
         record = json.loads((self.run / 'stage-3f.json').read_text())
         self.assertEqual(record['status'], 'error')
         self.assertFalse(record.get('contained_errors'))
+        # Plain-equivalent requests are never resent, even after a transient error.
+        self.assertTrue(sends)
+        self.assertEqual(set(sends.values()), {1})
+        self.assertFalse(record.get('retries'))
         self.assertFalse((self.run / '03-refined.glb').exists())
 
     def test_ordinary_attempt_zero_error_stays_loud(self):
@@ -1362,6 +1415,76 @@ class FastBeautyStageTests(unittest.TestCase):
     def test_ordinary_attempt_one_error_for_slot_three_stays_loud(self):
         self.assert_loud(lambda view, slot, nested: self.POLICY if nested and slot == 'attempt-1' else None,
                          self.POLICY, reject=lambda view, kind: view == 'body+90' and kind in ('beauty', 0))
+
+    def test_ordinary_attempt_one_transient_error_is_never_resent(self):
+        self.assert_loud(lambda view, slot, nested: self.SERVER if nested and slot == 'attempt-1' else None,
+                         reject=lambda view, kind: view == 'body+90' and kind in ('beauty', 0))
+
+    def test_enhanced_timeout_then_success_keeps_the_beauty_sample(self):
+        self.assert_resent_then_kept(self.TIMEOUT)
+
+    def test_enhanced_server_error_then_success_keeps_the_beauty_sample(self):
+        self.assert_resent_then_kept(self.SERVER)
+
+    def assert_resent_then_kept(self, error):
+        record, sent, errored, _, lines = self.contained_run(
+            self.enhanced(error, 'body+90', once=True), all_flags=True)
+        self.assertEqual(errored, Counter({'body+90': 1}))
+        # Two slot-1 sends (the error, then its identical resend) and slot 2's ordinary sample.
+        self.assertEqual(sent, Counter({view: 3 if view == 'body+90' else 2 for view in self.expected_views}))
+        side = record['views']['body+90']
+        self.assertEqual((side['winning_slot'], side['prompt'], side['accepted']), (1, 'RF16B', True))
+        self.assertEqual(record['contained_errors'], [])
+        entry = {'slot': 1, 'request': 'image edit', **self.fields(error), 'retry': 'ok'}
+        self.assertEqual(record['retries'], [{'view': 'body+90', **entry}])
+        self.assertEqual(side['retries'], [entry])
+        self.assertEqual(side['attempts'][0]['retries'], [{k: v for k, v in entry.items() if k != 'slot'}])
+        status = error.http_status
+        self.assertEqual([(e['try'], e['ok'], e.get('why'), e.get('code'), e['m']) for e in lines
+                          if e['kind'] == 'decision' and e['what'] == 'model_retry'],
+                         [(1, True, None, self.code(error),
+                           {'retry': 1, **({'http_status': status} if status else {})})])
+        # Both sends are logged as calls of try 1: the failed one, then the answered resend.
+        ends = [e['outcome'] for e in lines if e['kind'] == 'call_end' and e['who'] == 'muse-image'
+                and e.get('view') == 'body+90' and e.get('try') == 1]
+        self.assertEqual(sorted(ends), ['failed', 'ok'])
+        self.assertEqual(self.outcomes(lines)['body+90'], [('view_selected', 1, 2)])
+
+    def test_resend_is_identical_and_respects_budget_stops(self):
+        calls = []
+        class Client:
+            def __init__(self, outcomes):
+                self.outcomes = list(outcomes)
+            def segment(self, image, text):
+                calls.append(('segment', image, text))
+                outcome = self.outcomes.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+            edit_image = segment
+        retries = []
+        client = Client([self.SERVER, ['mask']])
+        fast.retry_once(client, retries)
+        self.assertEqual(client.segment('image', 'eyes'), ['mask'])
+        self.assertEqual(calls, [('segment', 'image', 'eyes')] * 2)
+        self.assertEqual(retries, [{'request': 'SAM query', 'concept': 'eyes', **self.fields(self.SERVER),
+                                    'retry': 'ok'}])
+        # A budget stop raised by the resend's reservation propagates unchanged and is recorded.
+        retries.clear()
+        client = Client([self.TIMEOUT, BudgetStop('API cap: next attempt exceeds $0.0100')])
+        fast.retry_once(client, retries)
+        with self.assertRaises(BudgetStop):
+            client.edit_image('prompt', [])
+        self.assertEqual((retries[0]['request'], retries[0]['retry']['error']), ('image edit', 'BudgetStop'))
+        # A 4xx, a replay miss and an unclassified error are never resent.
+        for error in (self.POLICY, ReplayMiss('missing'), ApiError('images/edits: unreadable')):
+            retries.clear()
+            calls.clear()
+            client = Client([error, ['unused']])
+            fast.retry_once(client, retries)
+            with self.assertRaises(type(error)):
+                client.segment('image', 'face')
+            self.assertEqual((len(calls), retries), (1, []))
 
     def test_plain_fast_errors_stay_loud(self):
         self.assert_loud(lambda view, slot, nested: self.TIMEOUT if view == 'body+90' else None,
@@ -1422,6 +1545,21 @@ class FastBeautyStageTests(unittest.TestCase):
         events = [e for e in lines if e['kind'] == 'decision' and e['what'] == 'beauty_reference']
         self.assertEqual([(e['ok'], e['why'], e['code'], e['m']) for e in events],
                          [(False, 'model_error', 'http_5xx', {'yaw': 90, 'fallback': 1, 'http_status': 500})])
+
+    def test_reference_resend_is_recorded_and_logged(self):
+        resent = [{'yaw': 90, 'request': 'image edit', **self.fields(self.TIMEOUT), 'retry': 'ok'}]
+        generate, _ = self.generated()
+        def wrapped(run, client, out):
+            return {**generate(run, client, out), 'retries': resent, 'contained_errors': []}
+        record, lines = self.logged(lambda: self.run_beauty(generate=wrapped, cap_usd=5))
+        self.assertEqual(record['status'], 'complete')
+        self.assertEqual(record['beauty_generation']['retries'], resent)
+        self.assertEqual(record['retries'], [{'reference_yaw': 90, **{k: v for k, v in resent[0].items()
+                                                                       if k != 'yaw'}}])
+        self.assertEqual(record['contained_errors'], [])
+        self.assertEqual([(e['ok'], e.get('code'), e['m']) for e in lines
+                          if e['kind'] == 'decision' and e['what'] == 'model_retry'],
+                         [(True, 'timeout', {'retry': 1, 'yaw': 90})])
 
     def test_front_reference_error_turns_the_beauty_arm_off(self):
         generate, errors = self.generated_errors(0)

@@ -123,13 +123,35 @@ def try_failed(view: str, number: int) -> None:
     events.emit("decision", step=STEP, what="view_result", view=view, try_=number, ok=False, why="model_error")
 
 
+def _code(error: dict) -> str | None:
+    """A recorded model error's failure class: from the answer's status, else the transport failure."""
+    status, network = error.get("http_status"), error.get("network_error")
+    if type(status) is int:
+        return events.code_for_status(status)
+    return ("timeout" if network == "TimeoutError" else "network") if network else None
+
+
 def _contained(error: dict) -> dict:
     """The failure class and measures of a contained model error: ``m.fallback`` is 1, with the answer's
-    ``http_status`` when one came back (none for a timeout or a dropped connection)."""
+    ``http_status`` when one came back (none for a timeout or a dropped connection), and ``m.retried`` 1
+    when it came from the one resend of a transient error."""
     status = error.get("http_status")
-    known = type(status) is int
-    return {"code": events.code_for_status(status) if known else None,
-            "m": {"fallback": 1, **({"http_status": status} if known else {})}}
+    return {"code": _code(error),
+            "m": {"fallback": 1, **({"http_status": status} if type(status) is int else {}),
+                  **({"retried": 1} if error.get("retried") else {})}}
+
+
+@_quiet
+def retried(entry: dict, *, view: str | None = None, number: int | None = None, yaw: int | None = None) -> None:
+    """A beauty-only request failed with a transient error (``code``, ``m.http_status``) and was resent once,
+    identically: ``ok`` says whether the resend answered. A view's try (``view``, ``try``) or a beauty
+    reference (``m.yaw``). A failed resend is then contained like any beauty-only error."""
+    status = entry.get("http_status")
+    ok = entry.get("retry") == "ok"
+    events.emit("decision", step=STEP, what="model_retry", view=view, try_=number, ok=ok,
+                why=None if ok else "model_error", code=_code(entry),
+                m={"retry": 1, **({"yaw": yaw} if yaw is not None else {}),
+                   **({"http_status": status} if type(status) is int else {})})
 
 
 @_quiet

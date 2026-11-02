@@ -212,16 +212,18 @@ def generate_fast(run, client, out):
     keep the standard recipe instead of borrowing another yaw. The folder is rebuilt on every call;
     an unchanged request replays the model cache.
 
-    These calls are beauty-only, so an ApiError on a yaw's image or SAM query leaves that yaw without
-    a reference, exactly like a rejected sample, and is recorded on the yaw (``error``) and in
-    ``contained_errors``. Every submitted yaw drains before any other error propagates.
+    These calls are beauty-only. A request that fails with a timeout, a dropped connection or an HTTP 5xx
+    is resent once, identically, and both attempts are recorded on the yaw (``retries``) and in ``retries``.
+    An ApiError that remains (a 4xx at once, or a failed resend) leaves that yaw without a reference,
+    exactly like a rejected sample, and is recorded on the yaw (``error``) and in ``contained_errors``.
+    Every submitted yaw drains before any other error propagates.
     """
     import shutil
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor, wait
     from herogen.pipeline.client import ApiError
-    from .fast import contained_error, isolated_client, publish
+    from .fast import contained_error, isolated_client, publish, retry_once
 
     run, out = Path(run), Path(out)
     t0 = time.monotonic()
@@ -264,17 +266,22 @@ def generate_fast(run, client, out):
                 view.pop(key, None)
             view.update(accepted=False, attempts=[], error=contained_error(
                 exc, "standard recipe" if angle else "beauty off", request=request,
+                retried=bool(retries[angle]) and retries[angle][-1]["retry"] != "ok",
                 **({"image": trial["image"]} if trial is not None else {})))
         finally:
+            if retries[angle]:
+                private["views"].setdefault(str(angle), {"accepted": False, "attempts": []})["retries"] = retries[angle]
             with lock:
                 rec["views"].update(private["views"])
                 rec["head_boxes"].update(boxes)
             save()
 
     children = {angle: isolated_client(client, f"beauty{angle:+d}", persistence_lock) for angle in FAST_ANGLES}
-    for child in children.values():
+    retries = {angle: [] for angle in FAST_ANGLES}
+    for angle, child in children.items():
         if hasattr(child, "network_attempts"):
             child._initial_network_attempts = child.network_attempts
+        retry_once(child, retries[angle])
     try:
         with ThreadPoolExecutor(max_workers=len(FAST_ANGLES)) as pool:
             futures = [pool.submit(one, angle, child) for angle, child in children.items()]
@@ -286,6 +293,7 @@ def generate_fast(run, client, out):
             future.result()
         rec["contained_errors"] = [{"yaw": angle, **rec["views"][str(angle)]["error"]} for angle in FAST_ANGLES
                                    if "error" in rec["views"].get(str(angle), {})]
+        rec["retries"] = [{"yaw": angle, **entry} for angle in FAST_ANGLES for entry in retries[angle]]
         selected = load(out)
         rec["selected"] = {str(a): bool(selected["views"][str(a)].get("accepted")) for a in FAST_ANGLES}
         rec["status"] = "complete" if all(rec["selected"].values()) else "rejected"

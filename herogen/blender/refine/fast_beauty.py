@@ -245,7 +245,10 @@ class FaceControl:
                 Image.new('L', face.size, 0).save(target / 'weight.png')
             self.data['views'][self.key] = {**fallback, 'head_only': True, 'selected_attempt': slot,
                                            'winning_slot': slot + 1,
-                                           'attempts': head.record['attempts'], 'tries': head.record['tries']}
+                                           'attempts': head.record['attempts'], 'tries': head.record['tries'],
+                                           # The view keeps its slot-1 model errors and resends on record.
+                                           **{k: head.record[k] for k in ('contained_errors', 'retries')
+                                              if k in head.record}}
             self.data['face_source'] = {'source': 'default', 'view': self.key, 'attempt': slot - 1}
         if self.key is None:
             self.data['face_source'] = {'source': 'default-fast-fallback',

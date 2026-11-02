@@ -89,17 +89,23 @@ class ReplayMiss(ClientError):
 
 class ApiError(ClientError):
     """The Model API itself failed: an HTTP or network error after the retries, or a response that can't be
-    read. Never cached as a result, so a replay never repeats it. A stage stops on it; the one caller that
-    records it instead is the held-out face cue, which then sends the view to human review.
+    read. Never cached as a result, so a replay never repeats it. A stage stops on it, with two kinds of
+    caller that record it instead: the held-out face cue, which then sends the view to human review, and fast
+    stage 3f's beauty-only requests (beauty references and the enhanced first try of a view). Those resend a
+    request once after a timeout, a dropped connection or an HTTP 5xx, and when it still fails, the view falls
+    back to its plain requests (`herogen.blender.refine.fast`).
 
-    Classification attributes come from response fields and transport state, never from message text."""
+    Classification attributes come from response fields and transport state, never from message text:
+    ``http_status`` and ``error_code`` from the last answer, and ``network_error``, the class of the transport
+    failure (``TimeoutError``, ``ConnectionResetError``, ...) when the last attempt got no HTTP answer."""
 
     def __init__(self, message: str, *, http_status: int | None = None, error_code: str | None = None,
-                 transient: bool = False) -> None:
+                 transient: bool = False, network_error: str | None = None) -> None:
         super().__init__(message)
         self.http_status = http_status
         self.error_code = error_code
         self.transient = transient
+        self.network_error = network_error
 
 
 @dataclass
@@ -596,19 +602,21 @@ class ModelClient:
                 ev.emit("call_retry", attempt=attempt, of=policy.max_attempts, code=ev.code, s=wait)
                 ev.outcome = None
             policy.sleep(wait)
+        network_error = network_class if status is None else None   # no HTTP answer: the transport failed
         if not retry.retryable(status, paid_edit=paid_edit):
             raise ApiError(f"{endpoint} failed: {last} (not retried)", http_status=status, error_code=error_code)
         if attempt == policy.max_attempts:
             # Callers use this flag to requeue whole stages. Fast failures require an explicit retry
             # even when the underlying HTTP status would normally be transient.
             raise ApiError(f"{endpoint} failed after {attempt} attempts: {last}", http_status=status,
-                           error_code=error_code, transient=not self.fast)
+                           error_code=error_code, transient=not self.fast, network_error=network_error)
         if left <= 0.0:
             raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the {deadline_s:g} s deadline "
-                           f"has passed", http_status=status, error_code=error_code, transient=not self.fast)
+                           f"has passed", http_status=status, error_code=error_code, transient=not self.fast,
+                           network_error=network_error)
         raise ApiError(f"{endpoint} failed after {attempt} attempt(s): {last}; the next wait would pass the "
                        f"{deadline_s:.0f} s deadline", http_status=status, error_code=error_code,
-                       transient=not self.fast)
+                       transient=not self.fast, network_error=network_error)
 
     def _ledger(self, row: dict[str, Any]) -> None:
         """Append one attempt to the cache's ledger (under an exclusive lock, so parallel runs never interleave)."""

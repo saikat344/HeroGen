@@ -2617,10 +2617,10 @@ its nearest generated yaw, so a rejected yaw leaves its views on the standard re
 a yaw 90 degrees away (saved six-yaw folders keep their nearest-usable fallback). Without a usable front
 reference the beauty arm is off for the run, as for a saved folder, and the record notes that standard
 recipes were used. Generation runs beside setup and preparation; its calls count toward the stage's
-cost and cap. Its requests are beauty-only, so an `ApiError` on a yaw's image or SAM query is contained
-as described under "Contained beauty-only model errors" below; any other model or replay error drains
-every yaw and fails the stage loudly. `beauty_generation` records the yaws, attempts, selection, cost,
-seconds and contained errors. Ordinary fast waves
+cost and cap. Its requests are beauty-only, so a transient error is resent once and an `ApiError` that
+remains is contained, as described under "Contained beauty-only model errors" below; any other model
+or replay error drains every yaw and fails the stage loudly. `beauty_generation` records the yaws,
+attempts, selection, cost, seconds, resends and contained errors. Ordinary fast waves
 first resolve from the original ungraded base, using the same cover, gates and user note, but only
 attempt zero per pass. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
 back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
@@ -2770,22 +2770,38 @@ make does not fail stage 3f. These requests are:
   slot 1 of each view that receives turnaround art (yaws 90 through 270: `body+90`, `body-90`,
   `body+180` and hair `upper+180`, sending `RF12R`, `RF12W` or `RF13H`). That view has no conditional
   slot, so its existing slot 2 decides. Front views send plain fast's own request there and stay loud.
-No contained error pays an extra sample, retry or gate: per view, at most the samples the existing rule
-allows are sent. Every other request still fails the stage loudly: slot 2 and slot 3, the nested
+One transient retry: a beauty-only request (any of the above, image edit or SAM query) that fails with a
+timeout or read timeout, a dropped or refused connection, or an HTTP 5xx is resent once, identically,
+through the same budget reservation, limiter and spend hooks; a budget stop or cancellation there behaves
+as for any request. "Transient" comes from the error's `http_status` and the client's `network_error` (the
+transport failure class when no HTTP answer came back), never from message text. An answered resend
+keeps the beauty sample or reference; a failed one is contained as below. Any 4xx, including
+`content_policy_violation`, and any other `ApiError` (an unreadable answer, no call slot) are contained at
+once with no resend. Plain-equivalent requests are never resent.
+Apart from that one resend, no contained error pays an extra sample, retry or gate: per view, at most the
+samples the existing rule allows are sent. Every other request still fails the stage loudly: slot 2 and slot 3, the nested
 default-head run (which sends plain fast's requests), slot 2 of a SideBeautyPass-only view, the frontal
 skin query and face recovery, and every request of plain fast, the full lane and `best`, which are
 unchanged. `ReplayMiss`, budget stops and cancellation behave as before.
-Each contained error is recorded with `error` (the class), `http_status`, `error_code`, `message` (at
-most 160 characters) and `fallback`. Views record it in `views[].contained_errors` with `slot`, `prompt`,
+Each contained error is recorded with `error` (the class), `http_status`, `error_code`, `network_error`,
+`message` (at most 160 characters), `retried` (true when it came from the resend) and `fallback`. Views record it in `views[].contained_errors` with `slot`, `prompt`,
 `request` (`image edit` or `SAM check`) and fallback `ordinary slots` (or `slot 2` without the beauty
 arm), and on the errored attempt as `contained_error` (reason `ApiError`). Reference yaws record it as
 the yaw's `error` in `beauty_references` and in `beauty_generation.contained_errors`, with `request`
 (`BT1 image edit`, `SAM character outline` or `SAM head crop`), the saved `image` when one came back and
 fallback `standard recipe` (`beauty off` for yaw 0). The run-level `contained_errors` list repeats every
 one, with `view` or `reference_yaw`; it is present, possibly empty, whenever beauty or SideBeautyPass is
-on in the fast profile. The build log adds a `view_result` decision for the errored try (`ok` false, why
-`model_error`) and, for a reference, a `beauty_reference` decision (`m.yaw`); both carry `m.fallback` 1,
-`m.http_status` and the matching `code` (`http_5xx`, `http_4xx`, ...) when an answer came back.
+on in the fast profile. Every resend is recorded with both attempts: `request` (`image edit`, or `SAM
+query` with its `concept`), the first error's fields and `retry` (`ok`, or the resend's error fields),
+in the view's `retries` (with `slot`) and on its attempt, in the reference yaw's `retries` and
+`beauty_generation.retries`, and in the run-level `retries` list (with `view` or `reference_yaw`),
+present alongside `contained_errors`. A default head that replaces `views["head+0"]` keeps its
+`contained_errors` and `retries`. The build log adds a `view_result` decision for the errored try (`ok`
+false, why `model_error`) and, for a reference, a `beauty_reference` decision (`m.yaw`); both carry
+`m.fallback` 1, `m.retried` 1 after a failed resend, and `m.http_status` when an answer came back. Each
+resend adds a `model_retry` decision (the view's try, or `m.yaw`; `ok` for an answered resend; `m.retry`
+1). These decisions carry the first error's `code`: `http_5xx`, `http_4xx` and so on from the status,
+otherwise `timeout` or `network`. The failed and resent requests also appear as calls.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
