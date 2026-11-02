@@ -7,7 +7,7 @@ let landing;
 import { workbenchLog } from '/assets/workbench.js';
 import { generationView, generationState } from '/assets/generation.js';
 import { variationsView } from '/assets/variations.js';
-import { heroesView } from '/assets/heroes.js';
+import { finishedNote, heroesView } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
@@ -261,8 +261,9 @@ function elapsedText(j) {
   const now = Date.now() / 1000;
   if (j.state === 'queued') return `Queued · ${fmtClock(now - j.created_at)} so far`;
   if (j.state === 'running' || !end) return polls(j) ? `Running · ${fmtClock(now - start)} elapsed` : '';
+  if (j.state === 'succeeded') return finishedNote(j, fmtClock, start);
   const took = fmtClock(end - start);
-  return { succeeded: `Finished in ${took}`, failed: `Stopped after ${took}`, rejected: `Stopped after ${took}`,
+  return { failed: `Stopped after ${took}`, rejected: `Stopped after ${took}`,
     canceled: `Cancelled after ${took}`, stopped: `Saved after ${took}` }[j.state] || '';
 }
 // Green when everything is saved, ember while results are still arriving, red when the page lost the service.
