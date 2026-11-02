@@ -4,6 +4,8 @@ Routes:
   /                          the page (static/index.html), with its Content-Security-Policy; also at /index.html
   /static/<path>             the page's CSS, JS, SVG icons, fonts, JSON tokens and licence texts, subfolders included
                              (HTML is never served from here, so the page never comes without its CSP)
+  /assets/<path>             the HeroGen design system the page shares with the web service: tokens.css, theme.js,
+                             site-header.js, fonts/ and icons/ (the same files the service serves at /assets/)
   /api/workspace             the runs roots, every run, the runs grouped into characters, and the versions
   /api/runs                  JSON list of every run in every runs root
   /api/runs/<root>/<run>     JSON detail of one run (records, images, bodies, scores, held-out views, quality)
@@ -67,6 +69,11 @@ STATIC_TYPES = {
 # Every response except the page itself: nothing in it may run or load anything, even if it is opened on its own
 # (an SVG or a JSON file opened directly in a tab).
 FILE_CSP = "default-src 'none'; sandbox"
+# The HeroGen service's static folder: the page's header, theme and design tokens come from there, so the Lab
+# looks the same standalone as it does at the service's /viewer. Only these files are served from it.
+SERVICE_STATIC_DIR = STATIC_DIR.parent.parent / "service" / "static"
+SERVICE_ASSET_FILES = {"tokens.css", "theme.js", "site-header.js"}
+SERVICE_ASSET_FOLDERS = {"fonts", "icons"}
 PAGE = STATIC_DIR / "index.html"
 PAGE_TYPE = "text/html; charset=utf-8"
 
@@ -126,8 +133,9 @@ def run_file_in(root: Path, rel: str) -> tuple[Path, str] | None:
     return resolved, ctype
 
 
-def safe_static_file(name: str) -> tuple[Path, str] | None:
+def safe_static_file(name: str, base: Path | None = None) -> tuple[Path, str] | None:
     """(file, content type) for `/static/<name>`, where `name` may name a file in a subfolder (`icons/box.svg`).
+    `base` is the folder to look in (the Lab's own static folder by default).
 
     Every segment must be a plain name (no `..`, `.`, hidden names, backslashes or NUL), the type must be in
     STATIC_TYPES after decoding and case-folding the extension (so `%69ndex.html` or `Index.HTML` is refused like
@@ -141,15 +149,25 @@ def safe_static_file(name: str) -> tuple[Path, str] | None:
     ctype = STATIC_TYPES.get(Path(parts[-1]).suffix.lower())
     if ctype is None:
         return None
+    base = (base or STATIC_DIR).resolve()
     try:
-        resolved = STATIC_DIR.joinpath(*parts).resolve(strict=True)
+        resolved = base.joinpath(*parts).resolve(strict=True)
     except (OSError, RuntimeError):
         return None
-    if not resolved.is_relative_to(STATIC_DIR) or not resolved.is_file():
+    if not resolved.is_relative_to(base) or not resolved.is_file():
         return None
     if STATIC_TYPES.get(resolved.suffix.lower()) != ctype:
         return None
     return resolved, ctype
+
+
+def safe_service_asset(name: str) -> tuple[Path, str] | None:
+    """(file, content type) for `/assets/<name>`: the design-system files of the service's static folder."""
+    decoded = unquote(name)
+    parts = decoded.split("/")
+    if not (decoded in SERVICE_ASSET_FILES or (len(parts) > 1 and parts[0] in SERVICE_ASSET_FOLDERS)):
+        return None
+    return safe_static_file(name, SERVICE_STATIC_DIR)
 
 
 class LabHandler(BaseHTTPRequestHandler):
@@ -260,6 +278,8 @@ class LabHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             f = safe_static_file(path[len("/static/"):])
             return self._send_file(f, head)
+        if path.startswith("/assets/"):
+            return self._send_file(safe_service_asset(path[len("/assets/"):]), head)
         if path == "/api/workspace":
             return self._json(self.workspace.workspace(), head)
         if path == "/api/runs":

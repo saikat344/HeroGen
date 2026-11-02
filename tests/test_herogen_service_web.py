@@ -622,6 +622,171 @@ class TestIsolation(WebCase):
         self.assertEqual(workspace["characters"][0]["title"], "Violet Knight")
 
 
+class TestErrorPages(WebCase):
+    """HTML for people on page routes (404, 500, the legal pages); JSON, as before, for the API and for files."""
+
+    def with_gallery(self) -> None:
+        import hashlib
+
+        root = self.tmp / "gallery"
+        (root / "ranger").mkdir(parents=True)
+        assets = {}
+        for kind, data, suffix in (("model", b"glTF-stand-in", "glb"), ("artwork", png(), "png"), ("sketch", png(), "png")):
+            (root / f"ranger/{kind}.{suffix}").write_bytes(data)
+            assets[kind] = {"file": f"ranger/{kind}.{suffix}", "sha256": hashlib.sha256(data).hexdigest()}
+        (root / "catalog.json").write_text(json.dumps({"version": 1, "items": [
+            {"id": "ranger", "title": "Woodland ranger", "description": "Fixture.", "code_commit": "a" * 40,
+             "assets": assets}]}))
+        self.store.close()
+        self.build(gallery_dir=root)
+
+    def assert_page_csp(self, r, name) -> None:
+        csp = r.headers["content-security-policy"]
+        self.assertIn("default-src 'self'", csp, name)
+        self.assertIn("script-src 'self';", csp, name)
+        self.assertIn("style-src 'self';", csp, name)
+        self.assertIn("font-src 'self'", csp, name)
+        self.assertIn("frame-ancestors 'none'", csp, name)
+        self.assertNotIn("unsafe-inline", csp, name)
+        self.assertNotIn("unsafe-eval", csp, name)
+        self.assertNotRegex(r.text, r"<style|\sstyle=|\son[a-z]+=", name)         # no inline styles or handlers
+        self.assertEqual(re.findall(r"<script(?![^>]*\ssrc=)[^>]*>", r.text), [], name)  # no inline scripts
+        for h in ("x-content-type-options", "x-frame-options", "referrer-policy", "cache-control"):
+            self.assertIn(h, r.headers, name)
+
+    def test_unknown_page_is_an_html_404(self):
+        r = Browser(self.app).get("/nope")
+        self.assertEqual(r.status_code, 404)
+        self.assertTrue(r.headers["content-type"].startswith("text/html"))
+        self.assertIn("This page wandered off.", r.text)
+        self.assertIn('class="site-header"', r.text)
+        self.assertIn('class="site-footer"', r.text)
+        self.assertRegex(r.text, r'<a class="btn btn--primary btn--l" href="/">Create a hero')
+        self.assertRegex(r.text, r'<a class="btn btn--secondary btn--l" href="/#gallery">Back to gallery</a>')
+        self.assertLess(r.text.index("/assets/tokens.css"), r.text.index("/assets/app.css"))
+        self.assertIn("/assets/styles/pages.css", r.text)
+        self.assertNotIn("<img", r.text, "no gallery, no art")
+        self.assert_page_csp(r, "/nope")
+        for path in ("/nope/deeper", "/gallery", "/viewer/x", "/admin/nothing"):
+            r = Browser(self.app).get(path)
+            self.assertEqual((r.status_code, r.headers["content-type"].startswith("text/html")),
+                             (404, True), path)
+
+    def test_the_404_shows_one_lazy_gallery_hero(self):
+        self.with_gallery()
+        b = Browser(self.app)
+        r = b.get("/nope")
+        self.assertEqual(r.status_code, 404)
+        imgs = re.findall(r"<img[^>]*>", r.text)
+        self.assertEqual(len(imgs), 1)
+        self.assertIn('src="/gallery-assets/ranger/artwork"', imgs[0])
+        self.assertIn('loading="lazy"', imgs[0])
+        self.assertRegex(imgs[0], r'width="\d+" height="\d+"')
+        self.assertEqual(b.get("/gallery-assets/ranger/artwork").status_code, 200)
+        self.assert_page_csp(r, "/nope with art")
+
+    def test_a_broken_gallery_never_breaks_the_404(self):
+        self.with_gallery()
+        (self.s.gallery_dir / "catalog.json").write_text("{not json")
+        r = Browser(self.app).get("/nope")
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("This page wandered off.", r.text)
+        self.assertNotIn("<img", r.text)
+
+    def test_api_and_file_routes_keep_json_errors(self):
+        b = Browser(self.app)
+        for path in ("/api", "/api/nope", "/api/jobs/x/y/z", "/assets/nope.css", "/static/nope.js",
+                     "/gallery-assets/nope/artwork"):
+            r = b.get(path)
+            self.assertEqual(r.status_code, 404, path)
+            self.assertEqual(r.headers["content-type"], "application/json", path)
+            self.assertEqual(r.json()["error"]["code"], "not_found", path)
+        r = b.get("/runs/r1/j_x/a.png")  # signed out: refused, as JSON
+        self.assertEqual((r.status_code, r.headers["content-type"]), (401, "application/json"))
+        b.session()
+        r = b.post("/api/nope", json={})
+        self.assertEqual((r.status_code, r.headers["content-type"]), (404, "application/json"))
+        self.assertEqual(b.get("/api/nope").headers["content-security-policy"],
+                         "default-src 'none'; frame-ancestors 'none'; sandbox")
+        r = b.post("/nope", json={}, csrf=False)  # not a page request: whatever it was before, never HTML
+        self.assertFalse(r.headers["content-type"].startswith("text/html"))
+
+    def test_a_server_error_on_a_page_route_is_an_html_500(self):
+        t = TestClient(self.app, base_url=ORIGIN, raise_server_exceptions=False)
+        with mock.patch("herogen.service.web.App.page", side_effect=RuntimeError("boom-secret")):
+            self.store.close()
+            self.build()
+            t = TestClient(self.app, base_url=ORIGIN, raise_server_exceptions=False)
+            r = t.get("/")
+            api = t.get("/api/jobs")
+        self.assertEqual(r.status_code, 500)
+        self.assertTrue(r.headers["content-type"].startswith("text/html"))
+        self.assertIn("Something went wrong on our side.", r.text)
+        self.assertIn("Your heroes and progress are saved.", r.text)
+        self.assertIn('class="site-header"', r.text)
+        self.assertNotIn("boom-secret", r.text)
+        self.assert_page_csp(r, "500")
+        self.assertEqual(api.status_code, 401, "the API is untouched by the page patch")
+
+    def test_a_server_error_on_an_api_route_stays_json(self):
+        b = self.signin()
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+
+        self.store.jobs_list = boom
+        t = TestClient(self.app, base_url=ORIGIN, raise_server_exceptions=False)
+        t.cookies = b.c.cookies
+        r = t.get("/api/jobs")
+        self.assertEqual((r.status_code, r.headers["content-type"]), (500, "application/json"))
+        self.assertEqual(r.json()["error"]["code"], "internal")
+
+    def test_legal_pages_use_the_site_chrome_and_the_page_csp(self):
+        legal = self.tmp / "legal"
+        legal.mkdir()
+        (legal / "terms.md").write_text(
+            "HeroGen Terms of Service (beta)\n\nDRAFT. Version {{terms_version}}.\n\n1. Who we are\n\n"
+            "We run it. <b>x</b>\nOn two lines.\n\n5.1 You keep your rights.\n\n6. Rules\n\nYou must not:\n\n"
+            "- break it;\n  or wrap it;\n- abuse it.\n")
+        (legal / "privacy.md").write_text("Privacy text.")
+        self.store.close()
+        self.build(legal_dir=legal)
+        b = Browser(self.app)
+        r = b.get("/terms")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('class="site-header"', r.text)
+        self.assertIn('class="site-footer"', r.text)
+        self.assertEqual(r.text.count("<h1>"), 1)
+        self.assertIn("<h1>Terms of Service</h1>", r.text)
+        self.assertNotIn("HeroGen Terms of Service (beta)", r.text, "the document's title line is the H1")
+        self.assertIn('<p class="doc-meta">DRAFT. Version t1.</p>', r.text)
+        self.assertIn("<h2>1. Who we are</h2>", r.text)
+        self.assertIn("<p>We run it. &lt;b&gt;x&lt;/b&gt; On two lines.</p>", r.text)
+        self.assertIn('<p class="clause"><span class="clause__n">5.1</span>You keep your rights.</p>', r.text)
+        self.assertIn("<ul><li>break it; or wrap it;</li><li>abuse it.</li></ul>", r.text)
+        self.assert_page_csp(r, "/terms")
+        # The visitor's theme choice applies: theme.js runs before the styles paint, and the header toggle exists.
+        self.assertIn('<script src="/assets/theme.js"></script>', r.text)
+        self.assertLess(r.text.index("/assets/theme.js"), r.text.index("/assets/tokens.css"))
+        self.assertIn('<script src="/assets/site-header.js" defer></script>', r.text)
+        self.assertIn("data-theme-toggle", r.text)
+        p = b.get("/privacy")
+        self.assertEqual(p.status_code, 200)
+        self.assertIn("<h1>Privacy Policy</h1>", p.text)
+        self.assert_page_csp(p, "/privacy")
+        (legal / "terms.md").unlink()
+        gone = b.get("/terms")
+        self.assertEqual(gone.status_code, 404)
+        self.assertIn("has not been published yet", gone.text)
+        self.assertIn('class="site-header"', gone.text)
+        self.assert_page_csp(gone, "/terms unpublished")
+
+    def test_page_stylesheet_ships_and_uses_tokens_only(self):
+        r = Browser(self.app).get("/assets/styles/pages.css")
+        self.assertEqual((r.status_code, r.headers["content-type"]), (200, "text/css; charset=utf-8"))
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", r.text), [])
+
+
 class TestPages(WebCase):
     def test_description_count_is_wired_to_the_field(self):
         from html.parser import HTMLParser
@@ -676,7 +841,6 @@ class TestPages(WebCase):
         self.assertIn("kept 30 days", r.text)
         self.assertNotIn("<script>", r.text)
         self.assertIn("&lt;script&gt;", r.text)
-        self.assertIn("default-src 'none'", r.headers["content-security-policy"])
         self.assertIn("font-src 'self'", r.headers["content-security-policy"])
         self.assertLess(r.text.index("/assets/tokens.css"), r.text.index("/assets/app.css"))
         self.assertIn("Terms t1.", Browser(self.app).get("/terms").text)
@@ -686,7 +850,7 @@ class TestPages(WebCase):
 
         b = Browser(self.app)
         pages = {"/": b.get("/").text, "/gallery/x": b.get("/gallery/x").text, "/admin": b.get("/admin").text,
-                 "viewer.html": (web.STATIC_DIR / "viewer.html").read_text()}
+                 "/nope": b.get("/nope").text, "viewer.html": (web.STATIC_DIR / "viewer.html").read_text()}
         fonts = ("/assets/fonts/Figtree-Variable.latin.woff2", "/assets/fonts/Fraunces-Variable.latin.woff2")
         for name, page in pages.items():
             self.assertLess(page.index('href="/assets/tokens.css"'), page.index('href="/assets/app.css"'), name)
@@ -703,7 +867,7 @@ class TestPages(WebCase):
         sprite = b.get("/assets/icons/sprite.svg")
         self.assertEqual((sprite.status_code, sprite.headers["content-type"]), (200, "image/svg+xml"))
         symbols = set(re.findall(r'<symbol id="([^"]+)"', sprite.text))
-        for name in ("/", "/gallery/x"):
+        for name in ("/", "/gallery/x", "/nope"):
             used = set(re.findall(r'/assets/icons/sprite\.svg#([\w-]+)', pages[name]))
             self.assertTrue(used and used <= symbols, (name, used - symbols))
         self.assertEqual(b.get("/assets/icons/favicon.svg").headers["content-type"], "image/svg+xml")

@@ -1052,16 +1052,16 @@ function seg(sel, fn) {
   $(sel).addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) fn(b.dataset.v, b); });
 }
 
-function setTheme(v) {
-  if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v;
-  pressed('#themeSeg', v);
+// The theme belongs to the HeroGen header (theme.js sets data-theme and announces every change); the 3D views only
+// re-read the colour tokens.
+function retheme() {
   viewer.theme();
   if (cmp) cmp.theme();
 }
 
 function decorate() {
   const BTN_ICONS = {
-    themeSeg: { dark: 'moon', light: 'sun' }, profileSeg: { best: 'sparkles', 'roblox-ingame': 'hg-profile-ingame', 'roblox-avatar': 'hg-profile-avatar', none: 'circle-help' },
+    profileSeg: { best: 'sparkles', 'roblox-ingame': 'hg-profile-ingame', 'roblox-avatar': 'hg-profile-avatar', none: 'circle-help' },
     modeSeg: { '3d': 'box', sketch: 'image', side: 'columns-2' },
     camSeg: { orbit: 'rotate-3d', front: 'hg-cam-front', q: 'hg-cam-34', side: 'hg-cam-side', back: 'hg-cam-back' },
     cmpCam: { front: 'hg-cam-front', q: 'hg-cam-34', side: 'hg-cam-side', back: 'hg-cam-back' },
@@ -1083,12 +1083,10 @@ function decorate() {
   for (const [id, n] of Object.entries({ pipeH: 'layers', verH: 'history', qH: 'gauge', hoH: 'hg-heldout', dH: 'package', gH: 'timer', cH: 'columns-2', aH: 'info' })) {
     $(`#${id}`).prepend(icon(n));
   }
-  const wm = icon('wordmark', 'wm-svg');
-  $('#wordmark').replaceChildren(wm);
 }
 
 function bind() {
-  seg('#themeSeg', (v) => { setTheme(v); store.set('hgl-theme', v); });
+  document.addEventListener('hg:theme', retheme);
   seg('#profileSeg', (v) => selectProfile(v));
   seg('#modeSeg', setMode);
   seg('#shadeSeg', setShading);
@@ -1107,7 +1105,6 @@ function bind() {
   $('#imgSel').addEventListener('change', (e) => setImg(e.target.value));
   $('#secSel').addEventListener('change', (e) => isolate(e.target.value || null));
   viewer.onPick = (n) => isolate(n && n === S.iso ? null : n);
-  matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { viewer.theme(); if (cmp) cmp.theme(); });
   document.addEventListener('keydown', (e) => {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     const t = e.target;
@@ -1130,8 +1127,7 @@ async function boot() {
   snaps = new Snapshots(360);
   decorate();
   bind();
-  const saved = store.get('hgl-theme');
-  setTheme(saved === 'dark' || saved === 'light' ? saved : 'auto');
+  retheme();
   window.heroLab = { S, viewer: () => viewer, inst: () => inst, compare: () => cmp, showMe };
   try {
     S.ws = await getJson('/api/workspace');
