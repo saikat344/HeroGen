@@ -1,5 +1,6 @@
 """Frozen-atlas repaint waves with isolated requests and ordered texture projection."""
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
+import contextvars
 import copy
 import hashlib
 import json
@@ -7,11 +8,14 @@ from datetime import datetime, timezone
 import os
 import shutil
 import threading
+import time
 import uuid
 from types import MethodType
 
 from herogen.pipeline.client import CallLog
 from herogen.refine_budget import BudgetStop
+
+from . import buildlog
 
 # A face close-up plus cardinal body coverage, followed by the upper back's hair pass.
 WAVES = ((('head+0', False), ('body+0', False), ('body+90', False),
@@ -104,10 +108,12 @@ class Pass:
         self.key, self.name, self.hair, self.record, self.folder = key, name, hair, record, folder
         self.cancelled = threading.Event()
         self.tasks = []
+        self.tries = []      # the build log's try number (the slot, 1-based) of each launched task
         self.completed = {}
         self.selected = None
         self.slots, self.conditional = 0, 0
         self.prepare = self.launch = None
+        self.reported = False
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
                body_cam, recipe, persistence_lock, user_note="", view_options=None, art=(), art_masks=None, art_framing=None,
@@ -133,6 +139,9 @@ class Pass:
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
+            # Every request of this try (the repaint and its SAM 3.1 checks) is logged with its view and try.
+            child.purpose = 'repaint'
+            child.event_fields = {'view': self.key, 'try_': index + 1}
             private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
             if standard_side:
                 private['reference_style'] = 'turnaround artwork and original cover'
@@ -157,8 +166,10 @@ class Pass:
 
         def launch(index):
             run, child, private, folder = prepare(index)
-            future = pool.submit(run)
+            # Worker threads start with an empty context; carry this one (the build-log step) into each try.
+            future = pool.submit(contextvars.copy_context().run, run)
             self.tasks.append((future, child, private, folder))
+            self.tries.append(child.event_fields['try_'])
             return future
 
         self.prepare, self.launch = prepare, launch
@@ -199,6 +210,8 @@ class Pass:
         self.record['attempts'] = [trial for i in sorted(self.completed)
                                    for trial in self.completed[i]['attempts']]
         self.record['tries'] = len(self.record['attempts'])
+        if private['reason'] == 'cancelled: lower attempt accepted':
+            buildlog.try_cancelled(self.key, self.tries[index], private, self.tasks[index][1].log.calls)
         # A higher-index answer cannot win until every lower attempt is known to have failed.
         for i in range(len(self.tasks)):
             if i not in self.completed:
@@ -217,9 +230,23 @@ class Pass:
                     self.cancelled.set()
                     for task, *_ in self.tasks[i + 1:]:
                         task.cancel()
+                    if not self.reported:
+                        self.reported = True
+                        buildlog.view_selected(self.key, self.tries[i], len(self.tries))
                 break
         if self.selected is None and len(self.completed) == len(self.tasks):
             self.record['reason'] = self.completed[len(self.tasks) - 1]['reason']
+            if len(self.tasks) >= self.slots + self.conditional:
+                self.report_kept()   # no conditional slot can follow; otherwise the wave decides
+
+    def report_kept(self):
+        """Log that the view keeps its original paint, once every launched try is known and none will follow.
+        Passes with their own selection (the face close-up's beauty slots) log no outcome here."""
+        if (self.reported or self.selected is not None or len(self.completed) != len(self.tasks)
+                or type(self).collect is not Pass.collect):
+            return
+        self.reported = True
+        buildlog.view_kept(self.key, self.record.get('reason'), len(self.tries))
 
 
 def reproject(tex, work, records, body_cam, recovery=None):
@@ -322,6 +349,7 @@ class Publisher:
             version['face_recovery'] = recovered
         self.progress['versions'].append(version)
         self.write()
+        buildlog.version(n, wave, len(accepted), len(records), len(version['rejected']), len(version['pending']))
         # Immutable snapshots let recorded runners reproduce every update, including the done transition.
         write_atomic(self.run / f'stage-3f-progress-v{n}.json', json.dumps(self.progress, indent=2))
         return texture
@@ -417,9 +445,9 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         if face_control is None:
             if job.name in ('head+0', 'body+0') and error is None and not stopped:
                 recover()
-            return None
+            return settled(job)
         if error is not None or face_error is not None:
-            return None
+            return settled(job)
         if index >= job.slots:
             # The default-head run paid this view's ordinary attempt 1 for the conditional slot.
             try:
@@ -431,9 +459,9 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
             except Exception as exc:
                 # A face-recovery model error stays loud after every submitted attempt drains.
                 error = exc
-                return None
+                return settled(job)
         if stopped or not job.conditional_due():
-            return None
+            return settled(job)
         return launch_conditional(job, wave)
 
     def recover():
@@ -469,9 +497,16 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         changed, recovery_changed = recovery_changed, False
         return changed
 
+    def settled(job):
+        # No conditional slot follows this collection: a view with every try rejected keeps its paint.
+        with state_lock:
+            job.report_kept()
+        return None
+
     def launch_conditional(job, wave):
         future = job.launch(len(job.tasks))
         remaining[future] = (job, len(job.tasks) - 1, wave)
+        buildlog.extra_try(job.key, len(job.tasks))
         return future
 
     try:
@@ -484,11 +519,13 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                     key = ('hair-' if hair else '') + name
                     record = data['views'][key]
                     if record['reason'] == 'head_not_found':
+                        buildlog.view_skipped(key, record['reason'])
                         continue
                     if stopped or error is not None or face_error is not None:
                         record['reason'] = ('not attempted: API cap' if stopped else
                                             'not attempted: model error' if error is not None else
                                             'not attempted: face unavailable')
+                        buildlog.view_skipped(key, record['reason'])
                         continue
                     factory = face_control.pass_type(name) if face_control is not None else Pass
                     jobs.append(factory(key, name, hair, record, work / key))
@@ -498,9 +535,13 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 data['waves'].append({'views': [j.key for j in jobs], 'frozen_atlas': os.path.relpath(current, work),
                                       'concurrency': CONCURRENCY, 'parallel_attempts': True})
                 save(ok=False, status='running')
+                buildlog.wave(wave_index, len(jobs), attempts, from_version=len(publisher.progress['versions'])
+                              if wave_index > 1 else 0)
+                render_started = time.monotonic()
                 blender('render', {'blend': str(prep / 'work.blend'), 'texture': str(current),
                                    'cams': [cams[j.name] for j in jobs], 'out': str(folder), 'pos': True},
                         folder / 'blender.log', timeout=timeout)
+                buildlog.rendered(wave_index, len(jobs), time.monotonic() - render_started)
                 if face_control is not None and wave_index == 1 and head_found:
                     face_control.default_render = face_control.default_work / 'wave-1'
                 for job in jobs:

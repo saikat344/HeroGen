@@ -760,6 +760,153 @@ class FastStageTests(unittest.TestCase):
         self.assertNotIn('waves', rec)
         self.assertEqual(len(rec['views']), 20)
 
+    # ---- build log ------------------------------------------------------------------------------------------
+
+    VIEWS = ('head+0', 'body+0', 'body+90', 'body-90', 'body+180', 'hair-upper+180')
+
+    def run_logged(self, edit=None, **kwargs):
+        """Run the fast stage with a build-log file; every Muse Image repaint goes through the call tracker."""
+        from herogen.pipeline import events
+        from herogen.pipeline.fast import tracked
+        log = self.run / 'events.jsonl'
+        inner = edit or FakeClient.edit_image
+        with mock.patch.dict('os.environ', {'HEROGEN_EVENTS_FILE': str(log)}), \
+             mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(FakeClient, 'edit_image', tracked(IMAGE_MODEL, 'edit', isolate=True)(inner)), \
+             events.step('3f'):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast', **kwargs)
+        lines = log.read_text().splitlines()
+        # Every line is inside the schema exactly as written.
+        self.assertEqual([events.validate(json.loads(line)) for line in lines], [json.loads(line) for line in lines])
+        return rec, [json.loads(line) for line in lines]
+
+    @staticmethod
+    def decisions(log, what):
+        return [e for e in log if e['kind'] == 'decision' and e['what'] == what]
+
+    def test_build_log_labels_each_try_and_both_waves(self):
+        rec, log = self.run_logged()
+        self.assertTrue(all(e['step'] == '3f' for e in log))
+        waves = self.decisions(log, 'wave')
+        self.assertEqual([(w['n'], w['m']) for w in waves],
+                         [(10, {'wave': 1, 'views': 5, 'tries': 2}),
+                          (2, {'wave': 2, 'views': 1, 'tries': 2, 'from_version': 1})])
+        self.assertEqual([e['m'] for e in log if e.get('what') == 'views_rendered' and e['kind'] == 'local'],
+                         [{'wave': 1, 'cameras': 5}, {'wave': 2, 'cameras': 1}])
+        # Each repaint request is one call row with its view and try, even from the worker threads.
+        starts = [e for e in log if e['kind'] == 'call_start']
+        ends = {e['id']: e for e in log if e['kind'] == 'call_end'}
+        self.assertTrue(starts)
+        for start in starts:
+            self.assertEqual((start['who'], start['what']), ('muse-image', 'repaint'))
+            self.assertIn(start['view'], self.VIEWS)
+            self.assertIn(start['try'], (1, 2))
+            self.assertEqual({k: ends[start['id']][k] for k in ('view', 'try')},
+                             {'view': start['view'], 'try': start['try']})
+        # Exactly one result per try: judged against its gates, or cancelled as no longer needed.
+        results = self.decisions(log, 'view_result')
+        self.assertCountEqual([(e['view'], e['try']) for e in results],
+                              [(view, n) for view in self.VIEWS for n in (1, 2)])
+        for e in results:
+            if e['ok']:
+                self.assertGreaterEqual(e['m']['overlap'], e['m']['overlap_min'])
+            else:
+                self.assertEqual(e['why'], 'lower_try_accepted')
+                self.assertIn(e['m']['paid'], (0, 1))
+        selected = self.decisions(log, 'view_selected')
+        self.assertCountEqual([e['view'] for e in selected], self.VIEWS)
+        for e in selected:
+            self.assertEqual(e['try'], rec['views'][e['view']]['selected_attempt'] + 1)
+        self.assertEqual(self.decisions(log, 'view_kept'), [])
+        versions = [e for e in log if e['kind'] == 'version']
+        self.assertEqual([(v['n'], v['passed'], v['of'], v['m']['wave']) for v in versions],
+                         [(1, 5, 6, 1), (2, 6, 6, 2)])
+        # The record's numbers are the log's numbers.
+        hair = next(e for e in results if e['view'] == 'hair-upper+180' and e['ok'])
+        trial = next(t for t in rec['views']['hair-upper+180']['attempts'] if t['try'] == hair['try'])
+        self.assertAlmostEqual(hair['m']['agreement'], trial['checks']['agreement'], places=4)
+        self.assertEqual(hair['m']['agreement_min'], fixture.refine.HAIR_GATE['agree_min'])
+
+    def test_build_log_labels_the_cancelled_hedge(self):
+        original = FakeClient.edit_image
+        selected = {view: threading.Event() for view in self.VIEWS}
+        original_collect = fast.Pass.collect
+
+        def collect(job, index):
+            original_collect(job, index)
+            if job.selected is not None:
+                selected[job.key].set()
+
+        def edit(child, prompt, images, **kw):
+            view = child.cache_dir.parts[-2]
+            if kw['attempt'] == 1:
+                # The second try asks only after the first was accepted, so the guard cancels it unpaid.
+                self.assertTrue(selected[view].wait(5))
+            return original(child, prompt, images, **kw)
+
+        with mock.patch.object(fast.Pass, 'collect', collect):
+            rec, log = self.run_logged(edit)
+        results = {(e['view'], e['try']): e for e in self.decisions(log, 'view_result')}
+        self.assertEqual(len(results), 12)
+        for view in self.VIEWS:
+            self.assertTrue(results[view, 1]['ok'])
+            cancelled = results[view, 2]
+            self.assertEqual((cancelled['ok'], cancelled['why'], cancelled['m']), (False, 'lower_try_accepted', {'paid': 0}))
+            self.assertEqual(rec['views'][view]['selected_attempt'], 0)
+        ends = [e for e in log if e['kind'] == 'call_end' and e['try'] == 2]
+        self.assertEqual(len(ends), 6)
+        self.assertTrue(all(e['outcome'] == 'cancelled' and e['usd'] == 0 for e in ends))
+
+    def test_build_log_reports_rejected_tries_with_their_gate_numbers(self):
+        def edit(child, prompt, images, **kw):
+            child._call(IMAGE_MODEL, 'edit')
+            return Image.new('RGB', images[0].size, (115, 115, 115))
+
+        rec, log = self.run_logged(edit)
+        results = self.decisions(log, 'view_result')
+        self.assertEqual(len(results), 12)
+        for e in results:
+            trial = rec['views'][e['view']]['attempts'][e['try'] - 1]
+            self.assertFalse(e['ok'])
+            self.assertEqual(e['why'], {'outline moved': 'outline_moved',
+                                        'hair outline, scale or colour agreement': 'hair_mismatch'}[trial['reason']])
+            self.assertAlmostEqual(e['m']['overlap'], trial['checks']['iou'], places=4)
+            if e['why'] == 'outline_moved':
+                self.assertEqual((e['m']['median_limit'], e['m']['p90_limit']),
+                                 (trial['checks']['median_limit'], trial['checks']['p90_limit']))
+        kept = self.decisions(log, 'view_kept')
+        self.assertCountEqual([e['view'] for e in kept], self.VIEWS)
+        self.assertTrue(all(e['m'] == {'tries': 2} for e in kept))
+        self.assertEqual([e for e in log if e['kind'] == 'version'], [])
+        # Without a version 1, the hair wave repaints from the unrefined texture.
+        self.assertNotIn('from_version', self.decisions(log, 'wave')[1]['m'])
+        self.assertEqual([(e['what'], e['why']) for e in log if e['kind'] == 'skip'],
+                         [('texture_refine', 'views_rejected')])
+
+    def test_build_log_skips_the_face_close_up_without_a_head(self):
+        self.info['head_centre'] = None
+        rec, log = self.run_logged()
+        self.assertIn({'what': 'head_probe', 'ok': False},
+                      [{k: e[k] for k in ('what', 'ok')} for e in log if e['kind'] == 'local' and 'ok' in e])
+        self.assertEqual([(e['view'], e['why']) for e in log if e['kind'] == 'skip'], [('head+0', 'head_not_found')])
+        self.assertEqual(self.decisions(log, 'wave')[0]['n'], 8)
+
+    def test_build_log_says_the_spending_cap_was_reached(self):
+        rec, log = self.run_logged(cap_usd=0)
+        self.assertEqual(rec['status'], 'cap_reached')
+        # Wave 1's tries stop at the cap, the hair wave never starts, and the step keeps its unrefined texture.
+        self.assertCountEqual([(e['view'], e['why']) for e in self.decisions(log, 'view_kept')],
+                              [(view, 'spend_cap') for view in self.VIEWS[:5]])
+        self.assertEqual([(e['what'], e.get('view'), e['why']) for e in log if e['kind'] == 'skip'],
+                         [('view', 'hair-upper+180', 'spend_cap'), ('texture_refine', None, 'spend_cap')])
+
+    def test_without_a_build_log_file_nothing_is_written(self):
+        with mock.patch.dict('os.environ', {}, clear=False) as env, \
+             mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            env.pop('HEROGEN_EVENTS_FILE', None)
+            stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        self.assertEqual(list(self.run.rglob('events.jsonl')), [])
+
 
 @unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
 class ReprojectionTests(unittest.TestCase):

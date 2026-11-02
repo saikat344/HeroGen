@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import CancelledError
 from contextvars import ContextVar
@@ -198,7 +199,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
           surface_reference_mask=None, fast_outline=False):
     import numpy as np
     from scipy import ndimage
-    from . import character as C, imaging as I
+    from . import buildlog, character as C, imaging as I
     from .backend import blender
     from .cameras import decode_pos, project, px_per_unit, read_exr
     from .prompts import ART_VARIANTS, prompt
@@ -254,6 +255,8 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             return current
     if reference_record is not None:
         record["reference"] = reference_record
+    # A parallel try's build-log number is its slot, which a reused attempt index can repeat.
+    slot = (getattr(client, "event_fields", None) or {}).get("try_")
     for attempt in range(attempt_start, attempt_start + (attempts if attempts is not None else I.HAIR_ATTEMPTS if hair else I.ATTEMPTS)):
         if cancelled is not None and cancelled.is_set():
             record.update(reason="cancelled: lower attempt accepted")
@@ -277,18 +280,23 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         if closeup_reference is not None:
             passed, measures = I.closeup_outline(figure, fig_e, cam["zoom"])
             reason = "outline moved"
+            limits = None
         elif hair:
             agreement, _, _ = I.interior_agreement(render_rgb, warped, figure, fig_e)
             measures["agreement"] = agreement
             passed = (overlap >= I.HAIR_GATE["iou_min"] and agreement >= I.HAIR_GATE["agree_min"]
                       and abs(reg["scale"] - 1) <= I.HAIR_GATE["scale_max_change"])
             reason = "hair outline, scale or colour agreement"
+            limits = {"overlap_min": I.HAIR_GATE["iou_min"], "agreement_min": I.HAIR_GATE["agree_min"],
+                      "scale_change_max": I.HAIR_GATE["scale_max_change"]}
         else:
             # Fast measures the outline with near-grey cloth the repaint kept (`figure_mask`); the
             # limits are unchanged, and paint weights keep the established mask.
             measured = I.figure_mask(warped, render_figure=figure, render_rgb=render_rgb) if fast_outline else fig_e
-            passed, measures = I.outline_gate(figure, measured, closeup=(body_cam is not None and I.is_closeup(cam, body_cam)))
+            closeup = body_cam is not None and I.is_closeup(cam, body_cam)
+            passed, measures = I.outline_gate(figure, measured, closeup=closeup)
             reason = "outline moved"
+            limits = {"overlap_min": (I.CLOSEUP_GATE if closeup else I.GATE)["iou_min"]}
         trial.update(registration=reg, checks=measures)
         if cancelled is not None and cancelled.is_set():
             record.update(reason="cancelled: lower attempt accepted")
@@ -320,6 +328,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         trial["reason"] = "accepted" if passed else reason
         if not passed:
             record["reason"] = reason
+            buildlog.try_result(buildlog.view_key(cam, hair), trial, False, reason, limits, number=slot)
             continue
         # Beauty references already carry the intended light and palette; fitting them back to the
         # source render would remove their crease shading and material contrast.
@@ -350,6 +359,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             Image.fromarray((np.clip(arr, 0, 1) * 255).round().astype(np.uint8)).save(folder / f"{name}.png")
         trial["accepted"] = True
         record.update(accepted=True, reason="accepted")
+        buildlog.try_result(buildlog.view_key(cam, hair), trial, True, limits=limits, number=slot)
         return tex.save(folder / "texture.png") if apply is None else current
     return current
 
@@ -586,7 +596,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             from . import beauty
             pool = ThreadPoolExecutor(max_workers=1)
             generation = (pool, pool.submit(beauty.generate_fast, run, client, beauty_dir))
+        from . import buildlog
+        probe_started = time.monotonic()
         info = C.setup(source, work, client, timeout=timeout, **setup_options)
+        buildlog.head_probe(info["head_centre"] is not None, time.monotonic() - probe_started)
         closeup_cams = []
         if upscale_texture:
             from . import closeups
@@ -764,6 +777,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             rec.data.update(outputs=["03-refined.glb"], final_model="03-refined.glb")
         else:
             rec.note("all views rejected; keeping 03-source.glb")
+            if not stopped:
+                buildlog.skipped("views_rejected")
+        if stopped:
+            buildlog.skipped("spend_cap")
         return save(status="cap_reached" if stopped else "complete")
     except BudgetStop as exc:
         drain()
@@ -771,6 +788,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             empty_progress(run, done=True)
         rec.data["stop_reason"] = str(exc)
         rec.note(str(exc))
+        from . import buildlog
+        buildlog.skipped("spend_cap")
         return save(status="cap_reached")
     except Exception as exc:
         drain()
