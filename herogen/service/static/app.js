@@ -4,7 +4,7 @@ import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
-import { workbenchLog } from '/assets/workbench.js';
+import { buildLog } from '/assets/buildlog.js';
 import { generationView, generationState } from '/assets/generation.js';
 import { variationsView } from '/assets/variations.js';
 import { finishedNote, heroesView } from '/assets/heroes.js';
@@ -28,7 +28,7 @@ function setScreen(next) {
 }
 const heroes = heroesView($, { api, open: (id) => openJob(id, true), create: () => goCreate(),
   refresh: () => refreshList().catch((e) => heroes.fail(e)) });
-const liveLog = workbenchLog($, api);
+const liveLog = buildLog($, api);
 const generation = generationView($, (url, options) => preview(url, options));
 const variations = variationsView($, { api, select: openJob, key: idemKey,
   textureNotes: () => S.session?.limits?.texture_notes === true,

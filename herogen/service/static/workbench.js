@@ -1,4 +1,5 @@
-// Read-only presentation of the selected job's recorded stage and publication times.
+// The selected job's recorded stage and publication times, read from its stage records. The Build log shows this
+// for runs recorded without events (older runs).
 const SOURCE = {p: 'pipeline/prompt_sketch.py', 0: 'pipeline/inputs.py', 1: 'pipeline/stages.py',
   2: 'pipeline/stages.py', 3: 'blender/stage3.py', '3f': 'blender/refine/__init__.py',
   4: 'blender/stage4.py', 6: 'roblox/export.py', 5: 'pipeline/results.py'};
@@ -191,7 +192,8 @@ function rowNode(e, open) {
   li.append(timeNode(e.time), body);
   return li;
 }
-export function workbenchLog($, api) {
+// The stage-record view inside #stageLog. The Build log owns the Follow live and Copy log controls and reads `text`.
+export function recordLog($, api) {
   let job = null, run = null, signature = '', request = 0, log = '';
   const records = new Map(), open = new Map();
   let shown = '';
@@ -212,12 +214,7 @@ export function workbenchLog($, api) {
     list.scrollTop = follow ? list.scrollHeight : position;
     if (focused) for (const summary of list.querySelectorAll('summary[data-key]')) if (summary.dataset.key === focused) summary.focus({preventScroll: true});
   }
-  $('#followLive').addEventListener('change', () => { if (job) render(true); });
-  $('#copyLog').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(log); $('#logStatus').textContent = 'Log copied'; }
-    catch { $('#logStatus').textContent = 'Copy unavailable. Select the log text to copy it.'; }
-  });
-  return {update(next) {
+  return {get text() { return log; }, render(force) { if (job) render(force); }, update(next) {
     if (job?.id !== next.id) { run = null; signature = ''; shown = ''; records.clear(); open.clear(); }
     job = next; render();
     const current = JSON.stringify([job.id, job.stages?.map(s => [s.key, s.state]), job.models]);

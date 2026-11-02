@@ -1,4 +1,4 @@
-/* Workspace side panel: "Behind the build" (Live / Recipe / Branches tabs), the variations tree, the failed-attempt
+/* Workspace side panel: "Behind the build" (Build log / Recipe / Branches tabs), the variations tree, the failed-attempt
    banner, the refine box and the compare / expanded-tree modals. Colours, type, spacing and durations come from
    tokens.css; components (.tabs, .node, .connector, .chip, .banner, .btn, .field) come from app.css and are only
    arranged here. */
@@ -25,40 +25,86 @@
 .side-body[hidden] { display: none; }
 .side-panel #developerMode { margin: 0 var(--space-5) var(--space-5); }
 
-/* ---------- Live tab ---------- */
+/* ---------- Build log tab ---------- */
 .side-panel .live-log { padding: var(--space-4); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border); background: var(--color-surface-2); }
 .side-panel .live-log .row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .side-panel .note-label { margin: 0; font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--ls-eyebrow); text-transform: uppercase; color: var(--color-text-muted); }
 .side-panel .follow-live { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-body-s); font-weight: var(--weight-regular); color: var(--color-text-muted); }
 .side-panel .follow-live input { accent-color: var(--color-accent); }
-.side-panel #stageLog { list-style: none; margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); max-height: 24rem; overflow: auto; border-radius: var(--radius-m); background: var(--color-bg); font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
-.side-panel #stageLog li { display: flex; gap: var(--space-4); min-width: 0; }
-.side-panel #stageLog time { flex: none; color: var(--color-text-faint); font-variant-numeric: tabular-nums; }
-.side-panel #stageLog span { overflow-wrap: anywhere; }
-.side-panel #stageLog .st-passed { color: var(--color-success); }
-.side-panel #stageLog .st-failed, .side-panel #stageLog .st-rejected { color: var(--color-danger-text); }
-.side-panel #stageLog .st-running { color: var(--color-accent-text); }
-.side-panel #stageLog .st-skipped { color: var(--color-warning); }
-.side-panel #stageLog .st-reused, .side-panel #stageLog .st-cancelled { color: var(--color-text-muted); }
+/* Build log: step headers that open into one row per model call or local step. */
+.side-panel #stageLog { list-style: none; margin: var(--space-3) 0 0; padding: var(--space-2) var(--space-3); max-height: min(60vh, 560px); overflow: auto; overscroll-behavior: contain; border-radius: var(--radius-m); background: var(--color-bg); font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
+.build-log ol { list-style: none; margin: 0; padding: 0; }
+.build-log .bl-step + .bl-step, .build-log .bl-group + .bl-step, .build-log .bl-step + .bl-group { border-top: var(--border-w) solid var(--color-border-subtle); }
+.build-log .bl-head { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-2) var(--space-3); min-height: var(--control-h-m); padding: var(--space-2) 0; list-style: none; cursor: pointer; border-radius: var(--radius-s); font-family: var(--font-ui); font-size: var(--text-body-s); font-weight: var(--weight-semibold); color: var(--color-text); }
+.build-log .bl-head::-webkit-details-marker { display: none; }
+.build-log .bl-head:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }
+.build-log .bl-chev { color: var(--color-text-faint); }
+.build-log details[open] > .bl-head .bl-chev { transform: rotate(90deg); }
+.build-log .bl-step.is-empty .bl-chev { visibility: hidden; }
+.build-log .bl-head .bl-meta { font-family: var(--font-mono); font-weight: var(--weight-regular); }
+.build-log .bl-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 0 var(--space-3); padding: var(--space-1) 0 var(--space-1) var(--space-7); }
+.build-log .bl-group > ol > .bl-row { padding-left: 0; }
+.build-log .bl-rows[hidden] { display: none; }
+.build-log .bl-rows { padding-bottom: var(--space-2); }
+.build-log .bl-body { min-width: 0; overflow-wrap: anywhere; }
+.build-log .bl-who { display: inline-block; margin-right: var(--space-2); padding: 0 var(--space-2); border: var(--border-w) solid var(--color-border); border-radius: var(--radius-pill); font-family: var(--font-ui); font-size: var(--text-caption); font-weight: var(--weight-medium); color: var(--color-text-muted); white-space: nowrap; }
+.build-log .bl-meta { color: var(--color-text-faint); font-size: var(--text-caption); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.build-log .bl-note { grid-column: 2 / -1; font-size: var(--text-caption); color: var(--color-text-muted); }
+.build-log .bl-mark { display: inline-grid; place-items: center; align-self: center; min-width: var(--icon-s); color: var(--color-text-faint); }
+.build-log .bl-mark > * { grid-area: 1 / 1; }
+.build-log .bl-dots { display: none; font-weight: var(--weight-bold); }
+.build-log .st-passed > .bl-mark, .build-log .st-passed > details > .bl-head .bl-mark { color: var(--color-success); }
+.build-log .st-failed > .bl-mark, .build-log .st-rejected > .bl-mark, .build-log .st-failed > details > .bl-head .bl-mark, .build-log .st-rejected > details > .bl-head .bl-mark { color: var(--color-danger); }
+.build-log .st-failed > .bl-body .bl-text { color: var(--color-danger-text); }
+.build-log .st-running > .bl-mark, .build-log .st-running > details > .bl-head .bl-mark { color: var(--color-accent-text); }
+.build-log .st-skipped > .bl-mark, .build-log .st-skipped > details > .bl-head .bl-mark { color: var(--color-warning); }
+.build-log .st-pending > details > .bl-head { color: var(--color-text-muted); }
+.build-log .is-late .bl-meta, .build-log .is-late .bl-note { color: var(--color-warning); }
+@media (prefers-reduced-motion: no-preference) {
+  .build-log .st-running > .bl-mark .icon, .build-log .st-running > details > .bl-head .bl-mark .icon { animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
+  .build-log .bl-chev { transition: transform var(--dur-base) var(--ease-standard); }
+}
+/* Reduced motion: no spinner, a static "…" instead. */
+@media (prefers-reduced-motion: reduce) {
+  .build-log .st-running > .bl-mark .icon, .build-log .st-running > details > .bl-head .bl-mark .icon { display: none; }
+  .build-log .st-running > .bl-mark .bl-dots, .build-log .st-running > details > .bl-head .bl-mark .bl-dots { display: inline; }
+}
+/* Phones: numbers drop under the sentence, the log takes more of the screen, headers are full tap targets. */
+@media (max-width: 767px) {
+  .side-panel #stageLog { max-height: 60vh; }
+  .build-log .bl-head { min-height: var(--tap-min); grid-template-columns: auto auto minmax(0, 1fr); }
+  .build-log .bl-head .bl-meta { grid-column: 3; text-align: left; white-space: normal; }
+  .build-log .bl-row { grid-template-columns: auto minmax(0, 1fr); padding-left: var(--space-4); }
+  .build-log .bl-row .bl-meta { grid-column: 2; text-align: left; white-space: normal; }
+}
+/* Runs without events: the stage-record view. */
+.side-panel #stageLog.is-records li { display: flex; gap: var(--space-4); min-width: 0; }
+.side-panel #stageLog.is-records time { flex: none; color: var(--color-text-faint); font-variant-numeric: tabular-nums; }
+.side-panel #stageLog.is-records span { overflow-wrap: anywhere; }
+.side-panel #stageLog.is-records .st-passed { color: var(--color-success); }
+.side-panel #stageLog.is-records .st-failed, .side-panel #stageLog.is-records .st-rejected { color: var(--color-danger-text); }
+.side-panel #stageLog.is-records .st-running { color: var(--color-accent-text); }
+.side-panel #stageLog.is-records .st-skipped { color: var(--color-warning); }
+.side-panel #stageLog.is-records .st-reused, .side-panel #stageLog.is-records .st-cancelled { color: var(--color-text-muted); }
 /* A step header opens each group; its calls follow, indented under it. */
-.side-panel #stageLog .log-step { margin-top: var(--space-4); }
-.side-panel #stageLog .log-step:first-child { margin-top: 0; }
-.side-panel #stageLog .log-call, .side-panel #stageLog .log-group, .side-panel #stageLog .log-version { padding-inline-start: var(--space-4); }
-.side-panel #stageLog .log-body, .side-panel #stageLog .log-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); min-width: 0; }
-.side-panel #stageLog .log-body { flex: 1; flex-direction: column; align-items: stretch; }
-.side-panel #stageLog .log-line { flex: 1; }
-.side-panel #stageLog .log-title { font-weight: var(--weight-semibold); }
-.side-panel #stageLog .log-text { flex: 1 1 10rem; min-width: 0; color: var(--color-text); }
-.side-panel #stageLog .log-title { flex: 1 1 100%; }
-.side-panel #stageLog .log-step .log-meta { margin-inline-start: 0; text-align: start; }
-.side-panel #stageLog .log-who { flex: none; padding: 0 var(--space-2); border-radius: var(--radius-s); background: var(--color-surface-2); color: var(--color-text-muted); font-size: var(--text-caption); }
-.side-panel #stageLog .log-who--local { color: var(--color-accent-text); }
-.side-panel #stageLog .log-meta { margin-inline-start: auto; color: var(--color-text-muted); font-variant-numeric: tabular-nums; text-align: end; }
-.side-panel #stageLog .log-checks, .side-panel #stageLog .log-message, .side-panel #stageLog .log-note { display: block; color: var(--color-text-muted); font-family: var(--font-ui); font-size: var(--text-body-s); line-height: var(--lh-body-s); }
-.side-panel #stageLog .log-message { color: var(--color-text); }
-.side-panel #stageLog .log-fold { flex: 1; min-width: 0; }
-.side-panel #stageLog .log-fold summary { display: flex; gap: var(--space-4); cursor: pointer; border-radius: var(--radius-s); }
-.side-panel #stageLog .log-children { list-style: none; margin: 0; padding: 0 0 0 var(--space-5); }
+.side-panel #stageLog.is-records .log-step { margin-top: var(--space-4); }
+.side-panel #stageLog.is-records .log-step:first-child { margin-top: 0; }
+.side-panel #stageLog.is-records .log-call, .side-panel #stageLog.is-records .log-group, .side-panel #stageLog.is-records .log-version { padding-inline-start: var(--space-4); }
+.side-panel #stageLog.is-records .log-body, .side-panel #stageLog.is-records .log-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); min-width: 0; }
+.side-panel #stageLog.is-records .log-body { flex: 1; flex-direction: column; align-items: stretch; }
+.side-panel #stageLog.is-records .log-line { flex: 1; }
+.side-panel #stageLog.is-records .log-title { font-weight: var(--weight-semibold); }
+.side-panel #stageLog.is-records .log-text { flex: 1 1 10rem; min-width: 0; color: var(--color-text); }
+.side-panel #stageLog.is-records .log-title { flex: 1 1 100%; }
+.side-panel #stageLog.is-records .log-step .log-meta { margin-inline-start: 0; text-align: start; }
+.side-panel #stageLog.is-records .log-who { flex: none; padding: 0 var(--space-2); border-radius: var(--radius-s); background: var(--color-surface-2); color: var(--color-text-muted); font-size: var(--text-caption); }
+.side-panel #stageLog.is-records .log-who--local { color: var(--color-accent-text); }
+.side-panel #stageLog.is-records .log-meta { margin-inline-start: auto; color: var(--color-text-muted); font-variant-numeric: tabular-nums; text-align: end; }
+.side-panel #stageLog.is-records .log-checks, .side-panel #stageLog.is-records .log-message, .side-panel #stageLog.is-records .log-note { display: block; color: var(--color-text-muted); font-family: var(--font-ui); font-size: var(--text-body-s); line-height: var(--lh-body-s); }
+.side-panel #stageLog.is-records .log-message { color: var(--color-text); }
+.side-panel #stageLog.is-records .log-fold { flex: 1; min-width: 0; }
+.side-panel #stageLog.is-records .log-fold summary { display: flex; gap: var(--space-4); cursor: pointer; border-radius: var(--radius-s); }
+.side-panel #stageLog.is-records .log-children { list-style: none; margin: 0; padding: 0 0 0 var(--space-5); }
 .side-panel .log-caveat { margin: var(--space-3) 0 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); }
 .side-panel .log-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); font-size: var(--text-caption); color: var(--color-text-muted); }
 .side-panel .log-footer .link { margin: 0; padding: 0; border: 0; background: none; color: var(--color-accent-text); font: inherit; font-weight: var(--weight-semibold); cursor: pointer; }
