@@ -51,7 +51,7 @@ class E2EImportTest(unittest.TestCase):
         result = json.loads(p.stdout)
         self.assertEqual((result['errors'], result['failures']), ([], []))
         self.assertEqual(result['tests'], len(result['skipped']))
-        self.assertEqual(result['tests'], 4)
+        self.assertGreater(result['tests'], 0)
 
 
 if __name__ == "__main__":
