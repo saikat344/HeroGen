@@ -222,12 +222,18 @@ class Pass:
             self.record['reason'] = self.completed[len(self.tasks) - 1]['reason']
 
 
-def reproject(tex, work, records, body_cam):
-    """Rebuild from the immutable base and saved accepted paint, in the declared pass order."""
+def reproject(tex, work, records, body_cam, recovery=None):
+    """Rebuild from the immutable base and saved accepted paint, in the declared pass order.
+
+    An applied face recovery paints at head+0's position, first, only while no frontal is accepted.
+    """
     import numpy as np
-    from . import imaging as I
+    from . import face_recovery, imaging as I
 
     views = I.load_accepted_views(work, records, tex.height, body_cam=body_cam)
+    recovered = face_recovery.view(work, records, recovery, tex.height, body_cam)
+    if recovered is not None:
+        views.insert(0, recovered)
     tex.reset()
     gains = I.solve_exposure(views, tex.height, mode=I.EXPOSURE_MODE) if I.EXPOSURE_SOLVE else {}
     for view in views:
@@ -246,8 +252,12 @@ def reproject(tex, work, records, body_cam):
                 delta = np.abs(I.masked_blur(rgb, valid, sigma) - I.masked_blur(current, valid, sigma)).max(-1)
                 lo, hi = I.AGREE_TOL
                 weight *= np.where(has_current, np.clip((hi - delta) / (hi - lo), 0, 1), 1).astype(np.float32)
-        records[view['key']]['texels'] = tex.apply(view['cam'], rgb, feather, view['depth'], view['valid'],
+        texels = tex.apply(view['cam'], rgb, feather, view['depth'], view['valid'],
                                                  weight, I.HAIR_BONUS if view['hair'] else 1.0)
+        if view is recovered:
+            recovery['texels'] = texels
+        else:
+            records[view['key']]['texels'] = texels
 
 
 class Publisher:
@@ -271,9 +281,14 @@ class Publisher:
         records = self.data['views']
         accepted = [key for key, record in records.items() if record['accepted']]
         previous = self.progress['versions'][-1]['accepted'] if self.progress['versions'] else []
-        if not set(accepted) > set(previous) and (self.progress['versions'] or self.face_control is None):
+        recovery = self.data.get('face_recovery')
+        recovered = (recovery['attempt'] if recovery and recovery.get('applied')
+                     and not any(records.get(key, {}).get('accepted') for key in ('head+0', 'body+0')) else None)
+        before = self.progress['versions'][-1].get('face_recovery') if self.progress['versions'] else None
+        if (not set(accepted) > set(previous) and recovered == before
+                and (self.progress['versions'] or self.face_control is None)):
             return None
-        reproject(self.tex, self.work, records, self.body_cam)
+        reproject(self.tex, self.work, records, self.body_cam, recovery)
         if self.face_control is not None:
             self.face_control.paint(self.tex, self.work, records)
         n = len(self.progress['versions']) + 1
@@ -303,6 +318,8 @@ class Publisher:
                    'code_sha': (self.data.get('code') or {}).get('commit'), 'wave': wave}
         if self.face_control is not None:
             version['face_source'] = dict(self.data['face_source'])
+        if recovered is not None:
+            version['face_recovery'] = recovered
         self.progress['versions'].append(version)
         self.write()
         # Immutable snapshots let recorded runners reproduce every update, including the done transition.
@@ -329,11 +346,14 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
           passes=None):
     """Run the frozen waves. `passes`, when given, receives every submitted Pass for later extension."""
     from .backend import blender
+    from . import face_recovery
 
     stopped, error, face_error = False, None, None
+    recovery_changed = False
     persistence_lock = threading.RLock()
     face_control = None
     face_client = None
+    recovery_client = None
     if beauty_context is not None:
         from .fast_beauty import FaceControl
         face_control = FaceControl(*beauty_context, data=data, state_lock=state_lock)
@@ -394,14 +414,60 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 job.record['tries'] = len(job.record['attempts'])
             if error is None:
                 error = exc
-        if face_control is None or error is not None or face_error is not None:
+        if face_control is None:
+            if job.name in ('head+0', 'body+0') and error is None and not stopped:
+                recover()
+            return None
+        if error is not None or face_error is not None:
             return None
         if index >= job.slots:
             # The default-head run paid this view's ordinary attempt 1 for the conditional slot.
-            face_control.fold_default(job.key)
+            try:
+                face_control.fold_default(job.key)
+            except BudgetStop as exc:
+                with state_lock:
+                    data['stop_reason'] = str(exc)
+                stopped = True
+            except Exception as exc:
+                # A face-recovery model error stays loud after every submitted attempt drains.
+                error = exc
+                return None
         if stopped or not job.conditional_due():
             return None
         return launch_conditional(job, wave)
+
+    def recover():
+        """Ordinary fast only: resolve face-only paint once both frontal passes are rejected."""
+        nonlocal stopped, error, recovery_changed, recovery_client
+        with state_lock:
+            records = copy.deepcopy({k: data['views'][k] for k in ('head+0', 'body+0') if k in data['views']})
+            previous = data.get('face_recovery')
+        if previous is not None or not face_recovery.due(records):
+            return
+        if recovery_client is None:
+            recovery_client = isolated_client(client, 'head+0/face-recovery', persistence_lock)
+            if hasattr(recovery_client, 'network_attempts'):
+                recovery_client._initial_network_attempts = recovery_client.network_attempts
+        try:
+            record = face_recovery.resolve(recovery_client, work, records, cams['head+0'], cams['body+0'])
+        except BudgetStop as exc:
+            record = {'applied': False, 'view': 'head+0', 'reason': str(exc)}
+            with state_lock:
+                data['stop_reason'] = str(exc)
+            stopped = True
+        except Exception as exc:
+            # Model and replay failures stay loud after every submitted attempt drains.
+            if error is None:
+                error = exc
+            return
+        with state_lock:
+            data['face_recovery'] = record
+        recovery_changed = bool(record and record.get('applied'))
+
+    def take_recovery():
+        nonlocal recovery_changed
+        changed, recovery_changed = recovery_changed, False
+        return changed
 
     def launch_conditional(job, wave):
         future = job.launch(len(job.tasks))
@@ -512,10 +578,12 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                             firsts.discard(future)
                             before = job.selected
                             collect(job, index, wave)
-                            if (wave < wave_index and error is None and face_error is None
-                                    and before is None and job.selected is not None):
+                            if (error is None and face_error is None
+                                    and ((wave < wave_index and before is None and job.selected is not None)
+                                         or take_recovery())):
                                 publisher.publish(wave)
                 if error is None and face_error is None:
+                    take_recovery()
                     texture = publisher.publish(wave_index)
                     if wave_index == 1 and texture is not None:
                         current = texture  # immutable v1; later retries never change wave 2's render input
@@ -528,7 +596,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                     job, index, wave = remaining.pop(future)
                     before = job.selected
                     collect(job, index, wave)
-                    if error is None and face_error is None and before is None and job.selected is not None:
+                    if error is None and face_error is None and (
+                            (before is None and job.selected is not None) or take_recovery()):
                         publisher.publish(wave)
                 save(ok=False, status='running')
     finally:
@@ -539,6 +608,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 publish(client, child)
         if face_client is not None:
             publish(client, face_client)
+        if recovery_client is not None:
+            publish(client, recovery_client)
     save(ok=False, status='running')
     if error is not None:
         raise error

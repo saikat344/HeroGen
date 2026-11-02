@@ -1017,6 +1017,43 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['default_fast_fallback']['views']['body+90']['reason'], 'ApiError')
         self.assertFalse((self.run / '03-refined.glb').exists())
 
+    def fake_recovery(self, calls):
+        from herogen.blender.refine import face_recovery
+        face = np.zeros((64, 64), bool)
+        face[24:40, 24:40] = True
+        def evaluate(client, folder, attempt, cam, body_cam):
+            calls.append((folder, attempt))
+            return {'attempt': attempt, 'outline': {}, 'parts': {}, 'qualified': True,
+                    'reason': face_recovery.REASON, 'mask_area_px': int(face.sum()), 'face_px': int(face.sum()),
+                    '_refined': np.zeros((64, 64, 3), np.float32), '_weight': face.astype(np.float32),
+                    '_face': face}
+        return mock.patch.object(face_recovery, 'evaluate', side_effect=evaluate)
+
+    def test_face_recovery_follows_the_default_head_run_only(self):
+        calls = []
+        with self.fake_recovery(calls):
+            record = self.run_beauty(cap_usd=5, reject=lambda view, kind: view in ('head+0', 'body+0'))
+        self.assertTrue(calls)
+        # Only the ordinary default-head samples (main slots 2 and 3 replay them), never beauty slot 1.
+        self.assertTrue(all('default-fast' in folder.parts for folder, _ in calls))
+        self.assertEqual({attempt for _, attempt in calls}, {0})
+        nested = record['default_fast_fallback']['face_recovery']
+        self.assertEqual((nested['applied'], nested['attempt']), (True, 0))
+        self.assertEqual(record['face_source']['source'], 'default-fast-fallback')
+        self.assertEqual(record['face_source']['face_recovery'],
+                         {k: nested[k] for k in ('view', 'attempt', 'reason', 'mask_area_px')})
+        self.assertNotIn('face_recovery', record)
+        # Attempt one was folded into the default-head run; attempt zero still wins.
+        self.assertEqual(record['default_fast_fallback']['views']['head+0']['tries'], 2)
+
+    def test_no_face_recovery_when_the_default_head_has_frontal_paint(self):
+        calls = []
+        with self.fake_recovery(calls):
+            record = self.run_beauty(cap_usd=5)
+        self.assertFalse(calls)
+        self.assertNotIn('face_recovery', record['default_fast_fallback'])
+        self.assertNotIn('face_recovery', record['face_source'])
+
     def test_face_conditional_error_drains_wave_one_before_raising(self):
         import time
         original = stage._view

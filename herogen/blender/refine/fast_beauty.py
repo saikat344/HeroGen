@@ -221,6 +221,11 @@ class FaceControl:
         if self.key is None:
             self.data['face_source'] = {'source': 'default-fast-fallback',
                                         'reason': 'no accepted frontal face repaint'}
+            recovery = (self.default_data or {}).get('face_recovery')
+            if recovery and recovery.get('applied'):
+                # The restored default head carries the default-head run's face-only paint.
+                self.data['face_source']['face_recovery'] = {
+                    k: recovery[k] for k in ('view', 'attempt', 'reason', 'mask_area_px')}
             self.key = 'head+0' if head is not None else 'body+0'
 
     def default_fast(self, client, prep, tex, cams, work, timeout, cover, head_found, recipe, save, user_note):
@@ -311,20 +316,31 @@ class FaceControl:
             record = self.default_data['views'][key]
             record['attempts'] = record['attempts'] + private['attempts']
             record['tries'] = len(record['attempts'])
-            if not private['accepted']:
+            if private['accepted']:
+                record.update({k: v for k, v in private.items() if k not in ('attempts', 'tries')})
+                record['selected_attempt'], record['winning_slot'] = 1, 2
+                target = self.default_work / key
+                target.mkdir(parents=True, exist_ok=True)
+                for source in folder.iterdir():
+                    if source.is_file():
+                        shutil.copy2(source, target / source.name)
+            else:
                 record['reason'] = private['reason']
+            records = copy.deepcopy(self.default_data['views'])
+            previous = self.default_data.get('face_recovery')
+        # Attempt one can change frontal ownership or add an outline-only head sample.
+        recovery = self.default_recovery(key, records, previous)
+        with self.state_lock:
+            if recovery is None:
+                self.default_data.pop('face_recovery', None)
+            else:
+                self.default_data['face_recovery'] = recovery
+            unchanged = (lambda r: r['attempt'] if r and r.get('applied') else None)
+            if not private['accepted'] and unchanged(recovery) == unchanged(previous):
                 self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
                 return
-            record.update({k: v for k, v in private.items() if k not in ('attempts', 'tries')})
-            record['selected_attempt'], record['winning_slot'] = 1, 2
-            target = self.default_work / key
-            target.mkdir(parents=True, exist_ok=True)
-            for source in folder.iterdir():
-                if source.is_file():
-                    shutil.copy2(source, target / source.name)
-            records = copy.deepcopy(self.default_data['views'])
         default = self.default_tex
-        reproject(default, self.default_work, records, self.default_context['cams']['body+0'])
+        reproject(default, self.default_work, records, self.default_context['cams']['body+0'], recovery)
         default.save(self.default_work / 'texture.png')
         with Image.open(self.default_work / 'texture.png') as image:
             fallback = np.asarray(image.convert('RGB'), dtype=np.float32) / 255
@@ -334,6 +350,28 @@ class FaceControl:
             self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
             self.data['face_source']['atlas_sha256'] = hashlib.sha256(
                 (self.default_work / 'texture.png').read_bytes()).hexdigest()
+
+    def default_recovery(self, key, records, previous):
+        """Re-resolve the default-head run's face recovery after a frontal attempt one is folded in."""
+        from . import face_recovery
+        from .fast import isolated_client, publish
+
+        if key not in face_recovery.FRONTAL:
+            return previous
+        if not face_recovery.due(records):
+            return None
+        client = self.default_context['client']
+        child = isolated_client(client, 'head+0/face-recovery-fold', self.persistence_lock)
+        if hasattr(child, 'network_attempts'):
+            child._initial_network_attempts = child.network_attempts
+        try:
+            return face_recovery.resolve(child, self.default_work, records, self.default_context['cams']['head+0'],
+                                         self.default_context['cams']['body+0'], previous)
+        except BudgetStop as exc:
+            return {'applied': False, 'view': 'head+0', 'reason': str(exc)}
+        finally:
+            with self.persistence_lock:
+                publish(client, child)
 
     def prepare_hair_views(self, client, work, records, height):
         """Read the hair masks already required by accepted fast paints, with no API fallback."""
