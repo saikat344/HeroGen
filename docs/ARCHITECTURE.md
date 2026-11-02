@@ -2742,8 +2742,8 @@ attempt one only when attempt zero and the enhanced sample were both rejected.
 Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes (for the head,
 when slot 2 passes or face selection accepts slot 1), and three (one enhanced, two ordinary) only when
 both are rejected, never more, including when SideBeautyPass and region palette are also on. The one
-identical resend of a beauty-only request after a transient error (below) is the only extra send; it repeats
-a request rather than drawing a new sample.
+identical resend of a beauty-only request after a transient error (below) is the only extra send; the
+service may bill it as a second generation.
 The lowest passing slot wins (1, then 2, then 3); higher body/hair slots are cancelled when a lower slot
 wins. Head candidates drain because eye-detail selection requires the ordinary paint; the lowest
 accepted default slot (2, then 3) is the head's default candidate. Wave 1 chooses the face source only
