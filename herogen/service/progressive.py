@@ -57,10 +57,12 @@ def read_progress(run: Path) -> dict:
             if data["done"] and previous and final is None:
                 return empty
             metadata["final_n"] = final
-        return {"versions": [{k: v[k] for k in ("n", "glb", "accepted", "rejected", "pending", "time")}
-                             for v in data["versions"] if (glb := _inside(run, v["glb"])) is not None
-                             and complete_glb(glb)],
-                "done": data["done"], **metadata}
+        versions = [{k: v[k] for k in ("n", "glb", "accepted", "rejected", "pending", "time")}
+                    for v in data["versions"] if (glb := _inside(run, v["glb"])) is not None and complete_glb(glb)]
+        if metadata.get("final_n") is not None and metadata["final_n"] not in {v["n"] for v in versions}:
+            # The final file is missing or cut short: the last complete version is the one offered.
+            metadata["final_n"] = versions[-1]["n"] if versions else None
+        return {"versions": versions, "done": data["done"], **metadata}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return empty
 
