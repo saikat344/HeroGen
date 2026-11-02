@@ -118,6 +118,21 @@ def try_cancelled(view: str, number: int, private: dict, calls: list) -> None:
 
 
 @_quiet
+def try_failed(view: str, number: int) -> None:
+    """A try stopped on a model or replay error before its gates could judge it."""
+    events.emit("decision", step=STEP, what="view_result", view=view, try_=number, ok=False, why="model_error")
+
+
+@_quiet
+def face_source(source, view=None, number=None) -> None:
+    """Where the face paint comes from, once the frontal tries are known: a beauty repaint, an ordinary
+    (default) repaint, or the ordinary fast run's atlas when no frontal face repaint was accepted."""
+    events.emit("decision", step=STEP, what="face_source", why=events.slug(source or "unknown"),
+                view=view if source in ("beauty", "default") else None,
+                try_=number if source in ("beauty", "default") and type(number) is int else None)
+
+
+@_quiet
 def view_selected(view: str, number: int, tries: int) -> None:
     """The view keeps the repaint of try ``number`` (the lowest accepted try)."""
     events.emit("decision", step=STEP, what="view_selected", view=view, try_=number, ok=True, m={"tries": tries})
