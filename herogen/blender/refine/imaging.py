@@ -91,7 +91,14 @@ def _background_colour(rgb, render_figure):
     return C.BG
 
 
-def figure_mask(rgb, *, render_figure=None):
+def figure_mask(rgb, *, render_figure=None, render_rgb=None):
+    """The edit's figure: everything the background flood from the known exterior cannot reach.
+
+    `render_rgb` (the fast profile's outline measurement, with `render_figure`): inside the render's
+    figure, an edit pixel within BG_TOL of the render's own colour there is surface the repaint kept,
+    so the flood cannot pass through it. Without it, cloth close to the background grey (s037's grey
+    sleeve) is flooded as background. Outside the render's figure nothing changes.
+    """
     bg = C.BG if render_figure is None else _background_colour(rgb, render_figure)
     m = (np.abs(rgb - bg) > BG_TOL).any(-1)
     if render_figure is None:
@@ -107,6 +114,8 @@ def figure_mask(rgb, *, render_figure=None):
             exterior = ~render_figure
         covered = border_touch(render_figure)
         walkable = ~closed & ~covered
+        if render_rgb is not None:
+            walkable &= ~(render_figure & (np.abs(rgb - render_rgb) <= BG_TOL).all(-1))
         seed = walkable & exterior
         if seed.any():
             bg = ndimage.binary_propagation(seed, mask=walkable)
