@@ -2536,6 +2536,12 @@ references to side/back repaint requests, including beauty requests (`RF16B`, re
 between, beauty reference last). Front beauty/default candidates keep their original references and gates.
 The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
 proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
+In fast refinement, a side/back pass with verified turnaround references uses its first independent slot
+for beauty (`RF16B`) and its second for the ordinary SideBeautyPass recipe (`RF12R`/`RF12W`, or `RF13H`
+for hair) with the original cover last. The existing index-order selection prefers beauty when it passes;
+otherwise the ordinary artwork repaint can win. This contains beauty references that change the camera
+or pose without adding a third sample, retry or gate. Missing orientation keeps both slots on the
+original beauty behavior. Front slots and the complete default-head fallback are unchanged.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
