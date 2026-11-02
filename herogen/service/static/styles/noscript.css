@@ -1,0 +1,6 @@
+/* Without JavaScript: show the landing headline and a note instead of the loading line, and hide the controls
+   that need scripts to work. Linked from a <noscript> element, so it never applies when scripts run. */
+#entry[hidden] { display: block !important; }
+#loading, .landing .composer, .landing .sparks, .landing .trust, .landing .showcase, .landing .band { display: none !important; }
+.landing .landing__hero { grid-template-columns: minmax(0, 1fr); }
+.noscript-note { max-width: 60ch; padding: var(--space-4) var(--space-5); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-warning-border); background: var(--color-warning-subtle); color: var(--color-text); font-size: var(--text-body); }
