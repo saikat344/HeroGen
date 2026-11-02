@@ -125,6 +125,71 @@ def artifact(root: Path | None, key: str, kind: str) -> tuple[Path, str]:
     return _checked(root, key, kind)[0], TYPES[kind][1]
 
 
+# Largest source image decoded for a thumbnail, judged from its header (Pillow's own limit is about 89 million).
+MAX_SOURCE_PIXELS = 64_000_000
+
+
+def _small(image):
+    """A copy of `image` that fits THUMB_SIDE on its long side (never enlarged), keeping transparency."""
+    from PIL import Image
+
+    alpha = image.mode in ('RGBA', 'LA', 'PA') or (image.mode == 'P' and 'transparency' in image.info)
+    small = image.convert('RGBA' if alpha else 'RGB')
+    small.thumbnail((THUMB_SIDE, THUMB_SIDE), Image.Resampling.LANCZOS)
+    return small
+
+
+def _encode(small, stream) -> None:
+    small.save(stream, format='WEBP', quality=THUMB_QUALITY, method=6)
+
+
+def webp_thumbnail(data: bytes) -> bytes:
+    """A PNG, JPEG or WebP as a small WebP. Needs no file, so it can run with no volume lock held. A corrupt
+    image, or one whose header promises more than MAX_SOURCE_PIXELS pixels (a decompression bomb), is a ValueError."""
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data), formats=['PNG', 'JPEG', 'WEBP']) as image:
+            if image.width * image.height > MAX_SOURCE_PIXELS:
+                raise ValueError('image too large')
+            image.load()
+            small = _small(image)
+        out = io.BytesIO()
+        _encode(small, out)
+    except ValueError:
+        raise
+    except Exception as exc:  # Pillow raises OSError, SyntaxError, DecompressionBombError, ... for bad files
+        raise ValueError('unreadable image') from exc
+    return out.getvalue()
+
+
+def _write_atomic(folder: Path, dest: Path, prefix: str, write) -> None:
+    """`write(stream)` into a temporary file in `folder`, renamed to `dest` once complete, so a half-written
+    image is never served."""
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, part = tempfile.mkstemp(dir=folder, prefix=f'.{prefix}-', suffix='.part')
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            write(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(part, dest)
+    except BaseException:
+        Path(part).unlink(missing_ok=True)
+        raise
+
+
+def write_webp(folder: Path, dest: Path, body: bytes) -> None:
+    """Keep `body` as `dest` in `folder` (atomically), removing the other WebP files there: a folder holds the
+    one current thumbnail."""
+    _write_atomic(folder, dest, 'thumb', lambda stream: stream.write(body))
+    for old in folder.glob('*.webp'):
+        if old != dest:
+            old.unlink(missing_ok=True)
+
+
 def thumbnail(root: Path | None, cache: Path, key: str, kind: str) -> tuple[Path, str, bool]:
     """(WebP file, version token, whether it was made now) for a published image, made on first request.
 
@@ -143,20 +208,8 @@ def thumbnail(root: Path | None, cache: Path, key: str, kind: str) -> tuple[Path
 
     with Image.open(source) as image:
         image.load()
-        alpha = image.mode in ('RGBA', 'LA', 'PA') or (image.mode == 'P' and 'transparency' in image.info)
-        small = image.convert('RGBA' if alpha else 'RGB')
-    small.thumbnail((THUMB_SIDE, THUMB_SIDE), Image.Resampling.LANCZOS)
-    folder.mkdir(parents=True, exist_ok=True)
-    fd, part = tempfile.mkstemp(dir=folder, prefix=f'.{kind}-', suffix='.part')
-    try:
-        with os.fdopen(fd, 'wb') as stream:
-            small.save(stream, format='WEBP', quality=THUMB_QUALITY, method=6)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(part, dest)
-    except BaseException:
-        Path(part).unlink(missing_ok=True)
-        raise
+        small = _small(image)
+    _write_atomic(folder, dest, kind, lambda stream: _encode(small, stream))
     for old in folder.glob(f'{kind}-*.webp'):
         if old != dest:
             old.unlink(missing_ok=True)

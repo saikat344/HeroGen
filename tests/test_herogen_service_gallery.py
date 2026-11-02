@@ -172,6 +172,44 @@ class GalleryThumbnailTest(GalleryFixture, WebCase):
         self.assertEqual(list(self.cache.iterdir()), [])
         self.assertEqual(Browser(self.app).get(self.urls()['artwork']['thumb_url']).status_code, 200)
 
+    def test_thumb_bytes_are_read_under_the_volume_lock_and_never_sent_as_a_file(self):
+        """A Modal volume cannot reload while any file on it is open, so the cached bytes are read with the read
+        lock held, and a thumbnail is never streamed from the volume by a file response after the lock is gone."""
+        import starlette.responses as sr
+        from herogen.service.storage import ModalVolumeView, Storage
+
+        class Vol:
+            def reload(self): pass
+            def commit(self): pass
+
+        view = ModalVolumeView(Vol())
+        self.svc.storage = Storage(self.s.data_dir, view)
+        self.app = create_app(self.svc)
+        data = str(self.s.data_dir.resolve())
+        reads, files = [], []
+        orig_read, orig_call = Path.read_bytes, sr.FileResponse.__call__
+
+        def spy_read(path):
+            if str(path.resolve()).startswith(data) and path.suffix == '.webp':
+                reads.append(view.readers)
+            return orig_read(path)
+
+        async def spy_call(resp, scope, receive, send):
+            files.append(str(Path(resp.path).resolve()))
+            return await orig_call(resp, scope, receive, send)
+
+        with mock.patch.object(Path, 'read_bytes', spy_read), mock.patch.object(sr.FileResponse, '__call__', spy_call):
+            b = Browser(self.app)
+            for kind in ('artwork', 'sketch'):
+                url = self.urls()[kind]['thumb_url']
+                for _ in range(2):   # the first request makes it, the second serves the cached file
+                    r = b.get(url)
+                    self.assertEqual((r.status_code, r.headers['content-type']), (200, 'image/webp'))
+        self.assertEqual(len(reads), 4, reads)
+        self.assertTrue(all(n >= 1 for n in reads), f'readers at read time: {reads}')
+        self.assertEqual([f for f in files if f.startswith(data)], [], 'FileResponse from the data volume')
+        self.assertEqual(view.readers, 0, 'lock released')
+
     def test_only_published_images_have_thumbs(self):
         b = Browser(self.app)
         for path in ('/gallery-assets/hero/model-thumb', '/gallery-assets/hero/stage-3-thumb',
