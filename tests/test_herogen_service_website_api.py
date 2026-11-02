@@ -46,24 +46,38 @@ class HeroThumbnailTest(WebCase):
     def fetch(self, url: str, browser=None):
         r = (browser or self.alice).get(url)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.headers["content-type"], "image/png")
+        self.assertEqual(r.headers["content-type"], "image/webp")
         return r
+
+    def assertShows(self, response, source: bytes) -> None:
+        """The response is a WebP of `source`: the same picture, at most 512 px on its long side and never
+        enlarged, within lossy-compression error."""
+        import io
+        from PIL import Image, ImageChops, ImageStat
+
+        shown = Image.open(io.BytesIO(response.content))
+        original = Image.open(io.BytesIO(source)).convert("RGB")
+        self.assertEqual(shown.format, "WEBP")
+        scale = min(1, 512 / max(original.size))
+        self.assertEqual(max(shown.size), round(max(original.size) * scale))
+        diff = ImageStat.Stat(ImageChops.difference(shown.convert("RGB"), original.resize(shown.size))).mean
+        self.assertLess(max(diff), 8, diff)
 
     def test_cover_then_sketch_then_upload_then_none(self):
         upload = self.svc.storage.input_path(self.uid, self.jid).read_bytes()
         url = self.listed()[self.jid]["thumbnail_url"]
         self.assertRegex(url, rf"^/api/jobs/{self.jid}/thumbnail\?v=[0-9a-f]{{16}}$")
-        self.assertEqual(self.fetch(url).content, upload, "a queued upload shows the uploaded sketch")
+        self.assertShows(self.fetch(url), upload)   # a queued upload shows the uploaded sketch
         self.assertEqual(self.alice.get(f"/api/jobs/{self.jid}").json()["thumbnail_url"], url)
 
         sketch = self.write("0", "00-sketch.png", (200, 10, 10))
         url_sketch = self.listed()[self.jid]["thumbnail_url"]
         self.assertNotEqual(url_sketch, url, "the URL changes with the image")
-        self.assertEqual(self.fetch(url_sketch).content, sketch)
+        self.assertShows(self.fetch(url_sketch), sketch)
 
         cover = self.write("1", "01-cover.png", (10, 200, 10))
         url_cover = self.listed()[self.jid]["thumbnail_url"]
-        self.assertEqual(self.fetch(url_cover).content, cover)
+        self.assertShows(self.fetch(url_cover), cover)
         self.assertEqual(self.alice.get(f"/api/jobs/{self.jid}").json()["thumbnail_url"], url_cover)
 
         # A cover being redrawn is not shown, as in the job's own images: the sketch is.
@@ -83,7 +97,7 @@ class HeroThumbnailTest(WebCase):
     def test_finished_hero_shows_its_cover(self):
         self.finish(self.jid)
         url = self.listed()[self.jid]["thumbnail_url"]
-        self.assertEqual(self.fetch(url).content, (self.run / "01-cover.png").read_bytes())
+        self.assertShows(self.fetch(url), (self.run / "01-cover.png").read_bytes())
 
     def test_cache_headers_follow_the_version(self):
         url = self.listed()[self.jid]["thumbnail_url"]
@@ -111,7 +125,7 @@ class HeroThumbnailTest(WebCase):
         (self.run / "stage-1.json").write_text(json.dumps({"stage": 1, "ok": True}))
         (self.run / "01-cover.png").symlink_to(outside)
         upload = self.svc.storage.input_path(self.uid, self.jid)
-        self.assertEqual(self.fetch(self.listed()[self.jid]["thumbnail_url"]).content, upload.read_bytes())
+        self.assertShows(self.fetch(self.listed()[self.jid]["thumbnail_url"]), upload.read_bytes())
         upload.unlink()
         upload.symlink_to(outside)
         self.assertIsNone(self.listed()[self.jid]["thumbnail_url"])
@@ -127,6 +141,133 @@ class HeroThumbnailTest(WebCase):
             jobs = self.listed()
         self.assertEqual(len(jobs), 4)
         self.assertTrue(all(j["thumbnail_url"] for j in jobs.values()))
+
+    def put_cover(self, content: bytes) -> None:
+        self.run.mkdir(parents=True, exist_ok=True)
+        (self.run / "01-cover.png").write_bytes(content)
+        (self.run / "stage-1.json").write_text(json.dumps({"stage": 1, "ok": True, "outputs": ["01-cover.png"]}))
+
+    def thumb_folder(self) -> Path:
+        return self.svc.storage.thumb_dir(self.uid, self.jid)
+
+    def thumb_files(self) -> list[str]:
+        return sorted(p.name for p in self.thumb_folder().iterdir()) if self.thumb_folder().is_dir() else []
+
+    def test_thumbnail_is_a_512px_webp_made_once_and_cached(self):
+        import io
+        from PIL import Image
+
+        self.put_cover(png(1400, 900))
+        url = self.listed()[self.jid]["thumbnail_url"]
+        token = url.split("v=")[1]
+        first = self.fetch(url)
+        image = Image.open(io.BytesIO(first.content))
+        self.assertEqual((image.format, image.size), ("WEBP", (512, 329)))
+        self.assertLess(len(first.content), (self.run / "01-cover.png").stat().st_size)
+        self.assertEqual(first.headers["cache-control"], "private, max-age=31536000, immutable")
+        self.assertEqual(self.thumb_files(), [f"{token}.webp"])
+        stamp = (self.thumb_folder() / f"{token}.webp").stat().st_mtime_ns
+        with mock.patch("PIL.Image.open", side_effect=AssertionError("made again")):
+            again = self.fetch(url)
+        self.assertEqual(again.content, first.content)
+        self.assertEqual(self.thumb_files(), [f"{token}.webp"])
+        self.assertEqual((self.thumb_folder() / f"{token}.webp").stat().st_mtime_ns, stamp)
+
+    def test_a_new_cover_gets_a_new_version_and_image(self):
+        self.put_cover(png(1400, 900))
+        old = self.listed()[self.jid]["thumbnail_url"]
+        first = self.fetch(old).content
+        self.put_cover(png(900, 1300, colour=(200, 0, 0)))
+        new = self.listed()[self.jid]["thumbnail_url"]
+        self.assertNotEqual(new, old)
+        second = self.fetch(new)
+        self.assertNotEqual(second.content, first)
+        self.assertEqual(second.headers["cache-control"], "private, max-age=31536000, immutable")
+        self.assertEqual(self.thumb_files(), [f"{new.split('v=')[1]}.webp"], "the older copy is removed")
+        stale = self.alice.get(old)   # an old link shows what is there now, without the long cache
+        self.assertEqual((stale.status_code, stale.content, stale.headers["cache-control"]),
+                         (200, second.content, "private, no-cache"))
+
+    def test_another_user_gets_404_even_when_cached(self):
+        self.put_cover(png(1400, 900))
+        url = self.listed()[self.jid]["thumbnail_url"]
+        self.fetch(url)
+        bob = self.signin("bob@example.com")
+        self.assertEqual(bob.get(url).status_code, 404)
+        self.assertEqual(bob.get(f"/api/jobs/{self.jid}/thumbnail").status_code, 404)
+
+    def test_corrupt_and_oversized_images_are_a_404_not_a_500(self):
+        import io
+        from PIL import Image
+
+        self.put_cover(b"\x89PNG\r\n\x1a\n not really a picture")
+        self.assertEqual(self.alice.get(self.listed()[self.jid]["thumbnail_url"]).status_code, 404)
+        self.put_cover(png(300, 300)[:200])   # cut short
+        self.assertEqual(self.alice.get(self.listed()[self.jid]["thumbnail_url"]).status_code, 404)
+        bomb = io.BytesIO()
+        Image.new("1", (9000, 9000)).save(bomb, format="PNG")   # 81 million pixels in a few KB
+        self.assertLess(len(bomb.getvalue()), 100_000)
+        self.put_cover(bomb.getvalue())
+        with mock.patch("PIL.PngImagePlugin.PngImageFile.load", side_effect=AssertionError("decoded a bomb")):
+            self.assertEqual(self.alice.get(self.listed()[self.jid]["thumbnail_url"]).status_code, 404)
+        self.assertEqual(self.thumb_files(), [])
+        self.put_cover(png(400, 400))   # a good cover afterwards works
+        self.assertShows(self.fetch(self.listed()[self.jid]["thumbnail_url"]), png(400, 400))
+
+    def test_deleting_the_hero_removes_its_thumbnail(self):
+        self.put_cover(png(1400, 900))
+        url = self.listed()[self.jid]["thumbnail_url"]
+        self.fetch(url)
+        self.assertEqual(len(self.thumb_files()), 1)
+        self.assertEqual(self.alice.send("DELETE", f"/api/jobs/{self.jid}").status_code, 200)
+        self.assertFalse(self.thumb_folder().exists())
+        self.assertEqual(self.alice.get(url).status_code, 404)
+
+    def test_files_are_read_and_written_under_the_volume_lock(self):
+        """A Modal volume cannot reload while any file on it is open: the source and the cached copy are read and
+        the copy is written with the read lock held, the decode holds none, and the commit comes after the write."""
+        import os
+        from herogen.service import gallery
+        from herogen.service.storage import ModalVolumeView, Storage
+
+        class Vol:
+            def reload(self):
+                pass
+
+            def commit(self):
+                events.append(("commit", view.readers))
+
+        events: list[tuple[str, int]] = []
+        view = ModalVolumeView(Vol())
+        self.svc.storage = Storage(self.s.data_dir, view)
+        self.put_cover(png(1400, 900))
+        url = self.listed()[self.jid]["thumbnail_url"]
+        data = str(self.s.data_dir.resolve())
+        orig_read, orig_replace, orig_decode = Path.read_bytes, os.replace, gallery.webp_thumbnail
+
+        def spy_read(path):
+            if str(path.resolve()).startswith(data):
+                events.append((f"read {path.suffix}", view.readers))
+            return orig_read(path)
+
+        def spy_replace(src, dst, *a, **kw):
+            if str(dst).startswith(data):
+                events.append(("write", view.readers))
+            return orig_replace(src, dst, *a, **kw)
+
+        def spy_decode(raw):
+            events.append(("decode", view.readers))
+            return orig_decode(raw)
+
+        with mock.patch.object(Path, "read_bytes", spy_read), mock.patch("os.replace", spy_replace), \
+                mock.patch.object(gallery, "webp_thumbnail", spy_decode):
+            made = self.fetch(url)
+            events.append(("second request", view.readers))
+            cached = self.fetch(url)
+        self.assertEqual(events, [("read .png", 1), ("decode", 0), ("write", 1), ("commit", 0),
+                                  ("second request", 0), ("read .webp", 1)])
+        self.assertEqual(cached.content, made.content)
+        self.assertEqual(view.readers, 0, "lock released")
 
 
 @web_test
