@@ -4,6 +4,11 @@
 same record format), with images drawn by code, a box-shaped GLB and placeholder Roblox files whose README says
 they are placeholders, so the whole service can be exercised end to end on one machine. Production refuses to
 start with it (see `__main__`). `fail` makes a stage reject or fail, for tests.
+
+It also writes the build log a real fast-lane run writes (`herogen.pipeline.events`, `FakeLog`): every model and
+GPU call with its cost estimate, parallel calls, a recovery sheet in the turnaround, a texture view whose repaints
+fail their outline gate, a hedged repaint try cancelled because the other try passed, and the step's checks,
+paced over ``delay_s`` per stage so the website shows it arriving live. The numbers are illustrative.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import struct
 import time
 from pathlib import Path
 
+from herogen.pipeline import events
 from herogen.service.runner import Outcome, StageContext, StageSpec, write_record
 
 SECTIONS = ("Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm",
@@ -72,6 +78,47 @@ def _record(stage, name, outputs, ok=True, cost=0.0, checks=None, details=None):
             "details": details or {}}
 
 
+class FakeLog:
+    """Writes one stage's build-log events into its run folder, sleeping ``delay_s * share`` between them."""
+
+    def __init__(self, ctx: StageContext, step: str, delay_s: float) -> None:
+        self.file, self.step, self.a, self.delay_s = ctx.run_dir / events.FILE, step, ctx.attempt, delay_s
+
+    def wait(self, share: float) -> None:
+        if self.delay_s:
+            time.sleep(self.delay_s * share)
+
+    def emit(self, kind: str, **fields) -> None:
+        events.emit(kind, file=self.file, step=self.step, a=self.a, **fields)
+
+    def start(self, who: str, what: str, gpu: bool = False, **fields) -> events.Call:
+        call = events.Call(who, what, gpu=gpu, step=self.step, file=str(self.file), a=self.a, **fields)
+        call.start()
+        return call
+
+    @staticmethod
+    def end(call: events.Call, usd: float = 0.0, outcome: str | None = None, code: str | None = None, **extra):
+        call.usd, call.outcome, call.code = usd, outcome, code
+        m = extra.pop("m", None)
+        if m:
+            call.m.update(m)
+        call.extra.update(extra)
+        call.end(None)
+
+    def calls(self, specs: list[tuple], share: float, usd: float) -> list[events.Call]:
+        """Start (who, what, fields) calls in parallel, wait, end them all."""
+        started = [self.start(who, what, **fields) for who, what, fields in specs]
+        self.wait(share)
+        for call in started:
+            self.end(call, usd)
+        return started
+
+
+SAM, MUSE = "sam-3.1", "muse-image"
+SAM_USD, MUSE_USD = 0.0025, 0.01
+REPAINT_VIEWS = ("head+0", "body+0", "body+90", "body-90", "body+180")
+
+
 class FakeRunner:
     def __init__(self, fail: dict[str, str] | None = None, delay_s: float = 0.0, roblox: bool = True) -> None:
         self.fail = dict(fail or {})
@@ -89,9 +136,19 @@ class FakeRunner:
         why = self.available(spec)
         if why:
             return Outcome("skipped", message=why, code="not_available")
-        if self.delay_s:
-            time.sleep(self.delay_s)
         mode = self.fail.get(spec.key)
+        flog = FakeLog(ctx, spec.key, self.delay_s)
+        if mode == "transient" and spec.group == "model":
+            call = flog.start(MUSE, "cover_art" if spec.key == "1" else "turnaround")
+            flog.wait(1.0)
+            flog.end(call, outcome="failed", code="http_5xx")
+        elif mode not in ("error", "transient", "raise"):
+            ctx.run_dir.mkdir(parents=True, exist_ok=True)
+            script = getattr(self, f"_log_{spec.key}", None)
+            if script is not None:   # texture refine logs from `_stage_3f`, as it publishes its versions
+                script(ctx, flog)
+        elif self.delay_s:
+            time.sleep(self.delay_s)
         if mode == "error":
             return Outcome("failed", 0.01, 0.0, f"The {spec.label} stage stopped with an internal error.",
                            "stage_error", False, "fake error")
@@ -116,6 +173,133 @@ class FakeRunner:
         from herogen.service.runner import CliRunner
 
         return CliRunner.outcome(spec, ctx, 0.01, code, "", "", False)
+
+    # ---- build-log scripts (one per stage; shares of delay_s add up to about 1) ----------------------------
+
+    def _log_p(self, ctx: StageContext, log: FakeLog) -> None:
+        log.calls([(MUSE, "sketch_design", {})], 0.4, MUSE_USD)
+        log.emit("image", what="design")
+        log.calls([(MUSE, "full_body_sketch", {})], 0.4, MUSE_USD)
+        log.emit("image", what="full_body")
+        log.emit("skip", what="identity_checks", why="fast_lane")
+        log.wait(0.2)
+
+    def _log_0(self, ctx: StageContext, log: FakeLog) -> None:
+        log.wait(0.5)
+        log.emit("check", name="min_side_px", ok=True, gate=True, op=">=", m={"value": 512, "limit": 256})
+        log.emit("check", name="line_contrast", ok=True, gate=True, op=">=", m={"value": 203, "limit": 32})
+        log.emit("local", what="input_checked", s=round(self.delay_s * 0.5, 3), m={"min_side_px": 512,
+                                                                                   "contrast": 203})
+        log.emit("image", what="sketch")
+        log.emit("checks", n=2, passed=2, gated=2, failed=[], advisory=[])
+        log.wait(0.5)
+
+    def _log_1(self, ctx: StageContext, log: FakeLog) -> None:
+        log.calls([(SAM, "cover_art", {"target": "character"}), (SAM, "cover_art", {"target": "feet"})], 0.2,
+                  SAM_USD)
+        log.calls([(MUSE, "cover_art", {})], 0.5, MUSE_USD)
+        log.emit("image", what="cover")
+        log.emit("checks", n=5, passed=5, gated=2, failed=[], advisory=[])
+        log.wait(0.3)
+
+    def _log_2(self, ctx: StageContext, log: FakeLog) -> None:
+        sheet, top = log.start(MUSE, "turnaround"), log.start(MUSE, "top_view")
+        log.wait(0.2)
+        log.end(sheet, MUSE_USD)
+        log.calls([(SAM, "turnaround", {"target": "character"})], 0.05, SAM_USD)
+        # The first sheet's figures overlap: the fast lane asks for one more sheet, once.
+        log.emit("decision", what="recovery_sheet", why="too_few_figures", m={"figures": 3})
+        again = log.start(MUSE, "turnaround")
+        log.wait(0.1)
+        log.end(top, MUSE_USD)
+        log.wait(0.1)
+        log.end(again, MUSE_USD)
+        log.calls([(SAM, "turnaround", {"target": "character"})], 0.05, SAM_USD)
+        log.emit("local", what="sheet_split", m={"figures": 4, "height_agreement": 0.99})
+        log.calls([(SAM, "top_view", {"target": "character"})], 0.05, SAM_USD)
+        log.calls([(SAM, "turnaround", {"target": "face"}), (SAM, "turnaround", {"target": "head"})], 0.05, SAM_USD)
+        for view in ("turnaround", "front", "right", "back", "left", "top"):
+            log.emit("image", what=view)
+        log.emit("checks", n=13, passed=10, gated=4, failed=[],
+                 advisory=["top_depth_ratio", "carve_iou", "top_mask_iou"])
+        log.wait(0.4)
+
+    def _log_3(self, ctx: StageContext, log: FakeLog) -> None:
+        shape = log.start("sam-3d-objects", "3d_shape", gpu=True)
+        log.wait(0.3)
+        shape.emit("gpu_wait", what="3d_shape", s=round(self.delay_s * 0.3, 3))   # "still waiting"
+        log.wait(0.2)
+        log.end(shape, 0.101, gpu="a100-40gb", m={"load_s": 60.4, "infer_s": 96.1})
+        log.emit("local", what="mesh_placed", m={"triangles": 217836, "rotations_tested": 4})
+        body = log.start("sam-3d-body", "body_joints", gpu=True)
+        log.wait(0.3)
+        log.end(body, 0.012, gpu="a10g", m={"load_s": 18.9, "infer_s": 4.2})
+        log.emit("local", what="joints_mapped", m={"joints": 16, "from_model": 12, "flagged": 7})
+        log.emit("skip", what="acceptance_judges", why="fast_lane")
+        log.emit("checks", n=5, passed=5, gated=3, failed=[], advisory=[])
+        log.wait(0.2)
+
+    def _log_3f_wave(self, log: FakeLog, wave: int) -> None:
+        if wave == 1:
+            log.emit("local", what="views_rendered", m={"cameras": 5})
+            log.calls([(SAM, "texture_refine", {"target": "face"}), (SAM, "texture_refine", {"target": "head"})],
+                      0.05, SAM_USD)
+            views = REPAINT_VIEWS
+        else:
+            views = ("hair-upper+180",)
+        log.emit("decision", what="wave", n=2 * len(views), m={"wave": wave, "views": len(views), "tries": 2})
+        tries = {(v, t): log.start(MUSE, "repaint", view=v, try_=t) for v in views for t in (1, 2)}
+        log.wait(0.3)
+        for (view, t), call in tries.items():
+            if (view, t) == ("body-90", 2):
+                continue
+            log.end(call, MUSE_USD)
+        if wave == 1:
+            # Try 1 of the -90 view passed first, so try 2 is cancelled (its request was already paid for).
+            log.end(tries[("body-90", 2)], MUSE_USD, outcome="cancelled")
+        log.calls([(SAM, "texture_refine", {"target": "face", "view": v}) for v in views], 0.05, SAM_USD)
+        for view in views:
+            if view in ("head+0", "body+0"):
+                for t, (median, p90) in ((1, (4.7, 13.2)), (2, (5.4, 18.0))):
+                    limit = (6, 16) if view == "body+0" else (10, 24)
+                    if view == "body+0" and t == 2:
+                        log.emit("check", name="outline_p90_px", ok=False, gate=True, op="<=",
+                                 m={"value": p90, "limit": limit[1]})
+                    log.emit("decision", what="view_result", view=view, try_=t, ok=False, why="outline_moved",
+                             m={"median_px": median, "median_limit": limit[0], "p90_px": p90,
+                                "p90_limit": limit[1]})
+                log.emit("decision", what="view_kept_original", view=view, ok=False, why="outline_moved")
+            else:
+                log.emit("decision", what="view_result", view=view, try_=1, ok=True,
+                         m={"overlap": 0.93, "median_px": 2.1})
+                if view == "body-90":
+                    log.emit("decision", what="view_result", view=view, try_=2, ok=False, why="lower_try_accepted")
+        log.wait(0.2)
+
+    def _log_4(self, ctx: StageContext, log: FakeLog) -> None:
+        log.emit("local", what="landmarks_loaded", m={"joints": 16, "from_model": 12})
+        log.wait(0.3)
+        log.emit("local", what="decimated", s=round(self.delay_s * 0.3, 3),
+                 m={"source_triangles": 217836, "high": 14400, "low": 2192})
+        log.wait(0.3)
+        log.emit("local", what="cuts_searched", s=round(self.delay_s * 0.3, 3),
+                 m={"neck_radius": -0.5, "waist_radius": 0.5})
+        log.emit("local", what="parts_split", m={"parts": 15, "high_triangles": 23754, "low_triangles": 5982})
+        log.emit("checks", n=49, passed=45, gated=8, failed=[],
+                 advisory=["max_joint_gap_posed", "pivots_in_joint_region", "joint_gap_left_elbow",
+                           "joint_gap_right_elbow"])
+        log.wait(0.1)
+
+    def _log_6(self, ctx: StageContext, log: FakeLog) -> None:
+        log.emit("local", what="rig_written", m={"parts": 15, "joints": 15, "attachments": 19, "hip_height": 1.719})
+        log.wait(0.5)
+        log.emit("checks", n=27, passed=26, gated=26, failed=[], advisory=["meshes_bound"])
+        log.wait(0.5)
+
+    def _log_5(self, ctx: StageContext, log: FakeLog) -> None:
+        log.wait(0.5)
+        log.emit("local", what="results_written")
+        log.wait(0.5)
 
     def _stage_p(self, ctx: StageContext, run: Path) -> None:
         from herogen import prompts
@@ -177,10 +361,13 @@ class FakeRunner:
 
     def _stage_3f(self, ctx: StageContext, run: Path) -> None:
         versions = []
+        flog = FakeLog(ctx, "3f", self.delay_s)
         for n, accepted in ((1, ['front', 'right']), (2, ['front', 'right', 'back', 'left'])):
+            self._log_3f_wave(flog, n)
             self.publish_version(run, versions, n, accepted)
+            flog.emit("version", n=n, passed=3 if n == 1 else 4, of=6)
             if self.delay_s:
-                time.sleep(self.delay_s)
+                time.sleep(self.delay_s * 0.2)
         (run / "03-refined.glb").write_bytes((run / versions[-1]['glb']).read_bytes())
         self.publish_progress(run, versions, done=True)
         write_record(run, {**_record("3f", "texture refine", ["03-refined.glb"]), "status": "complete",
