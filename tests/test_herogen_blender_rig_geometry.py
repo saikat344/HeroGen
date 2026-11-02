@@ -69,6 +69,27 @@ class LandmarkTests(unittest.TestCase):
         self.assertGreater(self.sk.joints["RightShoulder"][2], self.sk.joints["RightElbow"][2])
         np.testing.assert_allclose(self.sk.ends["HipCentre"], (self.sk.joints["LeftHip"] + self.sk.joints["RightHip"]) / 2)
 
+    def test_shoulder_on_a_scarf_outside_the_elbow_uses_recorded_anatomy(self):
+        self.sk.joints["LeftShoulder"][0] = self.sk.joints["LeftElbow"][0] + .3
+        changes = self.reconcile()
+        self.assertEqual(set(changes), {"LeftShoulder"})
+        np.testing.assert_array_equal(self.sk.joints["LeftShoulder"], self.figure.joints["LeftShoulder"])
+
+    def test_upward_scarf_tip_follows_the_actual_downward_hand_surface(self):
+        wrist = self.sk.joints["LeftWrist"]
+        self.sk.ends["LeftHandTip"] = wrist + [.4, 0, .3]
+        changes = self.reconcile()
+        self.assertEqual(set(changes), {"LeftHandTip"})
+        self.assertLess(self.sk.ends["LeftHandTip"][2], wrist[2])
+
+    def test_ribbon_radius_is_remeasured_at_the_recorded_forearm(self):
+        self.sk.radii["RightArm"] = .001
+        before = self.sk.as_json()
+        changes = self.reconcile()
+        self.assertEqual(set(changes), {"RightArmRadius"})
+        self.assertGreater(self.sk.radii["RightArm"], .1)
+        self.assertEqual(self.sk.as_json(), before)
+
     def test_missing_anatomical_alternative_is_loud(self):
         self.sk.joints["RightShoulder"] = np.array([0., 0., 1.])
         self.record.pop("sources")
