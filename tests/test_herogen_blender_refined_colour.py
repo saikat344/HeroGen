@@ -277,8 +277,10 @@ class RefinedSourceTests(unittest.TestCase):
         listed = bodies(self.run)[0]
         paths = [f["path"] for f in listed["files"]] + [d.get("path", "") for d in deliverables(self.run, listed, None)]
         self.assertFalse(any("views.png" in path for path in paths))
-        self.assertEqual(glb_path(self.run), body / "high.glb")
+        # The website's model is the stage 3/3f mesh; the game body ships in the Roblox bundle.
+        self.assertEqual(glb_path(self.run).resolve(), self.source_path.resolve())
         with zipfile.ZipFile(io.BytesIO(roblox_bundle(self.run))) as bundle:
+            self.assertIn("04-body/high.glb", bundle.namelist())
             self.assertFalse(any("views.png" in name for name in bundle.namelist()))
 
     def test_primary_with_degenerate_or_subpixel_uvs_returns_a_blank_bake(self):
