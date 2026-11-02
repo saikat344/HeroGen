@@ -13,7 +13,7 @@ import math
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
@@ -172,15 +172,43 @@ def by_area(instances: list[SamInstance]) -> list[SamInstance]:
     return sorted((i for i in instances if i.mask.any()), key=lambda i: -int(i.mask.sum()))
 
 
-def fast_figure_checks(instances: list[SamInstance], feet: list[SamInstance], height: int
+FAST_FIGURE_TEXTS = ("character", "person", "creature")
+
+
+def fast_sam_image(image: Image.Image) -> Image.Image:
+    """Stretch upload luminance for segmentation without changing the cover reference."""
+    return ImageOps.autocontrast(image.convert("L")).convert("RGB")
+
+
+def fast_figure_candidate(responses: dict[str, list[SamInstance]]) -> tuple[list[SamInstance], dict[str, Any]]:
+    """Prefer the largest single figure, but never hide a prompt's multiple substantial figures.
+
+    Responses describe the same image, so instances from different prompts are not added together.
+    Coverage ranks single-figure candidates; confidence breaks ties. Prompt order breaks remaining ties.
+    """
+    candidates = {text: by_area(instances) for text, instances in responses.items()}
+    counts = {text: sum(int(i.mask.sum() >= OTHER_CHARACTER_MIN_FRAC * figures[0].mask.sum()) for i in figures)
+              if figures else 0 for text, figures in candidates.items()}
+
+    def rank(text: str) -> tuple[bool, int, float]:
+        figures = candidates[text]
+        return (counts[text] >= 2, int(figures[0].mask.sum()) if figures else 0,
+                (figures[0].confidence or 0.0) if figures else 0.0)
+
+    selected = max(candidates, key=rank)
+    return candidates[selected], {"figure_prompt": selected, "figure_prompt_counts": counts}
+
+
+def fast_figure_checks(instances: list[SamInstance], feet: list[SamInstance], height: int, *,
+                       allow_missing: bool = False, require_feet: bool = True
                        ) -> tuple[list[Check], dict[str, Any]]:
     """Necessary fast input checks, measured on the one character and feet responses."""
     from herogen.pipeline.prompt_sketch import FEET_MIN, edge_tolerance_px
 
     figures = by_area(instances)
-    count = len(figures)
+    count = sum(int(i.mask.sum() >= OTHER_CHARACTER_MIN_FRAC * figures[0].mask.sum()) for i in figures) if figures else 0
     checks = [input_check(
-        "sketch_characters_found", count, 1, "==", "reject",
+        "sketch_characters_found", count, 1, "<=" if allow_missing else "==", "reject",
         f"We need exactly one character in the picture; we found {count}.",
     )]
     details = {"character_instances": count, "feet_instances": len(feet), "sam_prompts": ["character", "feet"]}
@@ -201,9 +229,11 @@ def fast_figure_checks(instances: list[SamInstance], feet: list[SamInstance], he
                "Show the whole character from head to feet; we couldn't see both feet.")
     # The service recognises this input check. Its fast value is the conjunction of the measured
     # predicates, rather than the legacy count of feet on the figure; retain every raw measurement.
+    required = measurements if require_feet else measurements[1:]
     checks += measurements + [input_check(
-        "sketch_feet_on_figure", int(all(c["pass"] for c in measurements)), 1, "==", "reject", message,
-        note="full body in frame: feet_in_lower_half AND figure_top_gap_px AND figure_bottom_gap_px pass",
+        "sketch_feet_on_figure", int(all(c["pass"] for c in required)), 1, "==", "reject", message,
+        note=("full body in frame: " + ("feet_in_lower_half AND " if require_feet else "") +
+              "figure_top_gap_px AND figure_bottom_gap_px pass"),
     )]
     details.update(figure_box=list(box), feet_in_lower_half=lower, edge_tolerance_px=tol)
     return checks, details
