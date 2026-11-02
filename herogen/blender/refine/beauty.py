@@ -8,6 +8,9 @@ from PIL import Image
 
 ANGLES = (0, 45, -45, 90, -90, 180)
 STAGE2 = {0: "front", 90: "right", -90: "left", 180: "back"}
+# The fast waves request exactly these yaws: head+0 and body+0 at 0, body+90, body-90, and body+180
+# and upper+180 at 180. Stage-2 views and masks guide them, so they need no diagonal guide.
+FAST_ANGLES = (0, 90, -90, 180)
 STYLE_IOU_MIN = .70
 # Scalp detections stop at the jaw; the occluded neck gap plus the collar's top band lie within
 # a further quarter of the scalp height on the saved r1 crops (s023 head+180 cut off the collar).
@@ -99,15 +102,78 @@ def with_neck(box, height):
     return [x0, y0, x1, min(height, y1 + round((y1 - y0) * NECK_FRACTION))]
 
 
-def generate(run, client, out, diagonal_guides):
-    """Save each paid attempt before testing its unregistered SAM outline; never substitute a rejected view."""
-    run, out = Path(run), Path(out)
-    out.mkdir(parents=True, exist_ok=True)
+def _manifest(out):
     manifest_path = out / "references.json"
     rec = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
         "prompt": "BT1", "text": BT1, "sha256": BT1_SHA256, "views": {}}
     if rec["sha256"] != BT1_SHA256:
         raise ValueError("beauty reference prompt hash differs")
+    return manifest_path, rec
+
+
+def _sample(run, client, out, rec, angle, cover, diagonal_guides, attempts, save):
+    """Pay up to `attempts` BT1 samples for one yaw, saving each before its outline check; stop at acceptance."""
+    key = str(angle)
+    view = rec["views"].setdefault(key, {"accepted": False, "attempts": []})
+    if view["accepted"] or (len(view["attempts"]) >= attempts and all("iou" in t for t in view["attempts"])):
+        return
+    stage2 = STAGE2.get(angle, "front")
+    design = Image.open(run / f"views/{stage2}.png").convert("RGB")
+    if angle in STAGE2:
+        guide = design
+        expected = np.asarray(Image.open(run / f"masks/{stage2}.png").convert("L")) > 127
+        threshold = .90
+    else:
+        rgba = Image.open(diagonal_guides[angle]).convert("RGBA")
+        expected = np.asarray(rgba)[..., 3] > 127
+        guide = Image.new("RGB", rgba.size, (240, 240, 240))
+        guide.paste(rgba, mask=rgba.getchannel("A"))
+        threshold = .85
+    view.update(threshold=threshold, guide_stage2=stage2)
+    Image.fromarray(expected.astype(np.uint8) * 255).save(out / f"expected{angle:+d}.png")
+    for attempt in range(attempts):
+        if attempt < len(view["attempts"]) and "iou" in view["attempts"][attempt]:
+            continue
+        image = client.edit_image(BT1.format(angle=angle), [guide, cover, design],
+                                  size=f"{guide.width}x{guide.height}", attempt=attempt)
+        path = out / f"beauty{angle:+d}-try{attempt + 1}.png"
+        image.save(path)
+        trial = {"try": attempt + 1, "image": path.name, "accepted": False}
+        if attempt < len(view["attempts"]):
+            view["attempts"][attempt] = trial
+        else:
+            view["attempts"].append(trial)
+        save()
+        raw_mask = union(client, image, "character")
+        mask = raw_mask
+        # Resolution changes are resampling only, without alignment, translation or shape fitting.
+        mask = np.asarray(Image.fromarray(mask).resize((expected.shape[1], expected.shape[0]),
+                                                      Image.Resampling.NEAREST), bool)
+        iou = float((mask & expected).sum() / max(1, (mask | expected).sum()))
+        trial.update(iou=iou, accepted=iou >= threshold)
+        Image.fromarray(raw_mask.astype(np.uint8) * 255).save(out / f"mask{angle:+d}-try{attempt + 1}.png")
+        if trial["accepted"]:
+            view.update(accepted=True, image=path.name, mask=f"mask{angle:+d}-try{attempt + 1}.png")
+        save()
+        if view["accepted"]:
+            break
+
+
+def head_box(client, image):
+    """The padded SAM head box of a reference image, or None when no head is detected."""
+    yy, xx = np.where(union(client, image, "head"))
+    if not len(xx):
+        return None
+    x0, x1, y0, y1 = int(xx.min()), int(xx.max() + 1), int(yy.min()), int(yy.max() + 1)
+    pad = round(max(x1 - x0, y1 - y0) * .15)
+    return [max(0, x0 - pad), max(0, y0 - pad), min(image.width, x1 + pad), min(image.height, y1 + pad)]
+
+
+def generate(run, client, out, diagonal_guides):
+    """Save each paid attempt before testing its unregistered SAM outline; never substitute a rejected view."""
+    run, out = Path(run), Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    manifest_path, rec = _manifest(out)
     cover = Image.open(run / "01-cover.png").convert("RGB")
     start = len(client.log.calls)
     def save():
@@ -116,61 +182,15 @@ def generate(run, client, out, diagonal_guides):
     rec["prior_cost_usd"] = rec.get("cost_usd", 0)
     try:
         for angle in ANGLES:
-            key = str(angle)
-            view = rec["views"].setdefault(key, {"accepted": False, "attempts": []})
-            if view["accepted"] or (len(view["attempts"]) >= 3 and all("iou" in t for t in view["attempts"])):
-                continue
-            stage2 = STAGE2.get(angle, "front")
-            design = Image.open(run / f"views/{stage2}.png").convert("RGB")
-            if angle in STAGE2:
-                guide = design
-                expected = np.asarray(Image.open(run / f"masks/{stage2}.png").convert("L")) > 127
-                threshold = .90
-            else:
-                rgba = Image.open(diagonal_guides[angle]).convert("RGBA")
-                expected = np.asarray(rgba)[..., 3] > 127
-                guide = Image.new("RGB", rgba.size, (240, 240, 240))
-                guide.paste(rgba, mask=rgba.getchannel("A"))
-                threshold = .85
-            view.update(threshold=threshold, guide_stage2=stage2)
-            Image.fromarray(expected.astype(np.uint8) * 255).save(out / f"expected{angle:+d}.png")
-            for attempt in range(3):
-                if attempt < len(view["attempts"]) and "iou" in view["attempts"][attempt]:
-                    continue
-                image = client.edit_image(BT1.format(angle=angle), [guide, cover, design],
-                                          size=f"{guide.width}x{guide.height}", attempt=attempt)
-                path = out / f"beauty{angle:+d}-try{attempt + 1}.png"
-                image.save(path)
-                trial = {"try": attempt + 1, "image": path.name, "accepted": False}
-                if attempt < len(view["attempts"]):
-                    view["attempts"][attempt] = trial
-                else:
-                    view["attempts"].append(trial)
-                save()
-                raw_mask = union(client, image, "character")
-                mask = raw_mask
-                # Resolution changes are resampling only, without alignment, translation or shape fitting.
-                mask = np.asarray(Image.fromarray(mask).resize((expected.shape[1], expected.shape[0]),
-                                                              Image.Resampling.NEAREST), bool)
-                iou = float((mask & expected).sum() / max(1, (mask | expected).sum()))
-                trial.update(iou=iou, accepted=iou >= threshold)
-                Image.fromarray(raw_mask.astype(np.uint8) * 255).save(out / f"mask{angle:+d}-try{attempt + 1}.png")
-                if trial["accepted"]:
-                    view.update(accepted=True, image=path.name, mask=f"mask{angle:+d}-try{attempt + 1}.png")
-                save()
-                if view["accepted"]:
-                    break
+            _sample(run, client, out, rec, angle, cover, diagonal_guides, 3, save)
         for view in rec["views"].values():
             if not view["accepted"] or "head_box" in view:
                 continue
             image = Image.open(out / view["image"]).convert("RGB")
-            yy, xx = np.where(union(client, image, "head"))
-            if not len(xx):
+            box = head_box(client, image)
+            if box is None:
                 raise ValueError("no head detected in accepted beauty view")
-            x0, x1, y0, y1 = int(xx.min()), int(xx.max() + 1), int(yy.min()), int(yy.max() + 1)
-            pad = round(max(x1 - x0, y1 - y0) * .15)
-            view["head_box"] = [max(0, x0 - pad), max(0, y0 - pad),
-                                min(image.width, x1 + pad), min(image.height, y1 + pad)]
+            view["head_box"] = box
             save()
         rec["status"] = "complete" if all(v["accepted"] for v in rec["views"].values()) else "rejected"
         rec.pop("error_type", None)
@@ -180,6 +200,96 @@ def generate(run, client, out, diagonal_guides):
         raise
     finally:
         save()
+
+
+def generate_fast(run, client, out):
+    """Fast-lane references: one BT1 sample per FAST_ANGLES yaw, every yaw in parallel, no retries.
+
+    Each sample keeps generate's saved outline check unchanged, and `load`'s style selection
+    decides use, as for saved references. A sample that selection would use gets its head crop
+    from the same SAM head query generate uses; a sample with no detected head is recorded as
+    unusable. A yaw without a usable sample has no reference (``fallback: "none"``), so its views
+    keep the standard recipe instead of borrowing another yaw. The folder is rebuilt on every call;
+    an unchanged request replays the model cache. Every submitted yaw drains before a model error
+    propagates.
+    """
+    import shutil
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor, wait
+    from .fast import isolated_client, publish
+
+    run, out = Path(run), Path(out)
+    t0 = time.monotonic()
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    manifest_path, rec = _manifest(out)
+    rec.update(angles=list(FAST_ANGLES), attempts_per_angle=1, fallback="none", head_boxes={})
+    cover = Image.open(run / "01-cover.png").convert("RGB")
+    start = len(client.log.calls)
+    lock, persistence_lock = threading.RLock(), threading.RLock()
+
+    def save():
+        with lock:
+            rec["cost_usd"] = round(client.log.cost_usd(start), 6)
+            manifest_path.write_text(json.dumps(rec, indent=2) + "\n")
+
+    def one(angle, child):
+        # Each yaw fills a private view, merged under the lock, so checkpoints never see a dictionary mid-update.
+        private, boxes = {"views": {}}, {}
+        try:
+            _sample(run, child, out, private, angle, cover, None, 1, lambda: None)
+            trial = private["views"][str(angle)]["attempts"][0]
+            expected = np.asarray(Image.open(out / f"expected{angle:+d}.png").convert("L")) > 127
+            with Image.open(out / f"mask{angle:+d}-try1.png") as image:
+                mask = np.asarray(image.convert("L").resize((expected.shape[1], expected.shape[0]),
+                                                            Image.Resampling.NEAREST)) > 127
+            if style_scores(mask, expected, angle)["style_usable"]:
+                with Image.open(out / trial["image"]) as image:
+                    box = head_box(child, image.convert("RGB"))
+                trial["head_detected"] = box is not None
+                if box is not None:
+                    boxes[trial["image"]] = box
+        finally:
+            with lock:
+                rec["views"].update(private["views"])
+                rec["head_boxes"].update(boxes)
+            save()
+
+    children = {angle: isolated_client(client, f"beauty{angle:+d}", persistence_lock) for angle in FAST_ANGLES}
+    for child in children.values():
+        if hasattr(child, "network_attempts"):
+            child._initial_network_attempts = child.network_attempts
+    try:
+        with ThreadPoolExecutor(max_workers=len(FAST_ANGLES)) as pool:
+            futures = [pool.submit(one, angle, child) for angle, child in children.items()]
+            wait(futures)
+        for child in children.values():
+            publish(client, child)
+        children = {}
+        for future in futures:
+            future.result()
+        selected = load(out)
+        rec["selected"] = {str(a): bool(selected["views"][str(a)].get("accepted")) for a in FAST_ANGLES}
+        rec["status"] = "complete" if all(rec["selected"].values()) else "rejected"
+        return rec
+    except Exception as exc:
+        rec.update(status="error", error_type=type(exc).__name__)
+        raise
+    finally:
+        for child in children.values():
+            publish(client, child)
+        rec["seconds"] = round(time.monotonic() - t0, 3)
+        save()
+
+
+def style_scores(mask, expected, angle):
+    """Style-selection scores for one saved sample mask, recomputed without registration."""
+    score = float((mask & expected).sum() / max(1, (mask | expected).sum()))
+    facing_score, mirrored = aligned_iou(mask, expected), aligned_iou(mask[:, ::-1], expected)
+    correct_facing = facing_score > mirrored if lateral(angle) else True
+    return {"style_iou": score, "facing_iou": facing_score, "mirror_iou": mirrored,
+            "correct_facing": correct_facing, "style_usable": score >= STYLE_IOU_MIN and correct_facing}
 
 
 def load(folder):
@@ -214,16 +324,12 @@ def load(folder):
             mask = Image.open(folder / mask_name).convert("L").resize(
                 (expected.shape[1], expected.shape[0]), Image.Resampling.NEAREST)
             mask = np.asarray(mask) > 127
-            def iou(value):
-                return float((value & expected).sum() / max(1, (value | expected).sum()))
-            score = iou(mask)
-            facing_score, mirrored = aligned_iou(mask, expected), aligned_iou(mask[:, ::-1], expected)
-            correct_facing = facing_score > mirrored if lateral(angle) else True
-            usable = score >= STYLE_IOU_MIN and correct_facing
-            trial.update(style_iou=score, facing_iou=facing_score, mirror_iou=mirrored,
-                         correct_facing=correct_facing, style_usable=usable, mask=mask_name,
+            scores = style_scores(mask, expected, angle)
+            # Fast-lane generation records a selected sample whose head query found no head.
+            scores["style_usable"] = scores["style_usable"] and trial.get("head_detected", True)
+            trial.update(**scores, mask=mask_name,
                          mask_sha256=hashlib.sha256((folder / mask_name).read_bytes()).hexdigest())
-            if usable:
+            if scores["style_usable"]:
                 candidates.append(trial)
         v["accepted"] = bool(candidates)
         if not candidates:
@@ -250,12 +356,17 @@ def load(folder):
 def selected_yaw(rec, angle):
     """Nearest usable circular yaw, or None to request the standard recipe.
 
+    References recorded with ``fallback: "none"`` serve only the camera's nearest generated yaw.
     Rear-quarter cameras only draw on rear-facing yaws: a profile crop carries its eye and
     nose onto the rear scalp, where the face gate must reject the painted result.
     """
     usable = [yaw for yaw in ANGLES if rec["views"].get(str(yaw), {}).get("accepted")]
     if rear_quarter(angle):
         usable = [yaw for yaw in usable if not shows_face(yaw)]
+    if rec.get("fallback") == "none":
+        # Fast-lane references never borrow a distant yaw: only the generated yaw nearest the camera serves it.
+        own = min((int(yaw) for yaw in rec["angles"]), key=lambda yaw: angular_distance(angle, yaw))
+        usable = [yaw for yaw in usable if yaw == own]
     return min(usable, key=lambda yaw: angular_distance(angle, yaw)) if usable else None
 
 
