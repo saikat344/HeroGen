@@ -311,8 +311,10 @@
           <section id="inlineRefine" class="inline-refine" aria-label="Refine this version"></section><button type="button" id="developerMode" class="btn btn--ghost btn--s" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
         </section>
       </div>
-      <section class="result-section" aria-labelledby="resultsH"><div class="row"><div><p class="note-label">The next chapter</p><h2 id="resultsH">Bring your hero into your world.</h2></div><div class="spacer"></div><a id="viewerLink" class="button" href="/viewer">Open full viewer ↗</a></div><div id="downloads" class="downloads"></div>
-        <div id="studio" hidden><h3>Using it in Roblox Studio</h3><ol class="steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details><summary>Read Roblox setup notes</summary><pre id="readme"></pre></details></div>
+      <section class="panel result-section" aria-labelledby="resultsH">
+        <div class="result-section__head"><div class="result-section__copy"><p class="eyebrow">The next chapter</p><h2 id="resultsH" class="display-s">Bring your hero into your world.</h2><p class="result-section__sub">The GLB works in any 3D tool. The Roblox bundle appears when every Roblox check passes.</p></div>
+          <div class="result-section__actions"><div id="downloads" class="downloads"></div><a id="viewerLink" class="btn btn--ghost" href="/viewer">Open full viewer<svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-arrow-right"></use></svg></a></div></div>
+        <div id="studio" class="studio" hidden><h3 class="studio__title">Using it in Roblox Studio</h3><ol class="studio__steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details class="studio__notes"><summary><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-right"></use></svg>Read Roblox setup notes</summary><pre id="readme" tabindex="0"></pre></details></div>
       </section>
 
     </section>
