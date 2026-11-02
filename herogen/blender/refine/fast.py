@@ -149,7 +149,8 @@ class Pass:
                                  timeout, view_cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=attempt_render, apply=lambda *args: 0,
                                  attempts=1, attempt_start=attempt_index, cancelled=self.cancelled,
-                                 user_note=user_note, art=attempt_art, art_masks=attempt_masks, **options)
+                                 user_note=user_note, art=attempt_art, art_masks=attempt_masks, fast_outline=True,
+                                 **options)
                 finally:
                     _attempt_cancelled.reset(token)
             return run, child, private, folder
