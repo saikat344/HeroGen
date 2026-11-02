@@ -19,7 +19,6 @@ from herogen.pipeline.runfolder import RunFolder
 from herogen.blender import refine, stage3, body_acceptance
 from herogen.blender.remote.client import RemoteClient
 import test_herogen_pipeline_flow as flow
-import test_herogen_blender_refine as refine_tests
 
 
 class ConcurrentAPI(flow.FakeAPI):
@@ -162,7 +161,7 @@ class FastPipelineTests(unittest.TestCase):
         self.assertTrue(all(c["outcome"] == "ReplayMiss" for c in rec["calls"]))
         self.assertIn("no cached", err.getvalue())
 
-    def test_remote_shape_and_joints_once_each_in_call_order(self):
+    def test_remote_shape_and_joints_once_each_with_separate_receipts(self):
         from types import SimpleNamespace
         from herogen.blender import glb, synth
         import numpy as np
@@ -171,8 +170,10 @@ class FastPipelineTests(unittest.TestCase):
         faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
         source = glb.write_glb(self.root / "cached.glb", [("Body", verts, faces)])
         remote = RemoteClient(self.root / "remote", fast=True)
-        def gpu(runner, summary, *args, **kwargs):
-            remote.log.add(summary["runner"], runner, True, 0.0)
+        together = threading.Barrier(2)
+        def gpu(client, runner, summary, *args, **kwargs):
+            client.log.add(summary["runner"], runner, True, 0.0)
+            together.wait(timeout=5)
             return SimpleNamespace(path=lambda name: source)
         def shape(run, vs, height, client, record):
             res = client.objects(run / "views/front.png", run / "masks/front.png")
@@ -184,15 +185,15 @@ class FastPipelineTests(unittest.TestCase):
             for camera in job["tasks"][0]["cameras"]:
                 Image.new("L", (64, 64)).save(self.root / "03-renders" / f"{camera['view']}.png")
             return {"blender": "synthetic"}
-        with mock.patch.object(remote, "_call", side_effect=gpu) as calls, \
+        with mock.patch.object(RemoteClient, "_call", autospec=True, side_effect=gpu) as calls, \
                 mock.patch.object(stage3, "_objects_mesh", side_effect=shape), \
                 mock.patch.object(stage3, "_body_joints", side_effect=joints), \
                 mock.patch.object(stage3.bl, "run_job", side_effect=render), \
                 mock.patch.object(body_acceptance, "assess") as judge:
             rec = stage3.run_stage3(self.root, remote=remote, fast=True)
         self.assertEqual(calls.call_count, 2)
-        self.assertEqual([c["model"] for c in rec["calls"]], ["sam-3d-objects", "sam-3d-body"])
-        self.assertEqual([c["purpose"] for c in rec["calls"]], ["3D shape", "body joints"])
+        self.assertCountEqual([(c["model"], c["purpose"]) for c in rec["calls"]],
+                              [("sam-3d-objects", "3D shape"), ("sam-3d-body", "body joints")])
         self.assertTrue(all(c["kind"] == "gpu" and c["cached"] for c in rec["calls"]))
         self.assertTrue(all(c["stage"] == 3 and c["outcome"] == "ok" for c in rec["calls"]))
         self.assertEqual(rec["cost_usd"], 0)
@@ -276,7 +277,7 @@ class FastPipelineTests(unittest.TestCase):
         self.assertIn("no space", rec["error"])
         self.assertEqual(rec["final_model"], "03-refined.glb")
 
-    def test_local_quality_failure_is_informational_without_extra_stages(self):
+    def test_stage4_failure_preserves_release_gates_and_the_model(self):
         from herogen.blender.__main__ import main as blender_main
         (self.root / "03-source.glb").write_bytes(b"source")
         def body(*args, **kwargs):
@@ -291,41 +292,39 @@ class FastPipelineTests(unittest.TestCase):
         s4.assert_called_once()
         s6.assert_not_called()
         rec = json.loads((self.root / "stage-4.json").read_text())
-        self.assertTrue(rec["ok"])
-        self.assertFalse(rec["checks"][0]["gate"])
+        self.assertFalse(rec["ok"])
+        self.assertTrue(rec["checks"][0]["gate"])
         self.assertFalse(rec["checks"][0]["pass"])
 
 
-@unittest.skipUnless(refine_tests.HAVE_REFINE, "texture-refine dependencies are required")
-class FastRefineTests(unittest.TestCase):
-    setUp = refine_tests.StageTests.setUp
-    identity = staticmethod(refine_tests.StageTests.identity)
+class FastRefinePlumbingTests(unittest.TestCase):
+    def test_product_refine_uses_fast_profile_without_cap_and_passes_note(self):
+        from herogen.blender.__main__ import main as blender_main
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "03-source.glb").write_bytes(b"source")
+            with mock.patch.object(refine, "run_stage3f", return_value={"status": "complete", "seconds": 0}) as called, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = blender_main(["run", "--run", tmp, "--stages", "3f", "--fast",
+                                     "--refine-note", "blue boots", "--refine-cap-usd", "0"])
+            self.assertEqual(code, 0)
+            self.assertEqual(called.call_args.kwargs["refine_profile"], "fast")
+            self.assertIsNone(called.call_args.kwargs["cap_usd"])
+            self.assertEqual(called.call_args.kwargs["user_note"], "blue boots")
+            self.assertNotIn("fast", called.call_args.kwargs)
 
-    def test_refine_without_top_uses_cover_and_mesh_renders(self):
-        self.assertFalse((self.run / "views/top.png").exists())
-        rec = refine.run_stage3f(self.run, self.client, fast=True)
-        self.assertTrue(rec["ok"])
-        self.assertEqual(rec["status"], "complete")
-        self.assertEqual(rec["final_model"], "03-refined.glb")
-        self.assertEqual(len(self.client.inputs), len(refine.REFINE_ORDER) + len(refine.HAIR_ORDER))
-
-    def test_every_repaint_once_and_applied_despite_all_gates_at_zero_cap(self):
-        self.client.reject = True
-        with mock.patch.object(refine_tests.refine, "part_gate", return_value=(False, {"face": "fails"}, None)):
-            rec = refine.run_stage3f(self.run, self.client, fast=True, cap_usd=0)
-        count = len(refine.REFINE_ORDER) + len(refine.HAIR_ORDER)
-        self.assertEqual(len(self.client.inputs), count)
-        self.assertEqual(self.tex.apply.call_count, count)
-        self.assertTrue(all(c[2]["attempt"] == 0 for c in self.client.inputs))
-        self.assertTrue(all(v["accepted"] and v["tries"] == 1 for v in rec["views"].values()))
-        self.assertTrue(all(not v["attempts"][0]["gate_pass"] for v in rec["views"].values()))
-        for name, view in rec["views"].items():
-            expected = "hair outline, scale or colour agreement" if name.startswith("hair-") else "outline moved"
-            self.assertEqual(view["attempts"][0]["reason"], expected)
-        self.assertEqual(rec["final_model"], "03-refined.glb")
-        self.assertEqual(rec["status"], "complete")
-        self.assertIsNone(rec["budget"]["cap_usd"])
-        self.assertEqual(rec["estimate_usd"], rec["estimate_max_samples_usd"])
-        self.assertGreater(rec["cost_usd"], 0)
-        normal = refine.run_stage3f(self.run, self.client, cap_usd=0)
-        self.assertEqual(normal["status"], "cap_reached")
+    def test_product_stage4_uses_fast_profile_and_requested_cut_workers(self):
+        from herogen.blender.__main__ import main as blender_main
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "03-source.glb").write_bytes(b"source")
+            def body(*args, **kwargs):
+                RunFolder(run.parent, run.name).write_stage(
+                    {"stage": 4, "name": "body", "ok": True, "checks": []})
+            with mock.patch("herogen.blender.stage4.run_stage4", side_effect=body) as called, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = blender_main(["run", "--run", tmp, "--stages", "4", "--fast", "--cut-workers", "2"])
+            self.assertEqual(code, 0)
+            self.assertTrue(called.call_args.kwargs["fast"])
+            self.assertEqual(called.call_args.kwargs["cut_workers"], 2)
+            self.assertNotIn("cut_search", called.call_args.kwargs)

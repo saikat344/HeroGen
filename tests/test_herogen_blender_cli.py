@@ -81,10 +81,14 @@ class UpstreamGateTest(unittest.TestCase):
 
     def test_fast_flag_reaches_stage4_only_when_requested(self):
         (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        (self.run / "03-source.glb").write_bytes(b"source")
+        def stage4(*args, **kwargs):
+            rec = {"stage": 4, "name": "game body", "ok": True, "seconds": 0, "checks": []}
+            (self.run / "stage-4.json").write_text(json.dumps(rec))
+            return rec
         for args, expected in (([], {}), (["--fast"], {"fast": True})):
             with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()), \
-                    patch("herogen.blender.stage4.run_stage4", return_value={"ok": True, "seconds": 0,
-                                                                           "checks": []}) as run:
+                    patch("herogen.blender.stage4.run_stage4", side_effect=stage4) as run:
                 code, _ = self._main("--stages", "4", *args)
                 self.assertEqual(code, 0)
                 self.assertEqual({k: v for k, v in run.call_args.kwargs.items() if k == "fast"}, expected)

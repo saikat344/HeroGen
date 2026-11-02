@@ -147,7 +147,7 @@ A stage that stops before its checks are complete writes its record with `"ok": 
 error) or `"input_rejected"` (an input check rejected the sketch, see below, or stage p refused the prompt). `python3 -m herogen.pipeline run` exits 0
 when every stage passed, 2 when a gate failed, 3 when the input was rejected and 1 on an error.
 
-## Fast lane (speed/demo)
+## Fast product lane
 
 `python3 -m herogen.pipeline run --fast` and `python3 -m herogen.blender run --fast` opt into a
 single-pass product path. `HEROGEN_FAST_LANE=1` selects the same behavior for callers that pass the
@@ -236,11 +236,12 @@ prompts, thresholds, retries and acceptance rules are unchanged.
 - Stage 3 requests the configured shape and joints sources once each (by default SAM 3D Objects and
   SAM 3D Body). No carve or silhouette fallback is attempted. Structural and silhouette checks are
   informational; visual acceptance judges are skipped. Construction and model errors remain errors.
-- Stage 3f tries every available repaint camera once, including hair cameras. Outline, face and hair gate
-  measurements are recorded; failure never prevents projection. Fast projection also bypasses the
-  disagreement masks that normally protect hair/face regions. There is no refinement USD cap. A missing
-  head still skips head cameras because those cameras cannot be constructed; body cameras remain available.
-- Stage 4 runs once with cut search disabled and informational acceptance checks. The default fast Blender
+- Stage 3f uses the frozen-atlas fast refinement schedule described below, with at most two attempts
+  per pass and unchanged registration, outline, face and hair gates. Only accepted paint is projected,
+  retaining the existing disagreement masks. The fast product CLI passes `refine_profile="fast"`, the
+  explicit `--refine-note` and no refinement USD cap. A missing head skips the head close-up.
+- Stage 4 runs once with cut search enabled and `fast=True`, preserving its necessary output and
+  nonempty-part gates and its recorded informational quality measurements. The default fast Blender
   invocation also runs stages 6 (export) and 5 (results), in that order, once each. An explicit `--stages` selects only
   the requested stages (with the usual automatic 3f between 3 and 4). Local failures are
   recorded and printed, and later stages still run. The displayed/downloaded model remains

@@ -1,5 +1,6 @@
 """Single-pass fast-lane construction and best-model completion after local export failures."""
 import json
+import shutil
 import sys
 import time
 
@@ -46,7 +47,7 @@ def run(a, stages):
     from herogen.pipeline.results import stage5_results
 
     steps = [("4", "game body", lambda: run_stage4(a.run, a.height, timeout=a.timeout,
-                                                   profile=a.profile, fast=True)),
+                                                   profile=a.profile, cut_workers=a.cut_workers, fast=True)),
              ("6", "roblox export", lambda: run_export(a.run / "04-body", a.run / "06-roblox")),
              ("5", "results", lambda: stage5_results(folder))]
     for stage, name, fn in steps:
@@ -55,6 +56,8 @@ def run(a, stages):
         receipt = StageRecord(a.run, int(stage), name)
         (a.run / f"stage-{stage}.json").unlink(missing_ok=True)
         try:
+            if stage == "4" and (a.run / "04-body").exists():
+                shutil.rmtree(a.run / "04-body")
             fn()
             rec = folder.read_stage(stage)
             if rec is None:
