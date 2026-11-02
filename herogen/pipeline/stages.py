@@ -107,7 +107,7 @@ class _Stage:
             client.stage, client.purpose = n, name.replace("_", " ")
         # The service brackets each stage itself; a stage run on its own announces its start and end.
         self.standalone = not os.environ.get(events.ENV_STEP)
-        events.set_step(n)
+        self._step_token: Any = events.set_step(n)
         if self.standalone:
             events.emit("step_start", step=n)
         self.started = now_iso()
@@ -126,6 +126,9 @@ class _Stage:
 
     def _announce(self, record: dict[str, Any], outcome: str) -> None:
         """The build log's summary of this stage's checks and, when run on its own, its end."""
+        if self._step_token is not None:
+            events.reset_step(self._step_token)
+            self._step_token = None
         if not events.enabled():
             return
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
