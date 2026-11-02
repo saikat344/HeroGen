@@ -7,6 +7,7 @@ import hashlib
 import logging
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from PIL import Image
 
 from herogen import prompts as prompt_registry
 from herogen.pipeline import checks as C
-from herogen.pipeline import imaging, inputs
+from herogen.pipeline import events, imaging, inputs
 from herogen.pipeline.client import (
     COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ClientError, ModelClient, SamInstance, call_cost,
 )
@@ -102,8 +103,13 @@ class _Stage:
     def __init__(self, run: RunFolder, client: ModelClient | None, n: int | str, name: str) -> None:
         self.run, self.client, self.n, self.name = run, client, n, name
         self.fast = getattr(client, "fast", False) if client else enabled()
-        if self.fast and client:
+        if client:   # read by the fast lane's call records and by every lane's build-log events
             client.stage, client.purpose = n, name.replace("_", " ")
+        # The service brackets each stage itself; a stage run on its own announces its start and end.
+        self.standalone = not os.environ.get(events.ENV_STEP)
+        events.set_step(n)
+        if self.standalone:
+            events.emit("step_start", step=n)
         self.started = now_iso()
         self.t0 = time.monotonic()
         self.calls0 = len(client.log.calls) if client else 0
@@ -116,6 +122,21 @@ class _Stage:
     def save_image(self, rel: str, img: Image.Image) -> None:
         img.save(self.run.file(rel), format="PNG")
         self.outputs.append(rel)
+        events.image(rel, step=self.n)
+
+    def _announce(self, record: dict[str, Any], outcome: str) -> None:
+        """The build log's summary of this stage's checks and, when run on its own, its end."""
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+        if checks:
+            failed = [c for c in checks if c.get("pass") is False]
+            events.emit("checks", step=self.n, n=len(checks), passed=sum(c.get("pass") is True for c in checks),
+                        gated=sum(c.get("gate", True) is not False for c in checks),
+                        failed=[events.slug(c.get("name")) for c in failed if c.get("gate", True)][:events.MAX_NAMES],
+                        advisory=[events.slug(c.get("name")) for c in failed
+                                  if not c.get("gate", True)][:events.MAX_NAMES])
+        if self.standalone:
+            events.emit("step_end", step=self.n, outcome=outcome, s=record.get("seconds"),
+                        usd=record.get("cost_usd"))
 
     def _record(self) -> dict[str, Any]:
         if self.fast:
@@ -146,6 +167,7 @@ class _Stage:
         if adjust is not None:
             adjust(record)
         self.run.write_stage(record)
+        self._announce(record, "passed" if record["ok"] else "rejected")
         if not record["ok"]:
             raise GateFailed(self.n, record, fail_message)
         return record
@@ -156,6 +178,8 @@ class _Stage:
         far, so paid calls are never left unrecorded."""
         record = {**self._record(), "ok": False, "status": status, "error": error}
         self.run.write_stage(record)
+        if status != "running":
+            self._announce(record, "rejected" if status == "input_rejected" else "failed")
         return record
 
     def reject_input(self, error: str) -> InputRejected:
@@ -1033,7 +1057,11 @@ def _fast_sheet_views(st: _Stage, client: ModelClient, cover: Image.Image, promp
         if "instance_split" in split:
             entry["instance_split"] = split["instance_split"]
         if sq:
+            events.emit("local", step=st.n, what="sheet_split", m={"figures": len(split["runs"])})
             break
+        if attempt == 0:
+            events.emit("decision", step=st.n, what="recovery_sheet",
+                        why="too_few_figures" if len(split["runs"]) < len(SIDE_VIEWS) else "no_usable_views")
     return attempt, sheet, bg, split, n_inst, size, sq, assignment
 
 
