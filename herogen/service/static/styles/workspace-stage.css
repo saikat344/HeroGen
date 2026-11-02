@@ -96,6 +96,16 @@
 .viewer__dock .thumb[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .viewer__dock .thumb[aria-disabled="true"]:hover .thumb__img { transform: none; }
 
+/* ---------- Retry / Refine, under the stage inside the result panel ---------- */
+.actions { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: var(--space-3) var(--space-6); padding: var(--space-5) var(--space-6) var(--space-4); border-top: var(--border-w) solid var(--color-border-subtle); }
+.actions__col { display: grid; justify-items: center; gap: var(--space-2); min-width: 0; }
+.actions__rule { align-self: start; width: var(--border-w); height: var(--control-h-l); background: var(--color-border); }
+.actions__help { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; }
+.actions__note { grid-column: 1 / -1; margin: var(--space-2) 0 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; text-wrap: balance; }
+.actions__note .icon { display: inline-block; vertical-align: -0.2em; margin-right: var(--space-2); }
+.actions__time:not(:empty)::before { content: " · "; }
+.actions__error { justify-content: center; margin: 0; padding: 0 var(--space-6) var(--space-4); text-align: center; }
+
 /* ---------- Fullscreen and the in-page fallback ---------- */
 .result-panel .viewer:fullscreen { width: 100vw; height: 100vh; border-radius: 0; }
 .result-panel .viewer.viewer--expanded { position: fixed; inset: 0; z-index: var(--z-modal); height: 100dvh; border-radius: 0; }
@@ -126,6 +136,9 @@ body.has-expanded-viewer { overflow: hidden; }
   .viewer.has-dock { --viewer-dock-space: calc(var(--space-4) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
   .viewer__dock .thumb { min-width: var(--tap-min); }
   .viewer .viewer__hint { display: none; }
+  .actions { grid-template-columns: minmax(0, 1fr); padding: var(--space-4); }
+  .actions__rule { display: none; }
+  .actions__error { padding: 0 var(--space-4) var(--space-4); }
   .viewer__silhouette-head { width: 44px; height: 44px; }
   .viewer .viewer__silhouette-body { width: 88px; height: 112px; }
 }
