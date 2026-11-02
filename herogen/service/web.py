@@ -365,22 +365,24 @@ class App:
         """`/gallery-assets/<id>/<kind>-thumb`: a small WebP of a published image, cached in the data folder."""
         from herogen.service.gallery import GalleryUnavailable, thumbnail
 
-        def make() -> tuple[Path, str]:
+        def make() -> tuple[bytes, str]:
+            # Read the bytes under the lock: a volume reload fails while any file on it is open.
             vol = self.svc.storage.volume
             with vol.reading():
                 path, token, made = thumbnail(self.s.gallery_dir, self.s.data_dir / GALLERY_THUMBS,
                                               request.path_params["id"], kind)
+                body = path.read_bytes()
             if made:
                 vol.commit()
-            return path, token
+            return body, token
 
         try:
-            path, token = await self.call(make)
+            body, token = await self.call(make)
         except (GalleryUnavailable, OSError, ValueError, KeyError, TypeError):
             return error(404, "not_found", "This public artifact is unavailable.")
         cache = ("public, max-age=31536000, immutable" if request.query_params.get("v") == token
                  else "public, max-age=3600")
-        return FileResponse(path, media_type="image/webp", headers={"Cache-Control": cache})
+        return Response(body, media_type="image/webp", headers={"Cache-Control": cache})
 
     async def gallery_page(self, request: Request) -> Response:
         return self.page("gallery.html")
