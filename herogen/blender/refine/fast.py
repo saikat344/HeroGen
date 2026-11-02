@@ -13,6 +13,7 @@ import uuid
 from types import MethodType
 
 from herogen.pipeline.client import ApiError, CallLog
+from herogen.pipeline.retry import NEVER_RETRY_5XX
 from herogen.refine_budget import BudgetStop
 
 from . import buildlog
@@ -45,10 +46,11 @@ def contained_error(exc, fallback, retried=False, **where):
 def transient(exc):
     """A timeout, a dropped connection or an HTTP 5xx, from status and transport state only (never the message).
 
-    Any 4xx, including a content-policy refusal, is not transient."""
+    Any 4xx, including a content-policy refusal, is not transient, nor are the 5xx answers the client
+    never retries (501, 505)."""
     status = getattr(exc, 'http_status', None)
     if type(status) is int:
-        return 500 <= status <= 599
+        return 500 <= status <= 599 and status not in NEVER_RETRY_5XX
     return getattr(exc, 'network_error', None) is not None
 
 

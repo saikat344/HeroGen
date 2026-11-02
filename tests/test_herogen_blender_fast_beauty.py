@@ -651,6 +651,31 @@ class EyeQualityTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
+class TransientResendTests(unittest.TestCase):
+    def test_only_retryable_server_errors_and_transport_failures_are_transient(self):
+        from herogen.pipeline.client import ApiError
+        def error(status=None, network=None):
+            exc = ApiError("failed", http_status=status)
+            exc.network_error = network
+            return exc
+        self.assertTrue(fast.transient(error(500)))
+        self.assertTrue(fast.transient(error(503)))
+        self.assertTrue(fast.transient(error(network="TimeoutError")))
+        for status in (400, 404, 429, 501, 505):
+            self.assertFalse(fast.transient(error(status)), status)
+
+    def test_a_stopped_resend_is_logged_as_stopped_not_as_a_model_error(self):
+        from herogen.blender.refine import buildlog
+        entry = {"request": "image edit", "http_status": 503, "network_error": None}
+        with mock.patch.object(buildlog.events, "enabled", return_value=True), \
+                mock.patch.object(buildlog.events, "emit") as emit:
+            buildlog.retried({**entry, "retry": {"error": "BudgetStop", "http_status": None}}, view="body+90", number=1)
+            buildlog.retried({**entry, "retry": {"error": "ApiError", "http_status": 503}}, view="body+90", number=1)
+            buildlog.retried({**entry, "retry": "ok"}, view="body+90", number=1)
+        self.assertEqual([(c.kwargs["ok"], c.kwargs["why"]) for c in emit.call_args_list],
+                         [(False, "stopped"), (False, "model_error"), (True, None)])
+
+
 class FastBeautyStageTests(unittest.TestCase):
     setUp = note_fixture.FastNoteTests.setUp
     identity = staticmethod(fixture.StageTests.identity)
