@@ -1,8 +1,13 @@
 """Visitor success at model readiness, with explicit best-effort export outcomes."""
 import json
+import os
+import sys
 import threading
 import unittest
 from unittest.mock import patch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from test_herogen_service_jobs import JobCase
 from herogen.pipeline.client import ApiError, ReplayMiss, ModelClient, IMAGE_MODEL
