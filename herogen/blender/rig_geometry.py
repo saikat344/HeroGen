@@ -91,7 +91,7 @@ def _mask_radius(front, point, direction):
     return float((stops[k] - starts[k]) / (2 * front.pps))
 
 
-def _mesh_radius(index, point, direction):
+def _mesh_radii(index, point, direction):
     d = np.asarray(direction, float)
     d /= np.linalg.norm(d)
     u = np.cross(d, [0, 1, 0])
@@ -106,15 +106,20 @@ def _mesh_radius(index, point, direction):
     finite = diameters[np.isfinite(diameters)]
     if not len(finite):
         raise ValueError("cannot measure the arm cross section at the recorded forearm")
-    return float(np.median(finite) / 2)
+    return finite / 2
+
+
+def _mesh_radius(index, point, direction):
+    return float(np.median(_mesh_radii(index, point, direction)))
 
 
 def reconcile_skeleton(sk, record, verts, faces, front):
     """Repair contradictory hybrid landmarks using the cached anatomical joints and source geometry.
 
-    Silhouette limb roots remain preferred. A pair of hips must straddle the pelvis, and an A-pose shoulder
-    must be above its elbow. Props can invalidate those relationships while the anatomical record remains
-    usable. Distal hand endpoints must continue outwards from the wrists, rather than follow a staff.
+    Silhouette limb roots remain preferred. Hips must straddle the pelvis, and an A-pose shoulder must be
+    above and medial to its elbow. Props can invalidate those relationships while the anatomical record
+    remains usable. Hand endpoints continue outwards and downwards from a descending forearm. A radius
+    smaller than every measured source forearm radius is remeasured there instead of following a ribbon.
     """
     changes = {}
     anatomical = (record or {}).get("sources", {}).get("sam3d-body", {})
@@ -123,8 +128,9 @@ def reconcile_skeleton(sk, record, verts, faces, front):
     hybrid = (record or {}).get("source") == "sam3d-body"
     hip_bad = hybrid and not j["RightHip"][0] < root_x < j["LeftHip"][0]
     replacements = [s + "Hip" for s in ("Left", "Right")] if hip_bad else []
-    replacements += [s + "Shoulder" for s in ("Left", "Right")
-                     if hybrid and j[s + "Shoulder"][2] <= j[s + "Elbow"][2]]
+    replacements += [s + "Shoulder" for s, sign in (("Left", 1), ("Right", -1))
+                     if hybrid and (j[s + "Shoulder"][2] <= j[s + "Elbow"][2]
+                                    or sign * (j[s + "Elbow"][0] - j[s + "Shoulder"][0]) < 0)]
     for name in replacements:
         if name not in anatomical:
             raise ValueError(f"contradictory {name} landmark without a recorded anatomical alternative")
@@ -144,11 +150,25 @@ def reconcile_skeleton(sk, record, verts, faces, front):
         sk.radii["shin"] = min(_mask_radius(front, j[s + "Ankle"], [0, 0, 1]) for s in ("Left", "Right"))
         sk.radii["head"] = _mask_radius(front, (j["Neck"] + j["HeadTop"]) / 2, [0, 0, 1])
         sk.radii["neck"] = _mask_radius(front, j["Neck"], [0, 0, 1])
+    index = MeshIndex(verts, faces) if hybrid else None
     for side in ("Left", "Right"):
         elbow, wrist = j[side + "Elbow"], j[side + "Wrist"]
         tip = sk.ends[side + "HandTip"]
         outward = wrist[0] - root_x
-        if (tip[0] - wrist[0]) * outward < 0:
+        wrong_tip = ((tip[0] - wrist[0]) * outward < 0
+                     or (hybrid and wrist[2] < elbow[2] and tip[2] > wrist[2]))
+        if hybrid and not wrong_tip and index.inside(((elbow + wrist) / 2)[None])[0]:
+            # The silhouette estimator can measure a ribbon or scarf instead of the arm. The recorded
+            # forearm is already in the source mesh: measure its transverse thickness there, not at the
+            # unrelated silhouette axis. build_rig uses 0.9 of this radius for the lower arm.
+            radii = _mesh_radii(index, (elbow + wrist) / 2, wrist - elbow)
+            radius = float(np.median(radii)) / .9
+            if .9 * sk.radii[side + "Arm"] < radii.min():
+                changes[side + "ArmRadius"] = {"source": "source mesh at the recorded forearm",
+                                               "before_studs": float(sk.radii[side + "Arm"]),
+                                               "after_studs": radius}
+                sk.radii[side + "Arm"] = radius
+        if wrong_tip:
             direction = wrist - elbow
             length = float(np.linalg.norm(direction))
             direction /= max(length, 1e-12)
