@@ -63,6 +63,9 @@ def publish(parent, child):
     for source in sorted(child.cache_dir.iterdir(), key=lambda p: p.suffix == '.json'):
         if source.is_file() and source.name != 'calls-ledger.jsonl':
             target = parent.cache_dir / source.name
+            # Shared filesystems can refuse replacing an open, already identical cache file.
+            if target.is_file() and source.read_bytes() == target.read_bytes():
+                continue
             temporary = target.with_name(target.name + '.' + uuid.uuid4().hex + '.part')
             try:
                 shutil.copy2(source, temporary)

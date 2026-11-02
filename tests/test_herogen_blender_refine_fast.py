@@ -71,6 +71,19 @@ class ConcurrentBudgetTests(unittest.TestCase):
             self.assertEqual(parent._load('n'), {'image': 'n.png'})
             self.assertEqual(len(parent.log.calls), 1)
 
+    def test_cached_family_is_not_replaced_but_changed_content_is_published(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = ModelClient(tmp)
+            parent._save_entry('k', {'value': 1})
+            child = fast.isolated_client(parent, 'child')
+            self.assertEqual(child._load('k'), {'value': 1})
+            with mock.patch.object(fast.os, 'replace', side_effect=OSError('shared file is open')):
+                fast.publish(parent, child)
+            self.assertEqual(parent._load('k'), {'value': 1})
+            child._save_entry('k', {'value': 2})
+            fast.publish(parent, child)
+            self.assertEqual(parent._load('k'), {'value': 2})
+
     def test_nested_cache_keeps_images_and_new_entries_with_their_client(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = ModelClient(tmp)
