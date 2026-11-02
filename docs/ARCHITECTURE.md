@@ -80,6 +80,15 @@ CSRF middleware:
 | `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains prior stage spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
 | `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, recorded `seconds` and `cost_usd`, `model_url`, and `cover_thumbnail_url`. Asset URLs use the existing owner-checked run routes. |
 
+Every hero summary in `GET /api/jobs`, and `GET /api/jobs/<id>`, carries `thumbnail_url`: the image a hero card
+shows, or `null` while there is none. It is the cover once stage 1 has recorded it and is not running again,
+else the stage-0 sketch on the same terms, else the uploaded sketch (upload heroes only). The URL is
+`/api/jobs/<id>/thumbnail?v=<token>`, behind the same session and owner check as other run files (another
+workspace's hero is a plain 404). The token comes from the chosen file's name, size and timestamps, so it
+changes with the image; a matching `v` is served with `Cache-Control: private, max-age=31536000, immutable`,
+any other with `private, no-cache`. The list looks up fixed file names and reads every listed hero's stage
+states in one query; it lists no folders and reads no images.
+
 The SQLite schema migration adds these version columns plus `continued_after`, an attempt offset for a
 fresh retry allowance after continuation. Attempt numbers never reset, preserving stale-worker fences.
 Version columns are migration 7 (schema version 8), following the existing admission migrations unchanged.
