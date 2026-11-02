@@ -161,7 +161,8 @@ def art_references(run, cam, body_cam, info, artwork):
 
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
           closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
-          apply=None, attempts=None, attempt_start=0, cancelled=None, user_note="", recipe_name=None, reference_record=None, face_keep=False, complete_face=False, save_face=False, art=(), art_masks=None):
+          apply=None, attempts=None, attempt_start=0, cancelled=None, user_note="", recipe_name=None, reference_record=None, face_keep=False, complete_face=False, save_face=False, art=(), art_masks=None,
+          surface_reference_mask=None):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -186,6 +187,14 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     positions, valid = decode_pos(read_exr(rendered / f"{cam['name']}.pos.exr"))
     _, _, depth = project(cam, positions)
     figure = alpha > 0.5
+    if surface_reference_mask is not None:
+        from .closeups import silhouette_reference
+        # Change the conditioning image, never the generated sample or its acceptance mask.
+        cover = cover.resize(inp.size, Image.Resampling.LANCZOS)
+        mask = surface_reference_mask.resize(inp.size, Image.Resampling.NEAREST)
+        cover = silhouette_reference(cover, mask, figure)
+        cover.save(folder / "surface-reference.png")
+        record["reference_framing"] = "render silhouette; uniform height fit and nearest foreground extension"
     if art_masks:
         from .closeups import silhouette_reference
         aligned = []
@@ -255,7 +264,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             edited_parts = I.part_masks(client, edit, figure.shape, mapx, mapy)
             passed, measures["parts"], _ = I.part_gate(parts, edited_parts, figure)
             reason = "new face outside the render face"
-        if passed and recipe == "RF6B" and cam["name"] in ("head+0", "body+0") and parts["face"].any():
+        if passed and recipe in ("RF6B", "RF17B") and cam["name"] in ("head+0", "body+0") and parts["face"].any():
             from .beauty import facial_features
             if reference_features is None:
                 reference_features = facial_features(client, cover)
@@ -278,7 +287,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             continue
         # Beauty references already carry the intended light and palette; fitting them back to the
         # source render would remove their crease shading and material contrast.
-        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B", "RF16B") else I.colour_match(render_rgb, warped, figure & fig_e)
+        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B", "RF16B", "RF17B") else I.colour_match(render_rgb, warped, figure & fig_e)
         if hair:
             weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy,
                                    parts["face"] if face_exclusion else None)
@@ -405,7 +414,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         empty_progress(run)
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()
-                                  if side_beauty or (beauty_refs is not None and name in ("RF5B", "RF6B"))
+                                  if side_beauty or (beauty_refs is not None and name in ("RF5B", "RF6B", "RF17B"))
                                   or name in ("RF2R", "RF2W", "RF3H", "RF4U", "RF5U")}
     if user_note:
         rec.data["user_note"] = user_note

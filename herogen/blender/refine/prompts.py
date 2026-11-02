@@ -98,6 +98,21 @@ RF6B = RF5B.replace(
     "reference character's identity and expression. Never paint facial features on hair, "
     "a helmet, a covered face or the back of the head.")
 
+RF17B = (
+    "Repaint only the visible surfaces of the first image, a render of our 3D character {view}. "
+    "The first image alone fixes every pixel of the silhouette, pose, proportions, camera, framing, "
+    "garment boundaries and background. Do not rebuild the character or copy the reference's anatomy, "
+    "limb widths, folds, pose or object layout. Keep the first image's exact size and grey background. "
+    "The last image is a surface design reference fitted to this silhouette, not replacement geometry. "
+    "Transfer its crisp material detail, costume markings, embroidery, rivets, seams, straps and wear "
+    "to their corresponding existing surfaces. Reproduce details supported by the artwork, including "
+    "crossing straps and decorated back panels where shown. Keep hair, skin, cloth, leather and metal "
+    "in their original regions. Keep exposed faces in place; never uncover a helmet or paint a face "
+    "on hair or a rear head. Use restrained soft shading with the light fixed above and in front of "
+    "the character at front yaw zero, with gentle fill in every view. Sharpen the surface paint "
+    "without changing any shape, crop edge or silhouette. No scenery, text, added props or ground shadow."
+)
+
 RF6R = (
     "Turn the first image, a render of a 3D character {view}, into a crisp, high-detail, high-resolution "
     "render of the same character from exactly the same viewpoint. Keep everything in the first image exactly "
@@ -213,7 +228,8 @@ RF16B = RF15B + DESIGN_ONLY
 PROMPTS = {"RF2R": RF2R, "RF2W": RF2W, "RF3H": RF3H, "RF4U": RF4U, "RF5U": RF5U,
            "RF6R": RF6R, "RF6W": RF6W, "RF7H": RF7H, "RF8U": RF8U, "RF9R": RF9R, "RF9W": RF9W,
            "RF10H": RF10H, "RF11R": RF11R, "RF11W": RF11W, "RF12R": RF12R, "RF12W": RF12W,
-           "RF13H": RF13H, "RF14U": RF14U, "RF5B": RF5B, "RF6B": RF6B, "RF15B": RF15B, "RF16B": RF16B}
+           "RF13H": RF13H, "RF14U": RF14U, "RF5B": RF5B, "RF6B": RF6B, "RF15B": RF15B, "RF16B": RF16B,
+           "RF17B": RF17B}
 
 # Art-conditioned variant of each cover-only recipe, used when turnaround views are supplied.
 ART_VARIANTS = {"RF2R": "RF12R", "RF2W": "RF12W", "RF3H": "RF13H", "RF5U": "RF14U", "RF6B": "RF16B"}

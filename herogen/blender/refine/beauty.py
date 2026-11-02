@@ -317,5 +317,14 @@ def frontal_features(client, image, face):
     labels, count = ndimage.label(eyes)
     centres = ndimage.center_of_mass(eyes, labels, range(1, count + 1)) if count else []
     both = any(x < crop.width / 2 for _, x in centres) and any(x >= crop.width / 2 for _, x in centres)
+    boxes = []
+    for side in (False, True):
+        regions = [i for i, (_, x) in enumerate(centres, 1) if (x >= crop.width / 2) == side]
+        if regions:
+            largest = max(regions, key=lambda i: int((labels == i).sum()))
+            ey, ex = np.nonzero(labels == largest)
+            boxes.append([int(ex.min()) + box[0], int(ey.min()) + box[1],
+                          int(ex.max()) + 1 + box[0], int(ey.max()) + 1 + box[1]])
     return {"both_eyes": bool(both), "eye_regions": int(count),
+            "eye_boxes": boxes,
             "mouth": bool((union(client, crop, "mouth") & inside).any())}
