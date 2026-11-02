@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "min_n": 8,
+  "calls": {
+    "p|muse-image|sketch_design": {"n": 27, "p50": 25.3, "p90": 34.7, "usd_p50": 0.01},
+    "p|muse-image|full_body_sketch": {"n": 27, "p50": 16.5, "p90": 25.6, "usd_p50": 0.01},
+    "1|muse-spark|cover_art": {"n": 69, "p50": 4.2, "p90": 6.0, "usd_p50": 0.0034},
+    "1|sam-3.1|cover_art|character": {"n": 144, "p50": 3.7, "p90": 5.9, "usd_p50": 0.0025},
+    "1|sam-3.1|cover_art|creature": {"n": 96, "p50": 3.7, "p90": 5.6, "usd_p50": 0.0025},
+    "1|sam-3.1|cover_art|person": {"n": 96, "p50": 3.3, "p90": 5.2, "usd_p50": 0.0025},
+    "1|sam-3.1|cover_art|feet": {"n": 145, "p50": 2.6, "p90": 4.1, "usd_p50": 0.0025},
+    "1|muse-image|cover_art": {"n": 90, "p50": 13.4, "p90": 20.9, "usd_p50": 0.01},
+    "2|muse-image|turnaround": {"n": 93, "p50": 22.0, "p90": 28.2, "usd_p50": 0.01},
+    "2|muse-image|top_view": {"n": 85, "p50": 21.2, "p90": 27.4, "usd_p50": 0.01},
+    "2|sam-3.1|*|character": {"n": 178, "p50": 3.9, "p90": 5.8, "usd_p50": 0.0025},
+    "2|sam-3.1|*|face": {"n": 84, "p50": 1.5, "p90": 2.5, "usd_p50": 0.0025},
+    "2|sam-3.1|*|head": {"n": 84, "p50": 1.5, "p90": 2.5, "usd_p50": 0.0025},
+    "3|sam-3d-objects|3d_shape": {"n": 83, "p50": 174.9, "p90": 217.4, "usd_p50": 0.102},
+    "3|sam-3d-body|body_joints": {"n": 83, "p50": 40.4, "p90": 63.0, "usd_p50": 0.0123},
+    "3f|muse-image|repaint": {"n": 976, "p50": 21.2, "p90": 28.6, "usd_p50": 0.01},
+    "3f|sam-3.1|*|face": {"n": 1503, "p50": 1.7, "p90": 3.3, "usd_p50": 0.0025},
+    "3f|sam-3.1|*|hair": {"n": 1234, "p50": 1.9, "p90": 3.3, "usd_p50": 0.0025},
+    "3f|sam-3.1|*|head": {"n": 233, "p50": 1.5, "p90": 2.9, "usd_p50": 0.0025}
+  }
+}
