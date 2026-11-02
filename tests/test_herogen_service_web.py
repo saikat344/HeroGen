@@ -683,6 +683,7 @@ class TestErrorPages(WebCase):
         self.assertLess(r.text.index("/assets/tokens.css"), r.text.index("/assets/app.css"))
         self.assertIn("/assets/styles/pages.css", r.text)
         self.assertNotIn("<img", r.text, "no gallery, no art")
+        self.assertNotIn("error-art.js", r.text, "no art, no script")
         self.assert_page_csp(r, "/nope")
         for path in ("/nope/deeper", "/gallery", "/viewer/x", "/admin/nothing"):
             r = Browser(self.app).get(path)
@@ -703,6 +704,13 @@ class TestErrorPages(WebCase):
         thumb = b.get(html.unescape(src))
         self.assertEqual((thumb.status_code, thumb.headers["content-type"]), (200, "image/webp"))
         self.assert_page_csp(r, "/nope with art")
+        # when the thumbnail fails, an external script (no inline handler: CSP) tries the full artwork, then hides the figure
+        self.assertIn('data-full="/gallery-assets/ranger/artwork"', imgs[0])
+        self.assertIn('<script type="module" src="/assets/error-art.js"></script>', r.text)
+        script = b.get("/assets/error-art.js")
+        self.assertEqual((script.status_code, script.headers["content-type"].split(";")[0]), (200, "text/javascript"))
+        self.assertIn("figure.hidden = true", script.text)
+        self.assertRegex(Browser(self.app).get("/assets/styles/pages.css").text, r"\.error-art\[hidden\] \{ display: none; \}")
 
     def test_a_broken_gallery_never_breaks_the_404(self):
         self.with_gallery()

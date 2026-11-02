@@ -182,6 +182,29 @@ class TestLandingModels(ServiceBrowserCase):
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'dark')
         self.assertEqual(self.tab.errors, [])
 
+    def test_the_404_hero_falls_back_to_the_full_artwork_and_then_hides(self):
+        t = self.tab
+        t.call('Network.enable')
+        art = "document.querySelector('.error-art img')"
+        t.goto(self.url + '/nope')
+        t.wait(f"{art}?.complete && {art}.naturalWidth > 0")
+        self.assertIn('/artwork-thumb?v=', t.eval(f"{art}.getAttribute('src')"))
+        # the small thumbnail fails: the full artwork takes its place
+        t.call('Network.setBlockedURLs', urls=['*artwork-thumb*'])
+        t.goto(self.url + '/nope')
+        t.wait(f"{art}.getAttribute('src').endsWith('/artwork') && {art}.complete && {art}.naturalWidth > 0")
+        self.assertFalse(t.eval("document.querySelector('.error-art').hidden"))
+        self.assertTrue(t.eval("getComputedStyle(document.querySelector('.error-art')).display !== 'none'"))
+        # both fail: no broken image, no empty frame
+        t.call('Network.setBlockedURLs', urls=['*artwork-thumb*', '*/artwork'])
+        t.goto(self.url + '/nope')
+        t.wait("document.querySelector('.error-art').hidden")
+        self.assertEqual(t.eval("getComputedStyle(document.querySelector('.error-art')).display"), 'none')
+        self.assertEqual(t.eval("document.querySelector('.error-page__copy h1').textContent"), 'This page wandered off.')
+        self.assertEqual(t.eval("document.documentElement.scrollWidth <= innerWidth"), True)
+        t.call('Network.setBlockedURLs', urls=[])
+        self.assertEqual(t.errors, [])
+
     def test_model_failure_is_retryable(self):
         t = self.tab
         t.call('Page.addScriptToEvaluateOnNewDocument', source="const originalFetch=window.fetch; window.fetch=(url,options)=>(url instanceof Request?url.url:String(url)).includes('/model')&&!window.allowModels?Promise.reject(new Error('offline fixture')):originalFetch(url,options);")
