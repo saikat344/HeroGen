@@ -97,7 +97,8 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
             "meshes": "MeshId left empty in every section; bind_meshes.luau binds the meshes Studio imports "
                       f"from {glb_name}",
             "parts": {p["name"]: {"center": p["center"], "size": p["size"], "pivot": p["pivot"],
-                                  "triangles": p["triangles"]} for p in spec["parts"]},
+                                  "triangles": p["triangles"], "pivot_fit_studs": p["pivot_fit_studs"]}
+                      for p in spec["parts"]},
         }
     except RobloxExportError as exc:
         for name in OUTPUT_FILES:

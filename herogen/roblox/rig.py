@@ -78,6 +78,10 @@ def build_rig(body: Path, glb_name: str = "high.glb", name: str = RIG_NAME) -> d
                                 f"mesh; {PROFILE_HINT}")
 
     parts, notes, lows = [], [], {}
+    repairs = sj.get("pivot_repairs", {})
+    if not isinstance(repairs, dict) or not isinstance(repairs.get(Path(glb_name).stem, {}), dict):
+        raise RobloxExportError("sections.json pivot_repairs must contain per-LOD part records")
+    pivot_repairs = repairs.get(Path(glb_name).stem, {})
     for pname, parent, joint in R15:
         s = by_name[pname]
         want_parent = None if parent == "HumanoidRootPart" else parent
@@ -104,6 +108,15 @@ def build_rig(body: Path, glb_name: str = "high.glb", name: str = RIG_NAME) -> d
         if d_bounds > NOTE_STUDS:
             notes.append(f"{pname}: GLB vertex bounds differ from sections.json bounds by {d_bounds:.4f} "
                          "studs")
+        pivot_fit = pivot_repairs.get(pname, {})
+        if (not isinstance(pivot_fit, dict) or (pivot_fit and
+                (not isinstance(pivot_fit.get("source"), str)
+                 or not isinstance(pivot_fit.get("distance_studs"), (float, int))
+                 or not math.isfinite(pivot_fit["distance_studs"]) or pivot_fit["distance_studs"] < 0))):
+            raise RobloxExportError(f"{pname}: invalid pivot repair source or distance_studs")
+        if pivot_fit:
+            notes.append(f"{pname}: pivot fitted to {pivot_fit['source']}, "
+                         f"{pivot_fit['distance_studs']:.6f} studs from the cut estimate")
         parts.append({
             "name": pname, "parent": parent, "joint": joint,
             "center": _rnd((lo + hi) / 2), "size": _rnd(size), "pivot": _rnd(pivot),
@@ -111,6 +124,7 @@ def build_rig(body: Path, glb_name: str = "high.glb", name: str = RIG_NAME) -> d
             "mesh_id": "",  # placeholder: bind_meshes.luau binds the imported mesh of GLB node `name`
             "glb_node_vs_pivot_studs": round(d_node, 6),
             "glb_vs_sections_bounds_studs": round(d_bounds, 6),
+            "pivot_fit_studs": pivot_fit.get("distance_studs", 0.0),
         })
 
     pc = {p["name"]: p for p in parts}

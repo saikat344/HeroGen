@@ -125,6 +125,20 @@ class RigSpecTest(unittest.TestCase):
             want = np.subtract(self.parts[part]["pivot"], self.parts[part]["center"])
             np.testing.assert_allclose(local, want, atol=1e-6)
 
+    def test_pivot_fit_distance_is_information_without_changing_the_rig(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            body = write_body(Path(tmp) / "body")
+            before = write_rbxmx(build_rig(body))
+            path = body / "sections.json"
+            sj = json.loads(path.read_text())
+            sj["pivot_repairs"] = {"high": {"LeftUpperArm": {"source": "shared cut edge", "distance_studs": .12}}}
+            path.write_text(json.dumps(sj))
+            spec = build_rig(body)
+            self.assertEqual(before, write_rbxmx(spec))
+            part = next(p for p in spec["parts"] if p["name"] == "LeftUpperArm")
+            self.assertEqual(part["pivot_fit_studs"], .12)
+            self.assertIn("0.120000 studs from the cut estimate", "; ".join(spec["notes"]))
+
 
 class RefusalTest(unittest.TestCase):
     def setUp(self):
@@ -196,6 +210,15 @@ class RefusalTest(unittest.TestCase):
         edit_glb_json(body / "high.glb",
                       lambda d: d["nodes"][0].update(rotation=[0, 0, 0, 1], scale=[1, 1, 1]))
         build_rig(body)
+
+    def test_invalid_pivot_repair_metadata_is_a_clear_error(self):
+        body = write_body(self.root / "b")
+        path = body / "sections.json"
+        good = json.loads(path.read_text())
+        for value in ([], {"high": []}, {"high": {"Head": {"source": "cut", "distance_studs": -1}}},
+                      {"high": {"Head": {"source": "cut", "distance_studs": "far"}}}):
+            path.write_text(json.dumps({**good, "pivot_repairs": value}))
+            self.assertRefused(body, "pivot")
 
 
 def _parent_of(root, el):
