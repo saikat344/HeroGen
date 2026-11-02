@@ -264,7 +264,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             edited_parts = I.part_masks(client, edit, figure.shape, mapx, mapy)
             passed, measures["parts"], _ = I.part_gate(parts, edited_parts, figure)
             reason = "new face outside the render face"
-        if passed and recipe in ("RF6B", "RF17B") and cam["name"] in ("head+0", "body+0") and parts["face"].any():
+        if passed and recipe in ("RF6B", "RF17B", "RF18B") and cam["name"] in ("head+0", "body+0") and parts["face"].any():
             from .beauty import facial_features
             if reference_features is None:
                 reference_features = facial_features(client, cover)
@@ -287,7 +287,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             continue
         # Beauty references already carry the intended light and palette; fitting them back to the
         # source render would remove their crease shading and material contrast.
-        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B", "RF16B", "RF17B") else I.colour_match(render_rgb, warped, figure & fig_e)
+        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B", "RF16B", "RF17B", "RF18B") else I.colour_match(render_rgb, warped, figure & fig_e)
         if hair:
             weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy,
                                    parts["face"] if face_exclusion else None)
@@ -414,7 +414,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         empty_progress(run)
     from .prompts import PROMPTS
     rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()
-                                  if side_beauty or (beauty_refs is not None and name in ("RF5B", "RF6B", "RF17B"))
+                                  if side_beauty or (beauty_refs is not None and name in ("RF5B", "RF6B", "RF17B", "RF18B"))
                                   or name in ("RF2R", "RF2W", "RF3H", "RF4U", "RF5U")}
     if user_note:
         rec.data["user_note"] = user_note

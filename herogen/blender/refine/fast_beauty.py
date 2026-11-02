@@ -136,7 +136,7 @@ class FaceControl:
             yaw = beauty.selected_yaw(self.references, angle)
             with Image.open(self.folder / self.references['views'][str(yaw)]['mask']) as mask:
                 mask = mask.convert('L')
-            return reference, {**options, 'recipe_name': 'RF17B', 'reference_record': record,
+            return reference, {**options, 'recipe_name': 'RF18B', 'reference_record': record,
                                'surface_reference_mask': mask, 'complete_face': True}
         return reference, {**options, 'recipe_name': 'RF6B', 'reference_record': record,
                            'complete_face': job.name in ('head+0', 'body+0')}
@@ -145,7 +145,7 @@ class FaceControl:
         """Choose by declared view order after all frontal attempts have drained."""
         for key in ('head+0', 'body+0'):
             record = self.data['views'][key]
-            if record['accepted'] and record.get('prompt') in ('RF6B', 'RF17B'):
+            if record['accepted'] and record.get('prompt') in ('RF6B', 'RF17B', 'RF18B'):
                 selected = next(a for a in record['attempts'] if a.get('accepted'))
                 features = selected.get('checks', {}).get('facial_features', {}).get('repaint', {})
                 if features.get('both_eyes') and features.get('mouth'):
