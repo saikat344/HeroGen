@@ -7,6 +7,12 @@
 @media (min-width: 1100px) {
   .generation { grid-template-columns: minmax(0, 1fr) var(--side-panel-w); column-gap: var(--space-6); }
 }
+/* Below 1100 px the panel moves under the result at full width, after the downloads. */
+@media (max-width: 1099px) {
+  .generation { display: flex; flex-direction: column; gap: 0; }
+  .generation > .result-section { order: 1; }
+  .generation-notes.side-panel { order: 2; width: 100%; margin-top: var(--space-6); }
+}
 .generation-notes.side-panel { grid-column: 2; grid-row: 1 / 5; min-width: 0; padding: 0; overflow: hidden; color: var(--color-text);
   background: var(--color-surface-1); border: var(--border-w) solid var(--color-border-subtle); border-radius: var(--radius-xl); box-shadow: var(--shadow-inset-top); }
 .side-panel > #inputRefusal { margin: var(--space-5) var(--space-5) 0; }
