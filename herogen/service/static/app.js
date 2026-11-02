@@ -5,17 +5,18 @@ import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
 import { workbenchLog } from '/assets/workbench.js';
-import { generationView } from '/assets/generation.js';
+import { generationView, generationState } from '/assets/generation.js';
 import { variationsView } from '/assets/variations.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
-const S = { csrf: null, session: null, current: null, timer: null, revision: 0 };
+const S = { csrf: null, session: null, current: null, timer: null, revision: 0, job: null, shown: null, lostSince: 0 };
+const LOST_BANNER_MS = 30000;
 let entry;
 let screen = 'entry';
 function setScreen(next) {
   const enteringWorkbench = next === 'generation' && screen !== 'generation';
-  screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation');
+  screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation'); show('#statusBar', next === 'generation');
   landing?.setVisible(next === 'entry');
   $('#app').classList.toggle('generation-screen', next === 'generation');
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
@@ -40,7 +41,7 @@ const variations = variationsView($, { api, select: openJob, key: idemKey,
   }
 });
 function returnToEntry() {
-  ++S.revision; clearTimeout(S.timer); S.current = null;
+  ++S.revision; clearTimeout(S.timer); S.current = null; S.job = null; S.shown = null; S.lostSince = 0;
   if ($('#developerMode').getAttribute('aria-pressed') === 'true') $('#developerMode').click();
   developer.update(null); generation.reset(); liveLog.reset(); variations.reset(); setScreen('entry'); show('#jobLoading', false);
 }
@@ -53,7 +54,21 @@ function signIn() {
   }
 }
 function show(id, on = true) { $(id).hidden = !on; }
-function banner(text) { const b = $('#banner'); b.textContent = text || ''; b.hidden = !text; }
+// The strip under the header: network, session and page-level problems. `title` says what happened, `text` what is
+// safe, and an optional `action` {label, run} what to do. Danger announces itself; the other kinds are polite.
+let bannerAction = null;
+function banner(text, { title = 'Something went wrong', kind = 'danger', action = null } = {}) {
+  const b = $('#banner');
+  b.hidden = !text; bannerAction = text ? action : null;
+  if (!text) return;
+  b.className = `banner banner--${kind} banner--global`;
+  b.setAttribute('role', kind === 'danger' ? 'alert' : 'status');
+  $('#bannerTitle').textContent = title; $('#bannerText').textContent = text;
+  b.querySelector('use').setAttribute('href', `/assets/icons/sprite.svg#i-${kind === 'info' ? 'info' : 'triangle-alert'}`);
+  $('#bannerAction').hidden = !action; if (action) $('#bannerAction').textContent = action.label;
+}
+$('#bannerClose').addEventListener('click', () => banner(''));
+$('#bannerAction').addEventListener('click', () => bannerAction?.run());
 function el(tag, props = {}, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -169,13 +184,13 @@ function renderJob(j) {
   developer.update(j);
   show('#detail', screen === 'generation');
   $('#detailH').textContent = j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero');
-  const st = $('#state'); st.textContent = j.state; st.className = `state s-${j.state}`;
+  $('#state').textContent = j.state;
   const bits = [`started ${fmtTime(j.created_at)}`, `profile ${j.profile}`];
   if (Number.isFinite(j.seconds)) bits.push(`recorded duration ${fmtSecs(j.seconds)}`);
   if (Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${fmtUsd(j.cost_usd)}`);
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
-  const err = $('#detailErr');
-  err.hidden = !j.error || j.input_rejected || !!j.parent_job; err.textContent = j.error ? j.error.message : '';
+  S.job = j; S.shown = j.id;
+  jobBanner(j);
   generation.update(j); liveLog.update(j);
   variations.update(j);
   const dl = $('#downloads');
@@ -202,6 +217,108 @@ function renderJob(j) {
   $('#viewerLink').href = j.viewer;
   show('#cancelJob', j.state === 'queued' || j.state === 'running');
   $('#viewerLink').hidden = !g.available;
+  renderStatus();
+}
+
+// The job-level banner under the progress bar. A failed hero says what stopped, what is safe and offers Retry; a
+// cancelled one says it stopped; a requeued one says it will resume. Variation failures and refused inputs have their
+// own banners (#variationFailure, #inputRefusal), so none is shown for them here.
+function jobBanner(j) {
+  const box = $('#detailErr');
+  const kind = j.parent_job || j.input_rejected ? null : ['failed', 'rejected'].includes(j.state) ? 'danger'
+    : j.state === 'canceled' ? 'info' : j.state === 'queued' && j.error ? 'warning' : null;
+  box.hidden = !kind;
+  if (!kind) return;
+  const label = j.error?.stage_label || j.stage_label || '';
+  const where = label ? label[0].toUpperCase() + label.slice(1) : 'This step';
+  const stopped = generationState(j).steps.find((x) => x.state === 'canceled')?.title.toLowerCase();
+  const saved = j.models?.length || j.downloads?.glb?.available ? 'Your 3D model is saved.'
+    : Object.keys(j.images || {}).length ? 'Your saved images are kept.' : '';
+  const copy = { danger: [`${where} ${j.state === 'rejected' ? 'needs attention' : 'did not finish'}`, j.error?.message || 'The step could not be completed.', saved],
+    info: [stopped ? `Cancelled during ${stopped}` : 'Cancelled before it finished', 'You stopped this hero before it was done.', saved],
+    warning: ['Waiting for a free worker', j.error?.message || '', 'Your hero is saved and will start again on its own.'] }[kind];
+  box.className = `banner banner--${kind}`; box.setAttribute('role', kind === 'danger' ? 'alert' : 'status');
+  box.querySelector('use').setAttribute('href', `/assets/icons/sprite.svg#i-${kind === 'info' ? 'info' : 'triangle-alert'}`);
+  $('#detailErrTitle').textContent = copy[0]; $('#detailErrText').textContent = copy[1]; $('#detailErrSafe').textContent = copy[2];
+  $('#detailErrText').hidden = !copy[1]; $('#detailErrSafe').hidden = !copy[2];
+  $('#detailRetry').hidden = kind === 'warning';
+}
+
+// ---- status bar ------------------------------------------------------------------------------------------
+
+function fmtClock(v) {
+  const s = Math.max(0, Math.round(v)), m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return h ? `${h} h ${String(m % 60).padStart(2, '0')} min` : m ? `${m} min ${String(s % 60).padStart(2, '0')} s` : `${s} s`;
+}
+function elapsedText(j) {
+  const start = j.started_at || j.created_at, end = j.finished_at;
+  if (!start) return '';
+  const now = Date.now() / 1000;
+  if (j.state === 'queued') return `Queued · ${fmtClock(now - j.created_at)} so far`;
+  if (j.state === 'running' || !end) return polls(j) ? `Running · ${fmtClock(now - start)} elapsed` : '';
+  const took = fmtClock(end - start);
+  return { succeeded: `Finished in ${took}`, failed: `Stopped after ${took}`, rejected: `Stopped after ${took}`,
+    canceled: `Cancelled after ${took}`, stopped: `Saved after ${took}` }[j.state] || '';
+}
+// Green when everything is saved, ember while results are still arriving, red when the page lost the service.
+function renderStatus() {
+  const j = S.job, bar = $('#saveStatus');
+  const mode = S.lostSince ? 'offline' : j && (j.state === 'running' || j.export_state === 'running') ? 'saving' : 'saved';
+  if (bar.dataset.mode !== mode) {
+    const copy = { offline: 'Not saved, reconnecting', saving: 'Saving each result as it arrives', saved: 'Progress saved' };
+    bar.classList.toggle('is-saving', mode === 'saving'); bar.classList.toggle('is-offline', mode === 'offline');
+    bar.classList.toggle('is-just-saved', mode === 'saved' && bar.dataset.mode === 'saving');
+    $('#savedText').textContent = copy[mode]; bar.dataset.mode = mode;
+  }
+  $('#elapsed').textContent = j ? elapsedText(j) : '';
+}
+setInterval(() => { if (S.job && !document.hidden && screen === 'generation') renderStatus(); }, 1000);
+// The page lost (or regained) the service while polling: red status at once, a banner once it lasts.
+function connection(ok) {
+  if (ok) S.lostSince = 0;   // the caller clears the banner with every good read
+  else {
+    S.lostSince ||= Date.now();
+    if (Date.now() - S.lostSince >= LOST_BANNER_MS) banner('HeroGen is not reachable right now. Your hero is saved, and this page keeps trying.',
+      { title: 'Connection lost', kind: 'warning', action: { label: 'Try now', run: () => S.current && openJob(S.current) } });
+  }
+  renderStatus();
+}
+
+// ---- More menu and delete confirmation -------------------------------------------------------------------
+
+function initMenu() {
+  const button = $('#moreMenu'), list = $('#moreList');
+  const items = () => [...list.querySelectorAll('[role=menuitem]')].filter((i) => !i.hidden && !i.disabled);
+  const close = (refocus) => { list.hidden = true; button.setAttribute('aria-expanded', 'false'); if (refocus) button.focus(); };
+  const open = (last) => {
+    $('#moreRule').hidden = $('#cancelJob').hidden; list.hidden = false; button.setAttribute('aria-expanded', 'true');
+    (last ? items().at(-1) : items()[0])?.focus();
+  };
+  button.addEventListener('click', () => (list.hidden ? open() : close(true)));
+  button.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (list.hidden) open(e.key === 'ArrowUp'); }
+  });
+  list.addEventListener('keydown', (e) => {
+    const all = items(), at = all.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); close(true); }
+    else if (e.key === 'Tab') close(false);
+    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      all[e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (at + (e.key === 'ArrowDown' ? 1 : -1) + all.length) % all.length]?.focus();
+    }
+  });
+  list.addEventListener('click', (e) => { if (e.target.closest('[role=menuitem]')) close(false); });
+  document.addEventListener('click', (e) => { if (!list.hidden && !e.target.closest('.more')) close(false); });
+  $('#deleteDialog').addEventListener('close', () => { if ($('#moreMenu').isConnected && !$('#statusBar').hidden) $('#moreMenu').focus(); });
+  $('#closeDelete').addEventListener('click', () => $('#deleteDialog').close());
+  $('#cancelDelete').addEventListener('click', () => $('#deleteDialog').close());
+  // The Retry on the failure banner presses the real Retry button, so it is allowed exactly when that one is.
+  const retry = $('#retryVersion'), sync = () => { $('#detailRetry').disabled = retry.disabled; };
+  new MutationObserver(sync).observe(retry, { attributes: true, attributeFilter: ['disabled'] }); sync();
+  $('#detailRetry').addEventListener('click', () => retry.click());
+  // Compare explains itself while it is off.
+  const compare = $('#compareVersions'), hint = () => { compare.title = compare.disabled ? 'Needs two finished versions' : 'Compare two finished versions'; };
+  new MutationObserver(hint).observe(compare, { attributes: true, attributeFilter: ['disabled'] }); hint();
 }
 
 let previewUrl = null, previewRequest = 0, previewModule = null;
@@ -256,14 +373,24 @@ document.addEventListener('visibilitychange', () => {
 async function openJob(id, reveal = false) {
   const revision = ++S.revision;
   clearTimeout(S.timer);
-  if (S.current !== id) { developer.update(null); generation.reset(); liveLog.reset(); show('#detail', false); }
+  if (S.current !== id) { developer.update(null); generation.reset(); liveLog.reset(); show('#detail', false); S.job = null; S.shown = null; S.lostSince = 0; }
   S.current = id;
   if (reveal) show('#jobLoading');
   try {
     const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (S.current !== id || revision !== S.revision) return;
-    banner(''); followJob(j, reveal);
-  } catch (e) { if (revision === S.revision) banner(e.message); }
+    banner(''); connection(true); followJob(j, reveal);
+  } catch (e) {
+    if (revision !== S.revision) return;
+    // A hero already on screen that cannot be reached right now is kept as it is, and the page keeps trying.
+    if (S.shown === id && !reveal && (!e.status || e.status >= 500)) {
+      connection(false);
+      if (!document.hidden) S.timer = setTimeout(() => openJob(id), 3000);
+    } else if (e.status === 404) {
+      banner('This hero is not in your workspace. It may have been deleted.', { title: 'Hero not found', kind: 'warning',
+        action: { label: 'Go to your heroes', run: () => { banner(''); $('#heroesNav').click(); } } });
+    } else banner(e.message);
+  }
   finally { if (revision === S.revision) show('#jobLoading', false); }
 }
 
@@ -345,17 +472,25 @@ function initJobs() {
     } catch (e) { banner(e.message); if (S.current === id) openJob(id); }
     finally { $('#cancelJob').disabled = false; }
   });
-  $('#deleteJob').addEventListener('click', async () => {
-    if (!confirm('Delete this hero and all of its files?')) return;
+  $('#deleteJob').addEventListener('click', () => {
+    $('#deleteHeading').textContent = `Delete ${$('#workbenchName').textContent || 'this hero'}?`;
+    $('#deleteError').hidden = true; $('#confirmDelete').disabled = false; $('#deleteDialog').showModal();
+  });
+  $('#confirmDelete').addEventListener('click', async () => {
     const id = S.current; ++S.revision; clearTimeout(S.timer);
+    $('#confirmDelete').disabled = true;
     try {
       await api(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} });
+      $('#deleteDialog').close();
       if (S.current === id) {
-        show('#detail', false); developer.update(null); generation.reset(); liveLog.reset(); S.current = null;
+        show('#detail', false); developer.update(null); generation.reset(); liveLog.reset(); S.current = null; S.job = null; S.shown = null;
         history.replaceState(null, '', '/'); setScreen('entry'); show('#heroLibrary'); $('#showLibrary').setAttribute('aria-expanded', 'true');
       }
       await refreshList();
-    } catch (e) { banner(e.message); if (S.current === id) openJob(id); }
+    } catch (e) {
+      $('#deleteError').textContent = e.message; $('#deleteError').hidden = false; $('#confirmDelete').disabled = false;
+      if (S.current === id) openJob(id);
+    }
   });
 
 }
@@ -422,7 +557,7 @@ async function boot() {
   catch (e) { $('#loading').textContent = `HeroGen is not reachable: ${e.message}`; return; }
   const signinRoute = ['/admin/signin'].includes(location.pathname);
   $('#headerSignIn').textContent = 'Admin sign in';
-  initSignin(); initJobs(); initGuestAccess();
+  initSignin(); initJobs(); initMenu(); initGuestAccess();
   document.querySelectorAll('[data-work-shade]').forEach(button => button.addEventListener('click', async () => {
     const mode = button.dataset.workShade;
     const module = await import('/assets/preview.js'); module.shading(mode);

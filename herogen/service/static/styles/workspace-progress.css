@@ -1,0 +1,133 @@
+/* Workspace heading, progress bar, banners, status bar and menus.
+   Loaded after app.css. Colours, sizes, spacing, radii and durations all come from tokens.css. */
+
+/* ---------- Heading block ---------- */
+.generation > .workspace-top { grid-column: 1; display: grid; gap: var(--space-5); min-width: 0; margin-bottom: var(--space-5); }
+.expanded-viewer .workspace-top { grid-column: 1 / -1; }
+.workspace-top .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); margin: 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.crumbs__link { margin: 0; padding: 0; border: 0; border-radius: var(--radius-xs); background: none; color: var(--color-text-muted); font: inherit; cursor: pointer; text-decoration: none; }
+.crumbs .crumbs__link:hover { background: none; color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+.crumbs [aria-current] { color: var(--color-text); overflow-wrap: anywhere; }
+.workspace-top .heading { display: grid; gap: var(--space-2); }
+.workspace-top .heading .eyebrow { margin: var(--space-2) 0 0; display: flex; align-items: center; gap: var(--space-3); }
+#detail[data-job-state="running"] #generationEyebrow { color: var(--color-accent-text); }
+#detail[data-job-state="running"] #generationEyebrow::before { content: ""; width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--color-accent); animation: pulse var(--dur-ambient) var(--ease-standard) infinite; }
+.heading-row { display: flex; align-items: center; justify-content: flex-start; gap: var(--space-5); flex-wrap: wrap; }
+.heading-row h1 { margin: 0; min-width: 0; font-size: var(--text-display-l); line-height: var(--lh-display-l); letter-spacing: var(--ls-display-l); }
+.generation-subtitle { margin: 0; max-width: 62ch; font-size: var(--text-body); line-height: var(--lh-body); }
+.badge-pill--wait { color: var(--color-warning); border-color: var(--color-warning-border); background: var(--color-warning-subtle); }
+
+/* ---------- Progress bar and steps list ---------- */
+.generation .progress { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; align-items: center; column-gap: var(--space-6); row-gap: 0; transition: border-color var(--dur-base) var(--ease-standard); }
+.progress__label { margin: 0; white-space: normal; }
+.progress__segs { min-width: 0; }
+.progress__segs:empty { visibility: hidden; }
+.seg { transition: background-color var(--dur-slow) var(--ease-out); }
+.seg--done.is-new { animation: seg-fill var(--dur-slow) var(--ease-out); transform-origin: left; }
+.seg--run::after { background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-accent) 80%, transparent) 50%, transparent); }
+.progress__toggle { margin-left: 0; gap: var(--space-2); }
+.progress__toggle .icon { transition: transform var(--dur-base) var(--ease-out); }
+.progress.is-open .progress__toggle .icon { transform: rotate(180deg); }
+.progress__steps { grid-column: 1 / -1; display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows var(--dur-slow) var(--ease-out), visibility 0s linear var(--dur-slow); }
+.progress.is-open .progress__steps { grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
+.progress__steps-inner { min-height: 0; overflow: hidden; }
+.progress .stages { display: grid; gap: 0; margin: var(--space-3) 0 0; padding: 0; list-style: none; border-top: var(--border-w) solid var(--color-border-subtle); overflow: visible; }
+.progress .stages li { display: grid; grid-template-columns: var(--icon-m) minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-4); row-gap: var(--space-1); min-height: 44px; margin: 0; padding: var(--space-3) 0; border: 0; border-bottom: var(--border-w) solid var(--color-border-subtle); border-radius: 0; background: none; box-shadow: none; }
+.progress .stages li:last-child { border-bottom: 0; padding-bottom: var(--space-2); }
+.step-icon { color: var(--color-text-faint); }
+.step-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-1) var(--space-4); min-width: 0; }
+.progress .stages b { font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.progress .step-status { font-size: var(--text-body-s); color: var(--color-text-muted); }
+.progress .step-duration { font-size: var(--text-body-s); color: var(--color-text-muted); font-variant-numeric: tabular-nums; text-align: right; }
+.step-note { grid-column: 2 / -1; margin: 0; font-size: var(--text-body-s); line-height: var(--lh-body-s); color: var(--color-text-muted); overflow-wrap: anywhere; }
+.progress .stage-source { grid-column: 2 / -1; width: fit-content; font-size: var(--text-caption); color: var(--color-text-muted); }
+.progress .stage-source:hover { color: var(--color-text); }
+.stages .st-passed .step-icon { color: var(--color-success); }
+.stages .st-running .step-icon { color: var(--color-accent-text); animation: spin 1.2s linear infinite; }
+.stages .st-running .step-status { color: var(--color-accent-text); }
+.stages .st-skipped .step-icon, .stages .st-skipped .step-status { color: var(--color-warning); }
+.stages .st-failed .step-icon, .stages .st-rejected .step-icon, .stages .st-failed .step-status, .stages .st-rejected .step-status { color: var(--color-danger-text); }
+.stages .st-pending .step-status, .stages .st-canceled .step-status, .stages .st-unavailable .step-status { color: var(--color-text-faint); }
+.stages .st-skipped .step-note { color: var(--color-text); }
+
+/* ---------- Banners in the workspace ---------- */
+.workspace-top .banner { align-items: flex-start; }
+.workspace-top .banner > .icon, .banner--global > .icon { margin-top: var(--space-1); }
+.banner__title { font-size: var(--text-body); line-height: var(--lh-body); }
+h2.banner__title { font-family: var(--font-ui); letter-spacing: 0; }
+.banner__text { line-height: var(--lh-body-s); overflow-wrap: anywhere; }
+.banner__safe { color: var(--color-text); }
+.banner__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.banner__list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; font-size: var(--text-body-s); line-height: var(--lh-body-s); color: var(--color-text-muted); }
+.banner__list b { color: var(--color-text); font-weight: var(--weight-semibold); }
+.banner__list b::after { content: "."; }
+.banner > .btn { flex: none; }
+.banner--warning .banner__text, .banner--info .banner__text { color: var(--color-text-muted); }
+.banner--global { margin: 0; align-items: center; justify-content: center; border-width: 0 0 var(--border-w); border-radius: 0; padding: var(--space-4) var(--gutter); }
+.banner--global .banner__body { flex: 0 1 auto; }
+.banner--global > .btn--icon { margin-left: var(--space-3); }
+.export-status { display: flex; align-items: center; gap: var(--space-3); margin: 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.export-status.sr { position: absolute; }
+
+/* ---------- Status bar (sticky at the bottom of the workspace only) ---------- */
+.status-bar { position: sticky; bottom: 0; z-index: var(--z-sticky); flex-wrap: nowrap; }
+.status-bar__saved { font-weight: var(--weight-medium); color: var(--color-text); white-space: nowrap; }
+.status-bar__saved .dot { flex: none; transition: background-color var(--dur-base) var(--ease-standard); }
+.status-bar__saved.is-just-saved .dot { animation: pop var(--dur-slow) var(--ease-spring); }
+.status-bar__saved.is-offline { color: var(--color-danger-text); }
+.status-bar__saved.is-offline .dot { background: var(--color-danger); }
+.status-bar__time { white-space: nowrap; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+.status-bar .btn__label { white-space: nowrap; }
+
+/* ---------- More menu ---------- */
+.more { position: relative; }
+.menu { position: absolute; right: 0; bottom: calc(100% + var(--space-3)); z-index: var(--z-dropdown); min-width: 220px; padding: var(--space-2); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border); background: var(--color-surface-3); box-shadow: var(--shadow-3); animation: banner-in var(--dur-base) var(--ease-out); }
+.menu__item { display: flex; align-items: center; gap: var(--space-4); width: 100%; height: 36px; margin: 0; padding: 0 var(--space-4); border: 0; border-radius: var(--radius-m); background: none; color: var(--color-text); font: inherit; font-size: var(--text-body-s); font-weight: var(--weight-medium); text-align: left; cursor: pointer; }
+.menu .menu__item:hover, .menu .menu__item:focus-visible { background: var(--color-surface-2); }
+.menu__item:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu__item--danger { color: var(--color-danger-text); }
+.menu__rule { display: block; height: 1px; margin: var(--space-2) 0; background: var(--color-border-subtle); }
+
+/* ---------- Delete confirmation ---------- */
+.modal { width: min(560px, calc(100vw - 2 * var(--gutter))); padding: var(--space-7); border: var(--border-w) solid var(--color-border); border-radius: var(--radius-xl); background: var(--color-surface-1); color: var(--color-text); box-shadow: var(--shadow-3); }
+.modal[open] { animation: banner-in var(--dur-slow) var(--ease-out); }
+.modal::backdrop { background: var(--color-scrim); backdrop-filter: blur(4px); }
+.modal h2 { margin: 0 var(--space-9) var(--space-3) 0; }
+.modal p { margin: 0; }
+.modal__close { position: absolute; top: var(--space-4); right: var(--space-4); }
+.modal__actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-7); }
+.modal .err { margin-top: var(--space-4); }
+.btn--danger-solid { background: var(--color-danger); color: var(--color-surface-1); border-color: transparent; }
+.btn--danger-solid:hover:not(:disabled) { background: var(--color-danger-text); }
+
+/* ---------- Focus (all controls above) ---------- */
+.crumbs__link:focus-visible, .menu__item:focus-visible, .modal :focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }
+
+/* ---------- Phones ---------- */
+@media (max-width: 767px) {
+  .generation .progress { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-3); padding-block: var(--space-4); }
+  .progress__label { grid-column: 1; grid-row: 1; }
+  .progress__toggle { grid-column: 2; grid-row: 1; min-height: var(--tap-min); }
+  .progress__segs { grid-column: 1 / -1; grid-row: 2; }
+  .progress__steps { grid-row: 3; }
+  .progress .stages li { grid-template-columns: var(--icon-m) minmax(0, 1fr); }
+  .progress .step-duration { grid-column: 2; text-align: left; }
+  .heading-row h1 { font-size: var(--text-display-m); line-height: var(--lh-display-m); }
+  .banner { flex-wrap: wrap; }
+  .workspace-top .banner > .banner__body { flex-basis: calc(100% - var(--icon-l) - var(--space-5)); }
+  .workspace-top .banner > .btn, .banner__actions { margin-left: calc(var(--icon-l) + var(--space-5)); }
+  .banner--global { flex-wrap: nowrap; text-align: left; }
+  .status-bar { gap: var(--space-4); }
+  .status-bar__rule { display: block; }
+  .status-bar__time, .status-bar .btn__label { display: none; }
+  .status-bar #compareVersions { width: var(--tap-min); min-width: var(--tap-min); padding: 0; }
+  .status-bar .btn { min-height: var(--tap-min); min-width: var(--tap-min); }
+  .menu__item { height: var(--tap-min); }
+  .modal { margin: auto auto 0; width: 100%; max-width: none; border-radius: var(--radius-xl) var(--radius-xl) 0 0; max-height: 90svh; }
+  .modal__actions .btn { flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stages .st-running .step-icon, #detail[data-job-state="running"] #generationEyebrow::before, .status-bar__saved.is-just-saved .dot, .menu, .modal[open] { animation: none; }
+  .seg--done.is-new { animation: none; }
+}

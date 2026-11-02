@@ -10,6 +10,7 @@
 <script src="/assets/theme.js"></script>
 <link rel="stylesheet" href="/assets/tokens.css">
 <link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/styles/workspace-progress.css">
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
@@ -46,7 +47,12 @@
     <button type="button" class="btn btn--ghost btn--icon nav-toggle" aria-controls="siteNav" aria-expanded="false" aria-label="Open menu"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-menu"></use></svg></button>
   </div>
 </header>
-<div id="banner" class="banner" role="alert" hidden></div>
+<div id="banner" class="banner banner--danger banner--global" role="alert" hidden>
+  <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg>
+  <div class="banner__body"><p class="banner__title" id="bannerTitle"></p><p class="banner__text" id="bannerText"></p></div>
+  <button type="button" class="btn btn--secondary btn--s" id="bannerAction" hidden></button>
+  <button type="button" class="btn btn--ghost btn--icon btn--s" id="bannerClose" aria-label="Dismiss this message"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-x"></use></svg></button>
+</div>
 <main id="main" tabindex="-1">
   <p id="loading" class="muted">Loading…</p>
 
@@ -137,9 +143,40 @@
     </div>
 
     <section id="detail" class="generation" tabindex="-1" hidden aria-labelledby="generationTitle">
-      <nav class="workbench-breadcrumb" aria-label="Breadcrumb"><button type="button" id="breadcrumbHeroes" class="link">Your heroes</button><span aria-hidden="true">/</span><span id="workbenchName"></span></nav>
-      <div class="generation-heading"><div><p class="eyebrow">From imagination to your game <span></span></p><h1 id="generationTitle">Your hero is taking shape.</h1><p id="generationSubtitle" class="generation-subtitle" role="status"></p></div><div class="generation-actions"><span id="state" class="state"></span></div></div>
-      <details class="progress-disclosure"><summary><span id="progressCount"></span><span id="progressSegments" class="progress-segments" aria-hidden="true"></span><span class="view-steps">View steps <span aria-hidden="true">⌄</span></span></summary><ol id="stages" tabindex="0" role="list" class="stages generation-stages" aria-label="Generation stages"></ol></details>
+      <div class="workspace-top">
+      <nav class="workbench-breadcrumb crumbs" aria-label="Breadcrumb"><button type="button" id="breadcrumbHeroes" class="crumbs__link">Your heroes</button><span aria-hidden="true">/</span><span id="workbenchName" aria-current="page"></span></nav>
+      <div class="generation-heading heading">
+        <p class="eyebrow" id="generationEyebrow"></p>
+        <div class="heading-row">
+          <h1 id="generationTitle" class="display-l">Your hero is taking shape.</h1>
+          <span id="robloxReady" class="badge-pill badge-pill--ok" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-person-standing"></use></svg>Roblox ready</span>
+          <span id="queueNote" class="badge-pill badge-pill--wait" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-timer"></use></svg><span id="queueNoteText"></span></span>
+        </div>
+        <p id="generationSubtitle" class="generation-subtitle muted" role="status"></p>
+        <span id="state" class="state sr" aria-hidden="true"></span>
+      </div>
+      <div class="progress" role="group" aria-label="Generation progress">
+        <p class="progress__label" id="progressCount" aria-live="polite"></p>
+        <div id="progressSegments" class="progress__segs" aria-hidden="true"></div>
+        <button type="button" class="btn btn--ghost btn--s progress__toggle" id="viewSteps" aria-expanded="false" aria-controls="progressSteps"><span>View steps</span><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-down"></use></svg></button>
+        <div class="progress__steps" id="progressSteps" inert><div class="progress__steps-inner"><ol id="stages" role="list" class="stages generation-stages" aria-label="Generation stages"></ol></div></div>
+      </div>
+      <section id="inputRefusal" class="banner banner--danger" role="alert" aria-labelledby="inputRefusalTitle" hidden>
+        <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-circle-x"></use></svg>
+        <div class="banner__body"><h2 class="banner__title" id="inputRefusalTitle">Let’s revisit your input</h2><p class="banner__text" id="inputReason"></p></div>
+        <div class="banner__actions"><button id="retryInput" type="button" class="btn btn--secondary btn--s"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Try again</button><button id="changeIdea" type="button" class="btn btn--ghost btn--s">Change my idea</button></div>
+      </section>
+      <div id="detailErr" class="banner banner--danger" role="alert" hidden>
+        <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg>
+        <div class="banner__body"><p class="banner__title" id="detailErrTitle"></p><p class="banner__text" id="detailErrText"></p><p class="banner__text banner__safe" id="detailErrSafe"></p></div>
+        <button type="button" class="btn btn--secondary btn--s" id="detailRetry"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Retry</button>
+      </div>
+      <section id="stageIssues" class="banner banner--warning" role="status" aria-label="Steps needing attention" hidden>
+        <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-info"></use></svg>
+        <div class="banner__body"><p class="banner__title" id="stageIssuesTitle"></p><ul class="banner__list" id="stageIssuesList"></ul></div>
+      </section>
+      <p id="exportStatus" class="export-status" role="status" hidden></p>
+      </div>
       <div class="generation-grid">
         <div class="result-column"><section class="artboard" aria-labelledby="artifactLabel">
           <div class="selected-result"><label for="versionSelect">Selected result</label><select id="versionSelect" aria-label="Selected version"></select></div>
@@ -155,7 +192,6 @@
           <section class="variation-actions"><div class="attempt-actions"><div><button id="retryVersion" type="button">↻ &nbsp; Retry</button><p>Run this step again.</p></div><div><button id="refineVersion" type="button">✎ &nbsp; Refine</button><p>Change the result with your instructions.</p></div></div><p class="small">Each action starts a new attempt</p><p id="attemptTime" class="small muted"></p><p id="variationError" role="alert" class="err" hidden></p></section>
         </div>
         <aside class="generation-notes">
-          <section id="inputRefusal" class="generation-error" hidden><h2>Let’s revisit your input</h2><p id="inputReason"></p><div class="row"><button id="retryInput" type="button">Try again</button><button id="changeIdea" type="button">Change my idea</button></div></section>
           <div class="behind-title"><span class="terminal-icon" aria-hidden="true">›_</span><h2 class="behind-heading">Behind the build</h2></div><p class="behind-intro">Understand each step. Shape what comes next.</p>
           <div class="behind-tabs" role="tablist" aria-label="Behind the build"><button id="liveTab" type="button" role="tab" aria-selected="true" aria-controls="livePanel" tabindex="0">Live</button><button id="recipeTab" type="button" role="tab" aria-selected="false" aria-controls="recipePanel" tabindex="-1">Recipe</button><button id="branchesTab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Branches</button></div>
           <div id="livePanel" role="tabpanel" aria-labelledby="liveTab">
@@ -168,10 +204,6 @@
 </div><section id="inlineRefine" class="inline-refine"></section><button type="button" id="developerMode" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
         </aside>
       </div>
-      <div id="detailErr" class="generation-error" role="alert" hidden></div>
-      <p id="exportStatus" role="status" hidden></p>
-      <section id="stageIssues" class="stage-issues" aria-label="Steps needing attention" hidden></section>
-      <div class="generation-bottom"><span class="saved-indicator">Progress saved</span><span class="footer-rule"></span><button type="button" id="cancelJob" class="link" hidden>Cancel generation</button><button id="compareVersions" type="button" disabled>Compare variations</button><button type="button" id="deleteJob" class="link danger">Delete hero</button></div>
       <section class="result-section" aria-labelledby="resultsH"><div class="row"><div><p class="note-label">The next chapter</p><h2 id="resultsH">Bring your hero into your world.</h2></div><div class="spacer"></div><a id="viewerLink" class="button" href="/viewer">Open full viewer ↗</a></div><div id="downloads" class="downloads"></div>
         <div id="studio" hidden><h3>Using it in Roblox Studio</h3><ol class="steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details><summary>Read Roblox setup notes</summary><pre id="readme"></pre></details></div>
       </section>
@@ -186,6 +218,27 @@
 
   </section>
 </main>
+<div class="status-bar" id="statusBar" role="region" aria-label="Hero status" hidden>
+  <span class="status-bar__saved" id="saveStatus" role="status"><span class="dot" aria-hidden="true"></span><span class="saved-indicator" id="savedText">Progress saved</span></span>
+  <span class="status-bar__rule" aria-hidden="true"></span>
+  <span class="status-bar__time tabular" id="elapsed"></span>
+  <button type="button" id="compareVersions" class="btn btn--secondary btn--s" title="Needs two finished versions" aria-label="Compare variations" disabled><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-columns-2"></use></svg><span class="btn__label">Compare variations</span></button>
+  <div class="more">
+    <button type="button" id="moreMenu" class="btn btn--ghost btn--icon btn--s" aria-haspopup="menu" aria-expanded="false" aria-controls="moreList" aria-label="More actions"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-ellipsis"></use></svg></button>
+    <div class="menu" id="moreList" role="menu" aria-labelledby="moreMenu" hidden>
+      <button type="button" id="cancelJob" class="menu__item" role="menuitem" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-x"></use></svg>Cancel generation</button>
+      <span class="menu__rule" role="separator" id="moreRule" hidden></span>
+      <button type="button" id="deleteJob" class="menu__item menu__item--danger" role="menuitem"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-trash-2"></use></svg>Delete hero</button>
+    </div>
+  </div>
+</div>
+<dialog id="deleteDialog" class="modal" aria-labelledby="deleteHeading">
+  <button type="button" class="btn btn--ghost btn--icon btn--s modal__close" id="closeDelete" aria-label="Close"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-x"></use></svg></button>
+  <h2 class="display-s" id="deleteHeading">Delete this hero?</h2>
+  <p class="muted" id="deleteText">This removes the hero and all of its variations. It cannot be undone.</p>
+  <div class="modal__actions"><button type="button" class="btn btn--secondary" id="cancelDelete">Keep it</button><button type="button" class="btn btn--danger-solid" id="confirmDelete"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-trash-2"></use></svg>Delete hero</button></div>
+  <p class="err small" id="deleteError" role="alert" hidden></p>
+</dialog>
 <footer class="site-footer"><div class="site-footer__inner"><span class="site-footer__tag">Your idea. Your character. Your game.</span><a href="https://github.com/saikat344/HeroGen" rel="noopener">Open source</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span class="faint">Built with Meta AI models</span></div></footer>
 </body>
 </html>
