@@ -266,6 +266,24 @@ class FaceControl:
         y0, y1 = max(0, int(np.floor(top - pad))), min(h, int(np.ceil(chin)))
         region = np.zeros((h, w), bool)
         region[y0:y1, x0:x1] = True
+        # Semantic head masks can omit hats and helmets. Extend the closed volume to
+        # its connected mesh silhouette above the chin; separate raised props stay out.
+        probe_path = work / 'probe' / 'probe0.png'
+        headgear_pixels = 0
+        if probe_path.exists():
+            with Image.open(probe_path) as image:
+                if image.size != (w, h):
+                    raise ValueError('Setup silhouette dimensions differ from its probe')
+                silhouette = np.asarray(image.convert('RGBA').getchannel('A')) > 127
+            silhouette[y1:] = False
+            labels, count = ndimage.label(silhouette)
+            if count:
+                overlap = np.bincount(labels[region], minlength=count + 1)
+                overlap[0] = 0
+                if overlap.max():
+                    connected = ndimage.binary_fill_holes(labels == int(overlap.argmax()))
+                    headgear_pixels = int((connected & ~region).sum())
+                    region |= connected
         if not region.any():
             raise ValueError('Detected head bounds are outside the setup probe')
         # Feather outward only: no beauty grade or feather correction enters the head.
@@ -325,7 +343,9 @@ class FaceControl:
                 'source': 'setup-head-mask-and-mesh', 'mask': str(mask_path.relative_to(work)),
                 'mask_available': mask_path.exists(), 'chin_px': float(chin),
                 'transition_px': float(width), 'transition_texels': int((selected & ~core).sum()),
-                'grade_inside': False, 'all_depths': True, 'hanging_hair': 'cached-hair-masks' if self.hair_views else 'mesh-front-depth'})
+                'grade_inside': False, 'all_depths': True,
+                'headgear_silhouette': probe_path.exists(), 'headgear_pixels': headgear_pixels,
+                'hanging_hair': 'cached-hair-masks' if self.hair_views else 'mesh-front-depth'})
 
     def prepare_region(self, client, work):
         """Include exposed scalp, ears and neck so a face cannot be pasted into graded skin.
