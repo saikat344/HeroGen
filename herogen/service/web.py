@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -93,6 +94,8 @@ class Services:
     submit: Callable[[str], str]
     clock: Callable[[], float] = time.time
     local_rates: RateLimiter = field(default_factory=lambda: RateLimiter(time.time))
+    # Called when a hero that will reach stage 3 is accepted; the real servers pass `prewarm_models`.
+    prewarm: Callable[[], None] | None = None
 
 
 def page_csp(page_html: str) -> str:
@@ -103,6 +106,15 @@ def page_csp(page_html: str) -> str:
             "style-src 'self'; img-src 'self' blob: data:; font-src 'self'; "
             f"connect-src 'self' blob: data: {CDN_PREFIX}; "
             "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+
+def prewarm_models() -> None:
+    """Start the remote 3D model containers loading when a hero that will reach stage 3 is accepted (never on page
+    load), so its image steps hide the cold start. Non-blocking and best effort: `herogen.blender.remote.prewarm`
+    never raises, and HEROGEN_PREWARM=0 turns it off."""
+    from herogen.blender.remote import prewarm
+
+    threading.Thread(target=prewarm, name="herogen-prewarm", daemon=True).start()
 
 
 class SecurityHeaders:
@@ -556,12 +568,20 @@ class App:
             await self.call(self._drop_input, u["id"], job_id)
         if created:
             event("job_created", job=job["id"], user=u["id"], kind=kind, profile=profile)
+            self._prewarm()
             try:
                 await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
             except Exception:
                 log.exception("dispatch after create failed")
         view = await self.job_view(job["id"], u["id"])
         return JSONResponse(view, status_code=201 if created else 200)
+
+    def _prewarm(self) -> None:
+        if self.svc.prewarm is not None:
+            try:
+                self.svc.prewarm()
+            except Exception:
+                log.exception("model prewarm could not start")
 
     def _save_input(self, user_id: str, job_id: str, png: bytes) -> None:
         self.svc.storage.save_input(user_id, job_id, png)
@@ -780,6 +800,8 @@ class App:
         if not created:
             await self.call(self._delete_files, u["id"], new)
         else:
+            if stage != "3f":
+                self._prewarm()
             try:
                 await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
             except Exception:
@@ -826,6 +848,7 @@ class App:
         if not created:
             await self.call(self._drop_input, u['id'], new)
         else:
+            self._prewarm()
             try:
                 await self.call(dispatch_queued, self.svc.store, self.s, self.svc.submit)
             except Exception:

@@ -41,7 +41,7 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
     from herogen.service.storage import Storage
     from herogen.service.store import Store
     from herogen.service.uploads import Limits, sanitize
-    from herogen.service.web import Services
+    from herogen.service.web import Services, prewarm_models
     from herogen.service.worker import ThreadBackend
 
     data.mkdir(parents=True, exist_ok=True)
@@ -74,7 +74,7 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
 
     svc = Services(settings=settings, store=store, signer=Signer(settings.signing_key), storage=storage,
                    sender=EchoSender(settings.outbox_path), sanitize=lambda b: sanitize(b, limits),
-                   submit=backend.submit)
+                   submit=backend.submit, prewarm=prewarm_models if runner_kind == "local" else None)
     return svc, backend
 
 

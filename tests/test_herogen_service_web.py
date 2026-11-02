@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import zipfile
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
@@ -373,6 +374,32 @@ class TestJobsApi(WebCase):
         self.assertEqual(b.get(f"/api/jobs/{job['id']}/download/glb?lod=../x").status_code, 404)
         listed = b.get("/api/jobs").json()["jobs"]
         self.assertEqual([j["id"] for j in listed], [job["id"]])
+
+    def test_an_accepted_hero_warms_the_3d_models_and_a_page_load_does_not(self):
+        warm = mock.Mock()
+        self.svc.prewarm = warm
+        b = self.signin()
+        b.get("/")
+        warm.assert_not_called()
+        self.assertEqual(self.make_job(b).status_code, 201)
+        self.assertEqual(warm.call_count, 1)
+        self.assertEqual(self.make_job(b).status_code, 200, "the same Idempotency-Key returns the saved hero")
+        self.assertEqual(warm.call_count, 1, "a replayed request starts no second warmup")
+        warm.side_effect = RuntimeError("synthetic prewarm failure")
+        with self.assertLogs("herogen.service", "ERROR"):
+            self.assertEqual(self.make_job(b, key="key-00000002").status_code, 201, "warming never fails a hero")
+
+    def test_prewarm_models_returns_before_the_remote_call_finishes(self):
+        import threading
+        from herogen.service.web import prewarm_models
+        started, release = threading.Event(), threading.Event()
+        def slow():
+            started.set()
+            release.wait(5)
+        with mock.patch("herogen.blender.remote.prewarm", slow):
+            prewarm_models()
+            self.assertTrue(started.wait(5))
+            release.set()
 
     def test_upload_is_cleaned_before_storage(self):
         b = self.signin()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from unittest import mock
 
 from test_herogen_service_support import web_test
 from test_herogen_service_web import WebCase
@@ -56,6 +57,14 @@ class TestVariations(WebCase):
     def snapshot(self):
         return {str(p.relative_to(self.run)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in self.run.rglob('*') if p.is_file()}
+
+    def test_only_redos_that_rebuild_the_shape_warm_the_3d_models(self):
+        warm = mock.Mock()
+        self.svc.prewarm = warm
+        self.assertEqual(self.redo('texture').status_code, 201)
+        warm.assert_not_called()
+        self.assertEqual(self.redo('cover', key='variation-0002').status_code, 201)
+        self.assertEqual(warm.call_count, 1)
 
     def test_texture_continuation_keeps_shape_and_runs_remaining_stages(self):
         before = self.snapshot()
