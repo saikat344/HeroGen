@@ -120,7 +120,7 @@ class Store(GenerationStore, AnalyticsStore):
         "group_enter", "job_finish", "job_requeue", "job_cancel", "job_delete", "job_stages", "jobs_to_dispatch",
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "job_renew", "job_model_ready", "job_export_finish",
-        "job_continue", "job_versions", "jobs_stage_states",
+        "job_continue", "job_versions", "jobs_stage_states", "queue_positions",
         "guest_open", "generation_get",
     }) | ANALYTICS_PUBLIC
     # Methods reached through StoreService.admin_call with the hosted admin key.
@@ -524,6 +524,24 @@ class Store(GenerationStore, AnalyticsStore):
             for row in rows:
                 c.execute('UPDATE jobs SET dispatched_at=? WHERE id=?', (now, row['id']))
             return rows
+
+    def queue_positions(self, job_ids: list[str]) -> dict[str, int]:
+        """Where each given queued job stands in the line `jobs_to_dispatch` serves, across every workspace: 1 is
+        the next to start. A job dispatched within DISPATCH_GRACE_S is starting, not waiting, and stands at 0;
+        once its grace runs out unclaimed it is back in line at its own place. Jobs not queued are left out."""
+        wanted = {j for j in job_ids if valid_id(j, "j")}
+        if not wanted:
+            return {}
+        starting_after = self.clock() - DISPATCH_GRACE_S
+        out, waiting = {}, 0
+        for row in self._all("SELECT id, dispatched_at FROM jobs WHERE state='queued' AND deleted_at IS NULL "
+                             "ORDER BY created_at,rowid"):
+            starting = row["dispatched_at"] is not None and row["dispatched_at"] > starting_after
+            if not starting:
+                waiting += 1
+            if row["id"] in wanted:
+                out[row["id"]] = 0 if starting else waiting
+        return out
 
     @staticmethod
     def _attempts_in_phase(job) -> int:
