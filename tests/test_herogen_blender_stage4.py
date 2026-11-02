@@ -539,10 +539,12 @@ class TestEndToEndBlender(SyntheticBase):
         (run / "stage-3.json").write_text(json.dumps({"ok": True, "mesh_source": "carve",
                                                      "shape_views": list(vs.views)}))
         with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": "0"}):
-            with self.assertRaises(cuts.UnmeasurableJoints) as exc:
-                stage4.run_stage4(run, cut_search=False)
-        full_message = str(exc.exception).encode()
-        self.assertIn(b"RightElbow: no shared rim", full_message)
+            full = stage4.run_stage4(run, cut_search=False)
+        self.assertFalse(full["ok"])
+        self.assertEqual(full["status"], "rejected")
+        self.assertIn("no shared rim", full["joint_reasons"]["RightElbow"])
+        self.assertFalse(next(c for c in full["checks"] if c["name"] == "measurable_joints")["pass"])
+        self.assertFalse((run / "04-body" / "sections.json").exists())
         measure = pose.joint_gaps
 
         def violated(*args, **kwargs):
