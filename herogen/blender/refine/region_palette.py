@@ -357,6 +357,9 @@ def export_texture(manifest, prep, texture, camera, folder, *, timeout=900, prot
             figure = np.asarray(image.convert("RGBA"))[..., 3] > 127
         width = float(data["feather_pixels_at_1536"]) * max(figure.shape) / 1536
         application = _masks(load_masks("application_masks"), source.shape[:2])
+        # Saved support comes from the setup render; rasterized silhouette edges can differ.
+        # Only the current rendered surface can receive a projected colour correction.
+        application = {name: mask & figure for name, mask in application.items()}
         if "completion_head" in data and "skin" in application:
             with Image.open(manifest.parent / data["completion_head"]) as image:
                 head = np.asarray(image.convert("L")) > 127

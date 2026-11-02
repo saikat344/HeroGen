@@ -177,6 +177,36 @@ class RegionPaletteTests(unittest.TestCase):
             self.assertEqual(grades["hair"]["status"], "missing_mask")
             self.assertEqual(render.call_count, 1)
 
+    def test_export_clips_saved_application_to_current_silhouette(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pos.exr").write_bytes(b"layout")
+            for name, rgb in (("art", self.art), ("texture", self.source)):
+                Image.fromarray(np.round(rgb * 255).astype(np.uint8)).save(root / (name + ".png"))
+            rgba = np.full((8, 8, 4), 200, np.uint8)
+            rgba[..., 3] = 255
+            rgba[0, :, 3] = 0
+            Image.fromarray(rgba).save(root / "body+0.png")
+            Image.fromarray(self.skin.astype(np.uint8) * 255).save(root / "skin.png")
+            Image.new("L", (8, 8), 255).save(root / "cov.png")
+            Image.new("L", (8, 8), 255).save(root / "application.png")
+            masks = {"skin": "skin.png"}
+            data = {"atlas_layout_sha256": hashlib.sha256(b"layout").hexdigest(),
+                    "artwork": "art.png", "artwork_masks": masks, "render_masks": masks,
+                    "atlas_masks": masks, "application_masks": {"skin": "application.png"},
+                    "completion_head": "application.png", "feather_pixels_at_1536": 9}
+            (root / "manifest.json").write_text(json.dumps(data))
+            with mock.patch("herogen.blender.refine.backend.blender"), mock.patch.object(
+                    palette, "project_fields", side_effect=lambda prep, camera, figure, fields: fields) as project:
+                target, _ = palette.export_texture(root / "manifest.json", root, root / "texture.png",
+                                                   {"name": "body+0"}, root)
+            self.assertTrue(target.is_file())
+            fields = project.call_args.args[3]
+            self.assertFalse(fields["skin"][0].any())
+            self.assertTrue((fields["skin"][1:] > 0).all())
+            with Image.open(root / "application-skin.png") as mask:
+                self.assertFalse(np.asarray(mask)[0].any())
+
 
 class GeneratedManifestTests(unittest.TestCase):
     def setUp(self):

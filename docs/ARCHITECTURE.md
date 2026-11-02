@@ -809,7 +809,9 @@ there is no shared body curve, fixed mixing coefficient or manually selected col
 before RGB gamut conversion and texture quantisation. This is a measured distribution correction bound,
 not a guarantee that corresponding artwork pixels improve. Grades and sample counts are written to
 `region-palette*/grades.json` and `stage-3f.json`. For generated manifests, application coverage uses
-the completed render masks projected to the prepared atlas; explicit legacy manifests use their atlas masks;
+the completed render masks projected to the prepared atlas. Saved application masks are intersected with
+the current rendered silhouette before completion and feathering, so rasterization differences at the
+edge cannot assign a correction to background pixels. Explicit legacy manifests use their atlas masks;
 front-only masks do not grade unseen surfaces. Per-region chroma, luminance and protected-pixel
 evaluation against unlit artwork remains necessary before enabling this option for product runs.
 After grading, uncovered atlas gutters receive their nearest covered texel's colour, matching ordinary
