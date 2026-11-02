@@ -65,6 +65,13 @@ class SmokeChecksTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "more than the log"):
             smoke.check(written, good, held + [f"{smoke.RUN}/events.jsonl.part"], [])
 
+    def test_one_failure_does_not_hide_the_others(self):
+        read = {"seen": [0, 1, 2], "lags": [9.1], "bad": 0, "after_delete": [(1.0, False), (20.0, True)]}
+        with self.assertRaises(AssertionError) as caught:
+            smoke.check({"emitted": 3, "pump_stopped": False}, read, [f"{smoke.RUN}/events.jsonl"], ["x"])
+        for message in ("slowest", "came back", "kept writing", "left on the volume"):
+            self.assertIn(message, str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

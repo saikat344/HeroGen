@@ -2461,8 +2461,9 @@ An event that does not fit is dropped; writing one never fails a stage.
 - Lines are appended with one `write()` under the file lock the call ledger uses; a run keeps at most 2,000
   events or 512 KB, after which only step boundaries and outcomes are kept, behind one `truncated` event.
 - On Modal a stage runs on a local copy, so `worker.EventPump` copies the growing file to the volume and commits
-  every 3 s while the stage runs, and stops for good once the attempt is no longer current. Dev mode writes in
-  place.
+  every 2 s while the stage runs, and stops for good once the attempt is no longer current. Dev mode writes in
+  place. Measured on Modal, an event reaches the browser within about 8 s (2 s pump, 2 s volume refresh, 1.5 s
+  poll, and a commit of up to ~3 s).
 - `GET /api/jobs/<id>/events` reads at most 1,000 events and 256 KB per call inside the volume view's read lock,
   validates and re-serialises every line, leaves a partial last line for the next call, and drops lines an older
   attempt wrote after a newer one began. `done` is true once the job and its export have finished and the file is

@@ -38,9 +38,9 @@ from herogen.pipeline import events  # noqa: E402
 
 MOUNT = "/data"
 RUN = "users/u_smoke/runs/j_smoke"       # the run folder's path inside the volume
-PUMP_S = 3.0
+PUMP_S = 2.0                             # the service default (worker.PUMP_EVERY_S)
 POLL_S = 1.0
-MAX_LAG_S = 7.0                          # pump beat (3 s) + view refresh (2 s) + poll (1 s) + commit time
+MAX_LAG_S = 8.0                          # pump beat (2 s) + view refresh (2 s) + poll (1 s) + commit, up to ~3 s on Modal
 EMIT_EVERY_S = 0.5
 DELETE_AT_S = 40.0
 SETTLE_S = 12.0                          # after the delete, by when the raced write must be gone
@@ -115,24 +115,42 @@ def _valid(line: bytes) -> bool:
 
 def check(written: dict, read: dict, held: list[str], left: list[str], *, max_lag_s: float = MAX_LAG_S,
           settle_s: float = SETTLE_S, raced: bool = True) -> dict[str, Any]:
-    """Raise AssertionError naming the first check that failed; return the measured summary. ``raced``: the
-    writer's view of the volume still held the folder after the delete (separate containers), so its next write
-    must have taken itself back and stopped the pump; one shared folder (the local test) has no such race."""
-    seen, lags = read["seen"], read["lags"]
-    assert read["bad"] == 0, f"{read['bad']} garbled lines"
-    assert seen and lags, "the reader saw no events"
-    assert seen == sorted(set(seen)), "events arrived out of order or twice"
-    assert seen == list(range(len(seen))), f"events were lost: saw {len(seen)}, not a gapless run from 0"
-    assert max(lags) <= max_lag_s, f"slowest event took {max(lags):.1f} s to arrive (limit {max_lag_s} s)"
-    assert held == [f"{RUN}/{events.FILE}"], f"the volume held more than the log: {held}"
+    """Measure every check, print the measures, then raise one AssertionError naming every check that failed;
+    return the measures when all pass. ``raced``: the writer's view of the volume still held the folder after the
+    delete (separate containers), so its next write must have taken itself back and stopped the pump; one shared
+    folder (the local test) has no such race."""
+    seen, lags = read["seen"], sorted(read["lags"])
     first = read["after_delete"][0][0] if read["after_delete"] else 0.0
     gone = [exists for t, exists in read["after_delete"] if t >= first + settle_s]
-    assert gone, "the run ended too soon after the delete to tell"
-    assert not any(gone), "the deleted run folder's log came back"
-    assert written["pump_stopped"] or not raced, "the pump kept writing after the delete"
-    assert not left, f"files left on the volume after the delete: {left}"
-    return {"events": len(seen), "max_lag_s": round(max(lags), 2), "median_lag_s": round(sorted(lags)[len(lags) // 2], 2),
-            "emitted": written["emitted"]}
+    pick = lambda q: round(lags[min(len(lags) - 1, int(q * len(lags)))], 2) if lags else None  # noqa: E731
+    measures = {"events": len(seen), "emitted": written["emitted"], "garbled": read["bad"],
+                "lag_p50_s": pick(0.5), "lag_p95_s": pick(0.95), "lag_max_s": round(lags[-1], 2) if lags else None,
+                "held": held, "left": left, "pump_stopped": written["pump_stopped"],
+                "came_back": any(gone), "settle_samples": len(gone)}
+    print("smoke measures:", json.dumps(measures))
+    failures = []
+    if read["bad"]:
+        failures.append(f"{read['bad']} garbled lines")
+    if not seen or not lags:
+        failures.append("the reader saw no events")
+    elif seen != sorted(set(seen)):
+        failures.append("events arrived out of order or twice")
+    elif seen != list(range(len(seen))):
+        failures.append(f"events were lost: saw {len(seen)}, not a gapless run from 0")
+    if lags and lags[-1] > max_lag_s:
+        failures.append(f"slowest event took {lags[-1]:.1f} s to arrive (limit {max_lag_s} s)")
+    if held != [f"{RUN}/{events.FILE}"]:
+        failures.append(f"the volume held more than the log: {held}")
+    if not gone:
+        failures.append("the run ended too soon after the delete to tell")
+    elif any(gone):
+        failures.append("the deleted run folder's log came back")
+    if raced and not written["pump_stopped"]:
+        failures.append("the pump kept writing after the delete")
+    if left:
+        failures.append(f"files left on the volume after the delete: {left}")
+    assert not failures, "; ".join(failures)
+    return measures
 
 
 try:
