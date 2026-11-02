@@ -369,6 +369,34 @@ class FaceRuleTests(unittest.TestCase):
                 np.testing.assert_allclose(pixels[6:], grade)
                 self.assertFalse(self.data['face_source']['head_region']['grade_inside'])
 
+    def test_connected_hat_uses_default_at_all_depths_but_separate_prop_does_not(self):
+        probe = self.work / 'probe'
+        probe.mkdir()
+        rgba = np.zeros((1536, 1024, 4), np.uint8)
+        rgba[20:120, 300:750, 3] = 255  # hat extends above and beside the semantic head box
+        rgba[100:450, 450:570, 3] = 255
+        rgba[20:180, 90:110, 3] = 255  # separate raised prop
+        Image.fromarray(rgba).save(probe / 'probe0.png')
+        self.control.source_info = {'height': 2., 'body_centre': [0, 0, 0],
+            'boxes_px': {'head': [420, 150, 600, 450], 'face': [450, 200, 570, 400]}}
+        cam = cameras.camera('probe0', [0, 0, 0], 0, 2.12, (1024, 1536))
+        k = cameras.px_per_unit(cam)
+        uv = np.array([[320, 50], [320, 50], [100, 50], [500, 550]])
+        pos = np.zeros((1, 4, 3))
+        pos[0, :, 0] = (uv[:, 0] - 512) / k
+        pos[0, :, 2] = (768 - uv[:, 1]) / k
+        pos[0, :2, 1] = [-.2, .2]
+        normals = np.zeros_like(pos)
+        self.control.key = 'head+0'
+        self.control.fallback_texture = np.full((1, 4, 3), .2, np.float32)
+        self.data['face_source'] = {'source': 'default'}
+        tex = I.Texture.from_arrays(pos, normals, np.ones((1, 4), bool),
+                                    np.full((1, 4, 3), .9, np.float32), 2)
+        self.control.paint(tex, self.work, {})
+        np.testing.assert_array_equal(tex.T[0, :2], self.control.fallback_texture[0, :2])
+        np.testing.assert_allclose(tex.T[0, 2:], .9)
+        self.assertGreater(self.data['face_source']['head_region']['headgear_pixels'], 0)
+
     def test_long_hair_is_preserved_without_filling_the_torso_opening(self):
         # Hair ring encloses a torso-sized hole; only the cranial hole is filled.
         mask = np.zeros((1536, 1024), np.uint8)
