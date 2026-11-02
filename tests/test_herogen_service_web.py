@@ -706,6 +706,12 @@ class TestPages(WebCase):
             r = b.get(f"/assets/{font}")
             self.assertEqual((r.status_code, r.headers["content-type"]), (200, "font/woff2"), font)
             self.assertEqual(r.content[:4], b"wOF2", font)
+        sprite = b.get("/assets/icons/sprite.svg")
+        self.assertEqual((sprite.status_code, sprite.headers["content-type"]), (200, "image/svg+xml"))
+        symbols = set(re.findall(r'<symbol id="([^"]+)"', sprite.text))
+        for name in ("/", "/gallery/x"):
+            used = set(re.findall(r'/assets/icons/sprite\.svg#([\w-]+)', pages[name]))
+            self.assertTrue(used and used <= symbols, (name, used - symbols))
         self.assertEqual(b.get("/assets/icons/favicon.svg").headers["content-type"], "image/svg+xml")
 
     def test_only_tokens_css_writes_hex_colours_in_the_new_styles(self):
