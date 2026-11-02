@@ -259,6 +259,20 @@ def selected_yaw(rec, angle):
     return min(usable, key=lambda yaw: angular_distance(angle, yaw)) if usable else None
 
 
+def style_only(rec, yaw):
+    """True when the selected reference at `yaw` passed style selection but not its generation threshold.
+
+    Style selection accepts outlines at STYLE_IOU_MIN; the generation threshold (.90 cardinal,
+    .85 diagonal) is the geometry match. Records without a threshold have no geometry verdict.
+    """
+    view = rec["views"][str(yaw)]
+    threshold = view.get("threshold")
+    if threshold is None:
+        return False
+    trial = next(t for t in view["attempts"] if t.get("image") == view["image"])
+    return trial.get("style_iou", trial.get("iou", 0)) < threshold
+
+
 def reference(folder, rec, angle, *, head=False):
     """Select the nearest usable yaw and its neck-extended head crop for close-up requests.
 

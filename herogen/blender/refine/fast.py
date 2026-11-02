@@ -337,6 +337,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         from .fast_beauty import FaceControl
         face_control = FaceControl(*beauty_context, data=data, state_lock=state_lock)
         face_control.root_client, face_control.persistence_lock = client, persistence_lock
+        face_control.side_art = art_context is not None
         face_client = isolated_client(client, 'face-source', persistence_lock)
         if hasattr(face_client, 'network_attempts'):
             face_client._initial_network_attempts = face_client.network_attempts
