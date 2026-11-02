@@ -257,10 +257,12 @@ def validate(s: Settings, require_key: bool = True) -> None:
             raise ConfigError(f"{ENV['email_from']} must use your own sending domain in production")
 
 
-# The fast lane's process settings, by exact name: the switch, the shared in-flight ceiling and the per-model
-# request budgets (`herogen.pipeline.retry.SharedRPMLimiter` reads HEROGEN_RPM_<MODEL>). Never a prefix match.
+# The fast lane's process settings, by exact name: the switch, the shared in-flight ceiling, the per-model
+# request budgets (`herogen.pipeline.retry.SharedRPMLimiter` reads HEROGEN_RPM_<MODEL>) and the stage-3f beauty
+# off switches (`herogen.blender.refine.fast_product_options`). Never a prefix match.
 FAST_LANE_ENV = ("HEROGEN_FAST_LANE", "HEROGEN_MAX_IN_FLIGHT", "HEROGEN_RPM_MUSE_IMAGE_1_0",
-                 "HEROGEN_RPM_SAM_3_1", "HEROGEN_RPM_MUSE_SPARK_1_3")
+                 "HEROGEN_RPM_SAM_3_1", "HEROGEN_RPM_MUSE_SPARK_1_3", "HEROGEN_SIDE_BEAUTY",
+                 "HEROGEN_REFINE_BEAUTY")
 
 
 def env_for_deploy(env: Mapping[str, str] | None = None) -> dict[str, str]:

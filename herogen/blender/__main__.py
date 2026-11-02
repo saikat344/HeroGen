@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -53,8 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--refine-cap-usd", type=lambda value: None if value == "none" else float(value), default=0.80, help="per-run texture-refine API cap")
     r.add_argument("--refine-recipe", choices=("RF2R", "RF2W"), default="RF2R",
                    help="frozen normal-pass recipe (RF2W preserves artwork wear)")
-    r.add_argument("--side-beauty", action="store_true", default=None,
-                   help="condition side and back repaints on matching turnaround artwork")
+    r.add_argument("--side-beauty", action=argparse.BooleanOptionalAction, default=None,
+                   help="condition side and back repaints on matching turnaround artwork (fast profile default "
+                        "on; --no-side-beauty or HEROGEN_SIDE_BEAUTY=0 turns it off)")
+    r.add_argument("--refine-beauty", action=argparse.BooleanOptionalAction, default=None,
+                   help="fast profile: generate beauty references in the run and repaint with them (default "
+                        "on; --no-refine-beauty or HEROGEN_REFINE_BEAUTY=0 turns it off)")
     r.add_argument("--refine-note", default="",
                    help="user design note appended to every repaint prompt as quoted data; it cannot override "
                         "the fixed framing, outline, pose or detail rules")
@@ -170,15 +175,21 @@ def main(argv: list[str] | None = None) -> int:
     if "3f" in stages:
         from herogen.pipeline.client import ClientError, ModelClient
         from herogen.pipeline.redo import clean_note
-        from .refine import run_stage3f
+        from .refine import fast_product_options, run_stage3f
         from .stage3 import error_text
 
         try:
+            if (a.refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")) == "fast":
+                beauty = fast_product_options(a.side_beauty, a.refine_beauty, a.refine_beauty_dir)
+            elif a.refine_beauty:
+                raise ValueError("--refine-beauty needs the fast refine profile")
+            else:
+                beauty = {"side_beauty": a.side_beauty,
+                          **({"beauty_dir": a.refine_beauty_dir} if a.refine_beauty_dir else {})}
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model", mode=a.refine),
                               profile=a.profile, cap_usd=a.refine_cap_usd, timeout=a.timeout,
                               upscale_texture=a.upscale_texture, recipe=a.refine_recipe, refine_profile=a.refine_profile,
-                              user_note=clean_note(a.refine_note, allow_empty=True), side_beauty=a.side_beauty,
-                              **({"beauty_dir": a.refine_beauty_dir} if a.refine_beauty_dir else {}),
+                              user_note=clean_note(a.refine_note, allow_empty=True), **beauty,
                               **({"region_palette": True} if a.refine_region_palette else {}))
         except (ClientError, BlenderError, ModuleNotFoundError, ValueError, RuntimeError, OSError) as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)

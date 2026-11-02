@@ -117,3 +117,19 @@ class TestFastLaneReachesDeployedWorkers(TempDirCase):
         runner._flags['herogen.blender'] = '--profile --refine-profile --refine-note'
         argv = runner.command(next(s for s in PLAN if s.key == '3f'), ctx, stage_env, self.tmp)[0]
         self.assertEqual(argv[argv.index('--refine-profile') + 1], 'fast')
+
+    def test_beauty_off_switches_reach_deployed_stage_subprocesses(self):
+        from herogen.service.config import env_for_deploy
+        from herogen.service.runner import base_env
+
+        switches = {"HEROGEN_SIDE_BEAUTY": "0", "HEROGEN_REFINE_BEAUTY": "0",
+                    "HEROGEN_REFINE_BEAUTY_DIR": "/never/forwarded", "HEROGEN_REFINE_REGION_PALETTE": "1"}
+        image = env_for_deploy(switches)
+        with mock.patch.dict(os.environ, image, clear=True):
+            stage_env = base_env({"HOME": str(self.tmp)})
+        for name in ("HEROGEN_SIDE_BEAUTY", "HEROGEN_REFINE_BEAUTY"):
+            self.assertEqual(stage_env[name], "0", name)
+        # Saved development references and the region palette never reach the product lane.
+        for name in ("HEROGEN_REFINE_BEAUTY_DIR", "HEROGEN_REFINE_REGION_PALETTE"):
+            self.assertNotIn(name, image)
+            self.assertNotIn(name, stage_env)
