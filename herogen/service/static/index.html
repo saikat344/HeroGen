@@ -281,8 +281,14 @@
               <div id="workbenchShading" class="dock-group" role="group" aria-label="Orbit and shading" hidden><button type="button" class="thumb thumb--tool" id="orbitToggle" aria-pressed="true"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-3d"></use></svg></span>Orbit</button><button type="button" class="thumb thumb--tool" data-work-shade="clay" aria-pressed="false"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-box"></use></svg></span>Clay</button><button type="button" class="thumb thumb--tool" data-work-shade="wire" aria-pressed="false"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-globe"></use></svg></span>Wireframe</button></div>
             </div>
           </div>
+          <div class="actions" id="attemptActions" role="group" aria-label="Next attempt">
+            <div class="actions__col"><button id="retryVersion" type="button" class="btn btn--secondary btn--l btn--block" aria-describedby="retryHelp"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Retry</button><p class="actions__help" id="retryHelp">Run this step again.</p></div>
+            <span class="actions__rule" aria-hidden="true"></span>
+            <div class="actions__col"><button id="refineVersion" type="button" class="btn btn--primary btn--l btn--block" aria-describedby="refineHelp" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-pencil"></use></svg>Refine</button><p class="actions__help" id="refineHelp">Change the result with your instructions.</p></div>
+            <p class="actions__note"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-info"></use></svg><span>Each action starts a new attempt. Your current result stays saved.</span><span id="attemptTime" class="actions__time"></span></p>
+          </div>
+          <p id="variationError" role="alert" class="field-error actions__error" hidden></p>
         </section>
-          <section class="variation-actions"><div class="attempt-actions"><div><button id="retryVersion" type="button">↻ &nbsp; Retry</button><p>Run this step again.</p></div><div><button id="refineVersion" type="button">✎ &nbsp; Refine</button><p>Change the result with your instructions.</p></div></div><p class="small">Each action starts a new attempt</p><p id="attemptTime" class="small muted"></p><p id="variationError" role="alert" class="err" hidden></p></section>
         </div>
         <aside class="generation-notes side-panel" aria-labelledby="behindHeading">
           <div class="side-head"><span class="side-head__icon" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-square-terminal"></use></svg></span><h2 id="behindHeading" class="behind-heading">Behind the build</h2><p class="behind-intro">Understand each step. Shape what comes next.</p></div>

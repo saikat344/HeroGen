@@ -111,6 +111,9 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     $('#inlineRefine').hidden = !!job.input_rejected || !terminal();
     if (!$('#refineDialog').open) $('#refineHeading').textContent = `Refine ${labelOf(job)}`;
     $('#attemptTime').textContent = job ? expectedTime(job, retryStage()) : '';
+    const waiting = !!job && !terminal();
+    $('#retryHelp').textContent = waiting ? 'Available when this run finishes.' : 'Run this step again.';
+    $('#refineHelp').textContent = waiting ? 'Available when this run finishes.' : 'Change the result with your instructions.';
     const failed = job?.parent_job && (FAILED.includes(job.state) || job.stages?.some(s => s.key === job.from_stage && ['skipped','failed','rejected'].includes(s.state)));
     failedChild = failed ? null : latestFailedChild();
     const subject = failed ? job : failedChild;
@@ -128,6 +131,7 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     $('#retryInput').disabled = busy || !terminal();
     $('#retryVersion').hidden = !!job?.input_rejected;
     $('#refineVersion').hidden = !!job?.input_rejected;
+    $('#attemptActions').hidden = !!job?.input_rejected;
   }
 
   // ---------- Variations tree ----------
