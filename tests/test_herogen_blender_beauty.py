@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from herogen.blender.refine import beauty
-from herogen.pipeline.client import ApiError, ReplayMiss
+from herogen.pipeline.client import IMAGE_MODEL, SAM_MODEL, ApiError, CallLog, ReplayMiss
 
 
 class BeautyTests(unittest.TestCase):
@@ -267,6 +267,118 @@ class BeautyTests(unittest.TestCase):
         self.assertEqual(front["attempts"][0]["iou"], 1)
         with Image.open(self.out / front["mask"]) as image:
             self.assertEqual(image.size, (128, 128))
+
+
+class FastClient:
+    """A cache-backed client shape that `isolated_client` can copy; each yaw draws its own image."""
+
+    def __init__(self, cache_dir, mask, *, unusable=(), headless=(), failing=(), barrier=None):
+        self.cache_dir, self.mask, self.log = Path(cache_dir), mask, CallLog()
+        self.unusable, self.headless, self.failing, self.barrier = unusable, headless, failing, barrier
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.edits, self.segments = [], []
+
+    def _load(self, key):
+        return None
+
+    def _save_entry(self, key, entry):
+        pass
+
+    @staticmethod
+    def yaw(prompt):
+        return int(prompt.split("at yaw ", 1)[1].split(" ", 1)[0])
+
+    def edit_image(self, prompt, images, *, size, attempt):
+        yaw = self.yaw(prompt)
+        self.edits.append((yaw, attempt))
+        self.log.add(IMAGE_MODEL, "edit", f"edit{yaw}", False)
+        if self.barrier is not None:
+            self.barrier.wait()  # every yaw must be in flight at once
+        if yaw in self.failing:
+            raise ApiError("edit failed")
+        return Image.new("RGB", images[0].size, (100 + yaw // 2, 50, 50))
+
+    def segment(self, image, text):
+        yaw = (image.getpixel((0, 0))[0] - 100) * 2
+        self.segments.append((yaw, text))
+        self.log.add(SAM_MODEL, "segment", f"{text}{yaw}", False)
+        if text == "character" and yaw in self.unusable:
+            return []
+        if text == "head":
+            if yaw in self.headless:
+                return []
+            head = np.zeros(self.mask.shape, bool)
+            head[8:20, 24:40] = True
+            return [SimpleNamespace(mask=head)]
+        return [SimpleNamespace(mask=self.mask)]
+
+
+class FastGenerationTests(unittest.TestCase):
+    setUp = BeautyTests.setUp
+
+    def fast(self, **kwargs):
+        client = FastClient(self.root / "cache", self.mask, **kwargs)
+        self.fast_client = client
+        return beauty.generate_fast(self.run, client, self.out), client
+
+    def test_one_sample_per_cardinal_in_parallel_without_diagonal_guides(self):
+        import threading
+        rec, client = self.fast(barrier=threading.Barrier(4, timeout=10))
+        self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+        self.assertEqual(sorted(client.segments), sorted((a, t) for a in beauty.FAST_ANGLES
+                                                         for t in ("character", "head")))
+        self.assertEqual((rec["angles"], rec["attempts_per_angle"], rec["fallback"]),
+                         ([0, 90, -90, 180], 1, "none"))
+        self.assertEqual(rec["selected"], {str(a): True for a in beauty.FAST_ANGLES})
+        self.assertEqual(rec["status"], "complete")
+        # The isolated calls reach the caller's ledger: four images and eight SAM queries.
+        self.assertEqual(client.log.cost_usd(), 4 * .01 + 8 * .0025)
+        self.assertEqual(rec["cost_usd"], client.log.cost_usd())
+        self.assertEqual([rec["views"][str(a)]["threshold"] for a in beauty.FAST_ANGLES], [.9] * 4)
+        loaded = beauty.load(self.out)
+        for angle in beauty.FAST_ANGLES:
+            self.assertEqual(beauty.selected_yaw(loaded, angle), angle)
+        self.assertTrue(json.loads((self.out / "references.json").read_text())["selected"]["0"])
+
+    def test_rejected_yaw_is_not_retried_and_keeps_the_standard_recipe(self):
+        rec, client = self.fast(unusable=(90,))
+        self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+        self.assertNotIn((90, "head"), client.segments)
+        self.assertFalse(rec["selected"]["90"])
+        self.assertEqual(rec["status"], "rejected")
+        loaded = beauty.load(self.out)
+        self.assertIsNone(beauty.selected_yaw(loaded, 90))
+        with self.assertRaisesRegex(ValueError, "standard recipe"):
+            beauty.reference(self.out, loaded, 90)
+        self.assertEqual([beauty.selected_yaw(loaded, a) for a in (0, -90, 180)], [0, -90, 180])
+        # Saved references without the fast record still borrow the nearest usable yaw.
+        loaded.pop("fallback")
+        self.assertEqual(beauty.selected_yaw(loaded, 90), 0)
+
+    def test_selected_sample_without_a_head_is_unusable(self):
+        rec, _ = self.fast(headless=(180,))
+        self.assertFalse(rec["views"]["180"]["attempts"][0]["head_detected"])
+        self.assertFalse(rec["selected"]["180"])
+        self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 180))
+
+    def test_model_error_drains_every_yaw_and_propagates(self):
+        with self.assertRaises(ApiError):
+            self.fast(failing=(-90,))
+        client = self.fast_client
+        self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+        rec = json.loads((self.out / "references.json").read_text())
+        self.assertEqual((rec["status"], rec["error_type"]), ("error", "ApiError"))
+        self.assertEqual(rec["views"]["-90"]["attempts"], [])
+        self.assertTrue(all(len(rec["views"][str(a)]["attempts"]) == 1 for a in (0, 90, 180)))
+        self.assertEqual(rec["cost_usd"], client.log.cost_usd())
+        self.assertEqual(sum(c["kind"] == "edit" for c in client.log.calls), 4)
+
+    def test_folder_is_rebuilt_for_each_run(self):
+        self.out.mkdir()
+        (self.out / "beauty+45-try1.png").write_bytes(b"stale")
+        self.fast()
+        self.assertFalse((self.out / "beauty+45-try1.png").exists())
+        self.assertNotIn("45", json.loads((self.out / "references.json").read_text())["views"])
 
 
 if __name__ == "__main__":
