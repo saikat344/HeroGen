@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultName, finishedNote, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, summaryLine, thumbnailOf}
+import {defaultName, finishedNote, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, stillWorking, summaryLine, thumbnailOf}
   from '../herogen/service/static/heroes.js';
 
 const job = (id, extra = {}) => ({id, kind: 'prompt', name: id, state: 'succeeded', created_at: 100, started_at: 100, finished_at: 160, parent_job: null, ...extra});
@@ -33,6 +33,27 @@ test('the finish note waits for the Roblox steps before giving the full time', (
   assert.equal(finishedNote(ready, secs), 'Finished in 528 s');
   assert.equal(heroStatus(job('a'), {export_state: 'running'}).note, 'Model ready in 60 s · Roblox files in progress');
   assert.equal(heroStatus(job('a'), {export_state: 'ready', export_seconds: 60, roblox_state: 'ready'}).note, 'Finished in 2 min');
+});
+
+test('a card without its detail record still says the Roblox files are in progress', () => {
+  const running = job('a', {export_state: 'running'});
+  assert.equal(heroStatus(running, null).note, 'Model ready in 60 s · Roblox files in progress');
+  assert.equal(heroStatus(running, undefined).label, 'Ready');
+  assert.equal(heroStatus(job('a', {export_state: 'ready', export_seconds: 60}), null).note, 'Finished in 2 min');
+  assert.equal(heroStatus(job('a', {export_state: 'unavailable', export_seconds: 12}), null).note, 'Finished in 72 s');
+  // the list is polled and the detail is fetched once, so a stale detail never overrides the list
+  assert.equal(heroStatus(job('a', {export_state: 'ready', export_seconds: 60}), {export_state: 'running'}).note, 'Finished in 2 min');
+  assert.equal(heroStatus(running, {export_state: 'ready', export_seconds: 60}).note, 'Model ready in 60 s · Roblox files in progress');
+  // no Roblox-ready claim while the Roblox steps are still running
+  assert.equal(heroStatus(running, {export_state: 'running', roblox_state: 'ready'}).label, 'Ready');
+  assert.equal(heroStatus(job('a', {export_state: 'ready', export_seconds: 5}), {roblox_state: 'ready'}).label, 'Roblox ready');
+  // the grid keeps refreshing until the Roblox steps end, so the note then turns into the full time
+  assert.equal(stillWorking(running), true);
+  assert.equal(stillWorking(job('a', {export_state: 'ready'})), false);
+  assert.equal(stillWorking(job('a', {state: 'queued'})), true);
+  assert.equal(stillWorking(job('a', {state: 'failed', export_state: 'running'})), false);
+  // the same sentence as the status bar
+  assert.equal(heroStatus(running, null).note, finishedNote({...running, export_state: 'running'}, (v) => `${Math.round(v)} s`));
 });
 
 test('run time counts from the start, never from when the hero was queued', () => {
