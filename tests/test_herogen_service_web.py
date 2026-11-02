@@ -708,6 +708,14 @@ class TestPages(WebCase):
             self.assertEqual(r.content[:4], b"wOF2", font)
         self.assertEqual(b.get("/assets/icons/favicon.svg").headers["content-type"], "image/svg+xml")
 
+    def test_only_tokens_css_writes_hex_colours_in_the_new_styles(self):
+        from herogen.service import web
+
+        css = (web.STATIC_DIR / "app.css").read_text()
+        marker = "/* legacy: delete per phase */"
+        self.assertEqual(css.count(marker), 1)
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css[:css.index(marker)]), [])
+
     def test_viewer_and_health(self):
         b = Browser(self.app)
         r = b.get("/viewer")
