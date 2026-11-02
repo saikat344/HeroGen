@@ -210,9 +210,17 @@ def step(key: Any) -> Iterator[None]:
         _step.reset(token)
 
 
-def set_step(key: Any) -> None:
-    """Set the step for the rest of this context (a stage function that owns its thread)."""
-    _step.set(str(key))
+def set_step(key: Any) -> contextvars.Token:
+    """Set the step for the rest of this context (a stage function that owns its thread); `reset_step` undoes it."""
+    return _step.set(str(key))
+
+
+def reset_step(token: contextvars.Token) -> None:
+    """Undo `set_step`, so a later stage in the same process starts from its own step."""
+    try:
+        _step.reset(token)
+    except ValueError:   # set in another context; nothing of this context's to undo
+        pass
 
 
 def current_step() -> str | None:

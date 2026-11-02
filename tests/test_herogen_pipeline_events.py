@@ -81,6 +81,13 @@ class EventsTest(unittest.TestCase):
         self.assertEqual(events.target_for("feet"), "feet")
         self.assertEqual(events.slug("Full-body sketch"), "full_body_sketch")
 
+    def test_reset_step_restores_the_previous_step(self):
+        with mock.patch.dict(os.environ, {events.ENV_STEP: "6"}):
+            token = events.set_step(1)
+            self.assertEqual(events.current_step(), "1")
+            events.reset_step(token)
+            self.assertEqual(events.current_step(), "6")
+
     def test_small_measurements_keep_six_significant_digits(self):
         event = events.validate({"v": 1, "t": 1, "kind": "check", "name": "tol", "ok": True,
                                  "m": {"value": 5e-08, "limit": 0.123456789}, "s": 1234.56789})
