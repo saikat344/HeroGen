@@ -98,6 +98,11 @@ function el(tag, props = {}, ...kids) {
   for (const k of kids) if (k) e.append(k);
   return e;
 }
+function svgIcon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  svg.setAttribute('class', 'icon'); svg.setAttribute('aria-hidden', 'true'); use.setAttribute('href', `/assets/icons/sprite.svg#i-${name}`);
+  svg.append(use); return svg;
+}
 function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; }
 function fmtUsd(v) { return typeof v === 'number' ? `$${v.toFixed(v < 0.1 ? 4 : 2)}` : ''; }
 function fmtSecs(v) { return typeof v === 'number' ? (v < 90 ? `${v.toFixed(1)} s` : `${(v / 60).toFixed(1)} min`) : ''; }
@@ -195,19 +200,21 @@ function renderJob(j) {
   const items = [];
   const g = j.downloads.glb;
   if (g.available) {
-    const glbLink = el('a', { href: g.url, cls: 'button', download: '', text: 'Download GLB' });
+    const glbLink = el('a', { href: g.url, cls: `btn ${j.downloads.roblox.available ? 'btn--secondary' : 'btn--primary'}`, download: '', text: 'Download GLB' });
+    glbLink.prepend(svgIcon('download'));
     glbLink.addEventListener('click', () => track('download_click', { format: 'glb' }, { flush: true }));
     items.push(glbLink);
   } else {
-    items.push(el('span', { cls: 'muted small', text: `GLB: ${g.reason}` }));
+    items.push(el('span', { cls: 'downloads__note', text: `GLB: ${g.reason}` }));
   }
   const r = j.downloads.roblox;
   if (r.available) {
-    const rbxLink = el('a', { href: r.url, cls: 'button', download: '', text: 'Download Roblox bundle (.zip)' });
+    const rbxLink = el('a', { href: r.url, cls: 'btn btn--primary', download: '', text: 'Download Roblox bundle (.zip)' });
+    rbxLink.prepend(svgIcon('download'));
     rbxLink.addEventListener('click', () => track('download_click', { format: 'roblox' }, { flush: true }));
     items.push(rbxLink);
   } else {
-    items.push(el('span', { cls: 'muted small', text: `Roblox bundle: ${r.reason}` }));
+    items.push(el('span', { cls: 'downloads__note', text: `Roblox bundle: ${r.reason}` }));
   }
   dl.replaceChildren(...items);
   show('#studio', r.available);
