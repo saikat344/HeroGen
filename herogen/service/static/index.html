@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="/assets/app.css">
 <link rel="stylesheet" href="/assets/styles/workspace-progress.css">
 <link rel="stylesheet" href="/assets/styles/landing.css">
+<link rel="stylesheet" href="/assets/styles/workspace-stage.css">
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
@@ -226,16 +227,41 @@
       <p id="exportStatus" class="export-status" role="status" hidden></p>
       </div>
       <div class="generation-grid">
-        <div class="result-column"><section class="artboard" aria-labelledby="artifactLabel">
-          <div class="selected-result"><label for="versionSelect">Selected result</label><select id="versionSelect" aria-label="Selected version"></select></div>
-          <div class="artboard-top"><span id="artifactLabel">Your character workbench</span><div class="artboard-tabs" aria-label="Preview type"><button type="button" id="artTab" aria-pressed="true">Images</button><button type="button" id="modelTab" aria-pressed="false" hidden>3D preview</button></div></div>
-          <div class="viewer-surface"><div class="viewer-controls"><button type="button" id="fullscreenPreview" aria-label="Fullscreen viewer">⛶</button><button type="button" id="previewLighting" aria-label="Studio lighting" aria-pressed="false" hidden>☼</button><button type="button" id="expandPreview" aria-label="Expand viewer" aria-pressed="false">↗</button></div><div class="artboard-canvas"><img id="artboardImage" alt="" hidden><div id="artboardEmpty"><span class="waiting-symbol" aria-hidden="true">✧</span><h2>A little imagination.<br>A new dimension.</h2><p id="artboardEmptyText">Your first image will appear here when it is ready.</p></div><div id="previewWrap" hidden><canvas id="preview" aria-label="3D preview of the body"></canvas></div><div id="imageError" class="artifact-error" role="status" hidden><p>This image could not be loaded.</p><button type="button" id="retryImage">Try image again</button></div><div id="previewError" class="artifact-error" role="status" hidden><p>The inline 3D preview could not be loaded. You can still download the file or open the full viewer.</p></div></div>
-          <div id="images" class="artifact-strip" aria-label="Available character images"></div>
-          <p id="orbitHint" class="artboard-hint" hidden>◎ Orbit · Drag to rotate · Scroll to zoom</p>
-          <div id="workbenchShading" class="artboard-tabs artboard-hint" aria-label="Model shading" hidden><button type="button" data-work-shade="textured" aria-pressed="true">Textured</button><button type="button" data-work-shade="clay" aria-pressed="false">Clay</button><button type="button" data-work-shade="wire" aria-pressed="false">Wire</button></div>
+        <div class="result-column"><section class="panel result-panel" aria-labelledby="resultH">
+          <div class="result-head">
+            <h2 id="resultH" class="result-head__title"><label for="versionSelect">Selected result</label></h2>
+            <div class="result-head__end">
+              <div class="seg-ctl viewer-mode" role="group" aria-label="Preview type"><button type="button" id="artTab" aria-pressed="true"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-image"></use></svg>Images</button><button type="button" id="modelTab" aria-pressed="false" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-3d"></use></svg><span id="modelTabText">3D preview</span></button></div>
+              <div class="select-wrap"><select id="versionSelect" class="select-btn"></select><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-down"></use></svg></div>
+            </div>
           </div>
-          <p id="modelNote" class="artboard-hint" role="status" hidden></p>
-          <div id="modelUpdate" class="artboard-hint" hidden><button type="button" id="updateModel">Sharper version ready - Update</button><p id="modelUpdateNote"></p></div>
+          <div class="viewer" id="viewer" data-mode="empty">
+            <div class="viewer__media">
+              <img id="artboardImage" class="viewer__image" alt="" hidden>
+              <div id="artboardEmpty" class="viewer__empty"><span class="viewer__silhouette" aria-hidden="true"><span class="skeleton viewer__silhouette-head"></span><span class="skeleton viewer__silhouette-body"></span></span><p id="artboardEmptyText" class="viewer__empty-title">Your first image appears here in about a minute.</p><p id="artboardIdea" class="viewer__idea" hidden></p></div>
+            </div>
+            <div id="previewWrap" class="viewer__canvas" hidden><canvas id="preview" aria-label="3D preview of the body. Drag to orbit, scroll to zoom, or use the Front, Side and Back buttons below."></canvas></div>
+            <div class="viewer__status">
+              <p id="artifactLabel" class="viewer__label">Your character workbench</p>
+              <p id="modelNote" class="viewer__note" role="status" hidden></p>
+              <div id="modelUpdate" class="viewer__notice" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg><p id="modelUpdateNote"></p><button type="button" id="updateModel" class="btn btn--secondary btn--s">Show it</button></div>
+            </div>
+            <div class="viewer__tools">
+              <button type="button" class="viewer__btn" id="resetView" aria-label="Reset camera" hidden><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-maximize"></use></svg></button>
+              <button type="button" class="viewer__btn" id="previewLighting" aria-label="Studio lighting" aria-pressed="false" hidden><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sun"></use></svg></button>
+              <button type="button" class="viewer__btn" id="fullscreenPreview" aria-label="Fullscreen" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-maximize-2"></use></svg></button>
+            </div>
+            <div id="imageError" class="viewer__error" role="status" hidden><svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg><p>This image could not be loaded.</p><button type="button" id="retryImage" class="btn btn--secondary btn--s"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Try again</button></div>
+            <div id="previewError" class="viewer__error" role="status" hidden><svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg><p>The 3D preview could not be loaded. You can still download the file or open the full viewer.</p></div>
+            <p id="modelPending" class="viewer__pending" role="status" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-loader-circle"></use></svg>3D shape on the way</p>
+            <p id="orbitHint" class="viewer__hint" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-3d"></use></svg>Drag to orbit · scroll to zoom</p>
+            <div class="viewer__dock" id="viewerDock" role="group" aria-label="Views and shading" hidden>
+              <div id="images" class="dock-group" role="group" aria-label="Available character images"></div>
+              <div id="cameraViews" class="dock-group" role="group" aria-label="Camera views" hidden></div>
+              <span class="dock-sep" id="dockSep" aria-hidden="true" hidden></span>
+              <div id="workbenchShading" class="dock-group" role="group" aria-label="Orbit and shading" hidden><button type="button" class="thumb thumb--tool" id="orbitToggle" aria-pressed="true"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-3d"></use></svg></span>Orbit</button><button type="button" class="thumb thumb--tool" data-work-shade="clay" aria-pressed="false"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-box"></use></svg></span>Clay</button><button type="button" class="thumb thumb--tool" data-work-shade="wire" aria-pressed="false"><span class="thumb__img"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-globe"></use></svg></span>Wireframe</button></div>
+            </div>
+          </div>
         </section>
           <section class="variation-actions"><div class="attempt-actions"><div><button id="retryVersion" type="button">↻ &nbsp; Retry</button><p>Run this step again.</p></div><div><button id="refineVersion" type="button">✎ &nbsp; Refine</button><p>Change the result with your instructions.</p></div></div><p class="small">Each action starts a new attempt</p><p id="attemptTime" class="small muted"></p><p id="variationError" role="alert" class="err" hidden></p></section>
         </div>

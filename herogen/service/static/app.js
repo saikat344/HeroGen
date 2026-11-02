@@ -111,20 +111,6 @@ for (const id of ['heroesNav', 'breadcrumbHeroes']) $(`#${id}`).addEventListener
   $('#showLibrary').click(); $('#heroLibrary').scrollIntoView({block: 'start', behavior: 'smooth'});
 });
 $('#workspaceNav').addEventListener('click', () => $('#backToIdeas').click());
-$('#fullscreenPreview').addEventListener('click', async () => {
-  try {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else await $('.viewer-surface').requestFullscreen();
-  } catch { banner('Fullscreen is unavailable in this browser. Use Expand viewer.'); }
-});
-$('#expandPreview').addEventListener('click', () => {
-  const expanded = $('#detail').classList.toggle('expanded-viewer');
-  $('#expandPreview').setAttribute('aria-pressed', String(expanded));
-});
-$('#previewLighting').addEventListener('click', () => {
-  const on = $('#previewLighting').getAttribute('aria-pressed') !== 'true';
-  $('#previewLighting').setAttribute('aria-pressed', String(on)); previewModule?.lighting(on);
-});
 
 const developer = developerMode($('#developerMode'), $('#developerPanel'),
   (id) => api(`/api/runs/r1/${encodeURIComponent(id)}`));
@@ -571,12 +557,6 @@ async function boot() {
   const signinRoute = ['/admin/signin'].includes(location.pathname);
   $('#headerSignIn').textContent = 'Admin sign in';
   initSignin(); initJobs(); initMenu(); initGuestAccess();
-  document.querySelectorAll('[data-work-shade]').forEach(button => button.addEventListener('click', async () => {
-    const mode = button.dataset.workShade;
-    const module = await import('/assets/preview.js'); module.shading(mode);
-    document.querySelectorAll('[data-work-shade]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
-    track('shade_toggle', {mode});
-  }));
   bindOrbitDrag($('#preview'), 'workbench');
   document.querySelectorAll('a[href="/terms"],a[href="/privacy"]').forEach((link) => link.addEventListener('click', () => track('page_view', { page: 'legal' }, { flush: true })));
   $('#backToIdeas').addEventListener('click', () => {

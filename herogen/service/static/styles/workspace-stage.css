@@ -1,0 +1,135 @@
+/* Workspace result panel: the lit 3D stage, its tools and the dock.
+   Builds on the .viewer, .viewer__tools, .viewer__btn, .viewer__dock and .thumb components in app.css.
+   The stage is dark in both themes, so everything placed on it uses the --stage-* tokens. */
+
+/* ---------- Result panel header ---------- */
+.result-panel { overflow: hidden; }
+.result-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-5); border-bottom: var(--border-w) solid var(--color-border-subtle); }
+.result-head .result-head__title { margin: 0; font-family: var(--font-ui); font-size: var(--text-title); line-height: var(--lh-title); font-weight: var(--weight-semibold); letter-spacing: 0; white-space: nowrap; }
+.result-head__title label { cursor: default; }
+.result-head__end { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.viewer-mode { flex: none; }
+.viewer-mode button .icon { color: inherit; }
+.result-head .viewer-mode button:hover:not(:disabled) { border-color: transparent; background-color: var(--color-surface-2); color: var(--color-text); }
+.result-head .viewer-mode button[aria-pressed="true"]:hover:not(:disabled) { background-color: var(--color-surface-1); }
+.select-wrap { position: relative; display: inline-flex; min-width: 0; }
+.select-wrap .icon { position: absolute; right: var(--space-4); top: 50%; transform: translateY(-50%); color: var(--color-text-muted); pointer-events: none; }
+.result-head .select-btn { appearance: none; -webkit-appearance: none; width: auto; max-width: 260px; min-width: 0; height: var(--control-h-m); margin: 0; padding: 0 calc(var(--space-4) + var(--icon-s) + var(--space-3)) 0 var(--space-4); border-radius: var(--radius-m); border: var(--border-w) solid var(--color-border-strong); background: var(--color-surface-2); color: var(--color-text); font: inherit; font-size: var(--text-body-s); font-weight: var(--weight-medium); text-overflow: ellipsis; cursor: pointer; transition: border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard); }
+.result-head .select-btn:hover { border-color: var(--color-text-muted); background: var(--color-surface-3); }
+.result-head .select-btn:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }
+
+/* ---------- Stage ---------- */
+.result-panel .viewer { --thumb-w: 76px; --thumb-h: 64px; --viewer-dock-space: var(--space-8);
+  height: clamp(420px, 62vh, 720px); border-radius: 0; container: stage / inline-size; }
+.viewer.has-dock { --viewer-dock-space: calc(var(--space-5) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
+.viewer.is-lit { background: radial-gradient(60% 55% at 50% 34%, color-mix(in srgb, var(--ember-300) 22%, transparent), transparent 72%), var(--stage-bg); }
+.viewer :focus-visible { outline-color: var(--stage-accent-text); }
+
+/* 2D results: the image centred on the stage on its own plate, above the dock. */
+.viewer__media { position: absolute; inset: var(--space-11) var(--space-8) var(--viewer-dock-space); z-index: 1; display: grid; place-items: center; min-height: 0; }
+.viewer__image { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; min-height: 0; object-fit: contain; border-radius: var(--radius-l); box-shadow: var(--shadow-3); }
+.viewer .viewer__image.reveal { animation: reveal var(--dur-reveal) var(--ease-out) both; }
+
+/* Before the first image: a silhouette skeleton and one line of copy. */
+.viewer__empty { display: grid; justify-items: center; gap: var(--space-5); max-width: 44ch; text-align: center; }
+.viewer__silhouette { display: grid; justify-items: center; gap: var(--space-3); }
+.viewer .viewer__silhouette .skeleton { background: var(--stage-thumb-bg); border: var(--border-w) solid var(--stage-glass-border); }
+.viewer .viewer__silhouette .skeleton::after { background: linear-gradient(100deg, transparent 30%, var(--stage-shimmer) 50%, transparent 70%); }
+.viewer__silhouette-head { width: 56px; height: 56px; border-radius: 50%; }
+.viewer .viewer__silhouette-body { width: 112px; height: 150px; border-radius: var(--radius-2xl) var(--radius-2xl) var(--radius-l) var(--radius-l); }
+.viewer .viewer__empty-title { margin: 0; font-family: var(--font-display); font-size: var(--text-display-s); line-height: var(--lh-display-s); font-weight: var(--weight-display); color: var(--stage-text); text-wrap: balance; }
+.viewer .viewer__idea { margin: 0; font-family: var(--font-display); font-size: var(--text-display-s); line-height: var(--lh-display-s); font-weight: var(--weight-regular); color: var(--stage-text-muted); text-wrap: balance; }
+
+/* 3D results: a transparent canvas over the backdrop. */
+.viewer__canvas { position: absolute; inset: 0; z-index: 1; }
+.viewer canvas#preview { display: block; width: 100%; height: 100%; margin: 0; border-radius: 0; background: transparent; touch-action: none; cursor: grab; }
+.viewer canvas#preview:active { cursor: grabbing; }
+.viewer canvas#preview.reveal { animation: reveal var(--dur-reveal) var(--ease-out) both; }
+
+/* Top left: what is shown, plus model notes and the update notice. */
+.viewer__status { position: absolute; top: var(--space-5); left: var(--space-5); z-index: 4; display: grid; justify-items: start; gap: var(--space-3); max-width: calc(100% - 3 * var(--control-h-m) - 2 * var(--space-3) - 3 * var(--space-5)); }
+.viewer .viewer__label { margin: 0; display: inline-flex; align-items: center; height: var(--control-h-s); padding: 0 var(--space-4); border-radius: var(--radius-pill); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-caption); font-weight: var(--weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.viewer[data-mode="empty"] .viewer__label { display: none; }
+.viewer .viewer__note { margin: 0; padding-left: var(--space-2); color: var(--stage-text-muted); font-size: var(--text-caption); }
+.viewer__notice { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4); border-radius: var(--radius-l); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-body-s); box-shadow: var(--shadow-3); animation: banner-in var(--dur-slow) var(--ease-out); }
+.viewer__notice > .icon { color: var(--stage-accent-text); }
+.viewer__notice p { margin: 0; }
+
+/* Buttons that sit on the stage keep stage colours in both themes. */
+.viewer .btn--secondary { color: var(--stage-text); border-color: var(--stage-glass-border-hover); background: transparent; }
+.viewer .btn--secondary:hover:not(:disabled) { color: var(--stage-text); background: var(--stage-glass-hover); border-color: var(--stage-text-muted); }
+
+/* Top right tools. */
+.viewer__tools { z-index: 5; }
+.viewer .viewer__btn:focus-visible { outline: var(--focus-w) solid var(--stage-accent-text); outline-offset: var(--focus-offset); }
+.viewer .viewer__btn[aria-pressed="true"]:hover:not(:disabled) { border-color: var(--color-accent-border); }
+
+/* Errors on the stage: a centred glass card; the rest of the workspace stays usable. */
+.viewer__error { position: absolute; left: 50%; top: 45%; z-index: 4; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: var(--space-4); width: min(360px, calc(100% - 2 * var(--space-5))); padding: var(--space-6); border-radius: var(--radius-l); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); color: var(--stage-text); text-align: center; font-size: var(--text-body-s); }
+.viewer__error > .icon { color: var(--stage-accent-text); }
+.viewer__error p { margin: 0; }
+
+/* Waiting for the 3D shape: a glass chip above the dock. */
+.viewer__pending { position: absolute; left: 50%; bottom: calc(var(--viewer-dock-space) - var(--space-3)); z-index: 4; transform: translateX(-50%); display: inline-flex; align-items: center; gap: var(--space-3); margin: 0; height: var(--control-h-s); padding: 0 var(--space-5); border-radius: var(--radius-pill); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-caption); font-weight: var(--weight-semibold); white-space: nowrap; }
+.viewer__pending .icon { color: var(--stage-accent-text); animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
+
+/* Bottom left hint; it fades after the first drag. */
+.viewer .viewer__hint { transition: opacity var(--dur-slow) var(--ease-standard); pointer-events: none; }
+.viewer .viewer__hint.is-faded { opacity: 0; }
+
+/* ---------- Dock ---------- */
+.viewer__dock { z-index: 5; overscroll-behavior-x: contain; }
+.dock-group { display: flex; gap: var(--space-3); flex: none; }
+.viewer__dock .dock-sep { flex: none; margin: var(--space-2) var(--space-1); }
+.viewer__dock .thumb { flex: none; min-width: var(--thumb-w); line-height: var(--lh-caption); border-radius: var(--radius-s); }
+.viewer__dock .thumb__img { display: grid; place-items: center; overflow: hidden; width: var(--thumb-w); height: var(--thumb-h); }
+.viewer__dock .thumb__img img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; }
+.viewer__dock .thumb__label { max-width: var(--thumb-w); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Neutralise the legacy element hover rule (button:hover) on the glass. */
+.viewer__dock .thumb:hover:not(:disabled) { background: none; border-color: transparent; color: var(--stage-text); }
+.viewer__dock .thumb:focus-visible { outline: none; }
+.viewer__dock .thumb:focus-visible .thumb__img { outline: var(--focus-w) solid var(--stage-accent-text); outline-offset: var(--focus-offset); }
+.viewer__dock .thumb--tool:hover:not(:disabled) .thumb__img { background-color: var(--stage-glass-hover); }
+.viewer__dock .thumb--tool[aria-pressed="true"] .thumb__img { border-color: var(--color-accent-border); background-color: color-mix(in srgb, var(--color-accent) 14%, transparent); }
+.viewer__dock .thumb[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.viewer__dock .thumb[aria-disabled="true"]:hover .thumb__img { transform: none; }
+
+/* ---------- Fullscreen and the in-page fallback ---------- */
+.result-panel .viewer:fullscreen { width: 100vw; height: 100vh; border-radius: 0; }
+.result-panel .viewer.viewer--expanded { position: fixed; inset: 0; z-index: var(--z-modal); height: 100dvh; border-radius: 0; }
+body.has-expanded-viewer { overflow: hidden; }
+
+/* Keep the hint clear of the dock when the stage is narrow. */
+@container stage (max-width: 880px) {
+  .viewer.has-dock .viewer__hint { bottom: calc(var(--viewer-dock-space) - var(--space-2)); }
+  .viewer.has-dock .viewer__pending ~ .viewer__hint { display: none; }
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 767px) {
+  /* Title and version picker share the first row; the Images / 3D switch takes the full second row. */
+  .result-head { flex-wrap: wrap; gap: var(--space-3); padding: var(--space-4); }
+  .result-head__end { display: contents; }
+  .result-head .result-head__title { flex: 1 1 auto; }
+  .select-wrap { flex: 0 1 auto; min-width: 0; }
+  .result-head .select-btn { max-width: 180px; }
+  .viewer-mode { order: 3; flex: 1 1 100%; }
+  .viewer-mode button { flex: 1; justify-content: center; height: var(--tap-min); }
+  .result-panel .viewer { --thumb-w: 56px; --thumb-h: 52px; height: clamp(380px, 64svh, 560px); }
+  .viewer__media { inset: calc(var(--space-11) + var(--space-3)) var(--space-5) var(--viewer-dock-space); }
+  .viewer__tools { top: var(--space-4); right: var(--space-4); gap: var(--space-2); }
+  .viewer__status { top: var(--space-4); left: var(--space-4); max-width: calc(100% - 3 * var(--tap-min) - 2 * var(--space-2) - 3 * var(--space-4)); }
+  .viewer .viewer__btn { width: var(--tap-min); height: var(--tap-min); }
+  .viewer__dock { bottom: var(--space-4); max-width: calc(100% - 2 * var(--space-4)); justify-content: flex-start; }
+  .viewer.has-dock { --viewer-dock-space: calc(var(--space-4) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
+  .viewer__dock .thumb { min-width: var(--tap-min); }
+  .viewer .viewer__hint { display: none; }
+  .viewer__silhouette-head { width: 44px; height: 44px; }
+  .viewer .viewer__silhouette-body { width: 88px; height: 112px; }
+}
+
+/* ---------- Reduced motion: durations collapse in tokens.css; also stop the spinner and the reveal blur. ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .viewer__pending .icon, .viewer__notice { animation: none; }
+  .viewer .viewer__image.reveal, .viewer canvas#preview.reveal { animation-name: fade; }
+}

@@ -135,3 +135,53 @@ test('studio lighting changes illumination while preserving the loaded camera an
   v.lighting(false);assert.equal(sun.intensity,1.2);
   v.dispose();
 });
+
+// The workspace stage: eased camera presets, an idle orbit after 4 s, and reduced motion.
+function stageClock(reduced = false) {
+  let t = 1000;
+  Object.defineProperty(globalThis, 'performance', {value: {now: () => t}, configurable: true, writable: true});
+  globalThis.matchMedia = query => ({matches: reduced && query.includes('reduced-motion')});
+  const listeners = {};
+  const canvas = {clientWidth: 800, clientHeight: 500, classList: {add() {}, remove() {}},
+    addEventListener(type, fn) { listeners[type] = fn; }, removeEventListener() {}};
+  return {canvas, listeners, advance(ms) { t += ms; }};
+}
+const azimuth = (s) => { const p = s.cameras[0].position, c = s.controls[0].target; return Math.atan2(p.x - c.x, p.z - c.z); };
+async function stage(reduced = false) {
+  const clock = stageClock(reduced), s = await setup(), presets = [];
+  s.api.onPreset(value => presets.push(value));
+  const load = s.api.show(clock.canvas, 'hero.glb'); s.loads[0].done({scene: s.model()}); await load;
+  const frame = (ms) => { clock.advance(ms); s.renderers[0].loop(); };
+  return {...s, clock, presets, frame};
+}
+test('the stage reveals the first model and settles on the front preset', async () => {
+  const s = await stage();
+  assert.ok(Math.abs(azimuth(s)) > 0.2, 'starts off-axis');
+  s.frame(600); assert.equal(s.presets.at(-1), null);
+  s.frame(700); assert.ok(Math.abs(azimuth(s)) < 1e-6); assert.equal(s.presets.at(-1), 'front');
+  delete globalThis.matchMedia;
+});
+test('camera presets ease to 90 and 180 degrees and report the preset when they land', async () => {
+  const s = await stage(); s.frame(1300);
+  s.api.camera('back'); s.frame(100); assert.equal(s.presets.at(-1), null);
+  s.frame(400); assert.ok(Math.abs(Math.abs(azimuth(s)) - Math.PI) < 1e-6); assert.equal(s.presets.at(-1), 'back');
+  s.api.camera('side'); s.frame(500); assert.ok(Math.abs(azimuth(s) - Math.PI / 2) < 1e-6); assert.equal(s.presets.at(-1), 'side');
+  delete globalThis.matchMedia;
+});
+test('the idle orbit starts after 4 s, stops on input and can be switched off', async () => {
+  const s = await stage(); s.frame(1300);
+  s.frame(3000); const still = azimuth(s); s.frame(500); assert.equal(azimuth(s), still);
+  s.frame(600); s.frame(16); const a = azimuth(s); s.frame(16); assert.notEqual(azimuth(s), a);
+  assert.equal(s.presets.at(-1), null);
+  s.clock.listeners.pointerdown(); s.frame(16); const b = azimuth(s); s.frame(3000); assert.equal(azimuth(s), b);
+  s.frame(1100); s.frame(16); const c = azimuth(s); s.frame(16); assert.notEqual(azimuth(s), c);
+  s.api.orbit(false); s.frame(16); const d = azimuth(s); s.frame(9000); s.frame(16); assert.equal(azimuth(s), d);
+  delete globalThis.matchMedia;
+});
+test('reduced motion skips the reveal, never orbits and snaps presets', async () => {
+  const s = await stage(true);
+  assert.ok(Math.abs(azimuth(s)) < 1e-6); assert.equal(s.presets.at(-1), 'front');
+  s.frame(10000); s.frame(16); const a = azimuth(s); s.frame(16); assert.equal(azimuth(s), a);
+  s.api.camera('back'); assert.ok(Math.abs(Math.abs(azimuth(s)) - Math.PI) < 1e-6); assert.equal(s.presets.at(-1), 'back');
+  delete globalThis.matchMedia;
+});
