@@ -69,7 +69,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
       case e.kind === 'step_start': {
         step.started ??= t;
         const usual = step.stage?.typical_seconds;
-        line(t, '▸', `${step.title}${Number.isFinite(usual) ? `  (usually about ${copy.about(usual)})` : ''}`);
+        line(t, '▸', `${step.title}${Number.isFinite(usual) ? `  (${copy.usually(usual)})` : ''}`);
         break;
       }
       case e.kind === 'step_end': {
@@ -104,7 +104,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         if (e.kind === 'gpu_wait' && Number.isFinite(e.s)) {
           // A second wait on the same call: the GPU has not answered after `s` seconds.
           row.gpuWait = true;
-          line(t, 'i', `${name}: still waiting for the GPU after ${copy.elapsed(e.s * 1000)}. If it was asleep the first call can take about a minute longer.`);
+          line(t, 'i', `${name}: still waiting for the GPU after ${copy.aboutCall(e.s)}. If it was asleep the first call can take about a minute longer.`);
         } else if (CALL_START.has(e.kind)) {
           row.started ??= t;
           row.text = `${copy.upper(copy.callStart(full))}…`;
@@ -160,8 +160,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         }
         if (!text) continue ordered;
         if (step && (state === 'failed' || state === 'kept')) step.attention = true;
-        group.rows.push({key: `e:${index}`, call: false, who: said ? 'herogen' : null, state, text, at: t});
-        if (e.kind === 'check' && step) step.attention = true;
+        group.rows.push({key: `e:${index}`, call: false, who: said ? 'herogen' : null, state, text, at: t, check: e.kind === 'check'});
         line(t, GLYPH[state], said ? `HeroGen (local): ${said}` : text);
       }
     }
@@ -181,6 +180,10 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     step.elapsed = step.running && step.started != null ? now - step.started : null;
     step.typicalSeconds = Number.isFinite(s?.typical_seconds) ? s.typical_seconds : null;
     if (['failed', 'rejected'].includes(step.state)) step.attention = true;
+    // A check that missed inside a step that still passed (one texture try, say) is a note, not a failure.
+    for (const row of step.rows) if (row.check && row.state === 'failed') {
+      if (step.state === 'passed') row.state = 'kept'; else step.attention = true;
+    }
     for (const row of step.rows) if (row.call && row.state === 'running' && !step.running && step.state !== 'pending') row.state = 'unknown';
   }
   for (const row of calls.values()) if (row.state === 'running') {
@@ -220,7 +223,7 @@ export function stepMeta(step) {
   const time = step.running ? (step.elapsed != null ? `running ${copy.elapsed(step.elapsed)}` : 'running')
     : Number.isFinite(step.seconds) ? copy.seconds(step.seconds) : '';
   const cost = Number.isFinite(step.cost) && (step.cost > 0 || step.calls || step.state === 'passed') ? `${copy.usd(step.cost)} est.` : '';
-  const usual = step.typicalSeconds != null && (step.running || step.state === 'pending') ? `usually about ${copy.about(step.typicalSeconds)}` : '';
+  const usual = step.typicalSeconds != null && (step.running || step.state === 'pending') ? copy.usually(step.typicalSeconds) : '';
   return metaJoin(time, cost, usual);
 }
 
