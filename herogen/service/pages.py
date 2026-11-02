@@ -85,9 +85,11 @@ def error_main(status: int, art: dict | None = None) -> str:
         artwork = (art.get("assets") or {}).get("artwork") or {}
         thumb = artwork.get("thumb_url")
         src = html.escape(thumb, quote=True) if thumb else f"/gallery-assets/{key}/artwork"
-        figure = (f'<figure class="error-art"><img src="{src}" width="320" height="480" '
-                  f'alt="{title}, a hero made with HeroGen" decoding="async">'
-                  f'<figcaption>{title}, made with HeroGen</figcaption></figure>')
+        # error-art.js falls back to the full artwork when the thumbnail fails, and hides the figure if that fails too.
+        figure = (f'<figure class="error-art"><img src="{src}" data-full="/gallery-assets/{key}/artwork" '
+                  f'width="320" height="480" alt="{title}, a hero made with HeroGen" decoding="async">'
+                  f'<figcaption>{title}, made with HeroGen</figcaption></figure>'
+                  f'<script type="module" src="/assets/error-art.js"></script>')
     return (f'<section class="error-page error-page--{status}" aria-labelledby="errorTitle">'
             f'<span class="error-page__mark" aria-hidden="true">HG</span>'
             f'<div class="error-page__copy"><p class="eyebrow">{eyebrow}</p>'
