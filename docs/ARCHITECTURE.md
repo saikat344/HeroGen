@@ -2600,7 +2600,9 @@ inside the same frozen wave: the exact ordinary-fast attempt-one request (origin
 recipe, sample index one, the ordinary wave's frozen render, no turnaround or beauty reference).
 A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3. For the
 `head+0` pass only, face selection's rejection of a gate-accepted slot 1 (missing eyes or mouth, no
-ordinary paint, or less eye detail) counts as a failed beauty sample. When slot 2 was also rejected,
+ordinary paint, or less eye detail) counts as a failed beauty sample. A gate-accepted slot 1 whose
+prompt is not a beauty recipe (`RF6B`, `RF17B` or `RF18B`) is never a face source either, so it also
+counts as a failed beauty sample and, with slot 2 rejected, launches slot 3, still at most three samples. When slot 2 was also rejected,
 the head launches slot 3 under the same rule before the face source is chosen, and that selection then
 runs unchanged with slot 3's accepted ordinary paint available for the eye-detail comparison. Slot 3's
 worker first runs ordinary attempt one through the nested run's own pass, which pays that sample once
