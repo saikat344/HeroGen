@@ -214,3 +214,46 @@ def apply_to_skeleton(sk, rec: dict):
     sk.evidence = dict(rec.get("evidence", {}))
     sk.notes.append(f"joints from 03-joints.json (source {rec.get('source')})")
     return sk
+
+
+def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray):
+    """Keep the selected joints unless they leave an R15 part without source vertices.
+
+    Silhouette limb roots can disagree with the model's distal joints. Try the recorded anatomical roots,
+    changing the fewest roots that give every part vertices. All other joints, radii and ends stay selected.
+    This is independent of lane and pose-gap thresholds; it never selects on a gap measurement.
+    """
+    from copy import deepcopy
+    from itertools import combinations
+
+    from . import SECTIONS, split
+
+    def empty(skeleton):
+        labels = split.Labeller(split.build_rig(skeleton)).labels(verts)
+        counts = np.bincount(labels, minlength=len(SECTIONS))
+        return [name for name, count in zip(SECTIONS, counts) if count == 0]
+
+    missing = empty(sk)
+    if not missing:
+        return sk
+    anatomical = rec.get("sources", {}).get("sam3d-body", {})
+    sources = rec.get("joint_sources", {})
+    roots = [name for name in LIMB_ROOTS if name in anatomical
+             and (sources.get(name, "").startswith("silhouette")
+                  or (name not in sources and rec.get("limb_roots") == "silhouette"))
+             and not np.array_equal(sk.joints[name], anatomical[name])]
+    for count in range(1, len(roots) + 1):
+        for names in combinations(roots, count):
+            candidate = deepcopy(sk)
+            for name in names:
+                candidate.joints[name] = np.asarray(anatomical[name], float)
+            candidate.ends["HipCentre"] = (candidate.joints["LeftHip"] + candidate.joints["RightHip"]) / 2
+            if empty(candidate):
+                continue
+            reason = "selected joints left no source vertices in " + ", ".join(missing)
+            for name in names:
+                candidate.evidence[name] = "recorded SAM 3D Body anatomical limb root; " + reason
+            candidate.notes.append("anatomical limb root fallback (" + ", ".join(names) + "): " + reason)
+            return candidate
+    raise ValueError("stage 4 joints leave R15 parts without source vertices: " + ", ".join(missing)
+                     + "; no recorded anatomical limb-root combination gives every part vertices")

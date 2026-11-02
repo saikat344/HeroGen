@@ -497,6 +497,15 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     joints_source = "silhouette"
     if jrec is not None and jrec.get("source") == "sam3d-body":
         sk = body_joints.apply_to_skeleton(sk, jrec)
+        if mesh_npz.exists():
+            with np.load(mesh_npz) as mesh:
+                source_verts = mesh["verts"]
+        else:
+            from .glb import load_glb
+
+            source_verts, _ = load_glb(mesh_src).merged()
+        sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts)
+        del source_verts
         joints_source = "sam3d-body"
     source = None
     from . import refined_colour

@@ -512,6 +512,134 @@ class TestDepthRegister(HybridBase):
 
 
 class TestBodyJoints(HybridBase):
+    def selected_skeleton(self):
+        rec = {"source": "sam3d-body", "joints": {k: list(v) for k, v in self.truth["joints"].items()},
+               "limb_roots": "silhouette",
+               "sources": {"sam3d-body": self.truth["joints"]},
+               "evidence": {name: "selected" for name in self.truth["joints"]}}
+        return body_joints.apply_to_skeleton(joints.estimate(self.vs, 5.5), rec), rec
+
+    def part_counts(self, sk, verts=None):
+        from herogen.blender import SECTIONS, split
+
+        labels = split.Labeller(split.build_rig(sk)).labels(self.verts if verts is None else verts)
+        return dict(zip(SECTIONS, np.bincount(labels, minlength=len(SECTIONS))))
+
+    def test_nonempty_selection_is_unchanged(self):
+        from copy import deepcopy
+
+        sk, rec = self.selected_skeleton()
+        before, record = deepcopy(sk), deepcopy(rec)
+        self.assertTrue(all(self.part_counts(sk).values()))
+        self.assertIs(body_joints.nonempty_limb_roots(sk, rec, self.verts), sk)
+        self.assertEqual(rec, record)
+        self.assertEqual(sk.notes, before.notes)
+        self.assertEqual(sk.evidence, before.evidence)
+        for attr in ("joints", "ends"):
+            for name, value in getattr(before, attr).items():
+                self.assertEqual(np.asarray(getattr(sk, attr)[name]).tobytes(), np.asarray(value).tobytes())
+
+    def test_reversed_shoulder_restores_hand_with_only_one_root_changed(self):
+        from copy import deepcopy
+
+        sk, rec = self.selected_skeleton()
+        sk.joints["RightShoulder"] = sk.joints["RightElbow"] + [0, 0, -.12]
+        # Other recorded alternatives exist but are unnecessary.
+        sk.joints["LeftShoulder"] += [.01, 0, 0]
+        before = deepcopy(sk)
+        self.assertEqual(self.part_counts(sk)["RightHand"], 0)
+        result = body_joints.nonempty_limb_roots(sk, rec, self.verts)
+        self.assertTrue(all(self.part_counts(result).values()))
+        for name, value in before.joints.items():
+            np.testing.assert_array_equal(result.joints[name],
+                rec["sources"]["sam3d-body"][name] if name == "RightShoulder" else value)
+            np.testing.assert_array_equal(sk.joints[name], value)
+        self.assertIn("RightHand", result.evidence["RightShoulder"])
+        self.assertEqual(result.evidence["LeftShoulder"], before.evidence["LeftShoulder"])
+
+    def test_two_empty_limbs_require_two_roots_and_update_hip_centre(self):
+        sk, rec = self.selected_skeleton()
+        sk.joints["RightShoulder"] = sk.joints["RightElbow"] + [0, 0, -.12]
+        sk.joints["LeftHip"] = sk.joints["LeftKnee"] + [0, 0, -.12]
+        sk.ends["HipCentre"] = (sk.joints["LeftHip"] + sk.joints["RightHip"]) / 2
+        counts = self.part_counts(sk)
+        self.assertEqual(counts["RightHand"], 0)
+        self.assertEqual(counts["LeftFoot"], 0)
+        result = body_joints.nonempty_limb_roots(sk, rec, self.verts)
+        self.assertTrue(all(self.part_counts(result).values()))
+        for name in ("RightShoulder", "LeftHip"):
+            np.testing.assert_array_equal(result.joints[name], self.truth["joints"][name])
+        np.testing.assert_array_equal(result.ends["HipCentre"],
+            (result.joints["LeftHip"] + result.joints["RightHip"]) / 2)
+
+    def test_fallback_must_leave_every_part_nonempty(self):
+        sk, rec = self.selected_skeleton()
+        labels = self.part_counts(sk)
+        self.assertTrue(all(labels.values()))
+        from herogen.blender import SECTIONS, split
+
+        keep = split.Labeller(split.build_rig(sk)).labels(self.verts) != SECTIONS.index("LeftHand")
+        sk.joints["RightShoulder"] = sk.joints["RightElbow"] + [0, 0, -.12]
+        with self.assertRaisesRegex(ValueError, "LeftHand.*RightHand.*no recorded"):
+            body_joints.nonempty_limb_roots(sk, rec, self.verts[keep])
+
+    def test_missing_alternatives_fail_clearly_without_mutating_selection(self):
+        sk, rec = self.selected_skeleton()
+        sk.joints["RightShoulder"] = sk.joints["RightElbow"] + [0, 0, -.12]
+        before = sk.as_json()
+        rec.pop("sources")
+        with self.assertRaisesRegex(ValueError, "RightHand.*no recorded"):
+            body_joints.nonempty_limb_roots(sk, rec, self.verts)
+        self.assertEqual(sk.as_json(), before)
+
+    def test_explicit_model_root_is_not_replaced(self):
+        sk, rec = self.selected_skeleton()
+        sk.joints["RightShoulder"] = sk.joints["RightElbow"] + [0, 0, -.12]
+        rec["joint_sources"] = {"RightShoulder": "sam3d-body"}
+        with self.assertRaisesRegex(ValueError, "RightHand.*no recorded"):
+            body_joints.nonempty_limb_roots(sk, rec, self.verts)
+
+    def test_stage4_resolves_empty_parts_in_both_lanes_from_npz_or_glb(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+
+        from herogen.blender.stage4 import run_stage4
+
+        _, original = self.selected_skeleton()
+        rec = deepcopy(original)
+        rec["joints"]["RightShoulder"] = (np.asarray(rec["joints"]["RightElbow"]) + [0, 0, -.12]).tolist()
+        resolve = body_joints.nonempty_limb_roots
+
+        def resolve_and_check(sk, record, verts):
+            self.assertEqual(self.part_counts(sk, verts)["RightHand"], 0)
+            result = resolve(sk, record, verts)
+            self.assertTrue(all(self.part_counts(result, verts).values()))
+            return result
+
+        with tempfile.TemporaryDirectory(prefix="herogen-joint-selection-test-") as tmp:
+            run = Path(tmp)
+            shutil.copytree(self.rundir / "masks", run / "masks")
+            shutil.copytree(self.rundir / "views", run / "views")
+            (run / "stage-3.json").write_text(json.dumps({"mesh_source": "carve"}))
+            (run / "03-joints.json").write_text(json.dumps(rec))
+            glb.write_glb(run / "03-mesh.glb", [("body", self.verts, self.faces)])
+            work = run / "blender-work"
+            work.mkdir()
+            for fast in (False, True):
+                for use_npz in (False, True):
+                    with self.subTest(fast=fast, npz=use_npz):
+                        mesh = work / "03-mesh.npz"
+                        if use_npz:
+                            np.savez(mesh, verts=self.verts, faces=self.faces)
+                        else:
+                            mesh.unlink(missing_ok=True)
+                        with patch.object(body_joints, "nonempty_limb_roots", side_effect=resolve_and_check) as select, \
+                                patch("herogen.blender.refined_colour.load", return_value=(None, {"reason": "synthetic"})), \
+                                patch.object(bl, "run_job", side_effect=RuntimeError("reached decimation")):
+                            with self.assertRaisesRegex(RuntimeError, "reached decimation"):
+                                run_stage4(run, fast=fast)
+                        select.assert_called_once()
+
     def test_mapping_recovers_the_synthetic_joints(self):
         body = synthetic_body_result(self.truth, self.vs.views["front"])
         for method in body_joints.Y_METHODS:
