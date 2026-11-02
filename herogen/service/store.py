@@ -110,6 +110,17 @@ class RateLimiter:
             q.append(now)
             return True, 0
 
+    def full(self, bucket: str, limit: int, window_s: float) -> tuple[bool, int]:
+        """Whether ``bucket`` is at its limit now, without counting a request: (full, seconds until it is not)."""
+        now = self.clock()
+        with self.lock:
+            q = self.hits.get(bucket)
+            while q and q[0] <= now - window_s:
+                q.popleft()
+            if q and len(q) >= limit:
+                return True, max(1, int(q[0] + window_s - now + 0.999))
+            return False, 0
+
 
 class Store(GenerationStore, AnalyticsStore):
     # Methods the service's own functions may invoke by name (modal_app.StoreService.call).

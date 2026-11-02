@@ -90,12 +90,12 @@ _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
 # The build log (`job_events`): an opaque cursor "<byte offset>.<newest attempt seen>", a page of at most
 # EVENTS_PAGE_MAX events and EVENTS_PAGE_BYTES of file, and "done" only once a finished job's last lines can have
 # reached this container (a Modal volume view refreshes at most every few seconds).
-EVENTS_CURSOR = re.compile(r"^(\d{1,12})\.(\d{1,2})$")
+EVENTS_CURSOR = re.compile(r"([0-9]{1,12})\.([0-9]{1,2})\Z")
 EVENTS_PAGE = 500
 EVENTS_PAGE_MAX = 1000
 EVENTS_PAGE_BYTES = 256 * 1024
 EVENTS_DONE_GRACE_S = 10.0
-EVENTS_ROUTE = re.compile(r"^/api/jobs/[^/]+/events$")
+EVENTS_ROUTE = re.compile(r"/api/jobs/[^/]+/events\Z")
 FINISHED_STATES = ("succeeded", "rejected", "failed", "canceled", "stopped")
 
 
@@ -1072,8 +1072,22 @@ class App:
 
     async def job_events(self, request: Request) -> Response:
         """The job's build log from a cursor (see `herogen.pipeline.events`): owner only, a plain 404 otherwise.
-        Every line is validated again and re-serialised; a partial last line waits for the next poll."""
-        u = await self.require_user(request)
+        Every line is validated again and re-serialised; a partial last line waits for the next poll.
+
+        Rate limits (the route skips the API's per-address budget, see `api_rate_guard`): a request whose session
+        does not check out counts against `events-noauth:<address>` at the API's own rate, which the guard
+        enforces before any store call; a signed-in user's polls count against `rate_events_user`."""
+        rates = self.svc.local_rates
+        u = await self.user(request)
+        if u is None:
+            rule = self.s.rate_api_ip
+            rates.hit(f"events-noauth:{self.client_ip(request)}", rule[0], rule[1])
+            raise HTTPException(401, "sign in first")
+        rule = self.s.rate_events_user
+        ok, retry = rates.hit(f"events-user:{u['id']}", rule[0], rule[1])
+        if not ok:
+            return error(429, "rate_limited", "Too many requests. Please wait a little and try again.",
+                         {"Retry-After": str(retry)})
         jid = self._job_id(request)
         raw = request.query_params.get("after")
         got = EVENTS_CURSOR.match(raw) if raw is not None else None
@@ -1376,18 +1390,31 @@ def api_rate_guard(app_state: App):
     """Per-address request budget for the whole API, counted in this container's memory."""
 
     def wrap(app):
+        async def limited(retry, scope, receive, send):
+            resp = error(429, "rate_limited", "Too many requests. Please wait a little and try again.",
+                         {"Retry-After": str(retry)})
+            return await resp(scope, receive, send)
+
         async def guard(scope, receive, send):
             path = scope.get("path", "") if scope["type"] == "http" else ""
-            # The build-log poll is exempt (owner-scoped and cheap): viewers on one venue network share an address.
-            exempt = scope.get("method") == "GET" and EVENTS_ROUTE.match(path) is not None
-            if path.startswith(("/api/", "/runs/")) and not exempt:
-                req = Request(scope)
-                rule = app_state.s.rate_api_ip
-                ok, retry = app_state.svc.local_rates.hit(f"api:{app_state.client_ip(req)}", rule[0], rule[1])
-                if not ok:
-                    resp = error(429, "rate_limited", "Too many requests. Please wait a little and try again.",
-                                 {"Retry-After": str(retry)})
-                    return await resp(scope, receive, send)
+            if not path.startswith(("/api/", "/runs/")):
+                return await app(scope, receive, send)
+            req = Request(scope)
+            ip, rates, s = app_state.client_ip(req), app_state.svc.local_rates, app_state.s
+            # The build-log poll gets its own, larger per-address budget (viewers on one venue network share an
+            # address), but only with a well-formed session cookie, and only while that address's failed sign-ins
+            # on this route stay under the API's rate: so a flood of made-up cookies stops here, before it reaches
+            # the store. The handler then limits each signed-in user (`App.job_events`).
+            raw = req.cookies.get(app_state.session_cookie, "")
+            if scope.get("method") == "GET" and EVENTS_ROUTE.match(path) and TOKEN_RE.match(raw):
+                full, retry = rates.full(f"events-noauth:{ip}", *s.rate_api_ip)
+                if full:
+                    return await limited(retry, scope, receive, send)
+                ok, retry = rates.hit(f"events-ip:{ip}", *s.rate_events_ip)
+            else:
+                ok, retry = rates.hit(f"api:{ip}", *s.rate_api_ip)
+            if not ok:
+                return await limited(retry, scope, receive, send)
             return await app(scope, receive, send)
 
         return guard
