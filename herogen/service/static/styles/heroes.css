@@ -169,13 +169,13 @@ body:has(#app.heroes-screen) main, body.gallery-page main { flex: 1 0 auto; }
 .gd-more h2 { margin: 0 0 var(--space-6); }
 .gd-more__grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gutter); }
 @media (min-width: 768px) { .gd-more__grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-.g-card { display: block; overflow: hidden; color: var(--color-text); text-decoration: none; margin: 0; padding: 0; }
-.g-card:hover { text-decoration: none; }
-.g-card__thumb { position: relative; display: block; aspect-ratio: 1 / 1; overflow: hidden; background: var(--stage-bg); }
-.g-card__thumb img { display: block; width: 100%; height: 100%; max-width: none; object-fit: cover; object-position: 50% 18%; }
-.g-card__body { display: grid; gap: var(--space-2); padding: var(--space-5); }
-.g-card__body h3 { margin: 0; font-family: var(--font-display); font-size: var(--text-title); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); line-height: var(--lh-title); letter-spacing: -0.01em; }
-.g-card__body p { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.gd-more .g-card { display: block; overflow: hidden; color: var(--color-text); text-decoration: none; margin: 0; padding: 0; }
+.gd-more .g-card:hover { text-decoration: none; }
+.gd-more .g-card__thumb { position: relative; display: block; aspect-ratio: 1 / 1; overflow: hidden; background: var(--stage-bg); }
+.gd-more .g-card__thumb img { display: block; width: 100%; height: 100%; max-width: none; object-fit: cover; object-position: 50% 18%; }
+.gd-more .g-card__body { display: grid; gap: var(--space-2); padding: var(--space-5); }
+.gd-more .g-card__body h3 { margin: 0; font-family: var(--font-display); font-size: var(--text-title); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); line-height: var(--lh-title); letter-spacing: -0.01em; }
+.gd-more .g-card__body p { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 
 #galleryState { margin-top: var(--space-9); }
 
@@ -202,9 +202,9 @@ body:has(#app.heroes-screen) main, body.gallery-page main { flex: 1 0 auto; }
   .gd-cta { padding: var(--space-6) var(--space-5); margin-top: var(--space-8); }
   .gd-cta .btn { width: 100%; --btn-h: var(--tap-min); }
   .gd-more { margin-top: var(--space-9); }
-  .g-card__body { padding: var(--space-4); }
+  .gd-more .g-card__body { padding: var(--space-4); }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .g-card__thumb img { transition: transform var(--dur-slow) var(--ease-out); }
-  .g-card:hover .g-card__thumb img { transform: scale(1.04); }
+  .gd-more .g-card__thumb img { transition: transform var(--dur-slow) var(--ease-out); }
+  .gd-more .g-card:hover .g-card__thumb img { transform: scale(1.04); }
 }
