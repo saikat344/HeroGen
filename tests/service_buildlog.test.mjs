@@ -59,9 +59,9 @@ test('GPU calls say they are still waiting after 20 s and reused results are nev
   const [gpu, reused] = rowsOf(model, '3');
   assert.ok(gpu.gpuWait);
   assert.equal(copy.whoName(gpu.who), 'SAM 3D Objects (GPU)');
-  assert.equal(reused.text, 'Reused a saved result');
+  assert.equal(reused.text, 'Finding the body joints from the front view: reused a saved result');
   assert.equal(rowMeta(reused), '$0');
-  assert.match(copyText(model), /SAM 3D Body \(GPU\): reused a saved result · \$0$/m);
+  assert.match(copyText(model), /SAM 3D Body \(GPU\): finding the body joints from the front view: reused a saved result · \$0$/m);
 });
 
 test('typical times need at least eight past calls', () => {
@@ -86,13 +86,13 @@ test('texture views, reasons and speakers read as plain text', () => {
     ev(4, 'decision', '3f', {what: 'view_kept', view: 'head+0', ok: false}),
     ev(5, 'local', '3f', {what: 'views_rendered', m: {cameras: 5}}),
     ev(6, 'version', '3f', {n: 1, passed: 3, of: 6}),
-    ev(7, 'skip', '3f', {what: 'spend_cap'})];
+    ev(7, 'skip', '3f', {what: 'texture_refine', why: 'spend_cap'})];
   const model = buildModel(job({'3f': 'running'}), events);
   assert.deepEqual(rowsOf(model, '3f').map(r => [r.state, r.text]), [
     ['info', 'Wave 1: asking Muse Image to repaint 5 views, 2 tries each, all at once (10 requests)'],
     ['kept', 'Repainting the side view −90°, try 2: not needed, the other try passed (already paid for)'],
-    ['kept', 'Front, try 1: not used (outline moved too far: median 4.7 px against 6, p90 18.0 px against 16)'],
-    ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, drift 3.6 px)'],
+    ['kept', 'Front, try 1: not used (outline moved too far: 90th percentile 18.0 px (limit 16))'],
+    ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, median drift 3.6 px)'],
     ['kept', 'Face close-up: neither try passed. Keeping the original paint for this view.'],
     ['info', 'Rendered the 3D shape from 5 cameras'],
     ['passed', 'Your model now shows version 1 (3 of 6 views repainted).'],
@@ -145,7 +145,7 @@ test('only ok and reused count as success; any other outcome is a loud failure i
     ['failed', 'Drawing one turnaround sheet with front, right, back and left side by side: outcome unknown (may be billed)'],
     ['failed', 'Drawing one turnaround sheet with front, right, back and left side by side failed: the answer could not be read'],
     ['failed', 'Drawing one turnaround sheet with front, right, back and left side by side failed: the model service returned an error'],
-    ['passed', 'Reused a saved result'], ['passed', 'Turnaround sheet ready']]);
+    ['passed', 'Drawing one turnaround sheet with front, right, back and left side by side: reused a saved result'], ['passed', 'Turnaround sheet ready']]);
   assert.ok(!copyText(model).includes('ApiError'));
   assert.equal(copyText(model).split('\n').filter(l => l.includes('  ✗ ')).length, 4);
   assert.ok(model.steps.find(s => s.key === '2').attention, 'a failed call keeps its step open');
@@ -387,4 +387,29 @@ test('the page labels the log and keeps the follow and copy controls', () => {
   const block = css.slice(css.indexOf('/* Build log:'), css.indexOf('.side-panel .log-footer'));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b|\d+ms\b|font-size:\s*\d+px/.test(block), 'tokens only');
   assert.match(block, /prefers-reduced-motion: reduce\)[^]*bl-dots[^]*display: inline/);
+});
+
+test('a replayed real run (3D shape and texture refine) renders end to end in plain words', () => {
+  const lines = readFileSync(new URL('./buildlog_replay_events.jsonl', import.meta.url), 'utf8').trim().split('\n');
+  const events = lines.map(l => JSON.parse(l)).map(e => ({...e, t: START + e.t}));
+  const model = buildModel(job({p: 'passed', 0: 'passed', 1: 'passed', 2: 'passed', 3: 'passed', '3f': 'passed'}), events, {typical: TYPICAL});
+  const shape = rowsOf(model, '3'), refine = rowsOf(model, '3f');
+  // One row per call id; every other event is its own row or is left out on purpose.
+  const ids = new Set(events.filter(e => e.id).map(e => e.id));
+  assert.equal(shape.filter(r => r.call).length + refine.filter(r => r.call).length, ids.size);
+  assert.ok(shape.some(r => r.text === 'Returned a mesh (8,223 vertices, 10,161 faces, 1,024 px texture) · cold start 60.4 s + 96.1 s inference on an A100'));
+  assert.ok(shape.some(r => r.text === 'Mapped 16 joints into the front view: 12 from SAM 3D Body, 4 from the outline; 7 differ from the outline estimate by more than 0.5 studs'));
+  assert.ok(shape.some(r => r.text === 'Left shoulder from the outline · 0.66 studs from the outline estimate (differs by more than 0.5 studs)'));
+  assert.ok(shape.some(r => r.text.startsWith('Faced the mesh forward (tested 4 rotations, turned 0°)')));
+  assert.ok(refine.some(r => r.text === 'Face close-up, try 1: not used (outline moved too far: median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))'));
+  assert.ok(refine.some(r => r.text === 'Side view +90°: kept the repaint from try 1'));
+  assert.ok(refine.some(r => r.text === 'Front: neither try passed (outline moved too far). Keeping the original paint for this view.'));
+  assert.ok(refine.some(r => r.text === 'Side view −90°, try 2: not needed, the other try passed (stopped before it was paid for)'));
+  assert.ok(refine.some(r => r.text.startsWith('Upper hair, back, try 1: accepted (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)')));
+  assert.ok(refine.some(r => r.text === 'Your model now shows version 1 (3 of 6 views repainted; 3 still being judged).'));
+  assert.ok(refine.some(r => r.text.startsWith('Wave 2: asking Muse Image to repaint 1 view from version 1')));
+  const text = copyText(model);
+  assert.equal(text.split('\n').length, events.filter(e => e.kind !== 'call_wait').length);
+  for (const raw of ['lower_try_accepted', 'outline_moved', 'joint_from', 'head+0', 'body-90', 'a100-40gb', 'undefined', 'NaN', 'null'])
+    assert.ok(!text.includes(raw), raw);
 });
