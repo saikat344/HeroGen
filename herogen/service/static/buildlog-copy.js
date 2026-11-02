@@ -269,4 +269,3 @@ export function jobLine(e, job) {
   }
 }
 
-export const FOOTNOTE = 'Typical times come from earlier HeroGen runs; every cost is an estimate.';

@@ -174,7 +174,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#headerSignIn').disabled")
         result = t.eval("""(async () => {
-          const {workbenchLog} = await import('/assets/workbench.js');
+          const {recordLog} = await import('/assets/workbench.js');
           const root = document.createElement('div');
           root.innerHTML = '<input id="followLive" type="checkbox"><button id="copyLog" type="button">Copy</button><span id="logStatus"></span><ol id="stageLog" tabindex="0"></ol>';
           document.body.append(root);
@@ -184,7 +184,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
           const record = {stage: '3f', started: '2026-01-01T00:00:00Z', seconds: 9, calls: [call(1, 'ok'), call(2, 'ok'), call(3, 'ok')]};
           const job = n => ({id: 'job1', stages: [{key: '3f', label: 'texture refine', state: 'passed'}], models: n ? [{n, time: '2026-01-01T00:00:05Z'}] : []});
           const wait = async test => { for (let i = 0; i < 100 && !test(); i++) await new Promise(r => setTimeout(r, 50)); };
-          const log = workbenchLog($, async () => record);
+          const log = recordLog($, async () => record);
           log.update(job(0));
           await wait(() => $('#stageLog summary'));
           const summary = $('#stageLog summary'), details = summary.parentElement;
@@ -219,9 +219,10 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         try:
             self.signin(); self.make_hero('Clockwork gardener'); t = self.tab
             t.wait("document.querySelector('#stages .st-running')?.dataset.stage === '2'")
-            t.wait("document.querySelector('#stageLog .log-step.st-running .log-note')?.textContent.includes('Muse Image draws a turnaround sheet')")
-            self.assertIn('Character views',t.eval("document.querySelector('#stageLog .log-step.st-running .log-title').textContent"))
-            self.assertIn('running',t.eval("document.querySelector('#stageLog .log-step.st-running .log-meta').textContent"))
+            # The fake runner writes a build log: the running step is open with its calls.
+            t.wait("document.querySelector('#stageLog .bl-step.st-running')?.textContent.includes('Character views')")
+            self.assertEqual(t.eval("document.querySelector('#stageLog').getAttribute('role')"), 'log')
+            self.assertTrue(t.eval("document.querySelector('#stageLog .bl-step.st-running details').open"))
             self.assertFalse(t.eval("document.querySelector('#cancelJob').hidden"))
             self.assertFalse(t.eval("document.querySelector('.site-header').contains(document.querySelector('#developerMode'))"))
             self.assertEqual(t.eval("document.querySelector('#who').textContent"),'Private workspace')
@@ -240,11 +241,10 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         self.capture_matrix('finished')
         t.eval("Object.defineProperty(navigator.clipboard,'writeText',{value:async text=>{window.copiedStageLog=text;},configurable:true});document.querySelector('#copyLog').click()")
         t.wait("document.querySelector('#logStatus').textContent === 'Log copied'")
-        self.assertIn('Refined version 1 ready',t.eval('window.copiedStageLog'))
-        self.assertRegex(t.eval('window.copiedStageLog'),r'Step 1 of \d+ \u00b7 ')
-        self.assertIn('HeroGen (local): no model call',t.eval('window.copiedStageLog'))
-        self.assertIn('Game body',t.eval("document.querySelector('#stageLog').textContent"))
-        self.assertEqual(t.eval("document.querySelectorAll('#stageLog .log-step').length"),t.eval("document.querySelectorAll('#stages li').length"))
+        copied = t.eval('window.copiedStageLog')
+        self.assertRegex(copied, r'(?m)^\+00:\d\d\.\d  ▸ Step 1 of \d+ · ')
+        self.assertIn('Game body', t.eval("document.querySelector('#stageLog').textContent"))
+        self.assertEqual(t.eval("document.querySelectorAll('#stageLog .bl-step').length"), t.eval("document.querySelectorAll('#stages li').length"))
         root = t.eval("document.querySelector('#versionSelect').value")
         t.eval("document.querySelector('#refineNote').value='Weathered brass';document.querySelector('#refineForm').requestSubmit()")
         t.wait("document.querySelector('#versionSelect').options.length === 2 && !document.querySelector('#refineVersion').disabled")
