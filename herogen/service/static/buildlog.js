@@ -11,10 +11,10 @@ const CALL_START = new Set(['call_start', 'gpu_wait']), CALL_END = new Set(['cal
 const CALL_NOTE = new Set(['call_wait', 'call_retry']);
 const JOB_KINDS = new Set(['job_start', 'queue', 'requeue', 'cancel', 'model_ready', 'truncated', 'job_end']);
 const RUNNING = new Set(['queued', 'running']);
-const STATE_TEXT = {passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
+const STATE_TEXT = {muted: 'Informational, not met', passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   skipped: 'Skipped', unavailable: 'Not available', canceled: 'Cancelled', info: 'Note', kept: 'Not used',
   unknown: 'No finish recorded'};
-const ICON = {passed: 'circle-check', running: 'loader-circle', pending: 'circle-dashed', failed: 'circle-x',
+const ICON = {muted: 'info', passed: 'circle-check', running: 'loader-circle', pending: 'circle-dashed', failed: 'circle-x',
   rejected: 'circle-x', skipped: 'info', unavailable: 'ban', canceled: 'x', info: 'info', kept: 'circle-dashed',
   unknown: 'circle-dashed'};
 const GLYPH = {running: '…', passed: '✓', failed: '✗', rejected: '✗', kept: '✗', skipped: '!', info: 'i', unknown: 'i',
@@ -49,7 +49,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
   const steps = new Map(), lead = {key: 'lead', rows: []}, tail = {key: 'tail', rows: []};
   stages.forEach((s, i) => steps.set(String(s.key), {key: String(s.key), number: i + 1, total: stages.length,
     title: stepTitle(i + 1, stages.length, s.key), stage: s, state: s.state || 'pending', rows: [], usd: 0, calls: 0,
-    started: null, ended: null, endS: null, endUsd: null, attention: false}));
+    started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null}));
   const calls = new Map(), lines = [];
   let current = null, total = 0, cut = truncated;
   const stepFor = (e) => {
@@ -57,7 +57,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     if (key == null) return null;
     const title = Number.isInteger(e.i) && Number.isInteger(e.of) ? stepTitle(e.i, e.of, key) : copy.stepName(key);
     if (!steps.has(key)) steps.set(key, {key, number: e.i ?? null, total: e.of ?? stages.length, title, stage: null,
-      state: 'pending', rows: [], usd: 0, calls: 0, started: null, ended: null, endS: null, endUsd: null, attention: false});
+      state: 'pending', rows: [], usd: 0, calls: 0, started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null});
     return steps.get(key);
   };
   const line = (t, glyph, text) => { if (text) lines.push({t, text: `+${copy.clock(t - origin)}  ${glyph} ${text}`}); };
@@ -138,16 +138,36 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
       }
       default: {
         let text = null, state = 'info', said = null;
+        if (e.kind === 'local' && step && /^[a-z0-9_]+_start$/.test(String(e.what)) && copy.isLongStep(e.what.slice(0, -6))) {
+          // A long local sub-step: a running row now, finished in place when `<name>` arrives.
+          const name = e.what.slice(0, -6), key = `l:${step.key}:${name}`;
+          if (calls.has(key)) continue ordered;
+          const row = {key, call: false, timed: true, who: 'herogen', state: 'running', started: t, notes: [],
+            text: `${copy.upper(copy.localRunning(name))}…`};
+          calls.set(key, row); step.rows.push(row);
+          line(t, '…', `HeroGen (local): ${copy.localRunning(name)}…`);
+          continue ordered;
+        }
+        if (e.kind === 'local' && step && calls.get(`l:${step.key}:${e.what}`)?.state === 'running') {
+          const row = calls.get(`l:${step.key}:${e.what}`), done = copy.localLine(e);
+          Object.assign(row, {state: 'info', text: copy.upper(done), ended: t});
+          line(t, 'i', `HeroGen (local): ${done}`);
+          continue ordered;
+        }
         if (e.kind === 'local') { said = copy.localLine(e); text = copy.upper(said); }
         else if (e.kind === 'decision') { text = copy.decisionLine(e); state = e.ok === false ? 'kept' : e.ok ? 'passed' : 'info'; }
-        else if (e.kind === 'checks') {
-          said = copy.checksLine(e); text = said && copy.upper(said);
-          state = Array.isArray(e.failed) && e.failed.length ? 'failed' : 'passed';
-        } else if (e.kind === 'check') {
-          // Passing checks are counted by the step's summary; only a failure becomes its own row.
-          said = copy.checkLine(e); state = e.ok ? 'passed' : e.gate === false ? 'skipped' : 'failed';
-          if (e.ok) { line(t, GLYPH[state], `HeroGen (local): ${said}`); continue ordered; }
-          text = said;
+        else if (e.kind === 'check') {
+          // Each check joins its step's list, shown under the step's check summary.
+          const said = copy.checkLine(e), cstate = e.ok ? 'passed' : e.gate === true ? 'failed' : 'muted';
+          if (step) step.checkList.push({key: `k:${index}`, state: cstate, text: said, ok: e.ok === true, gate: e.gate === true});
+          line(t, e.ok ? '✓' : e.gate === true ? '✗' : 'i', `HeroGen (local): ${said}`);
+          continue ordered;
+        } else if (e.kind === 'checks') {
+          if (!step) continue ordered;
+          const row = {key: `e:${index}`, call: false, who: 'herogen', state: 'passed', at: t, summary: e, checks: step.checkList};
+          step.checkRow = row; step.rows.push(row);
+          line(t, 'i', `HeroGen (local): ${copy.checksLine(e, step.checkList, step.key)}`);
+          continue ordered;
         } else if (e.kind === 'version') { text = copy.versionLine(e); state = 'passed'; }
         else if (e.kind === 'skip') { text = copy.skipLine(e); state = 'skipped'; }
         else if (e.kind === 'error') { text = copy.errorLine(e, step?.stage); state = 'failed'; }
@@ -161,7 +181,8 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         }
         if (!text) continue ordered;
         if (step && (state === 'failed' || state === 'kept')) step.attention = true;
-        group.rows.push({key: `e:${index}`, call: false, who: said ? 'herogen' : null, state, text, at: t, check: e.kind === 'check'});
+        const fold = e.kind === 'local' && step ? copy.foldOf(e) : null;
+        group.rows.push({key: `e:${index}`, call: false, who: said ? 'herogen' : null, state, text, at: t, fold, m: e.m});
         line(t, GLYPH[state], said ? `HeroGen (local): ${said}` : text);
       }
     }
@@ -182,10 +203,32 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     step.typicalSeconds = Number.isFinite(s?.typical_seconds) ? s.typical_seconds : null;
     if (['failed', 'rejected'].includes(step.state)) step.attention = true;
     // A check that missed inside a step that still passed (one texture try, say) is a note, not a failure.
-    for (const row of step.rows) if (row.check && row.state === 'failed') {
-      if (step.state === 'passed') row.state = 'kept'; else step.attention = true;
+    // Parts and joints: one row each that opens into the list, so 15 of each never flood the step.
+    for (const kind of ['parts', 'joints']) {
+      const members = step.rows.filter(r => r.fold === kind || r.fold === `${kind}_summary`);
+      const items = members.filter(r => r.fold === kind);
+      if (items.length < 3) continue;
+      const summary = members.find(r => r.fold === `${kind}_summary`);
+      const row = {key: `g:${step.key}:${kind}`, call: false, who: 'herogen', state: 'info', summary: null,
+        text: copy.foldTitle(kind, items.map(r => r.m || {}), summary?.text),
+        checks: items.map(r => ({key: r.key, state: 'info', text: r.text}))};
+      const at = step.rows.indexOf(items[0]);
+      step.rows = step.rows.filter(r => !members.includes(r));
+      step.rows.splice(Math.min(at, step.rows.length), 0, row);
     }
-    for (const row of step.rows) if (row.call && row.state === 'running' && !step.running && step.state !== 'pending') row.state = 'unknown';
+    // Checks: one summary row per step that opens into the list. A required check that failed is red unless the
+    // step still passed (one texture try, say), where it is a quiet note.
+    if (step.checkList.length && !step.checkRow) {
+      step.checkRow = {key: `k:${step.key}`, call: false, who: 'herogen', state: 'passed', summary: null, checks: step.checkList};
+      step.rows.push(step.checkRow);
+    }
+    if (step.checkRow) {
+      const row = step.checkRow, gateFailed = step.checkList.some(c => c.state === 'failed') || copy.listOf(row.summary?.failed) > 0;
+      row.text = copy.upper(copy.checksLine(row.summary, step.checkList, step.key) || 'Checks recorded');
+      row.state = gateFailed ? (step.state === 'passed' ? 'kept' : 'failed') : 'passed';
+      if (row.state === 'failed') step.attention = true;
+    }
+    for (const row of step.rows) if ((row.call || row.timed) && row.state === 'running' && !step.running && step.state !== 'pending') row.state = 'unknown';
   }
   for (const row of calls.values()) if (row.state === 'running') {
     row.elapsed = row.started != null ? now - row.started : null;
@@ -207,6 +250,7 @@ export function copyText(model) {
 
 // The right-hand numbers of a row: time and cost when done, a live counter and the usual time while it runs.
 export function rowMeta(row) {
+  if (row.timed && row.state === 'running') return row.elapsed != null ? copy.elapsed(row.elapsed) : '';
   if (!row.call) return '';
   if (row.state === 'running') return metaJoin(row.elapsed != null && copy.elapsed(row.elapsed),
     row.typical && `usually ${copy.aboutCall(row.typical.p50)}`);
@@ -283,7 +327,37 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
     records.update(job);
   }
 
+  // A check summary opens into the full list: name, value against limit, verdict.
+  function checksElement(row) {
+    let li = rows.get(row.key);
+    if (!li) {
+      li = node('li'); const details = node('details', 'bl-fold'), summary = node('summary', 'bl-fold-head'), list = node('ol', 'bl-checks');
+      details.addEventListener('toggle', () => {
+        if (details.open !== li.expect) { userOpen.set(row.key, details.open); li.expect = details.open; }
+      });
+      details.append(summary, list); li.append(details); li.parts = {details, summary, list}; rows.set(row.key, li);
+    }
+    const {details, summary, list} = li.parts;
+    const sig = JSON.stringify([row.state, row.text, row.checks.length]);
+    if (li.sig !== sig) {
+      li.sig = sig;
+      li.className = `bl-row bl-check-sum st-${row.state}`;
+      const body = node('span', 'bl-body'), chev = icon('chevron-right');
+      chev.setAttribute('class', 'icon icon--s bl-chev');
+      body.append(node('span', 'bl-who', copy.whoName('herogen')), node('span', 'bl-text', row.text));
+      summary.replaceChildren(marker(row.state), body, chev);
+      list.replaceChildren(...row.checks.map(c => {
+        const item = node('li', `bl-check st-${c.state}`); item.append(marker(c.state), node('span', 'bl-text', c.text)); return item;
+      }));
+    }
+    const open = userOpen.has(row.key) ? userOpen.get(row.key) : row.state === 'failed';
+    li.expect = open;
+    if (details.open !== open) details.open = open;
+    return li;
+  }
+
   function rowElement(row) {
+    if (row.checks) return checksElement(row);
     let li = rows.get(row.key);
     const meta = rowMeta(row), note = rowNote(row);
     const sig = JSON.stringify([row.state, row.text, row.who, meta, note]);

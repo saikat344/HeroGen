@@ -123,8 +123,11 @@ test('unknown codes, model messages and stray fields never reach the page or the
   const shown = JSON.stringify([model.lead, model.tail, model.steps.map(s => s.rows.map(r => r.text))]) + copyText(model);
   for (const text of raw) assert.ok(!shown.includes(text), text);
   assert.deepEqual(rowsOf(model, '1').map(r => r.text), ['Working on artwork failed: it stopped before finishing',
-    'One view: not used (it did not pass the checks)', 'This part was skipped.', '1 of 2 checks passed (1 hard limit failed)',
-    'This step stopped. Technical details are kept in the server logs.', 'Min side px: failed · measured 200, needs at least 256']);
+    'One view: not used (it did not pass the checks)', 'This part was skipped.', '1 of 2 required checks failed',
+    'This step stopped. Technical details are kept in the server logs.']);
+  const sum = rowsOf(model, '1').find(r => r.checks);
+  assert.equal(sum.state, 'failed');
+  assert.deepEqual(sum.checks.map(c => [c.state, c.text]), [['failed', 'min_side_px: failed · measured 200, needs at least 256']]);
   // A failed step's own plain message (already shown on the page) is preferred over the code.
   const failed = job({1: 'failed'}); failed.stages[2].message = 'The character is cut off.';
   assert.equal(rowsOf(buildModel(failed, [ev(0, 'error', '1', {code: 'rejected'})]), '1')[0].text, 'The character is cut off.');
@@ -391,36 +394,64 @@ test('the page labels the log and keeps the follow and copy controls', () => {
   assert.match(block, /prefers-reduced-motion: reduce\)[^]*bl-dots[^]*display: inline/);
 });
 
-test('a replayed real run (3D shape and texture refine) renders end to end in plain words', () => {
-  const lines = readFileSync(new URL('./buildlog_replay_events.jsonl', import.meta.url), 'utf8').trim().split('\n');
+test('the replayed fox-samurai run (3D shape to Roblox rig) renders end to end in plain words', () => {
+  const lines = readFileSync(new URL('./buildlog_t08_events.jsonl', import.meta.url), 'utf8').trim().split('\n');
   const events = lines.map(l => JSON.parse(l)).map(e => ({...e, t: START + e.t}));
-  const model = buildModel(job({p: 'passed', 0: 'passed', 1: 'passed', 2: 'passed', 3: 'passed', '3f': 'passed'}), events, {typical: TYPICAL});
-  const shape = rowsOf(model, '3'), refine = rowsOf(model, '3f');
-  // One row per call id; every other event is its own row or is left out on purpose.
+  const model = buildModel(job({p: 'passed', 0: 'passed', 1: 'passed', 2: 'passed', 3: 'passed', '3f': 'passed', 4: 'passed', 6: 'passed'}),
+    events, {typical: TYPICAL});
+  const shape = rowsOf(model, '3'), refine = rowsOf(model, '3f'), body = rowsOf(model, '4'), rig = rowsOf(model, '6');
+  const texts = rows => rows.map(r => r.text);
+  // One row per call id.
   const ids = new Set(events.filter(e => e.id).map(e => e.id));
-  assert.equal(shape.filter(r => r.call).length + refine.filter(r => r.call).length, ids.size);
-  assert.ok(shape.some(r => r.text === 'Returned a mesh (8,223 vertices, 10,161 faces, 1,024 px texture) · cold start 60.4 s + 96.1 s inference on an A100'));
-  assert.ok(shape.some(r => r.text === 'Mapped 16 joints into the front view: 12 from SAM 3D Body, 4 from the outline; 7 differ from the outline estimate by more than 0.5 studs'));
-  assert.ok(shape.some(r => r.text === 'Left shoulder from the outline · 0.66 studs from the outline estimate (differs by more than 0.5 studs)'));
-  assert.ok(shape.some(r => r.text.startsWith('Faced the mesh forward (tested 4 rotations, turned 0°)')));
-  assert.ok(refine.some(r => r.text === 'Face close-up, try 1: not used (outline moved too far: median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))'));
-  assert.ok(refine.some(r => r.text === 'Side view +90°: kept the repaint from try 1'));
-  assert.ok(refine.some(r => r.text === 'Front: neither try passed (outline moved too far). Keeping the original paint for this view.'));
-  assert.ok(refine.some(r => r.text === 'Side view −90°, try 2: not needed, the other try passed (stopped before it was paid for)'));
-  assert.ok(refine.some(r => r.text.startsWith('Upper hair, back, try 1: accepted (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)')));
-  assert.ok(refine.some(r => r.text === 'Your model now shows version 1 (3 of 6 views repainted; 3 still being judged).'));
-  assert.ok(refine.some(r => r.text.startsWith('Wave 2: asking Muse Image to repaint 1 view from version 1')));
+  assert.equal([...shape, ...refine].filter(r => r.call).length, ids.size);
+  // 3D shape: GPU results, facing search, and the 16 joints folded under the mapping summary.
+  assert.ok(texts(shape).includes('Returned a mesh (8,223 vertices, 10,161 faces, 1,024 px texture) · cold start 60.4 s + 96.1 s inference on an A100'));
+  assert.ok(texts(shape).some(t => t.startsWith('Faced the mesh forward (tested 4 rotations, turned 0°)')));
+  const joints3 = shape.find(r => r.key === 'g:3:joints');
+  assert.equal(joints3.text, '16 joints · 12 from SAM 3D Body, 4 from the outline; 7 differ from the outline estimate by more than 0.5 studs');
+  assert.ok(joints3.checks.some(c => c.text === 'Left shoulder from the outline · 0.66 studs from the outline estimate (differs by more than 0.5 studs)'));
+  // Texture refine: every try and view decision in words.
+  for (const want of ['Face close-up, try 1: not used (outline moved too far: median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))',
+    'Side view +90°: kept the repaint from try 1', 'Front: neither try passed (outline moved too far). Keeping the original paint for this view.',
+    'Side view −90°, try 2: not needed, the other try passed (stopped before it was paid for)',
+    'Your model now shows version 1 (3 of 6 views repainted; 3 still being judged).']) assert.ok(texts(refine).includes(want), want);
+  assert.ok(texts(refine).some(t => t.startsWith('Upper hair, back, try 1: accepted (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)')));
+  // Game body: long sub-steps finished in place, names in words, parts folded with their total, 49 checks folded.
+  assert.ok(!body.some(r => r.state === 'running' || r.state === 'unknown'));
+  for (const want of ['Crotch height clamped from 0.328 H to 0.380 H', 'Moved the neck cut −0.50 radius (−0.24 studs)',
+    'Right elbow: no shared rim between its parts, so its seam cannot be measured (shown as unverified, not a failure).',
+    'Split the high-detail model into 15 parts: 23,758 of 24,000 triangles (14,400 body, 5,158 caps, 1,016 shoulder covers), largest part 6,298 · 11.4 s'])
+    assert.ok(texts(body).includes(want), want);
+  const parts = body.find(r => r.key === 'g:4:parts');
+  assert.equal(parts.text, '15 parts · 23,758 of 24,000 triangles (high), 5,998 of 6,000 (low); largest part 6,298 (limit 20,000)');
+  assert.equal(parts.checks[1].text, 'Upper torso: 6,298 / 1,836 triangles (high / low)');
+  const joints4 = body.find(r => r.key === 'g:4:joints');
+  assert.equal(joints4.checks.length, 15);
+  assert.ok(joints4.checks.some(c => c.text === 'Left shoulder joint at (0.94, 0.17, 3.61) from the outline · differs from the outline estimate by more than 0.5 studs'));
+  const bodyChecks = body.find(r => r.checks && r.text.includes('body checks'));
+  assert.equal(bodyChecks.text, '8 of 8 required body checks passed · 41 informational (23 not met in the fast lane)');
+  assert.equal(bodyChecks.checks.length, 49);
+  assert.equal(bodyChecks.state, 'passed');
+  assert.equal(bodyChecks.checks.filter(c => c.state === 'muted').length, 23);
+  // Roblox rig: 27 checks behind one line, each with its meaning, value and limit.
+  const rigChecks = rig.find(r => r.checks);
+  assert.equal(rigChecks.text, '26 of 26 required rig checks passed · 1 informational');
+  assert.equal(rigChecks.checks.length, 27);
+  assert.ok(rigChecks.checks.some(c => c.text === 'xml_well_formed (rig file is valid Roblox XML): passed · measured 1, needs exactly 1'));
+  assert.ok(texts(rig).includes('Wrote HeroGen-R15.rbxmx: 15 MeshParts, 15 Motor6D joints, 19 accessory attachments, HipHeight 1.719 studs · 0.1 s'));
+  // The copied log keeps one line per event, never a raw id.
   const text = copyText(model);
-  assert.equal(text.split('\n').length, events.filter(e => e.kind !== 'call_wait').length);
-  for (const raw of ['lower_try_accepted', 'outline_moved', 'joint_from', 'head+0', 'body-90', 'a100-40gb', 'undefined', 'NaN', 'null'])
-    assert.ok(!text.includes(raw), raw);
+  assert.equal(text.split('\n').length, events.length);
+  for (const raw of ['lower_try_accepted', 'outline_moved', 'joint_from', 'head+0', 'body-90', 'a100-40gb', 'part_left', 'split_high',
+    'no_shared_rim', 'proportion_', 'undefined', 'NaN', 'null']) assert.ok(!text.includes(raw), raw);
 });
 
 test('a check that missed inside a step that passed is a quiet note, not a red failure', () => {
   const events = [ev(0, 'step_start', '3f'), ev(1, 'check', '3f', {name: 'outline_p90_px', ok: false, gate: true, op: '<=', m: {value: 18, limit: 16}})];
   const [row] = rowsOf(buildModel(job({'3f': 'passed'}), events), '3f');
   assert.equal(row.state, 'kept');
-  assert.equal(row.text, 'Outline p90 px: failed · measured 18, needs at most 16');
+  assert.equal(row.text, '1 of 1 required checks failed');
+  assert.deepEqual(row.checks.map(c => c.text), ['outline_p90_px: failed · measured 18, needs at most 16']);
   assert.equal(rowsOf(buildModel(job({'3f': 'failed'}), events), '3f')[0].state, 'failed');
 });
 
@@ -448,4 +479,36 @@ test('a busy server or a lost connection pauses the log quietly and backs off, t
   await next();
   assert.equal(pollDelay(), POLL_MS, 'back to 1.5 s after a success');
   assert.equal(h.els['#logStatus'].textContent, 'Following live');
+});
+
+test('a long local sub-step runs as one row until it ends, and a check list keeps the reader\'s open state', async () => {
+  const start = [ev(0, 'step_start', '4'), ev(1, 'local', '4', {what: 'body_start', m: {parts: 15, lods: 2}}),
+    ev(2, 'local', '4', {what: 'decimate_start'})];
+  let rows = rowsOf(buildModel(job({4: 'running'}), start, {now: START + 12000}), '4');
+  assert.deepEqual(rows.map(r => [r.key, r.state, r.text]), [
+    ['e:1', 'info', 'Turning the 3D shape into the 15 rigid parts Roblox R15 expects, in 2 levels of detail. No model is called here'],
+    ['l:4:decimate', 'running', 'Reducing the mesh to fit the in-game budget…']]);
+  assert.equal(rowMeta(rows[1]), '10 s');
+  const end = [...start, ev(44, 'local', '4', {what: 'decimate', s: 42, m: {source_triangles: 217836}})];
+  rows = rowsOf(buildModel(job({4: 'running'}), end), '4');
+  assert.equal(rows[1].key, 'l:4:decimate');
+  assert.equal(rows[1].text, 'Reduced the 217,836-triangle mesh to candidate sizes · 42.0 s');
+  // The step ended without the finish: never left spinning.
+  assert.equal(rowsOf(buildModel(job({4: 'failed'}), start), '4')[1].state, 'unknown');
+
+  const checks = [ev(0, 'step_start', '6'), ev(1, 'check', '6', {name: 'xml_well_formed', ok: true, gate: true, op: '==', m: {value: 1, limit: 1}}),
+    ev(1, 'check', '6', {name: 'meshes_bound', ok: false, gate: false, m: {value: 0}}),
+    ev(2, 'checks', '6', {n: 2, passed: 1, gated: 1, failed: [], advisory: ['meshes_bound']})];
+  const h = harness({responses: [{events: checks, cursor: 'o:1', done: false}, {events: [ev(3, 'step_end', '6', {outcome: 'passed', s: 0.1, usd: 0})], cursor: 'o:2', done: false}]});
+  h.log.update(job({6: 'running'}));
+  await h.settle();
+  const [fold] = h.els['#stageLog'].find('bl-check-sum');
+  assert.equal(fold.find('bl-text')[0].textContent, '1 of 1 required rig checks passed · 1 informational (1 not met in the fast lane)');
+  assert.deepEqual(fold.find('bl-check').map(c => c.className), ['bl-check st-passed', 'bl-check st-muted']);
+  const details = fold.children[0];
+  assert.equal(details.open, false);
+  details.open = true; details.fire('toggle');
+  await h.runNext(t => t.f.name === 'poll');
+  assert.equal(h.els['#stageLog'].find('bl-check-sum')[0], fold);
+  assert.equal(details.open, true, 'still open after the next update');
 });
