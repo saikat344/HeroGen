@@ -82,6 +82,7 @@ class Segmenter:
     """SAM stand-in: a face disc on the render, a chosen face on the widened repaint, optional hair."""
     def __init__(self, edit_face=FACE, hair=None):
         self.edit_face, self.hair, self.queries = edit_face, hair, []
+        self.render_face = FACE
 
     def __call__(self, client, image, text):
         client._call(fixture.SAM_MODEL, 'segment')
@@ -89,7 +90,7 @@ class Segmenter:
                                               or image.getpixel(INNER) == (200, 10, 10))
         self.queries.append((text, repaint))
         if text == 'face':
-            return [SamInstance(mask=self.edit_face if repaint else FACE, box=(0, 0, 1, 1))]
+            return [SamInstance(mask=self.edit_face if repaint else self.render_face, box=(0, 0, 1, 1))]
         if text == 'hair' and self.hair is not None and not repaint:
             return [SamInstance(mask=self.hair, box=(0, 0, 1, 1))]
         return []
@@ -173,6 +174,21 @@ class FastRecoveryStageTests(unittest.TestCase):
         self.assertFalse(recovery['applied'])
         self.assertEqual([row['reason'] for row in recovery['evaluated']],
                          ['new face outside the render face'] * 2)
+        self.assertFalse((self.work / 'face-recovery').exists())
+        cams = [call.args[0]['name'] for call in self.tex.apply.call_args_list]
+        self.assertNotIn('head+0', cams)
+
+    def test_oversized_render_face_mask_skips_recovery(self):
+        whole = np.ones((64, 64), bool)  # SAM returned the whole frame as "face"
+        segmenter = Segmenter(edit_face=whole)
+        segmenter.render_face = whole
+        record, _ = self.run_stage(segmenter=segmenter)
+        recovery = record['face_recovery']
+        self.assertFalse(recovery['applied'])
+        self.assertEqual(recovery['reason'], R.OVERSIZED_REASON)
+        row, = recovery['evaluated']  # the shared render mask stops further attempts
+        self.assertEqual(row['reason'], R.OVERSIZED_REASON)
+        self.assertGreater(row['face_fraction'], R.FACE_FRACTION_MAX)
         self.assertFalse((self.work / 'face-recovery').exists())
         cams = [call.args[0]['name'] for call in self.tex.apply.call_args_list]
         self.assertNotIn('head+0', cams)

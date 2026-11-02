@@ -901,6 +901,9 @@ sample that only the outline check rejected may still paint the face. No sample 
 attempt is re-measured from its saved render and repaint (the outline must still fail), and the existing
 face-outside check runs on it with the existing SAM 3.1 face queries (render and repaint) and hair queries.
 It qualifies only when the repaint shows a face and at most 25% of it lies outside the render's face.
+A render face mask covering more than 75% of the `head+0` figure is a segmentation error (recorded masks
+reach 55%); recovery is then skipped with `applied` false, the reason and the measured `face_fraction`,
+and no later attempt is evaluated, since every attempt shares that render mask.
 Its paint is the ordinary colour-matched repaint, weighted inside the render's SAM face mask minus both
 images' hair and the outline-disagreement band (the same four-pixel dilation accepted paint excludes),
 with a 12-pixel (per 1024) inward smoothstep from that region's edge and zero outside it. It is saved in

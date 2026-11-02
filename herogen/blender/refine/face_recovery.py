@@ -20,6 +20,11 @@ FOLDER = "face-recovery"
 FEATHER_PX = 12   # inward ramp per 1024 render pixels, the beauty face composition's boundary width
 OUTLINE_REASON = "outline moved"
 REASON = "only the outline check rejected it; no accepted frontal paint"
+# Recorded head+0 SAM face masks cover at most 0.553 of the head+0 render figure (16 distinct masks,
+# 7 characters, median 0.37). A mask beyond 0.75 is a segmentation error: painting it would replace
+# most of the figure, so recovery is skipped. The render mask is shared by every attempt.
+FACE_FRACTION_MAX = 0.75
+OVERSIZED_REASON = "render face mask covers more of the head+0 figure than a face can"
 
 
 def due(records):
@@ -66,6 +71,10 @@ def evaluate(client, folder, attempt, cam, body_cam):
         return {**result, "qualified": False, "reason": "no face in the repaint"}
     if not ok:
         return {**result, "qualified": False, "reason": "new face outside the render face"}
+    face_fraction = float((parts_r["face"] & figure).sum() / max(1, int(figure.sum())))
+    if face_fraction > FACE_FRACTION_MAX:
+        return {**result, "qualified": False, "reason": OVERSIZED_REASON,
+                "face_fraction": round(face_fraction, 3), "face_fraction_max": FACE_FRACTION_MAX}
     render_hair = np.zeros(figure.shape, bool)
     for inst in client.segment(inp, "hair"):
         render_hair |= inst.mask
@@ -110,6 +119,9 @@ def resolve(client, work, records, cam, body_cam, previous=None):
                 Image.fromarray((np.clip(image, 0, 1) * 255).round().astype(np.uint8)).save(target / f"{key}.png")
             Image.fromarray(row.pop("_face").astype(np.uint8) * 255).save(target / "face.png")
         evaluated.append({k: v for k, v in row.items() if not k.startswith("_")})
+        if row["reason"] == OVERSIZED_REASON:
+            # Every attempt shares this render mask, so no later attempt can qualify.
+            return {"applied": False, "view": VIEW, "evaluated": evaluated, "reason": OVERSIZED_REASON}
         if row["qualified"]:
             chosen = evaluated[-1]
             break
