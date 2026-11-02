@@ -144,6 +144,22 @@ class ProgressiveFiles(WebCase):
         (self.tmp / 'outside.glb').write_bytes(box_glb())
         self.assertEqual(read_progress(run)['versions'], [])
 
+    def test_final_version_cut_short_falls_back_to_the_last_complete_one(self):
+        run = self.tmp / 'final-truncated'
+        run.mkdir()
+        versions = []
+        FakeRunner().publish_version(run, versions, 1, ['front'])
+        FakeRunner().publish_version(run, versions, 2, ['front', 'back'])
+        (run / 'stage-3f-progress.json').write_text(json.dumps(
+            {'profile': 'fast', 'versions': versions, 'done': True, 'final_n': 2}))
+        data = (run / '03-refined-v2.glb').read_bytes()
+        (run / '03-refined-v2.glb').write_bytes(data[:len(data) // 2])
+        progress = read_progress(run)
+        self.assertEqual([v['n'] for v in progress['versions']], [1])
+        self.assertEqual(progress['final_n'], 1)
+        (run / '03-refined-v1.glb').write_bytes(b'')
+        self.assertEqual(read_progress(run)['final_n'], None)
+
     def test_signed_view_names_and_final_version_metadata(self):
         run = self.tmp / 'signed-views'
         run.mkdir()
