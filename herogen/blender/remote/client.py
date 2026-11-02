@@ -184,17 +184,42 @@ def body_summary(image: Path, bbox: list, box_source: str, detector: str | None 
 STILL_WAITING_S = 20.0   # a "still waiting for the GPU" build-log line after this long
 
 
+def _number(value) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _job(run_log) -> dict:
+    runs = run_log.get("runs") if isinstance(run_log, dict) else None
+    job = runs.get("job") if isinstance(runs, dict) else None
+    return job if isinstance(job, dict) else {}
+
+
 def _gpu_timings(run_log) -> dict:
     """Model load and inference seconds a runner reported (load > 0 means the model was loaded: a cold start);
-    empty for anything else, never an error."""
+    empty for anything else, never an error. Inference is the runner's own time for the job; without it, the
+    run's time after loading."""
     if not isinstance(run_log, dict):
         return {}
-    load, total = run_log.get("load_seconds"), run_log.get("total_seconds")
+    load, total, job = run_log.get("load_seconds"), run_log.get("total_seconds"), _job(run_log)
     out = {}
-    if type(load) in (int, float) and math.isfinite(load) and load >= 0:
+    if _number(load):
         out["load_s"] = round(float(load), 1)
-        if type(total) in (int, float) and math.isfinite(total) and total >= load:
+        if _number(job.get("seconds")):
+            out["infer_s"] = round(float(job["seconds"]), 1)
+        elif _number(total) and total >= load:
             out["infer_s"] = round(float(total) - float(load), 1)
+    return out
+
+
+def _gpu_result(run_log) -> dict:
+    """The size of what a runner returned (SAM 3D Objects' mesh and texture, SAM 3D Body's people found);
+    empty for anything else, never an error."""
+    job = _job(run_log)
+    out = {name: int(job[key]) for name, key in (("vertices", "glb_vertices"), ("faces", "glb_faces"),
+                                                ("people", "n_people")) if _number(job.get(key))}
+    size = job.get("texture_size")
+    if isinstance(size, list) and size and all(_number(v) for v in size):
+        out["texture_px"] = int(max(size))
     return out
 
 
@@ -346,6 +371,7 @@ class RemoteClient:
             (d / "modal.log").write_text(logtext)
             if call is not None and call.active:
                 call.m.update(_gpu_timings(run_log))
+                call.m.update(_gpu_result(run_log))
                 gpu_type = run_log.get("gpu_type") if isinstance(run_log, dict) else None
                 call.extra["gpu"] = events.slug(gpu_type or gpu, "other").replace("_", "-")
         price = PRICE_PER_SECOND.get(gpu)
