@@ -159,7 +159,7 @@ class FastPipelineTests(unittest.TestCase):
         self.assertEqual(code, 1)
         rec = RunFolder(self.root, "miss").read_stage(1)
         self.assertEqual(rec["status"], "error")
-        self.assertEqual(len(rec["calls"]), 3)
+        self.assertEqual(len(rec["calls"]), 5)
         self.assertTrue(all(c["outcome"] == "ReplayMiss" for c in rec["calls"]))
         self.assertIn("no cached", err.getvalue())
 

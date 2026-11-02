@@ -446,9 +446,11 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
     reference = _load(run, "redo/parent-cover.png") if run.exists("redo/parent-cover.png") else sketch
     (run.path / "01-cover.png").unlink(missing_ok=True)
     st.details["input"] = {"generated_sketch": generated}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        characters = pool.submit(client.segment, sketch, "character")
-        feet = pool.submit(client.segment, sketch, "feet")
+    sam_image = sketch if generated else inputs.fast_sam_image(sketch)
+    figure_texts = ("character",) if generated else inputs.FAST_FIGURE_TEXTS
+    with ThreadPoolExecutor(max_workers=len(figure_texts) + 2) as pool:
+        characters = {text: pool.submit(client.segment, sam_image, text) for text in figure_texts}
+        feet = pool.submit(client.segment, sam_image, "feet")
         photo = None if generated else pool.submit(inputs.judge_photo, client, sketch)
         cover = (pool.submit(client.edit_image, prompt, [reference], size=f"{sketch.width}x{sketch.height}")
                  if generated else None)
@@ -457,14 +459,19 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         check, details = inputs.photo_check(photo.result())
         st.checks.append(check)
         st.details["input"]["photo"] = details
-    checks, details = inputs.fast_figure_checks(characters.result(), feet.result(), sketch.height)
-    incomplete = not generated and any(c["name"] == "sketch_feet_on_figure" and not c["pass"]
-                                       for c in checks)
+    figures, candidate_details = inputs.fast_figure_candidate({text: call.result() for text, call in characters.items()})
+    checks, details = inputs.fast_figure_checks(figures, feet.result(), sketch.height, allow_missing=not generated)
+    details.update(candidate_details, sam_prompts=[*figure_texts, "feet"], contrast_normalised=not generated)
+    incomplete = not generated and (not figures or any(
+        c["name"] == "sketch_feet_on_figure" and not c["pass"] for c in checks))
     if not generated:
         st.details["upload_failed_checks"] = [c["name"] for c in checks[1:] if not c["pass"]]
         # Keep upload measurements distinct from the necessary checks on the generated cover.
-        for check in checks[1:]:
+        character_check = checks[0].copy()
+        for check in checks:
             check["name"] = "upload_" + check["name"].removeprefix("sketch_")
+        if not character_check["pass"]:
+            checks.append(character_check)
     st.checks += checks
     st.necessary_checks.update(c["name"] for c in st.checks if generated or c["name"] in {
         "sketch_characters_found", "upload_real_person_photo_probability"})
@@ -482,20 +489,19 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         image = client.edit_image(prompt, [reference], size=f"{sketch.width}x{sketch.height}")
     st.save_image("01-cover.png", image)
     if not generated:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            cover_characters = pool.submit(client.segment, image, "character")
+        with ThreadPoolExecutor(max_workers=len(inputs.FAST_FIGURE_TEXTS) + 1) as pool:
+            cover_characters = {text: pool.submit(client.segment, image, text) for text in inputs.FAST_FIGURE_TEXTS}
             cover_feet = pool.submit(client.segment, image, "feet")
+        figures, candidate_details = inputs.fast_figure_candidate(
+            {text: call.result() for text, call in cover_characters.items()})
         cover_checks, cover_details = inputs.fast_figure_checks(
-            cover_characters.result(), cover_feet.result(), image.height)
-        if not any(c["name"] == "sketch_feet_on_figure" for c in cover_checks):
-            cover_checks.append(inputs.input_check(
-                "sketch_feet_on_figure", 0, 1, "==", "reject",
-                "Show the whole character from head to feet; we couldn't see both feet."))
+            figures, cover_feet.result(), image.height, require_feet=False)
+        cover_details.update(candidate_details, sam_prompts=[*inputs.FAST_FIGURE_TEXTS, "feet"])
         for check in cover_checks:
-            if check["name"] != "sketch_feet_on_figure":
+            if check["name"] not in {"sketch_characters_found", "sketch_feet_on_figure"}:
                 check["name"] = "cover_" + check["name"].removeprefix("sketch_")
         st.checks += cover_checks
-        st.necessary_checks.add("sketch_feet_on_figure")
+        st.necessary_checks.update({"sketch_characters_found", "sketch_feet_on_figure"})
         st.details["cover"] = cover_details
         _finish_input_checks(st)
         if incomplete:

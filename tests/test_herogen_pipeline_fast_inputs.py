@@ -1,6 +1,9 @@
 """Necessary fast input gates and call ordering with synthetic images and fake clients."""
+import base64
 import contextlib
+import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -38,6 +41,7 @@ class FastInputTests(unittest.TestCase):
         self.cover_feet = "normal"
         self.cover_image = None
         self.failures = {}
+        self.figure_responses = {}
 
         def post(client, endpoint, body, **kwargs):
             if endpoint == "responses":
@@ -60,8 +64,12 @@ class FastInputTests(unittest.TestCase):
             return answer
 
         def decode(text, size):
+            upload = np.array_equal(np.asarray(self.api.last_sam_image),
+                                    np.asarray(inputs.fast_sam_image(self.upload_image)))
+            key = ("upload" if upload else "cover", self.api.last_sam_text)
+            if key in self.figure_responses:
+                return self.figure_responses[key]
             if self.api.last_sam_text == "feet":
-                upload = np.array_equal(np.asarray(self.api.last_sam_image), np.asarray(self.upload_image))
                 feet = self.feet if upload else self.cover_feet
                 if feet == "missing":
                     return []
@@ -119,15 +127,103 @@ class FastInputTests(unittest.TestCase):
         self.assertEqual(self.run.exists("01-cover.png"), cover_exists)
         return record
 
-    def test_zero_and_two_characters_reject_without_cover_or_retry(self):
+    def test_two_characters_reject_without_cover_or_retry(self):
+        self.input("two")
+        record = self.reject("We need exactly one character in the picture; we found 2.")
+        check = next(c for c in record["checks"] if c["name"] == "sketch_characters_found")
+        self.assertEqual((check["value"], check["threshold"]), (2, 1))
+        self.assertCountEqual(self.calls, ["character", "person", "creature", "feet", "photo"])
+
+    def test_bird_figure_found_only_by_creature_passes_upload_and_cover(self):
+        self.input()
+        for source in ("upload", "cover"):
+            for prompt in ("character", "person"):
+                self.figure_responses[source, prompt] = []
+        record = stages.stage1_cover(self.run, self.client)
+        self.assertTrue(record["ok"])
+        for source in ("input", "cover"):
+            self.assertEqual(record["details"][source]["figure_prompt"], "creature")
+            self.assertEqual(record["details"][source]["figure_prompt_counts"],
+                             {"character": 0, "person": 0, "creature": 1})
+
+    def test_no_upload_character_is_informational_and_cover_decides(self):
+        self.input()
+        for prompt in inputs.FAST_FIGURE_TEXTS:
+            self.figure_responses["upload", prompt] = []
+        record = stages.stage1_cover(self.run, self.client)
+        self.assertTrue(record["ok"])
+        check = next(c for c in record["checks"] if c["name"] == "upload_characters_found")
+        self.assertEqual(check["value"], 0)
+        self.assertFalse(check["gate"])
+        self.assertEqual(self.calls.count("cover"), 1)
+        self.assertEqual(record["details"]["cover"]["character_instances"], 1)
+
+    def test_faint_upload_normalised_for_all_sam_calls_only(self):
+        original = self.input()
+        grey = np.asarray(original.convert("L"))
+        faint = Image.fromarray(np.where(grey < 100, 238, 250).astype(np.uint8)).convert("RGB")
+        self.upload_image = faint
+        faint.save(self.run.file("00-sketch.png"))
+        self.cover_image = draw("ok")
+        record = stages.stage1_cover(self.run, self.client)
+        self.assertTrue(record["ok"])
+        for label, body in self.requests[:5]:
+            if label == "photo":
+                encoded = body["input"][0]["content"][1]["image_url"].split(",", 1)[1]
+                self.assertEqual(base64.b64decode(encoded), client_module.jpeg_bytes(faint, 1024, 90))
+            else:
+                image = flow._decode_data_url(body["input"][0]["content"][1]["image_url"])
+                self.assertEqual(image.convert("L").getextrema(), (0, 255))
+                np.testing.assert_array_equal(np.asarray(image), np.asarray(inputs.fast_sam_image(faint)))
+        body = next(b for label, b in self.requests if label == "cover")
+        np.testing.assert_array_equal(np.asarray(flow._decode_data_url(body["images"][0]["image_url"])),
+                                      np.asarray(faint))
+
+    def test_missing_and_multiple_cover_characters_refuse(self):
         for scenario, count in (("blank", 0), ("two", 2)):
             with self.subTest(scenario=scenario):
+                self.input()
+                self.cover_image = draw(scenario)
                 self.calls.clear()
-                self.input(scenario)
-                record = self.reject(f"We need exactly one character in the picture; we found {count}.")
-                check = next(c for c in record["checks"] if c["name"] == "sketch_characters_found")
-                self.assertEqual((check["value"], check["threshold"]), (count, 1))
-                self.assertCountEqual(self.calls, ["character", "feet", "photo"])
+                self.client = ModelClient(self.root / f"cover-count-{count}", mode="live", fast=True)
+                self.reject(f"We need exactly one character in the picture; we found {count}.", cover_exists=True)
+                self.assertEqual(self.calls.count("cover"), 1)
+
+    def test_multiple_figures_on_any_prompt_cannot_be_hidden_by_single_candidate(self):
+        self.input()
+        two = flow.imaging.threshold_mask(draw("two"))
+        figures = []
+        for start, end in flow.imaging.split_columns(two):
+            mask = two.copy()
+            mask[:, :start] = False
+            mask[:, end:] = False
+            figures.append(SamInstance(mask, flow.imaging.bbox(mask), .9))
+        self.figure_responses["upload", "person"] = figures
+        record = self.reject("We need exactly one character in the picture; we found 2.")
+        self.assertEqual(record["details"]["input"]["figure_prompt"], "person")
+
+    def test_candidate_prefers_whole_figure_over_smaller_part(self):
+        whole = np.zeros((100, 100), dtype=bool)
+        whole[10:90, 30:70] = True
+        part = whole.copy()
+        part[45:] = False
+        character = SamInstance(part, (30, 10, 70, 45), .99)
+        creature = SamInstance(whole, (30, 10, 70, 90), .9)
+        selected, details = inputs.fast_figure_candidate({"character": [character], "person": [],
+                                                        "creature": [creature]})
+        self.assertIs(selected[0], creature)
+        self.assertEqual(details["figure_prompt"], "creature")
+
+    def test_candidate_confidence_and_prompt_order_break_coverage_ties(self):
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[10:90, 30:70] = True
+        for confidence, expected in ((.8, "character"), (.9, "character"), (.99, "person")):
+            with self.subTest(confidence=confidence):
+                _, details = inputs.fast_figure_candidate({
+                    "character": [SamInstance(mask, (30, 10, 70, 90), .9)],
+                    "person": [SamInstance(mask, (30, 10, 70, 90), confidence)], "creature": [],
+                })
+                self.assertEqual(details["figure_prompt"], expected)
 
     def assert_completion(self, record, failed):
         self.assertTrue(record["ok"])
@@ -144,11 +240,11 @@ class FastInputTests(unittest.TestCase):
                           "sketch_feet_on_figure"})
         self.assertFalse(checks["upload_feet_on_figure"]["gate"])
         self.assertTrue(checks["sketch_feet_on_figure"]["pass"])
-        self.assertCountEqual(self.calls[:3], ["character", "feet", "photo"])
-        self.assertEqual(self.calls[3:4], ["cover"])
-        self.assertCountEqual(self.calls[4:], ["character", "feet"])
-        # The last two SAM requests must measure the generated image, not the cut-off upload.
-        for label, body in self.requests[-2:]:
+        self.assertCountEqual(self.calls[:5], ["character", "person", "creature", "feet", "photo"])
+        self.assertEqual(self.calls[5:6], ["cover"])
+        self.assertCountEqual(self.calls[6:], ["character", "person", "creature", "feet"])
+        # The last four SAM requests must measure the generated image, not the cut-off upload.
+        for label, body in self.requests[-4:]:
             image = flow._decode_data_url(body["input"][0]["content"][1]["image_url"])
             with Image.open(self.run.file("01-cover.png")) as saved:
                 np.testing.assert_array_equal(np.asarray(image), np.asarray(saved))
@@ -170,7 +266,7 @@ class FastInputTests(unittest.TestCase):
     def test_bottom_crop_completes_even_when_two_feet_are_detected(self):
         self.input("cut")
         cover_started = threading.Event()
-        barrier = threading.Barrier(2)
+        barrier = threading.Barrier(4)
         self.after = lambda label: cover_started.set() if label == "cover" else None
         self.before = lambda _: barrier.wait(timeout=5) if cover_started.is_set() else None
         record = stages.stage1_cover(self.run, self.client)
@@ -186,8 +282,7 @@ class FastInputTests(unittest.TestCase):
         self.assert_completion(record, ["figure_top_gap_px"])
 
     def test_cover_full_body_failure_uses_existing_plain_message(self):
-        for scenario, feet in (("ok", "missing"), ("ok", "upper"), ("cut", "normal"),
-                               ("blank", "normal"), ("two", "normal"), ("top", "normal")):
+        for scenario, feet in (("cut", "normal"), ("top", "normal")):
             with self.subTest(scenario=scenario, feet=feet):
                 self.input("cut")
                 self.cover_image = (Image.fromarray(np.roll(np.asarray(draw("ok")), -50, axis=0))
@@ -198,16 +293,30 @@ class FastInputTests(unittest.TestCase):
                 record = self.reject("Show the whole character from head to feet;", cover_exists=True)
                 self.assertNotIn("completed_figure", record["details"])
                 self.assertEqual(self.calls.count("cover"), 1)
-                self.assertCountEqual(self.calls[4:], ["character", "feet"])
+                self.assertCountEqual(self.calls[6:], ["character", "person", "creature", "feet"])
 
-    def test_full_body_upload_still_requires_full_body_cover(self):
+    def test_dress_cover_with_hidden_feet_passes(self):
         self.input()
         self.cover_feet = "missing"
-        record = self.reject("Show the whole character from head to feet;", cover_exists=True)
+        record = stages.stage1_cover(self.run, self.client)
+        self.assertTrue(record["ok"])
+        checks = {c["name"]: c for c in record["checks"]}
+        self.assertFalse(checks["cover_feet_in_lower_half"]["pass"])
+        self.assertFalse(checks["cover_feet_in_lower_half"]["gate"])
+        self.assertTrue(checks["sketch_feet_on_figure"]["pass"])
         self.assertEqual(record["details"]["prompt"], stages.COVER_PROMPT)
         self.assertEqual(record["details"]["upload_failed_checks"], [])
         self.assertNotIn("completed_figure", record["details"])
-        self.assertCountEqual(self.calls[4:], ["character", "feet"])
+        self.assertCountEqual(self.calls[6:], ["character", "person", "creature", "feet"])
+
+    def test_dress_upload_completes_and_cover_still_allows_hidden_feet(self):
+        self.input()
+        self.feet = self.cover_feet = "missing"
+        record = stages.stage1_cover(self.run, self.client)
+        self.assert_completion(record, ["feet_in_lower_half"])
+        check = next(c for c in record["checks"] if c["name"] == "cover_feet_in_lower_half")
+        self.assertEqual(check["value"], 0)
+        self.assertFalse(check["gate"])
 
     def test_completion_preserves_redo_reference_and_appearance_note(self):
         self.input("cut")
@@ -224,15 +333,28 @@ class FastInputTests(unittest.TestCase):
         self.assertEqual(record["details"]["prompt"], expected)
         self.assertEqual(request["prompt"], expected)
 
-    def test_small_extra_character_is_still_another_instance(self):
+    def test_small_extra_character_is_not_another_substantial_figure(self):
         mask = np.zeros((100, 100), dtype=bool)
         mask[10:90, 30:70] = True
         small = np.zeros_like(mask)
         small[50, 5] = True
         figures = [SamInstance(mask, (30, 10, 70, 90), .9), SamInstance(small, (5, 50, 6, 51), .9)]
         checks, _ = inputs.fast_figure_checks(figures, [], 100)
-        self.assertEqual(checks[0]["value"], 2)
-        self.assertFalse(checks[0]["pass"])
+        self.assertEqual(checks[0]["value"], 1)
+        self.assertTrue(checks[0]["pass"])
+
+    def test_other_character_area_fraction_boundary_is_unchanged(self):
+        main = np.zeros((100, 100), dtype=bool)
+        main[10:90, 30:70] = True  # 3200 pixels
+        for area, count in ((799, 1), (800, 2)):
+            with self.subTest(area=area):
+                extra = np.zeros_like(main)
+                extra.flat[:area] = True
+                figures = [SamInstance(main, (30, 10, 70, 90), .9),
+                           SamInstance(extra, flow.imaging.bbox(extra), .9)]
+                checks, _ = inputs.fast_figure_checks(figures, [], 100)
+                self.assertEqual(checks[0]["value"], count)
+                self.assertEqual(checks[0]["pass"], count == 1)
 
     def test_edge_tolerance_and_feet_thresholds_are_unchanged(self):
         for gap in (2, 3):  # 100 px has the existing 2 px minimum tolerance
@@ -269,7 +391,7 @@ class FastInputTests(unittest.TestCase):
 
     def test_upload_checks_overlap_and_photo_passes_before_cover(self):
         self.input()
-        barrier = threading.Barrier(3)
+        barrier = threading.Barrier(5)
         passed = threading.Event()
         def before(label):
             if label == "cover":
@@ -280,14 +402,19 @@ class FastInputTests(unittest.TestCase):
         self.after = lambda label: passed.set() if label == "photo" else None
         record = stages.stage1_cover(self.run, self.client)
         self.assertTrue(record["ok"])
-        self.assertCountEqual(self.calls[:3], ["character", "feet", "photo"])
-        self.assertEqual(self.calls[3:4], ["cover"])
-        self.assertCountEqual(self.calls[4:], ["character", "feet"])
+        self.assertCountEqual(self.calls[:5], ["character", "person", "creature", "feet", "photo"])
+        self.assertEqual(self.calls[5:6], ["cover"])
+        self.assertCountEqual(self.calls[6:], ["character", "person", "creature", "feet"])
         self.assertEqual(record["details"]["prompt"], stages.COVER_PROMPT)
         self.assertNotIn("prompt_version", record["details"])
         self.assertNotIn("completed_figure", record["details"])
 
     def test_non_fast_recorded_call_sequence_and_cover_wording_unchanged(self):
+        # Request bodies and records at e72ef1f, excluding only stage timing.
+        expected = {
+            "ok": "9c3bd4ab703e7c93163cded2a7447ab4c629ac4b6ac698ae293b96731fc5d88b",
+            "cut": "7e4a380f510c56e0a8da8f947d3a745b30201af289e4cf9f23b55e6050bc7f13",
+        }
         for scenario in ("ok", "cut"):
             with self.subTest(scenario=scenario):
                 self.input(scenario)
@@ -306,6 +433,10 @@ class FastInputTests(unittest.TestCase):
                 self.assertNotIn("completed_figure", record["details"])
                 self.assertNotIn("upload_failed_checks", record["details"])
                 self.assertNotIn("prompt_version", record["details"])
+                stable = {k: v for k, v in record.items() if k not in {"started", "seconds"}}
+                encoded = json.dumps({"requests": self.requests, "record": stable},
+                                     sort_keys=True, separators=(",", ":")).encode()
+                self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected[scenario])
 
     def test_prompt_crop_still_rejects_without_completion_or_cover_checks(self):
         self.input("cut", generated=True)
@@ -316,6 +447,8 @@ class FastInputTests(unittest.TestCase):
 
     def test_completion_cover_checks_propagate_model_errors_and_drain(self):
         for label, failure in (("character", ReplayMiss("cover character missing")),
+                               ("person", ApiError("cover person failed")),
+                               ("creature", ReplayMiss("cover creature missing")),
                                ("feet", ApiError("cover feet failed"))):
             with self.subTest(label=label):
                 self.input("cut")
@@ -327,8 +460,8 @@ class FastInputTests(unittest.TestCase):
                     stages.stage1_cover(self.run, self.client)
                 record = self.run.read_stage(1)
                 self.assertEqual(record["status"], "error")
-                self.assertEqual(len(record["calls"]), 6)
-                self.assertCountEqual(self.calls[4:], ["character", "feet"])
+                self.assertEqual(len(record["calls"]), 10)
+                self.assertCountEqual(self.calls[6:], ["character", "person", "creature", "feet"])
                 self.assertNotIn("completed_figure", record["details"])
 
     def test_cli_completes_cut_off_upload_and_continues_only_when_cover_passes(self):
@@ -351,7 +484,7 @@ class FastInputTests(unittest.TestCase):
         self.input()
         self.api.photo_answer.update(real_person_photo_probability=.99, image_kind="photo_of_real_person")
         record = self.reject("This looks like a photo of a real person.")
-        self.assertCountEqual(self.calls, ["character", "feet", "photo"])
+        self.assertCountEqual(self.calls, ["character", "person", "creature", "feet", "photo"])
         self.assertIn("Upload a drawing or artwork", record["error"])
 
     def test_missing_or_mismatched_prompt_provenance_requires_photo_gate(self):
@@ -368,11 +501,13 @@ class FastInputTests(unittest.TestCase):
                 self.calls.clear()
                 self.client = ModelClient(self.root / provenance, mode="live", fast=True)
                 self.reject("This looks like a photo of a real person.")
-                self.assertCountEqual(self.calls, ["character", "feet", "photo"])
+                self.assertCountEqual(self.calls, ["character", "person", "creature", "feet", "photo"])
 
     def test_model_failures_stay_loud_and_drain_concurrent_calls(self):
         for label, failure in (("photo", ApiError("photo failed")),
                                ("character", ReplayMiss("character missing")),
+                               ("person", ApiError("person failed")),
+                               ("creature", ReplayMiss("creature missing")),
                                ("feet", ApiError("feet failed")),
                                ("cover", ApiError("cover failed"))):
             with self.subTest(label=label):
@@ -384,8 +519,9 @@ class FastInputTests(unittest.TestCase):
                     stages.stage1_cover(self.run, self.client)
                 record = self.run.read_stage(1)
                 self.assertEqual(record["status"], "error")
-                self.assertEqual(len(record["calls"]), 3)
-                self.assertCountEqual(self.calls, ["character", "feet", "cover" if label == "cover" else "photo"])
+                self.assertEqual(len(record["calls"]), 3 if label == "cover" else 5)
+                self.assertCountEqual(self.calls, ["character", "feet", "cover"] if label == "cover" else
+                                      ["character", "person", "creature", "feet", "photo"])
                 self.assertFalse(self.run.exists("01-cover.png"))
 
     def test_cli_rejection_stops_before_stage_two_without_retry(self):
@@ -396,4 +532,4 @@ class FastInputTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("We need exactly one character in the picture; we found 2.", err.getvalue())
         self.assertFalse(RunFolder(self.root, "cli").exists("stage-2.json"))
-        self.assertCountEqual(self.calls, ["character", "feet", "photo"])
+        self.assertCountEqual(self.calls, ["character", "person", "creature", "feet", "photo"])
