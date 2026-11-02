@@ -17,6 +17,7 @@ retain an attempt lease but do not occupy a model-generation slot. Their status 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from herogen.pipeline import events
 from herogen.service.config import Settings
 from herogen.service.runner import (
     GROUPS,
@@ -57,6 +59,10 @@ GROUP_MAX_ENTRIES = 2
 # The TTL allows a few renewals in a row to fail (store busy).
 LEASE_TTL_S = 600.0
 RENEW_EVERY_S = 120.0
+# While a stage runs on a local copy (Modal), its build-log file is copied to the data volume and committed this
+# often, when it has grown, so the website can show the events live. Without it they would appear only when the
+# stage ends and the whole run folder is copied back.
+PUMP_EVERY_S = 3.0
 
 
 class LeaseKeeper:
@@ -80,6 +86,62 @@ class LeaseKeeper:
                 log.warning("could not renew the lease of %s; trying again", self.what, exc_info=True)
 
     def __enter__(self) -> LeaseKeeper:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=60)
+
+
+class EventPump:
+    """Mirror one stage's build-log file (`herogen.pipeline.events`) from the local copy to the data volume while
+    the stage runs: `with EventPump(src, dst, volume, still_current):`. Every `every_s`, when the file changed,
+    it checks that this attempt is still the job's live one (else it stops for good, so a stale, canceled or
+    deleted attempt never writes), copies the file next to its target and renames it into place, then commits.
+    It never creates the run folder. The copy back after the stage still copies everything, so a missed beat
+    loses nothing."""
+
+    def __init__(self, src: Path, dst: Path, volume, still_current: Callable[[], bool],
+                 every_s: float | None = None) -> None:
+        self.src, self.dst, self.volume, self.still_current = Path(src), Path(dst), volume, still_current
+        self.every_s = PUMP_EVERY_S if every_s is None else every_s
+        self.last: tuple[int, int] | None = None
+        self.stopped = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._beat, name="event-pump", daemon=True)
+
+    def pump(self) -> bool:
+        """One beat: True when the file was copied and committed."""
+        if self.stopped:
+            return False
+        try:
+            st = self.src.stat()
+        except FileNotFoundError:
+            return False
+        stamp = (st.st_size, st.st_mtime_ns)
+        if stamp == self.last:
+            return False
+        if not self.still_current():
+            self.stopped = True
+            return False
+        if not self.dst.parent.is_dir():
+            return False
+        part = self.dst.with_name(self.dst.name + ".part")
+        shutil.copy2(self.src, part)
+        os.replace(part, self.dst)
+        self.volume.commit()
+        self.last = stamp
+        return True
+
+    def _beat(self) -> None:
+        while not self._stop.wait(self.every_s) and not self.stopped:
+            try:
+                self.pump()
+            except Exception:
+                log.warning("could not copy the build log; trying again", exc_info=True)
+
+    def __enter__(self) -> EventPump:
         self._thread.start()
         return self
 
@@ -252,6 +314,11 @@ class CopyWorkdir:
     def close(self) -> None:
         shutil.rmtree(self.local_root, ignore_errors=True)
 
+    def event_pump(self) -> EventPump:
+        assert self.local is not None
+        return EventPump(self.local.run_dir / events.FILE, self.remote.run_dir / events.FILE, self.volume,
+                         self.still_current)
+
 
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any], *, spend_limits_enabled=False) -> StageContext:
     uid, jid = job["user_id"], job["id"]
@@ -327,6 +394,14 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
         return GroupResult("error", mine[0][1].key, "restarts", "A worker was restarted too many times.", False)
     prior = {r["stage"]: r for r in store.job_stages(jid)}
     ctx = workdir.open()
+    ctx.attempt = attempt
+    log_file = ctx.run_dir / events.FILE
+
+    def step_event(kind: str, spec, **fields: Any) -> None:
+        if kind == "step_start":
+            fields.update(i=plan.index(spec) + 1, of=len(plan))
+        events.emit(kind, file=log_file, step=spec.key, a=attempt, **fields)
+
     try:
         for index, spec in mine:
             if not store.job_current(jid, attempt):
@@ -334,6 +409,8 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             if index < resume and record_ok(ctx.run_dir, spec):
                 store.job_stage_set(jid, attempt, spec.key, "passed", message="kept from an earlier attempt",
                                     **({"seconds": 0.0, "cost_usd": 0.0} if spec.key not in prior else {}))
+                step_event("step_start", spec)
+                step_event("step_end", spec, outcome="kept", s=0, usd=0)
                 continue
             rows = {r['stage']: r for r in store.job_stages(jid)}
             # The game body needs a passed stage 3 (`herogen.blender` refuses a rejected one), as refine does.
@@ -344,15 +421,20 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                        if spec.key == '4' else
                        'Texture refine was skipped because the 3D shape is rough. Showing the unrefined texture.')
                 skip_stage(store, jid, attempt, spec, ctx, why)
+                step_event("step_start", spec)
+                step_event("step_end", spec, outcome="skipped", why="earlier_step", s=0, usd=0)
                 workdir.sync()
                 continue
             timeout = settings.blender_timeout_s if spec.group in ("blender", "body") else settings.stage_timeout_s
             if not store.job_stage_set(jid, attempt, spec.key, "running", lease_s=timeout + LEASE_MARGIN_S):
                 return GroupResult("stale", spec.key)
             event("stage_started", job=jid, attempt=attempt, stage=spec.key)
+            step_event("step_start", spec)
             stage_t0 = time.monotonic()
+            pump = getattr(workdir, "event_pump", None)
             try:
-                out = runner.run(spec, ctx)
+                with pump() if pump else contextlib.nullcontext():
+                    out = runner.run(spec, ctx)
             except Exception as e:
                 from herogen.pipeline.client import ApiError, ReplayMiss
 
@@ -379,10 +461,12 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                     'status': 'error' if out.state == 'failed' else 'rejected',
                     'error': out.detail or out.message, 'seconds': out.seconds, 'cost_usd': out.cost_usd})
             compute = round(out.seconds * compute_price_per_s, 6)
-            workdir.sync()
             state = "skipped" if degraded else out.state
             if spec.key == "4" and out.state == "rejected":
                 state = "rejected"
+            step_event("step_end", spec, outcome=state, code=out.code or None if state != "passed" else None,
+                       s=out.seconds, usd=round(out.cost_usd + compute, 6))
+            workdir.sync()
             store.job_stage_set(jid, attempt, spec.key, state, seconds=out.seconds,
                                 cost_usd=round((prior.get(spec.key, {}).get("cost_usd") or 0.0)
                                                + out.cost_usd + compute, 6), message=degradation_note(spec, out) if degraded else out.message,
@@ -411,6 +495,26 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
 GroupExecutor = Callable[[dict[str, Any], int, str, int], GroupResult]
 
 
+def job_event(storage: Storage, job: dict[str, Any], volume, kind: str, *, create: bool = False,
+              **fields: Any) -> None:
+    """A job-level build-log event, written by the orchestrator straight to the data volume. It writes only while
+    none of its job's groups runs (before, between and after them), so it never races a group's copy back; on
+    Modal it reloads first, so it appends to the newest file, and commits after. ``create`` makes the run folder
+    (the claim, for a job that has none yet); otherwise a folder that is gone (a deleted hero) stays gone."""
+    try:
+        if volume is not None:
+            volume.reload()
+        run = storage.run_dir(job["user_id"], job["id"])
+        if create:
+            run.mkdir(parents=True, exist_ok=True)
+        if not run.is_dir() or not events.emit(kind, file=run / events.FILE, **fields):
+            return
+        if volume is not None:
+            volume.commit()
+    except Exception:
+        log.warning("could not write the %s build-log event of %s", kind, job.get("id"), exc_info=True)
+
+
 def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: str, execute: GroupExecutor,
             redispatch: Callable[[str], None] | None = None, volume=None) -> str | None:
     """Claim and execute one attempt, recording its final state or retry."""
@@ -421,6 +525,11 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
     job, attempt = claim["job"], claim["attempt"]
     event("job_started", job=job_id, attempt=attempt, kind=job["kind"], profile=job["profile"],
           commit=job["code_commit"] or settings.code_commit)
+    job_event(storage, job, volume, "job_start", create=True, a=attempt, of=settings.max_attempts)
+    clock = getattr(store, "clock", None)   # the store's clock stamped created_at (a remote store has none here)
+    waited = (clock() if callable(clock) else time.time()) - (job.get("created_at") or 0.0)
+    if attempt == 1 and 0 <= waited < 86400:
+        job_event(storage, job, volume, "queue", a=attempt, s=round(waited, 3))
     # The orchestrator lives for the whole attempt: its heartbeat keeps the job's lease through every copy,
     # stage, cold start and copy back, and stops when the orchestrator dies, so the sweep then finds the job.
     with LeaseKeeper(lambda: store.job_renew(job_id, attempt, LEASE_TTL_S), job_id):
@@ -432,6 +541,7 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                   if attempt > 1 or job.get("parent_job") else 0)
         if (job["kind"] == "sketch" and not job.get("parent_job")
                 and not storage.input_path(job["user_id"], job_id).is_file()):
+            job_event(storage, job, volume, "job_end", a=attempt, state="failed")
             store.job_finish(job_id, attempt, "failed", error_code="input_missing", error_stage="0",
                              error_message="The uploaded sketch was not saved.")
             return "failed"
@@ -475,6 +585,7 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                     res = GroupResult('error', '3', 'model_missing',
                                       'The 3D shape could not be saved. Please create another hero.')
                 elif store.job_model_ready(job_id, attempt, bytes_=_bytes(storage, job, volume)):
+                    job_event(storage, job, volume, "model_ready", a=attempt)
                     if redispatch is not None:
                         redispatch(job_id)
             ready = (store.job_get(job_id) or {}).get('state') == 'succeeded'
@@ -490,8 +601,14 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 res.status = 'ok'
             if res.status == "stale":
                 event("job_stale", job=job_id, attempt=attempt, group=group)
-                return (store.job_get(job_id) or {}).get("state")
+                now = store.job_get(job_id) or {}
+                if now.get("state") == "canceled" and now.get("deleted_at") is None and now.get("attempts") == attempt:
+                    job_event(storage, job, volume, "cancel", a=attempt)
+                    job_event(storage, job, volume, "job_end", a=attempt, state="canceled")
+                return now.get("state")
             if res.status == "rejected":
+                job_event(storage, job, volume, "job_end", a=attempt, state="rejected",
+                          s=round(time.monotonic() - t0, 2), usd=round(carried + cost + compute, 6))
                 store.job_finish(job_id, attempt, "rejected", error_code="rejected", error_stage=res.stage,
                                  error_message=res.message, seconds=round(time.monotonic() - t0, 2),
                                  cost_usd=round(carried + cost + compute, 6), cost_detail=detail,
@@ -502,7 +619,14 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                 if res.retry:
                     state = store.job_requeue(job_id, attempt, settings.max_attempts, res.code, res.stage,
                                               res.message + " It was tried again automatically.")
+                    if state == "queued":
+                        job_event(storage, job, volume, "requeue", a=attempt, next=attempt + 1,
+                                  of=settings.max_attempts, step=res.stage, code=res.code or None)
+                    else:
+                        job_event(storage, job, volume, "job_end", a=attempt, state="failed")
                 else:
+                    job_event(storage, job, volume, "job_end", a=attempt, state="failed",
+                              s=round(time.monotonic() - t0, 2), usd=round(carried + cost + compute, 6))
                     store.job_finish(job_id, attempt, "failed", error_code=res.code, error_stage=res.stage,
                                      error_message=res.message,
                                      seconds=round(time.monotonic() - t0, 2), cost_usd=round(carried + cost + compute, 6),
@@ -531,10 +655,14 @@ def run_job(store, settings: Settings, storage: Storage, job_id: str, call_id: s
                                        if rows.get(k, {}).get('state') in ('skipped', 'rejected') and rows[k]['message']), str(exc))
             for prefix in ('Roblox body unavailable for this hero: ', 'Roblox files unavailable for this hero: '):
                 export_message = export_message.removeprefix(prefix)
+            job_event(storage, job, volume, "job_end", a=attempt, state="succeeded", export=export_state, s=took,
+                      usd=round(carried + cost + compute, 6))
             store.job_export_finish(job_id, attempt, state=export_state, message=export_message,
                                     cost_detail=detail,
                                     bytes_=_bytes(storage, job, volume))
         else:
+            job_event(storage, job, volume, "job_end", a=attempt, state=final_state, s=took,
+                      usd=round(carried + cost + compute, 6))
             store.job_finish(job_id, attempt, final_state, seconds=took, cost_usd=round(carried + cost + compute, 6),
                              cost_detail=detail, bytes_=_bytes(storage, job, volume))
         event("job_finished", job=job_id, attempt=attempt, state=final_state, seconds=took,

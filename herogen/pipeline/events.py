@@ -347,8 +347,10 @@ class Call:
     """One model or GPU call between its start and end events. Set ``outcome``, ``code``, ``usd`` or ``m`` before
     the block ends to change what the end event says."""
 
-    def __init__(self, who: str, what: str, *, gpu: bool, step: Any, file: str | None, **fields: Any) -> None:
+    def __init__(self, who: str, what: str, *, gpu: bool, step: Any, file: str | None, a: int | None = None,
+                 **fields: Any) -> None:
         self.id = secrets.token_hex(6)
+        self.a = a
         self.who, self.what, self.gpu = who, what, gpu
         self.step = step if step is not None else current_step()
         self.file = file if file is not None else target()
@@ -367,7 +369,7 @@ class Call:
     def emit(self, kind: str, **fields: Any) -> dict | None:
         if not self.active:
             return None
-        return emit(kind, file=self.file, step=self.step, id=self.id, who=self.who, **fields)
+        return emit(kind, file=self.file, step=self.step, a=self.a, id=self.id, who=self.who, **fields)
 
     def add_cost(self, usd: Any) -> None:
         if type(usd) in (int, float) and math.isfinite(usd) and usd > 0:
