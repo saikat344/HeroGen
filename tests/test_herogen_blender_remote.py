@@ -225,6 +225,37 @@ class Live(Base):
         again = rc.RemoteClient(self.cache, mode="replay").body(self.img, [1, 2, 3, 4], "front mask")
         self.assertTrue(again.cached)
 
+    def test_build_log_gpu_events_say_waiting_still_waiting_and_how_it_ended(self):
+        from herogen.pipeline import events
+        log = self.tmp / "events.jsonl"
+        os.environ.update({events.ENV_FILE: str(log), events.ENV_STEP: "3", "FAKE_SLEEP": "0.6"})
+        with mock.patch.object(rc, "STILL_WAITING_S", 0.2):
+            rc.RemoteClient(self.cache, mode="live", timeout=60, fast=True).objects(self.img, self.msk)
+        del os.environ["FAKE_SLEEP"]
+        rc.RemoteClient(self.cache, mode="replay", fast=True).objects(self.img, self.msk)
+        os.environ["FAKE_FAIL"] = "1"
+        with self.assertRaises(rc.RemoteError):
+            rc.RemoteClient(self.cache, mode="live", timeout=60).body(self.img, [1, 2, 3, 4], "front mask")
+        text = log.read_text()
+        got = [events.validate(json.loads(x)) for x in text.splitlines()]
+        self.assertEqual([(e["kind"], e["who"], e.get("outcome"), e.get("s") if e["kind"] == "gpu_wait" else None)
+                          for e in got], [
+            ("gpu_wait", "sam-3d-objects", None, None), ("gpu_wait", "sam-3d-objects", None, 0.2),
+            ("gpu_end", "sam-3d-objects", "ok", None),
+            ("gpu_wait", "sam-3d-objects", None, None), ("gpu_end", "sam-3d-objects", "reused", None),
+            ("gpu_wait", "sam-3d-body", None, None), ("gpu_end", "sam-3d-body", "failed", None)])
+        self.assertEqual({e["what"] for e in got}, {"3d_shape", "body_joints"})
+        self.assertEqual(len({e["id"] for e in got[:3]}), 1)
+        self.assertGreater(got[2]["usd"], 0)
+        self.assertGreaterEqual(got[2]["s"], 0.6)
+        self.assertEqual(got[2]["gpu"], rc.DEFAULT_OBJECTS_GPU.lower())
+        self.assertEqual((got[4]["usd"], "s" in got[4]), (0, False))
+        self.assertEqual(got[6]["code"], "remote_error")
+        self.assertNotIn(str(self.tmp), text)
+        self.assertEqual(rc._gpu_timings({"load_seconds": 60.4, "total_seconds": 156.5}),
+                         {"load_s": 60.4, "infer_s": 96.1})
+        self.assertEqual(rc._gpu_timings({}), {})
+
     def test_body_needs_a_person_box(self):
         c = rc.RemoteClient(self.cache, mode="live", timeout=60)
         for bbox, source in ((None, "front mask"), ([1, 2, 3], "front mask"), ([1, 2, 3, 4], "")):

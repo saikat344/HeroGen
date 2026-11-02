@@ -47,7 +47,7 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
-from herogen.pipeline import ledger, retry
+from herogen.pipeline import events, ledger, retry
 from herogen.pipeline.fast import enabled, tracked
 
 API_BASE = "https://api.meta.ai/v1"
@@ -74,6 +74,7 @@ TIMEOUT_S = 240.0  # socket timeout of one attempt
 # call like SAM's and has its deadline.
 DEADLINE_S = {SAM_MODEL: 600.0, IMAGE_MODEL: 900.0, TEXT_MODEL: 600.0}
 LEDGER = "calls-ledger.jsonl"
+SLOT_WAIT_EVENT_S = 0.5  # a shorter wait for the shared limiter is not worth a build-log line
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +123,8 @@ class CallLog:
         cost, since it may be billed). ``cost_usd``: the call's own estimate (token-priced models), used in
         place of the per-image price."""
         call: dict[str, Any] = {"model": model, "kind": kind, "key": key, "cached": cached}
+        if cached:
+            events.mark_reused()   # the build log says "reused a saved result" for the call this runs in
         if outcome:
             call["outcome"] = outcome
         if cost_usd is not None:
@@ -468,11 +471,16 @@ class ModelClient:
         deadline = policy.clock() + deadline_s
         paid_edit = model == IMAGE_MODEL  # each answered Muse call is a new, billed generation
         last = "no attempt made"
+        ev = events.current_call()   # the build-log call this request belongs to, if the log is on
         for attempt in range(1, policy.max_attempts + 1):
             if self.before_api_attempt is not None:
                 self.before_api_attempt(model)
             slot, slot_wait = limiter.acquire(policy.wall() + (deadline - policy.clock()))
+            if ev is not None and slot_wait >= SLOT_WAIT_EVENT_S:
+                ev.emit("call_wait", why="slot", s=slot_wait)
             if slot is None:
+                if ev is not None:
+                    ev.code = "no_slot"
                 raise ApiError(f"{endpoint} failed: no call slot came free before the {deadline_s:.0f} s deadline "
                                f"(attempt {attempt}; last: {last})", transient=not self.fast)
             started = policy.clock()
@@ -538,6 +546,16 @@ class ModelClient:
                 self.log.add(model, kind, key, cached=False,
                              cost_usd=attempt_cost if usage_cost_usd else None)
             seconds = policy.clock() - started
+            if ev is not None:
+                ev.add_cost(attempt_cost)
+                if outcome != "ok":
+                    ev.code = ("unreadable" if outcome == "unreadable" else events.code_for_status(status)
+                               if status is not None else "timeout" if network_class == "TimeoutError"
+                               else "network")
+                    if outcome == "unknown":
+                        ev.outcome = "unknown"
+                else:
+                    ev.outcome = None
             if self.fast:
                 if len(self.log.calls) == log_start:
                     self.log.add(model, kind, key, cached=False, outcome=outcome, cost_usd=attempt_cost)
@@ -574,6 +592,9 @@ class ModelClient:
                 break
             log.warning("%s %s attempt %d/%d failed (%s); retrying in %.1f s (%s)", model, endpoint, attempt,
                         policy.max_attempts, f"HTTP {status}" if status is not None else network_class, wait, why)
+            if ev is not None:
+                ev.emit("call_retry", attempt=attempt, of=policy.max_attempts, code=ev.code, s=wait)
+                ev.outcome = None
             policy.sleep(wait)
         if not retry.retryable(status, paid_edit=paid_edit):
             raise ApiError(f"{endpoint} failed: {last} (not retried)", http_status=status, error_code=error_code)
