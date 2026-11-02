@@ -69,3 +69,16 @@ class TestDevMode(TempDirCase):
         self.assertEqual((self.tmp / "dev" / ".gitignore").read_text(), "*\n")
         self.assertTrue(svc.store.generation_get()["enabled"])
         svc.store.close()
+
+    def test_dev_services_read_settings_without_the_service_prefix(self):
+        from unittest import mock
+
+        from herogen.service.__main__ import dev_services
+
+        with mock.patch.dict(os.environ, {"HEROGEN_TEXTURE_NOTES": "1"}):
+            try:
+                svc, _ = dev_services(self.tmp / "dev", 8899, "fake", 0.0, echo=False)
+            except ImportError:
+                self.skipTest("dev mode needs the web dependencies")
+        self.assertTrue(svc.settings.texture_notes)
+        svc.store.close()
