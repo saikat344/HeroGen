@@ -6,11 +6,29 @@ Without a build-log file (`herogen.pipeline.events`) every function is a no-op.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 
 from herogen.pipeline import events
 
 STEP = "3f"
+_MUTED = contextvars.ContextVar("refine_buildlog_muted", default=False)
+
+
+@contextlib.contextmanager
+def muted():
+    """No view, wave or version lines inside: an internal sub-run whose results the main run reports itself.
+    Its model requests are still logged as calls (they are real requests), without a try number."""
+    token = _MUTED.set(True)
+    try:
+        yield
+    finally:
+        _MUTED.reset(token)
+
+
+def is_muted() -> bool:
+    return _MUTED.get()
 
 # Record reasons (`views[].reason`, `attempts[].reason`) as build-log reason identifiers.
 WHY = {
@@ -31,7 +49,7 @@ def _quiet(fn):
     """Emit only when the build log is on, and never let working out a line fail the stage."""
     @functools.wraps(fn)
     def emit(*args, **kwargs):
-        if not events.enabled():
+        if not events.enabled() or _MUTED.get():
             return
         try:
             fn(*args, **kwargs)
@@ -95,7 +113,7 @@ def try_cancelled(view: str, number: int, private: dict, calls: list) -> None:
     from herogen.pipeline.client import call_cost
     trial = (private.get("attempts") or [{}])[-1]
     spent = sum(call_cost(c) for c in calls if not c.get("cached"))
-    events.emit("decision", step=STEP, what="view_result", view=view, try_=trial.get("try", number), ok=False,
+    events.emit("decision", step=STEP, what="view_result", view=view, try_=number, ok=False,
                 why="lower_try_accepted", m={**measures(trial), "paid": int(spent > 0), "paid_usd": round(spent, 6)})
 
 
@@ -150,6 +168,7 @@ def skipped(reason: str) -> None:
     events.emit("skip", step=STEP, what="texture_refine", why=reason)
 
 
+@_quiet
 def extra_try(view: str, number: int) -> None:
     """Every earlier try of the view was rejected by its gates, so one more (conditional) try was started."""
     events.emit("decision", step=STEP, what="extra_try", view=view, try_=number)
