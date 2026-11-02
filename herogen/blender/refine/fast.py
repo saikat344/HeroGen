@@ -103,7 +103,8 @@ class Pass:
         self.selected = None
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
-               body_cam, recipe, persistence_lock, user_note="", view_options=None, art=(), art_masks=None, art_framing=None):
+               body_cam, recipe, persistence_lock, user_note="", view_options=None, art=(), art_masks=None, art_framing=None,
+               attempts=ATTEMPTS):
         from . import _attempt_cancelled, _view
 
         def attempt(*args, **kwargs):
@@ -113,7 +114,7 @@ class Pass:
             finally:
                 _attempt_cancelled.reset(token)
 
-        for index in range(ATTEMPTS):
+        for index in range(attempts):
             view_cover, options = (cover, {}) if view_options is None else view_options(self, index, cover)
             standard_side = bool(art and index == 1 and options.get('recipe_name') == 'RF6B')
             if standard_side:
@@ -283,7 +284,7 @@ class Publisher:
 
 
 def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock,
-          user_note="", beauty_context=None, art_context=None, palette_manifest=None):
+          user_note="", beauty_context=None, art_context=None, palette_manifest=None, attempts=ATTEMPTS):
     from .backend import blender
 
     stopped, error, face_error = False, None, None
@@ -385,7 +386,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         art, masks, framing = art_references(art_run, cams[job.name], cams['body+0'], info, artwork)
                     job.submit(pool, client, prep, current, tex, cams[job.name], folder, timeout, cover,
                                head_found, cams['body+0'], recipe, persistence_lock, user_note=user_note,
-                               art=art, art_masks=masks, art_framing=framing,
+                               art=art, art_masks=masks, art_framing=framing, attempts=attempts,
                                **({"view_options": face_control.options} if face_control is not None else {}))
                     all_passes.append(job)
                     for index, (future, *_) in enumerate(job.tasks):

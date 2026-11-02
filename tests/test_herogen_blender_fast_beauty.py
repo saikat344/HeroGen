@@ -1,5 +1,6 @@
 """Beauty face ownership, independent fallback and progressive repaint contracts."""
 from concurrent.futures import Future
+from collections import Counter
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,12 @@ import numpy as np
 from PIL import Image
 
 from herogen.blender import refine as stage
-from herogen.blender.refine import beauty, cameras, fast, fast_beauty as B, imaging as I
-from herogen.pipeline.client import ApiError, ReplayMiss
+try:
+    from herogen.blender.refine import beauty, cameras, fast, fast_beauty as B, imaging as I
+    HAVE_REFINE = True
+except ImportError:
+    HAVE_REFINE = False
+from herogen.pipeline.client import ApiError, ReplayMiss, ModelClient
 from herogen.refine_budget import BudgetStop
 from tests import test_herogen_blender_refine as fixture
 from tests import test_herogen_blender_refine_note as note_fixture
@@ -39,6 +44,7 @@ class TrackedLock:
         self.lock.release()
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class FaceRuleTests(unittest.TestCase):
     def test_fast_beauty_estimate_includes_frontal_feature_calls(self):
         self.assertEqual(stage.cost_estimate(refine_profile='fast'), .25)
@@ -293,6 +299,7 @@ class FaceRuleTests(unittest.TestCase):
         def ordinary(client, prep, current, default, cams, work, data, *args, **kwargs):
             self.assertNotIn('beauty_context', kwargs)
             self.assertEqual(kwargs['user_note'], NOTE)
+            self.assertEqual(kwargs['attempts'], 1)
             np.testing.assert_allclose(default.T, .2)
             default.T[3:5] = [.3, .4, .5]
             data['views']['body+90'] = {'accepted': True}
@@ -504,6 +511,7 @@ class FaceRuleTests(unittest.TestCase):
         client.segment.assert_not_called()
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class EyeQualityTests(unittest.TestCase):
     boxes = [[10, 16, 46, 40], [74, 16, 110, 40]]
 
@@ -534,6 +542,16 @@ class EyeQualityTests(unittest.TestCase):
         self.assertTrue(result['eyes'][0]['accepted'])
         self.assertFalse(result['eyes'][1]['accepted'])
 
+    def test_flat_ordinary_eyes_are_ineligible_even_against_flat_beauty(self):
+        flat = Image.new('RGB', self.face().size, 'grey')
+        for candidate in (flat, self.face()):
+            with self.subTest(flat_beauty=candidate is flat):
+                result = B.eye_quality(candidate, flat, self.boxes)
+                self.assertFalse(result['accepted'])
+                self.assertEqual(result['reason'], 'ordinary eye detail unavailable')
+                self.assertTrue(all(not eye['eligible'] for eye in result['eyes']))
+                self.assertTrue(all(eye['ratios']['laplacian_variance'] is None for eye in result['eyes']))
+
     def test_missing_or_invalid_boxes_cannot_pass(self):
         image = self.face()
         self.assertFalse(B.eye_quality(image, image, self.boxes[:1])['accepted'])
@@ -544,10 +562,23 @@ class EyeQualityTests(unittest.TestCase):
 
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class FastBeautyStageTests(unittest.TestCase):
     setUp = note_fixture.FastNoteTests.setUp
     identity = staticmethod(fixture.StageTests.identity)
-    render_many = note_fixture.FastNoteTests.render_many
+    def render_many(self, mode, args, log, **kwargs):
+        note_fixture.FastNoteTests.render_many(self, mode, args, log, **kwargs)
+        if mode == 'render':
+            from PIL import ImageDraw
+            for cam in args['cams']:
+                path = Path(args['out']) / (cam['name'] + '.png')
+                with Image.open(path) as image:
+                    image = image.copy()
+                draw = ImageDraw.Draw(image)
+                for x in (20, 36):
+                    draw.ellipse((x, 24, x + 8, 32), fill='white', outline='black')
+                    draw.ellipse((x + 3, 26, x + 5, 30), fill='black')
+                image.save(path)
     run_fast = note_fixture.FastNoteTests.run_fast
     beauty_folder = fixture.StageTests.beauty_folder
 
@@ -576,7 +607,7 @@ class FastBeautyStageTests(unittest.TestCase):
         prep.mkdir(exist_ok=True)
         Image.new('RGB', (4, 4), 'blue').save(prep / 'base.png')
         features = {'both_eyes': complete, 'mouth': complete, 'eye_regions': 2 if complete else 0,
-                    'eye_boxes': [[8, 8, 16, 16], [32, 8, 40, 16]] if complete else []}
+                    'eye_boxes': [[20, 24, 28, 32], [36, 24, 44, 32]] if complete else []}
         original = stage._view
         def view(*args, **kw):
             if not default and kw.get('recipe_name') in (None, 'RF2R') and args[4]['name'] == 'head+0':
@@ -590,6 +621,60 @@ class FastBeautyStageTests(unittest.TestCase):
             record = self.run_fast(beauty_dir=folder, **kwargs)
         self.assertGreater(paint.call_count, 0)
         return record
+
+    def assert_paid_samples(self, *, all_flags=False):
+        # Use the real request-key cache and fake only the paid transport. The fixture's
+        # usual edit override counts cache replays as paid, so it cannot prove this cap.
+        self.client.mode = 'live'
+        paid = Counter()
+        ordinary = Counter()
+        lock = threading.Lock()
+        render = self.render_many
+        def distinct_render(mode, args, log, **kwargs):
+            render(mode, args, log, **kwargs)
+            if mode == 'render':
+                for cam in args['cams']:
+                    path = Path(args['out']) / (cam['name'] + '.png')
+                    with Image.open(path) as image:
+                        image = image.copy()
+                    image.putpixel((32, 32), (40 + sum(map(ord, cam['name'])) % 100, 80, 100, 255))
+                    image.save(path)
+        def post(client, endpoint, body, **kwargs):
+            self.assertEqual(endpoint, 'images/edits')
+            view = client.cache_dir.parts[-2]
+            with lock:
+                paid[view] += 1
+                if 'face-source' in client.cache_dir.parts:
+                    ordinary[view] += 1
+            png = body['images'][0]['image_url'].split(',', 1)[1]
+            return {'data': [{'b64_json': png}]}
+        self.client.cache_dir.mkdir()
+        self.assertFalse(list(self.client.cache_dir.iterdir()))
+        fixture.StageTests.closeup_artwork(self)
+        with mock.patch.object(fixture.FakeClient, 'edit_image', ModelClient.edit_image), \
+             mock.patch.object(fixture.FakeClient, '_post', post), \
+             mock.patch.object(self, 'render_many', side_effect=distinct_render), \
+             mock.patch.object(stage, 'art_references', side_effect=lambda run, cam, *a:
+                 ((('back', Image.new('RGB', (64, 64), 'green')),), {}, {})
+                 if stage.side_art_yaw(cam['angle']) else ((), {}, {})), \
+             mock.patch('herogen.blender.refine.region_palette.prepare_manifest', return_value='manifest.json'), \
+             mock.patch('herogen.blender.refine.region_palette.export_texture',
+                        side_effect=lambda m, p, t, *a, **kw: (t, {})):
+            record = self.run_beauty(cap_usd=None, side_beauty=all_flags, region_palette=all_flags)
+        expected = {('hair-' if hair else '') + name for wave in fast.WAVES for name, hair in wave}
+        self.assertEqual(set(paid), expected)
+        self.assertEqual(ordinary, Counter({view: 1 for view in expected}))
+        self.assertTrue(all(count <= 2 for count in paid.values()), paid)
+        self.assertEqual(sum(paid.values()), sum(c['kind'] == 'edit' and not c['cached']
+                                               for c in self.client.log.calls))
+        self.assertTrue(all(view['tries'] == 1 for view in record['default_fast_fallback']['views'].values()))
+        self.assertTrue(any(c['kind'] == 'edit' and c['cached'] for c in self.client.log.calls))
+
+    def test_uncached_beauty_pays_at_most_two_samples_per_view(self):
+        self.assert_paid_samples()
+
+    def test_uncached_all_three_pays_at_most_two_samples_per_view(self):
+        self.assert_paid_samples(all_flags=True)
 
     def test_complete_beauty_front_is_kept_and_progress_and_note_survive(self):
         record = self.run_beauty(user_note=NOTE, cap_usd=5)
@@ -642,7 +727,7 @@ class FastBeautyStageTests(unittest.TestCase):
         import time
         original = stage._view
         def view(*args, **kwargs):
-            if args[4]['name'] == 'body+90' and kwargs.get('attempt_start') == 1:
+            if args[4]['name'] == 'body+90' and kwargs.get('attempt_start') == 0:
                 time.sleep(.2)
                 raise ApiError('late side repaint failure')
             return original(*args, **kwargs)

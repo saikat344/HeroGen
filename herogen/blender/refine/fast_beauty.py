@@ -43,9 +43,12 @@ def eye_quality(candidate, default, boxes):
         enhanced, ordinary = measures
         eyes.append({'box': list(region), 'beauty': enhanced, 'default': ordinary,
                      'ratios': {k: (enhanced[k] / ordinary[k] if ordinary[k] else None) for k in ordinary},
-                     'accepted': all(enhanced[k] >= ordinary[k] for k in ordinary)})
+                     'eligible': all(ordinary[k] > 0 for k in ordinary),
+                     'accepted': all(ordinary[k] > 0 and enhanced[k] >= ordinary[k] for k in ordinary)})
     accepted = all(eye['accepted'] for eye in eyes)
-    return {'accepted': accepted, 'reason': 'accepted' if accepted else 'less eye detail than ordinary fast',
+    reason = ('ordinary eye detail unavailable' if any(not eye['eligible'] for eye in eyes) else
+              'accepted' if accepted else 'less eye detail than ordinary fast')
+    return {'accepted': accepted, 'reason': reason,
             'eyes': eyes}
 
 
@@ -172,7 +175,7 @@ class FaceControl:
             self.key = 'head+0' if head is not None else 'body+0'
 
     def default_fast(self, client, prep, tex, cams, work, timeout, cover, head_found, recipe, save, user_note):
-        """Resolve the ordinary fast atlas, including accepted side/body paint and base residuals."""
+        """Resolve the cover-only atlas from ordinary attempt zero per view and base residuals."""
         from .fast import waves
 
         if self.default_work is not None:
@@ -199,7 +202,8 @@ class FaceControl:
                 return save(**kwargs)
 
         _, stopped = waves(client, prep, self.default_base, default, cams, folder, data,
-                           timeout, cover, head_found, recipe, checkpoint, self.state_lock, user_note=user_note)
+                           timeout, cover, head_found, recipe, checkpoint, self.state_lock,
+                           user_note=user_note, attempts=1)
         checkpoint(ok=False, status='running')
         # Match the exported default atlas, including its quantization and gutter extension.
         default.save(folder / 'texture.png')
