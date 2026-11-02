@@ -1,8 +1,13 @@
 """Transactional generation settings, terminal spend and guest-only HTTP access."""
 import concurrent.futures
 import json
+import os
+import sys
 import threading
 from pathlib import Path
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
 from test_herogen_service_support import Clock, TempDirCase, make_user
 from test_herogen_service_web import WebCase, Browser
