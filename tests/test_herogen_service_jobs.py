@@ -556,15 +556,24 @@ class TestStageCommands(TempDirCase):
         from herogen.service.runner import base_env
 
         values = {"HEROGEN_FAST_LANE": "1", "HEROGEN_MAX_IN_FLIGHT": "6",
-                  "HEROGEN_RPM_IMAGE": "30", "HEROGEN_RPM_TEXT": "120",
-                  "HEROGEN_REFINE_NOTE": "private per-job text"}
+                  "HEROGEN_RPM_MUSE_IMAGE_1_0": "30", "HEROGEN_RPM_SAM_3_1": "60", "HEROGEN_RPM_MUSE_SPARK_1_3": "120",
+                  "HEROGEN_REFINE_NOTE": "private per-job text", "HEROGEN_RPM_SECRET_TOKEN": "not-a-budget"}
         with mock.patch.dict(os.environ, values, clear=True):
             env = base_env()
         for key in values:
-            if key != "HEROGEN_REFINE_NOTE":
+            if key not in ("HEROGEN_REFINE_NOTE", "HEROGEN_RPM_SECRET_TOKEN"):
                 self.assertEqual(env[key], values[key])
-        self.assertNotIn("HEROGEN_REFINE_NOTE", env)
-        self.assertNotIn(values["HEROGEN_REFINE_NOTE"], env.values())
+        for unlisted in ("HEROGEN_REFINE_NOTE", "HEROGEN_RPM_SECRET_TOKEN"):
+            self.assertNotIn(unlisted, env, "only named settings reach a stage, never a prefix match")
+            self.assertNotIn(values[unlisted], env.values())
+
+    def test_fast_lane_budget_names_match_the_request_limiter(self):
+        from herogen.pipeline.client import IMAGE_MODEL, SAM_MODEL, TEXT_MODEL
+        from herogen.service.config import FAST_LANE_ENV
+
+        derived = {"HEROGEN_RPM_" + m.upper().replace("-", "_").replace(".", "_")
+                   for m in (IMAGE_MODEL, SAM_MODEL, TEXT_MODEL)}
+        self.assertEqual({n for n in FAST_LANE_ENV if n.startswith("HEROGEN_RPM_")}, derived)
 
     def test_stage_env_holds_no_secrets(self):
         from herogen.service.runner import base_env
