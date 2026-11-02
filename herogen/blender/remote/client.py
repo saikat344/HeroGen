@@ -196,7 +196,7 @@ class RemoteClient:
 
     # ---- public calls ---------------------------------------------------------------------------------
 
-    @tracked("sam-3d-objects", "gpu")
+    @tracked("sam-3d-objects", "gpu", isolate=True)
     def objects(self, image: Path, mask: Path, seed: int = 42, gpu: str | None = None) -> RemoteResult:
         """SAM 3D Objects: `mesh.glb` (textured source mesh) and `run.json`. `gpu` defaults to the client's
         `objects_gpu`."""
@@ -209,7 +209,7 @@ class RemoteClient:
                           {"HEROGEN_OBJECTS_GPU": gpu, "HEROGEN_OBJECTS_TIMEOUT": str(int(self.timeout))}, gpu,
                           required=("mesh.glb",))
 
-    @tracked("sam-3d-body", "gpu")
+    @tracked("sam-3d-body", "gpu", isolate=True)
     def body(self, image: Path, bbox: list, box_source: str, gpu: str | None = None,
              detector: str | None = None) -> RemoteResult:
         """SAM 3D Body: `joints.json`, `body.npz` and `run.json`. `bbox` [x0, y0, x1, y1] is the person box and
