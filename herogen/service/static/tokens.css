@@ -1,0 +1,393 @@
+/* HeroGen design tokens: "Ember Workshop".
+ *
+ * Usage
+ *   1. Load this file first, before any page stylesheet:  <link rel="stylesheet" href="/assets/tokens.css">
+ *      (target path: herogen/service/static/tokens.css). theme.js already sets <html data-theme="dark|light">
+ *      before first paint; these tokens key off that attribute. Dark is the primary theme and the default.
+ *   2. Components read only semantic tokens (--color-*, --font-*, --space-*, --radius-*, --shadow-*, --dur-*,
+ *      --ease-*). Never write a raw hex, px font size or ms duration in a page stylesheet. If a value is missing,
+ *      add a token here first.
+ *   3. The 3D stage stays dark in both themes (studio convention). Anything placed on it uses the --stage-*
+ *      tokens, not the page tokens.
+ *   4. Fonts are self-hosted from /assets/fonts/ (see DESIGN-SPEC.md section 3). No CDN.
+ *   5. Motion tokens collapse to near-zero under prefers-reduced-motion; components need no extra media query
+ *      for durations, only for animations that move things (see the "motion" section at the bottom).
+ *
+ * Contrast ratios (WCAG 2.x) are listed beside each text/UI colour as fg on --color-bg / --color-surface-1.
+ */
+
+/* ---------- Fonts ---------- */
+@font-face {
+  font-family: "Fraunces";
+  src: url("fonts/Fraunces-Variable.latin.woff2") format("woff2");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Figtree";
+  src: url("fonts/Figtree-Variable.latin.woff2") format("woff2");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+/* Metric-matched fallbacks keep layout shift low while the woff2 files load. Starting values; verify once
+   with the real files (Capsize or fontpie) and adjust size-adjust by +-2% if the headline reflows. */
+@font-face {
+  font-family: "Fraunces Fallback";
+  src: local("Georgia");
+  size-adjust: 104%;
+  ascent-override: 92%;
+  descent-override: 24%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Figtree Fallback";
+  src: local("Arial"), local("Helvetica Neue");
+  size-adjust: 101%;
+  ascent-override: 94%;
+  descent-override: 25%;
+  line-gap-override: 0%;
+}
+
+:root {
+  /* ---------- Raw palette (do not use directly in components) ---------- */
+  --ink-950: #0B0E12;
+  --ink-900: #11151B;
+  --ink-850: #171C23;
+  --ink-800: #1E242D;
+  --ink-750: #232A33;
+  --ink-700: #323B46;
+  --ink-600: #646F7D;
+  --ink-500: #858E99;
+  --ink-300: #ADB4BE;
+  --paper-50: #F3EFE8;
+
+  --ember-500: #FF6B1A;
+  --ember-400: #FF8445;
+  --ember-300: #FF8F52;
+  --ember-600: #E85A0E;
+  --ember-700: #B3420A;
+  --ember-ink: #170A02;
+
+  --stage-hi: #3B2A1C;
+  --stage-mid: #22180F;
+  --stage-lo: #0E0B09;
+
+  /* ---------- Typography ---------- */
+  --font-display: "Fraunces", "Fraunces Fallback", Georgia, "Times New Roman", serif;
+  --font-ui: "Figtree", "Figtree Fallback", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Fraunces axes: soft, non-wonky display cut. */
+  --display-variation: "SOFT" 30, "WONK" 0;
+  --weight-display: 640;
+  --weight-display-strong: 720;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Display scale (Fraunces). size / line-height / tracking */
+  --text-display-xl: clamp(2.75rem, 1.55rem + 4.2vw, 5.25rem);   /* 44 -> 84 px  landing H1 */
+  --lh-display-xl: 1.0;
+  --ls-display-xl: -0.028em;
+  --text-display-l: clamp(2.125rem, 1.45rem + 2.4vw, 3.5rem);     /* 34 -> 56 px  workspace H1, page H1 */
+  --lh-display-l: 1.04;
+  --ls-display-l: -0.022em;
+  --text-display-m: clamp(1.625rem, 1.3rem + 1.1vw, 2.25rem);     /* 26 -> 36 px  section H2, panel title */
+  --lh-display-m: 1.1;
+  --ls-display-m: -0.016em;
+  --text-display-s: 1.375rem;                                      /* 22 px        card title */
+  --lh-display-s: 1.2;
+  --ls-display-s: -0.01em;
+
+  /* UI scale (Figtree) */
+  --text-title: 1.125rem;     /* 18 px / 600 */
+  --lh-title: 1.35;
+  --text-body-l: 1.0625rem;   /* 17 px intro copy */
+  --lh-body-l: 1.55;
+  --text-body: 0.9375rem;     /* 15 px default */
+  --lh-body: 1.5;
+  --text-body-s: 0.8125rem;   /* 13 px helper text */
+  --lh-body-s: 1.45;
+  --text-caption: 0.75rem;    /* 12 px, the minimum for any readable text */
+  --lh-caption: 1.4;
+  --text-eyebrow: 0.6875rem;  /* 11 px, uppercase only, weight 600 */
+  --ls-eyebrow: 0.18em;
+  --text-button: 0.9375rem;   /* 15 px / 600 */
+  --text-button-l: 1.0625rem; /* 17 px / 600, primary CTA */
+  --ls-button: 0.005em;
+  --text-mono: 0.8125rem;     /* 13 px */
+  --lh-mono: 1.55;
+
+  /* ---------- Spacing (4 px base) ---------- */
+  --space-0: 0;
+  --space-1: 0.125rem;  /* 2 */
+  --space-2: 0.25rem;   /* 4 */
+  --space-3: 0.5rem;    /* 8 */
+  --space-4: 0.75rem;   /* 12 */
+  --space-5: 1rem;      /* 16 */
+  --space-6: 1.25rem;   /* 20 */
+  --space-7: 1.5rem;    /* 24 */
+  --space-8: 2rem;      /* 32 */
+  --space-9: 2.5rem;    /* 40 */
+  --space-10: 3rem;     /* 48 */
+  --space-11: 4rem;     /* 64 */
+  --space-12: 5rem;     /* 80 */
+  --space-13: 6rem;     /* 96 */
+  --space-14: 8rem;     /* 128 */
+
+  /* Layout */
+  --gutter: 16px;                 /* page side padding + grid gap; 24 at >=768, 32 at >=1200 */
+  --content-max: 1280px;          /* marketing/landing/gallery/legal */
+  --workspace-max: 1680px;        /* workspace is near full-bleed */
+  --prose-max: 68ch;              /* terms, privacy, long notes */
+  --header-h: 64px;
+  --footer-status-h: 48px;
+  --side-panel-w: clamp(360px, 32vw, 560px);
+
+  /* Control sizes */
+  --control-h-s: 32px;
+  --control-h-m: 40px;
+  --control-h-l: 48px;
+  --tap-min: 44px;                /* any touch target, incl. icon buttons on phones */
+  --icon-s: 16px;
+  --icon-m: 20px;
+  --icon-l: 24px;
+  --icon-stroke: 1.75;
+
+  /* ---------- Radii ---------- */
+  --radius-xs: 4px;    /* number badges, tiny tags */
+  --radius-s: 6px;     /* thumbnails inside nodes, segments */
+  --radius-m: 8px;     /* buttons, inputs, icon buttons */
+  --radius-l: 12px;    /* cards, tree nodes, banners, dock */
+  --radius-xl: 16px;   /* panels, viewer stage, modals */
+  --radius-2xl: 24px;  /* landing composer, gallery hero card */
+  --radius-pill: 999px;
+
+  /* ---------- Borders ---------- */
+  --border-w: 1px;
+  --border-w-strong: 2px;
+  --focus-w: 2px;
+  --focus-offset: 2px;
+
+  /* ---------- Motion ---------- */
+  --dur-instant: 80ms;    /* press feedback */
+  --dur-fast: 140ms;      /* hover, colour changes */
+  --dur-base: 220ms;      /* tabs, chips, small reveals */
+  --dur-slow: 360ms;      /* panels, banners, node completion */
+  --dur-reveal: 640ms;    /* result reveal (image/model fade-up) */
+  --dur-ambient: 2400ms;  /* running shimmer, status pulse */
+  --dur-orbit: 40s;       /* one idle viewer revolution */
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);      /* most UI */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);        /* entrances, reveals */
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);            /* exits */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1); /* node check-mark pop only */
+  --ease-linear: linear;                            /* shimmer, orbit */
+
+  --lift-hover: -2px;     /* translateY for hover lift on cards/thumbnails */
+
+  /* ---------- Z-index ---------- */
+  --z-base: 0;
+  --z-sticky: 10;       /* status footer, sticky sub-headers */
+  --z-header: 20;
+  --z-dropdown: 30;
+  --z-toast: 40;
+  --z-modal: 50;
+
+  /* ---------- Stage (3D viewer); identical in both themes ---------- */
+  --stage-bg:
+    radial-gradient(120% 90% at 50% 38%, var(--stage-hi) 0%, var(--stage-mid) 42%, var(--stage-lo) 100%);
+  --stage-floor: radial-gradient(50% 12% at 50% 92%, rgba(0, 0, 0, 0.55), transparent 70%);
+  --stage-text: #F3EFE8;          /* 14.0:1 on --stage-hi */
+  --stage-text-muted: #C9C2B8;
+  --stage-glass: rgba(11, 14, 18, 0.58);
+  --stage-glass-border: rgba(255, 255, 255, 0.10);
+  --stage-glass-hover: rgba(30, 36, 45, 0.78);
+  /* Three.js clear colour should match --stage-lo; the gradient is a CSS layer behind a transparent canvas. */
+
+  /* Film grain for the stage and the landing hero, 3% opacity. */
+  --texture-grain: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  --texture-grain-opacity: 0.035;
+}
+
+/* ---------- Dark theme (primary, default) ---------- */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: var(--ink-950);            /* page canvas */
+  --color-surface-1: var(--ink-900);     /* panels, header, footer bar */
+  --color-surface-2: var(--ink-850);     /* cards and nodes inside panels */
+  --color-surface-3: var(--ink-800);     /* inputs, hovered rows, secondary buttons */
+  --color-surface-inverse: var(--paper-50);
+
+  --color-border-subtle: var(--ink-750); /* dividers, panel edges (decorative) */
+  --color-border: var(--ink-700);        /* card edges, default button outline (decorative, paired with fill) */
+  --color-border-strong: var(--ink-600); /* input boundary, secondary button: 3.59 on s1, 3.06 on s3 (>=3:1) */
+
+  --color-text: var(--paper-50);         /* 16.88 bg / 15.98 s1 / 13.62 s3 */
+  --color-text-muted: var(--ink-300);    /* 9.26 bg / 8.76 s1 / 7.47 s3 */
+  --color-text-faint: var(--ink-500);    /* 5.83 bg / 5.52 s1 / 4.70 s3; helper text only */
+  --color-text-on-accent: var(--ember-ink); /* 6.82 on accent, 7.99 on accent-hover */
+  --color-text-inverse: var(--ink-950);
+
+  --color-accent: var(--ember-500);      /* fills: primary button, active tab bar, selected node; 6.79 on bg (UI) */
+  --color-accent-hover: var(--ember-400);
+  --color-accent-press: var(--ember-600);
+  --color-accent-text: var(--ember-300); /* accent as text/link/icon: 8.57 bg / 8.11 s1 / 6.91 s3 */
+  --color-accent-subtle: rgba(255, 107, 26, 0.12);  /* selected chip bg, active thumbnail wash */
+  --color-accent-border: rgba(255, 107, 26, 0.55);
+  --color-accent-glow: rgba(255, 107, 26, 0.42);
+
+  --color-success: #45D483;              /* done segments, check icons, "Roblox ready": 10.13 bg / 9.59 s1 */
+  --color-success-subtle: #10261A;       /* 8.37 with success text */
+  --color-success-border: rgba(69, 212, 131, 0.40);
+  --color-danger: #FF6B63;               /* 6.94 bg / 6.57 s1 */
+  --color-danger-text: #FF8A82;          /* text inside danger banner: 7.61 on danger-subtle */
+  --color-danger-subtle: #2A1416;
+  --color-danger-border: #6B2428;
+  --color-warning: #F5B544;              /* skipped-with-note, queued: 10.66 bg */
+  --color-warning-subtle: #2A2110;
+  --color-warning-border: rgba(245, 181, 68, 0.40);
+  --color-info: #74B4FF;                 /* 8.95 bg */
+  --color-info-subtle: #111D2C;
+  --color-info-border: rgba(116, 180, 255, 0.40);
+
+  --color-track: #2A323C;                /* pending progress segment (state also in text) */
+  --color-hatch: repeating-linear-gradient(135deg, #2A323C 0 4px, #1E242D 4px 8px); /* skipped/unavailable */
+  --color-scrim: rgba(5, 7, 9, 0.72);    /* modal backdrop */
+  --color-focus: #FFB07A;                /* focus ring: 10.82 bg / 9.57 s2 */
+  --color-selection: rgba(255, 107, 26, 0.32);
+  --color-dot-grid: rgba(255, 255, 255, 0.055);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-2: 0 10px 28px -10px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 28px 72px -16px rgba(0, 0, 0, 0.75), 0 6px 18px rgba(0, 0, 0, 0.4);
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.045);   /* panel/card top highlight */
+  --glow-accent: 0 0 0 1px var(--color-accent), 0 0 28px -6px var(--color-accent-glow);
+  --glow-accent-soft: 0 0 22px -8px var(--color-accent-glow);
+  --glow-success: 0 0 18px -6px rgba(69, 212, 131, 0.55);
+}
+
+/* ---------- Light theme ---------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg: #F6F3EE;
+  --color-surface-1: #FFFFFF;
+  --color-surface-2: #FBF9F6;
+  --color-surface-3: #F0EBE4;
+  --color-surface-inverse: var(--ink-950);
+
+  --color-border-subtle: #E7E0D6;
+  --color-border: #D3C9BB;
+  --color-border-strong: #8C8173;        /* 3.82 on s1, 3.45 bg */
+
+  --color-text: #17130E;                 /* 16.70 bg / 18.49 s1 */
+  --color-text-muted: #5A534A;           /* 6.85 bg / 7.58 s1 */
+  --color-text-faint: #6E665C;           /* 5.10 bg / 5.65 s1 */
+  --color-text-on-accent: var(--ember-ink); /* 5.46 on accent */
+  --color-text-inverse: var(--paper-50);
+
+  --color-accent: var(--ember-600);      /* 3.22 bg / 3.56 s1 (UI >= 3:1) */
+  --color-accent-hover: #F06A20;
+  --color-accent-press: #CF4E08;
+  --color-accent-text: var(--ember-700); /* 5.13 bg / 5.68 s1 / 4.79 s3 */
+  --color-accent-subtle: #FCE9DD;        /* accent-text on it: 4.82 */
+  --color-accent-border: rgba(232, 90, 14, 0.55);
+  --color-accent-glow: rgba(232, 90, 14, 0.28);
+
+  --color-success: #1C7A44;              /* 4.84 bg / 5.36 s1 */
+  --color-success-subtle: #E6F4EC;
+  --color-success-border: rgba(28, 122, 68, 0.35);
+  --color-danger: #C0281F;               /* 5.32 bg / 5.89 s1 */
+  --color-danger-text: #C0281F;          /* 5.33 on danger-subtle */
+  --color-danger-subtle: #FDF1EF;
+  --color-danger-border: #EDB8B3;
+  --color-warning: #8A5800;              /* 5.46 bg */
+  --color-warning-subtle: #FBF1DC;
+  --color-warning-border: rgba(138, 88, 0, 0.35);
+  --color-info: #1F62C0;                 /* 5.32 bg */
+  --color-info-subtle: #E8F0FB;
+  --color-info-border: rgba(31, 98, 192, 0.35);
+
+  --color-track: #E2DAD0;
+  --color-hatch: repeating-linear-gradient(135deg, #E2DAD0 0 4px, #F0EBE4 4px 8px);
+  --color-scrim: rgba(23, 19, 14, 0.45);
+  --color-focus: #C24A0A;                /* 4.44 bg / 4.67 s2 */
+  --color-selection: rgba(232, 90, 14, 0.22);
+  --color-dot-grid: rgba(23, 19, 14, 0.07);
+
+  --shadow-1: 0 1px 2px rgba(40, 28, 14, 0.08);
+  --shadow-2: 0 10px 28px -12px rgba(40, 28, 14, 0.22), 0 2px 6px rgba(40, 28, 14, 0.06);
+  --shadow-3: 0 28px 72px -18px rgba(40, 28, 14, 0.32), 0 6px 18px rgba(40, 28, 14, 0.08);
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --glow-accent: 0 0 0 1px var(--color-accent), 0 0 24px -8px var(--color-accent-glow);
+  --glow-accent-soft: 0 0 20px -10px var(--color-accent-glow);
+  --glow-success: 0 0 16px -8px rgba(28, 122, 68, 0.35);
+}
+
+/* ---------- Responsive layout tokens ---------- */
+@media (min-width: 768px) {
+  :root { --gutter: 24px; --header-h: 68px; }
+}
+@media (min-width: 1200px) {
+  :root { --gutter: 32px; --header-h: 72px; }
+}
+
+/* ---------- Reduced motion ----------
+   Durations collapse so colour/opacity transitions still complete instantly-ish; components must also gate any
+   transform/keyframe animation (shimmer, orbit, lift, count-up) behind
+   @media (prefers-reduced-motion: no-preference) { ... }. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 1ms;
+    --dur-fast: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+    --dur-reveal: 120ms;   /* keep a short cross-fade so content does not pop */
+    --dur-ambient: 0ms;
+    --lift-hover: 0px;
+  }
+}
+
+/* ---------- Minimal base that every page shares ---------- */
+html {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: 100%;
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
+}
+::selection { background: var(--color-selection); }
+:focus-visible {
+  outline: var(--focus-w) solid var(--color-focus);
+  outline-offset: var(--focus-offset);
+}
+.u-display {
+  font-family: var(--font-display);
+  font-weight: var(--weight-display);
+  font-variation-settings: var(--display-variation);
+}
