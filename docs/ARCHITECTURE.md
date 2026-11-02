@@ -265,6 +265,24 @@ how densely the mesh is sampled along it (the mean of the opening's vertices, us
 pencil-sketch hybrid's waist pivot 0.06 studs between a 16k-triangle decimation and the full mesh). A cut vertex
 stays at least 1e-4 studs from both ends of the edge it splits, so a plane through a vertex leaves no sliver for
 welding to collapse.
+An opening that borders several sections contributes only the points shared with that joint's parent to
+its centroid. Including another neighbour's boundary can move the pivot and stretch the spherical caps;
+openings with fewer than three shared points retain the whole-loop fallback.
+
+Before cutting, `rig_geometry.reconcile_skeleton` checks the hybrid landmarks against their limb topology.
+If the selected hips do not straddle Root, their recorded anatomical pair is used; a shoulder below its elbow
+uses its recorded anatomical alternative. Missing alternatives stop construction. For a corrected hip pair,
+mask widths are measured around the anatomical trunk and legs rather than the displaced silhouette axis.
+A hand endpoint directed back towards the trunk is replaced by the source hand's extent along the forearm,
+with the arm radius measured from source-mesh cross sections. A toe behind its ankle is replaced by the
+forward extent of the nearby source foot. This reconciles inconsistent side drawings without rotating or
+reflecting the front-conditioned mesh. `landmark_repairs` records the sources and distances in studs.
+
+After selecting each LOD, a pivot outside either its child or parent vertex bounds (allowing 1e-4 studs for
+rounding) moves to the nearest shared cut edge. Root uses its own section surface. A missing shared edge
+stops construction rather than placing a joint between disconnected parts. Valid pivots are preserved
+exactly. `pivot_repairs` records each LOD's source and displacement; stage 6 also reports `pivot_fit_studs`
+per part and includes the displacement in its informational notes. Existing rig checks are unchanged.
 
 Stage 4 may then move the neck, waist, elbow, wrist, knee and ankle cuts along their normals by up to half the
 child bone's radius (`herogen/blender/cuts.py`): a cut on a costume ledge (a belt, a hem) leaves the wider side's

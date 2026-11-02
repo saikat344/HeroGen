@@ -621,7 +621,10 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
             jn = info["joint"]
             if jn is None or jn != PIVOT_JOINT[name] or not info["shared"]:
                 continue
-            pts = pos[info["loop"]]
+            # One opening can border several sections. Only this joint's shared rim lies on its cut;
+            # the rest can run down a robe or sleeve. Projecting the entire opening's centroid back onto
+            # this plane moves the pivot away from the joint and stretches its spherical caps.
+            pts = pos[info["shared"]] if len(info["shared"]) >= 3 else pos[info["loop"]]
             p, nrm = rig.planes[jn]
             area = loop_area(pts, nrm)         # the largest opening by area, not by vertex count
             if jn not in joint_centre or area > joint_centre[jn][1]:
