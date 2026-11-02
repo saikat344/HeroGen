@@ -48,6 +48,35 @@ def _decode_data_url(url: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
 
 
+# Encoded PNG bytes, and the request keys and hashes taken over them, differ between Pillow/zlib builds
+# (macOS and Linux encode the same pixels differently). Decoded pixels and request content do not.
+ENCODED_HASH_FIELDS = frozenset({"key", "image_sha256", "images_sha256"})
+
+
+def pixel_digest(image: Image.Image) -> str:
+    rgb = np.asarray(image.convert("RGB"))
+    return hashlib.sha256(repr(rgb.shape).encode() + rgb.tobytes()).hexdigest()
+
+
+def stable_content(value):
+    """`value` with embedded images replaced by their decoded-pixel digests and encoded-byte hashes dropped."""
+    if isinstance(value, dict):
+        return {k: stable_content(v) for k, v in value.items() if k not in ENCODED_HASH_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [stable_content(v) for v in value]
+    if isinstance(value, str) and value.startswith("data:image/"):
+        return "pixels:" + pixel_digest(_decode_data_url(value))
+    return value
+
+
+def file_digest(path: Path) -> str:
+    """Decoded pixels for images, raw bytes otherwise."""
+    if path.suffix.lower() == ".png":
+        with Image.open(path) as image:
+            return "pixels:" + pixel_digest(image)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 FEET_TEXTS = ("foot", "shoe", "boot")  # the held-out turn guide's foot prompts (`heldout.find_feet`)
 
 
