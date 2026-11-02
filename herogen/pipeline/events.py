@@ -89,10 +89,15 @@ def _int(lo: int, hi: int):
     return check
 
 
+def _sig(v: float) -> float:
+    """Six decimals, or six significant digits below 0.001, so a tolerance such as 5e-08 does not read as 0.0."""
+    return float(f"{v:.6g}") if v and abs(v) < 1e-3 else round(v, 6)
+
+
 def _num(v: Any) -> Any:
     if type(v) not in (int, float) or not math.isfinite(v) or v < 0:
         raise ValueError("a finite number >= 0")
-    return round(v, 6) if type(v) is float else v
+    return _sig(v) if type(v) is float else v
 
 
 def _seconds(v: Any) -> Any:
@@ -131,7 +136,7 @@ def _measures(v: Any) -> dict[str, Any]:
             raise ValueError("measurement names are identifiers")
         if type(x) not in (int, float) or not math.isfinite(x):
             raise ValueError("measurements are finite numbers")
-        out[k] = round(x, 6) if type(x) is float else x
+        out[k] = _sig(x) if type(x) is float else x
     return out
 
 
