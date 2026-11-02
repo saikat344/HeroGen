@@ -937,3 +937,130 @@ class TestPages(WebCase):
         self.assertIn("sha256-", r.headers["content-security-policy"])
         self.assertEqual(b.get("/healthz").json()["ok"], True)
         self.assertEqual(b.get("/api/nothing").status_code, 404)
+
+
+class TestBuildLog(WebCase):
+    """GET /api/jobs/{job}/events: the owner's build log from a cursor."""
+
+    def events(self, b, jid, after=None, **params):
+        if after is not None:
+            params["after"] = after
+        r = b.get(f"/api/jobs/{jid}/events", params=params)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["cache-control"], "no-store")
+        return r.json()
+
+    def finished_prompt_job(self, b, prompt="a secret samurai fox with a lacquered katana"):
+        r = b.post("/api/jobs", data={"kind": "prompt", "prompt": prompt}, files={"x": ("a", b"a")},
+                   headers={"Idempotency-Key": "key-buildlog-1"})
+        self.assertEqual(r.status_code, 201, r.text)
+        job = r.json()
+        self.assertEqual(self.finish(job["id"]), "succeeded")
+        uid = self.store.users_list()[0]["id"]
+        return job["id"], self.svc.storage.run_dir(uid, job["id"]) / "events.jsonl"
+
+    def test_a_fake_run_logs_every_step_in_order_and_leaks_nothing(self):
+        from herogen.pipeline import events
+        b = self.signin()
+        prompt = "a secret samurai fox with a lacquered katana"
+        jid, path = self.finished_prompt_job(b, prompt)
+        got = self.events(b, jid)
+        self.assertTrue(got["done"])
+        self.assertFalse(got["more"])
+        evs = got["events"]
+        kinds = [e["kind"] for e in evs]
+        self.assertEqual((kinds[0], kinds[1], kinds[-1]), ("job_start", "queue", "job_end"))
+        self.assertEqual(evs[-1]["state"], "succeeded")
+        self.assertEqual(evs[-1]["export"], "ready")
+        steps = [(e["step"], e["i"], e["of"]) for e in evs if e["kind"] == "step_start"]
+        self.assertEqual(steps, [(k, i + 1, 9) for i, k in enumerate(("p", "0", "1", "2", "3", "3f", "4", "6", "5"))])
+        self.assertEqual([e["outcome"] for e in evs if e["kind"] == "step_end"], ["passed"] * 9)
+        self.assertLess(kinds.index("model_ready"), [e.get("step") for e in evs].index("4"))
+        # The sample's story: a recovery sheet, a failed outline gate, a cancelled hedged try, two versions.
+        self.assertIn("recovery_sheet", [e.get("what") for e in evs if e["kind"] == "decision"])
+        self.assertTrue(any(e["kind"] == "check" and e["ok"] is False and e["gate"] for e in evs))
+        self.assertEqual([e["view"] for e in evs if e.get("outcome") == "cancelled"], ["body-90"])
+        self.assertEqual([e["n"] for e in evs if e["kind"] == "version"], [1, 2])
+        starts = {e["id"] for e in evs if e["kind"] in ("call_start", "gpu_wait")}
+        self.assertEqual(starts, {e["id"] for e in evs if e["kind"] in ("call_end", "gpu_end")})
+        for e in evs:
+            self.assertEqual(events.validate(e), e)
+        raw = path.read_text()
+        for needle in (prompt, "samurai", str(self.tmp), "/Users/", "Traceback", "MODEL_API_KEY", jid):
+            self.assertNotIn(needle, raw)
+            self.assertNotIn(needle, json.dumps(got))
+
+    def test_the_cursor_resumes_pages_and_waits_for_a_partial_last_line(self):
+        b = self.signin()
+        jid, path = self.finished_prompt_job(b)
+        whole = self.events(b, jid)["events"]
+        seen, cursor = [], None
+        while True:
+            page = self.events(b, jid, after=cursor, limit=7)
+            self.assertLessEqual(len(page["events"]), 7)
+            seen += page["events"]
+            cursor = page["cursor"]
+            if not page["more"]:
+                break
+        self.assertEqual(seen, whole)
+        self.assertEqual(self.events(b, jid, after=cursor)["events"], [])
+        with open(path, "ab") as f:                       # a writer in the middle of a line
+            f.write(b'{"v":1,"t":1,"kind":"local","step":"5","what":"late"')
+        page = self.events(b, jid, after=cursor)
+        self.assertEqual((page["events"], page["cursor"], page["done"]), ([], cursor, True))
+        with open(path, "ab") as f:
+            f.write(b',"a":1}\n')
+        page = self.events(b, jid, after=cursor)
+        self.assertEqual([e["what"] for e in page["events"]], ["late"])
+
+    def test_bad_lines_and_stale_attempts_are_dropped(self):
+        b = self.signin()
+        job = self.make_job(b).json()
+        uid = self.store.users_list()[0]["id"]
+        run = self.svc.storage.run_dir(uid, job["id"])
+        run.mkdir(parents=True, exist_ok=True)
+        rows = [{"v": 1, "t": 1, "kind": "job_start", "a": 1},
+                {"v": 1, "t": 2, "kind": "local", "step": "1", "what": "x", "path": "/Users/me/secret"},
+                {"v": 1, "t": 3, "kind": "job_start", "a": 2},
+                {"v": 1, "t": 4, "kind": "step_start", "step": "1", "a": 1},    # a stale worker, after attempt 2
+                {"v": 1, "t": 5, "kind": "step_start", "step": "1", "a": 2}]
+        (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows) + "garbage\n")
+        page = self.events(b, job["id"])
+        self.assertEqual([(e["t"], e.get("a")) for e in page["events"]], [(1, 1), (3, 2), (5, 2)])
+        self.assertFalse(page["done"])                    # still queued
+        # The newest attempt rides in the cursor, so a later page drops stale lines too.
+        with open(run / "events.jsonl", "a") as f:
+            f.write(json.dumps({"v": 1, "t": 6, "kind": "step_end", "step": "1", "a": 1, "outcome": "passed"}) + "\n")
+        self.assertEqual(self.events(b, job["id"], after=page["cursor"])["events"], [])
+
+    def test_owner_only_and_bad_requests(self):
+        alice = self.signin("alice@example.com")
+        jid, _ = self.finished_prompt_job(alice)
+        bob = self.signin("bob@example.com")
+        self.assertEqual(bob.get(f"/api/jobs/{jid}/events").status_code, 404)
+        self.assertEqual(Browser(self.app).get(f"/api/jobs/{jid}/events").status_code, 401)
+        self.assertEqual(alice.get("/api/jobs/j_notanid/events").status_code, 404)
+        for params in ({"after": "12"}, {"after": "-1.1"}, {"after": "x.y"}, {"limit": "0"}, {"limit": "1001"},
+                       {"limit": "many"}):
+            self.assertEqual(alice.get(f"/api/jobs/{jid}/events", params=params).status_code, 400, params)
+        self.assertEqual(alice.send("DELETE", f"/api/jobs/{jid}", json={}).status_code, 200)
+        self.assertEqual(alice.get(f"/api/jobs/{jid}/events").status_code, 404)
+
+    def test_a_job_without_a_log_reads_empty(self):
+        b = self.signin()
+        job = self.make_job(b).json()
+        page = self.events(b, job["id"])
+        self.assertEqual((page["events"], page["more"], page["done"]), ([], False, False))
+        b.post(f"/api/jobs/{job['id']}/cancel", json={})
+        self.assertTrue(self.events(b, job["id"])["done"])
+
+    def test_the_poll_is_exempt_from_the_per_address_limit(self):
+        self.store.close()
+        self.build(admin_emails=("alice@example.com",), rate_api_ip=(40, 60))
+        b = self.signin()
+        jid, _ = self.finished_prompt_job(b)
+        for _ in range(60):
+            self.assertEqual(b.get(f"/api/jobs/{jid}/events").status_code, 200)
+        statuses = [b.get(f"/api/jobs/{jid}").status_code for _ in range(60)]
+        self.assertIn(429, statuses)
+        self.assertEqual(b.get(f"/api/jobs/{jid}/events").status_code, 200)
