@@ -20,6 +20,7 @@ body.error-body .error-page h1 { font-size: var(--text-display-l); line-height: 
 .error-page__actions .btn { text-decoration: none; }
 
 .error-art { margin: 0; display: flex; flex-direction: column; gap: var(--space-4); width: clamp(10rem, 22vw, 17rem); }
+.error-art[hidden] { display: none; }
 .error-art img { display: block; width: 100%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; background: var(--color-surface-2); border: var(--border-w) solid var(--color-border); border-radius: var(--radius-xl); box-shadow: var(--shadow-3), var(--shadow-inset-top); }
 .error-art figcaption { font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; }
 
