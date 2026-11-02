@@ -16,12 +16,36 @@ const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled', 'stoppe
 const INTERRUPTED = new Set(['failed', 'rejected', 'canceled']);
 const STATE = { passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   canceled: 'Cancelled', skipped: 'Skipped', unavailable: 'Unavailable' };
+const ISSUE_STATES = ['failed', 'rejected', 'unavailable', 'skipped'];
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// "Roblox ready" is shown only for a finished job whose Roblox files are ready (the service reports `roblox_state`
+// as ready only when the game body and rig steps passed; `export_state` is the older name for the same report).
+export const robloxStatus = (job) => job?.roblox_state || job?.export_state;
+export const robloxReady = (job) => job?.state === 'succeeded' && robloxStatus(job) === 'ready';
+// What a queued hero waits behind. `queued_ahead` counts the waiting heroes in front of it; 0 means a worker is
+// starting it; a service that does not report a place gets the plain sentence.
+export function queueNote(job) {
+  if (job?.state !== 'queued') return '';
+  let ahead = job.queued_ahead;
+  if (!Number.isInteger(ahead) && Number.isInteger(job.queue_position)) ahead = Math.max(0, job.queue_position - 1);
+  if (!Number.isInteger(ahead) || ahead < 0) return 'Starts when a worker is free';
+  return ahead === 0 ? 'Starting…' : `${ahead} ${ahead === 1 ? 'hero' : 'heroes'} ahead of you`;
+}
+function timeLeft(steps) {
+  let seconds = 0;
+  for (const s of steps) {
+    if (!['pending', 'running'].includes(s.state)) continue;
+    if (!Number.isFinite(s.typical_seconds)) return null;
+    seconds += s.state === 'running' && Number.isFinite(s.elapsed_seconds) ? Math.max(0, s.typical_seconds - s.elapsed_seconds) : s.typical_seconds;
+  }
+  return seconds <= 0 ? null : seconds < 60 ? 'under a minute left' : `about ${Math.ceil(seconds / 60)} min left`;
+}
 export function generationState(job) {
   const stages = (Array.isArray(job.stages) ? job.stages : []).filter((s) => s && typeof s === 'object');
   const main = stages.filter((s) => !s.side);
   const active = main.find((s) => s.state === 'running');
   const focus = active || main.find((s) => s.key === job.stage) || main.find((s) => s.state === 'pending');
-  const issues = main.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
+  const issues = main.filter((s) => ISSUE_STATES.includes(s.state));
   const title = { queued: 'Waiting for a free worker', running: 'Your hero is taking shape.',
     succeeded: issues.length ? 'Meet your hero.' : 'Your hero. Your next idea.', stopped: 'Your version is saved.', failed: 'Your hero needs attention.', rejected: 'Let’s revisit your input.', canceled: 'Generation cancelled.' }[job.state] || 'Your hero’s progress';
   const subtitle = job.state === 'succeeded' ? (issues.length ? 'Your model is ready. See the notes below.' : 'Explore the result and the available downloads.') :
@@ -30,11 +54,34 @@ export function generationState(job) {
     job.state === 'canceled' ? 'The job has stopped. Any saved images remain available to inspect.' :
     INTERRUPTED.has(job.state) ? 'Review the reported issue below. Saved outputs remain available.' :
     (COPY[focus?.key]?.[1] || focus?.label || 'Following the pipeline');
-  return { title, subtitle, main, focus, issues, terminal: TERMINAL.has(job.state),
-    passed: main.filter((s) => s.state === 'passed').length,
-    steps: main.map((s) => ({ ...s, title: COPY[s.key]?.[0] || s.label || s.key,
-      description: COPY[s.key]?.[2] || 'Follow the status reported by the service.',
-      status: s.state === 'pending' && TERMINAL.has(job.state) ? (job.state === 'succeeded' && ['4', '6', '5'].includes(s.key) && job.export_state === 'running' ? 'Waiting' : 'Not reached') : STATE[s.state] || s.state || 'Not reported' })) };
+  const steps = main.map((s) => ({ ...s, title: COPY[s.key]?.[0] || s.label || s.key,
+    description: COPY[s.key]?.[2] || 'Follow the status reported by the service.',
+    status: s.state === 'pending' && TERMINAL.has(job.state) ? (job.state === 'succeeded' && ['4', '6', '5'].includes(s.key) && job.export_state === 'running' ? 'Waiting' : 'Not reached') : STATE[s.state] || s.state || 'Not reported' }));
+  const passed = main.filter((s) => s.state === 'passed').length;
+  const terminal = TERMINAL.has(job.state);
+  const exporting = job.state === 'succeeded' && job.export_state === 'running';
+  const current = steps.find((s) => s.state === 'running') || steps.find((s) => s.state === 'pending');
+  const phase = COPY[focus?.key]?.[1] || focus?.label || 'Following the pipeline';
+  const left = job.state === 'running' ? timeLeft(steps) : null;
+  const eyebrow = { queued: 'Queued · your hero is saved', running: left ? `${phase} · ${left}` : phase,
+    succeeded: issues.length ? 'Hero ready · see the notes' : exporting ? 'Hero ready · preparing Roblox files' : robloxReady(job) ? 'Hero ready · Roblox R15' : 'Hero ready',
+    stopped: 'Saved at this step', failed: 'Needs attention', rejected: 'Input needs attention', canceled: 'Cancelled' }[job.state] || 'Following the pipeline';
+  return { title, subtitle, eyebrow, main, focus, issues, terminal, passed, steps, label: progressLabel(job, steps, passed, current, exporting) };
+}
+// The progress label as plain text pieces: `lead` then the emphasised `strong` part (never both empty).
+function progressLabel(job, steps, passed, current, exporting) {
+  const total = steps.length;
+  if (job.state === 'queued') return { lead: '', strong: 'Waiting to start' };
+  if (!total) return { lead: '', strong: 'Preparing the steps' };
+  const count = (state) => steps.filter((s) => s.state === state).length;
+  const bad = count('failed') + count('rejected'), skipped = count('skipped'), unavailable = count('unavailable');
+  const notes = [bad && (job.state === 'rejected' ? 'input needs attention' : `${bad} failed`),
+    skipped && `${skipped} skipped`, unavailable && `${unavailable} not available`,
+    job.state === 'canceled' && 'cancelled', job.state === 'stopped' && 'saved at this step'].filter(Boolean);
+  if (current && (!TERMINAL.has(job.state) || exporting))
+    return { lead: `${passed} of ${total} stages complete · `, strong: `${current.state === 'running' ? 'Now' : 'Next'}: ${current.title}` };
+  if (!notes.length && passed === total) return { lead: '', strong: `${passed} of ${total} stages complete` };
+  return { lead: `${passed} of ${total} complete${notes.length ? ' · ' : ''}`, strong: notes.join(' · ') };
 }
 const IMAGES = [['sketch', 'Starting image'], ['cover', 'Artwork'], ['turnaround', 'Character views'],
   ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']];
@@ -55,6 +102,19 @@ const text = (e, value) => { if (e.textContent !== value) e.textContent = value;
 function node(tag, content, cls) {
   const n = document.createElement(tag); if (content != null) n.textContent = content; if (cls) n.className = cls; return n;
 }
+const SVG = 'http://www.w3.org/2000/svg';
+function icon(name, cls = 'icon icon--s') {
+  const svg = document.createElementNS(SVG, 'svg'), use = document.createElementNS(SVG, 'use');
+  svg.setAttribute('class', cls); svg.setAttribute('aria-hidden', 'true');
+  use.setAttribute('href', `/assets/icons/sprite.svg#i-${name}`); svg.append(use); return svg;
+}
+// Each step state reads three ways: icon, word and colour.
+const STEP_ICON = { passed: 'circle-check', running: 'loader-circle', pending: 'circle-dashed', skipped: 'info',
+  unavailable: 'ban', failed: 'circle-x', rejected: 'circle-x', canceled: 'x' };
+const SEGMENT = { passed: 'seg--done', running: 'seg--run', skipped: 'seg--skip', unavailable: 'seg--na',
+  failed: 'seg--fail', rejected: 'seg--fail' };
+// Messages the service sends for a step that did not simply pass. They are always shown, never hidden behind a click.
+const NOTED = new Set(['skipped', 'unavailable', 'failed', 'rejected']);
 export function generationView($, select3D) {
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
   let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null;
@@ -136,6 +196,56 @@ export function generationView($, select3D) {
     if (!selected || model) return;
     pick(selected, true, true);
   });
+  function renderSegments(steps, fresh) {
+    const bar = $('#progressSegments');
+    const keys = steps.map((x) => x.key).join();
+    if (bar.dataset.keys !== keys) {
+      bar.dataset.keys = keys;
+      bar.replaceChildren(...steps.map((x) => { const n = node('span', null, 'seg'); n.dataset.key = x.key; return n; }));
+    }
+    steps.forEach((x, i) => {
+      const n = bar.children[i], became = !fresh && n.dataset.state && n.dataset.state !== 'passed' && x.state === 'passed';
+      n.className = `seg ${SEGMENT[x.state] || ''}${became ? ' is-new' : ''}`.trim();
+      n.dataset.state = x.state; n.title = `${x.title}: ${x.status}`;
+    });
+    bar.dataset.count = String(steps.length);
+  }
+  function stepRow(s) {
+    const li = node('li', null, `st-${s.state}`);
+    li.dataset.stage = s.key; li.setAttribute('role', 'listitem');
+    if (s.state === 'running') li.setAttribute('aria-current', 'step');
+    const head = node('span', null, 'step-head');
+    head.append(node('b', s.title), node('span', s.status, 'step-status'));
+    li.append(icon(STEP_ICON[s.state] || 'circle-dashed', 'icon icon--s step-icon'), head);
+    const timing = stageTiming(s);
+    if (timing) li.append(node('small', timing, 'step-duration'));
+    if (s.message && (NOTED.has(s.state) || s.state === 'passed' || s.state === 'running')) li.append(node('p', s.message, 'step-note'));
+    const source = stageSource(s.key);
+    if (source) { const a = node('a', 'View stage source ↗', 'stage-source'); a.href = source; a.target = '_blank'; a.rel = 'noopener'; li.append(a); }
+    return li;
+  }
+  // Skipped and unavailable steps are always listed with the service's own sentence; failed steps join them only when
+  // the model itself was kept (a failed hero gets its own banner instead).
+  function renderIssues(state, job) {
+    const kept = ['succeeded', 'stopped'].includes(job.state);
+    const list = state.steps.filter((x) => x.state === 'skipped' || x.state === 'unavailable' || kept && ['failed', 'rejected'].includes(x.state));
+    const box = $('#stageIssues');
+    box.hidden = !list.length;
+    if (!list.length) { box.dataset.signature = ''; return; }
+    const fallback = { skipped: 'was skipped.', unavailable: 'is not available for this target.' };
+    const signature = JSON.stringify(list.map((x) => [x.key, x.state, x.message]));
+    if (box.dataset.signature === signature) return;
+    box.dataset.signature = signature;
+    const skipped = list.every((x) => x.state === 'skipped');
+    text($('#stageIssuesTitle'), skipped ? (list.length === 1 ? '1 step was skipped' : `${list.length} steps were skipped`) : (list.length === 1 ? '1 step needs attention' : `${list.length} steps need attention`));
+    $('#stageIssuesList').replaceChildren(...list.map((x) => {
+      const li = node('li'); li.append(node('b', x.title), document.createTextNode(` ${x.message || `${x.title} ${fallback[x.state] || 'did not finish.'}`}`)); return li;
+    }));
+  }
+  const toggle = $('#viewSteps'), stepsPanel = $('#progressSteps');
+  const open = (on) => { toggle.setAttribute('aria-expanded', String(on)); stepsPanel.inert = !on; $('.progress').classList.toggle('is-open', on); };
+  toggle.addEventListener('click', () => open(toggle.getAttribute('aria-expanded') !== 'true'));
+  open(false);
   return {
     update(next) {
       const changed = jobId !== next.id;
@@ -146,45 +256,36 @@ export function generationView($, select3D) {
       if (!chosenModel || !touched && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
       const state = generationState(job);
       if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
-      text($('#generationTitle'), state.title); text($('#generationSubtitle'), state.subtitle);
-      const nextStep = state.steps.find(s => ['running', 'pending'].includes(s.state));
-      text($('#progressCount'), `${state.passed} of ${state.main.length} stages complete${nextStep && !state.terminal ? ` · Next: ${nextStep.title}` : ''}`);
-      $('#progressSegments').replaceChildren(...state.steps.map(s => node('span', null, `segment st-${s.state}`)));
+      const running = job.state === 'running' ? state.steps.find((x) => x.key === state.focus?.key) : null;
+      text($('#generationEyebrow'), state.eyebrow); text($('#generationTitle'), state.title);
+      text($('#generationSubtitle'), running ? running.description : state.subtitle);
+      const queue = queueNote(job);
+      text($('#queueNoteText'), queue); $('#queueNote').hidden = !queue;
+      $('#robloxReady').hidden = !robloxReady(job);
+      const label = $('#progressCount'), lead = state.label.lead + '\u0000' + state.label.strong;
+      if (label.dataset.label !== lead) {
+        label.dataset.label = lead;
+        label.replaceChildren(...[state.label.lead && document.createTextNode(state.label.lead), node('b', state.label.strong)].filter(Boolean));
+      }
+      renderSegments(state.steps, changed);
       $('#detail').dataset.jobState = job.state;
       text($('#workbenchName'), job.name || (job.kind === 'prompt' ? 'Your imagined hero' : 'Your uploaded character'));
       const stageSignature = JSON.stringify(state.steps);
       if ($('#stages').dataset.signature !== stageSignature) {
         $('#stages').dataset.signature = stageSignature;
-        $('#stages').replaceChildren(...state.steps.map((s, i) => {
-          const li = node('li', null, `st-${s.state}`);
-          li.dataset.stage = s.key; li.setAttribute('role', 'listitem');
-          if (s.state === 'running') li.setAttribute('aria-current', 'step');
-          li.append(node('span', s.state === 'passed' ? '✓' : String(i + 1).padStart(2, '0'), 'stage-number'),
-            node('b', s.title), node('span', s.status, 'step-status'));
-          const timing = stageTiming(s);
-          if (timing) li.append(node('small', timing, 'step-duration'));
-          const source = stageSource(s.key);
-          if (source) { const a = node('a', 'View stage source ↗', 'stage-source'); a.href = source; a.target = '_blank'; a.rel = 'noopener'; li.append(a); }
-          return li;
-        }));
-      }
-      if (state.focus?.key !== activeKey) {
-        activeKey = state.focus?.key;
-        const active = [...$('#stages').children].find((n) => n.dataset.stage === activeKey);
-        if (active) $('#stages').scrollLeft = active.offsetLeft - $('#stages').offsetLeft - ($('#stages').clientWidth - active.clientWidth) / 2;
+        $('#stages').replaceChildren(...state.steps.map(stepRow));
       }
       const focus = state.steps.find((s) => s.key === state.focus?.key);
       text($('#currentStep'), job.state === 'queued' ? 'Waiting for a free worker' : state.terminal ? (job.state === 'succeeded' ? 'Your next adventure' : 'What happened') : (focus?.title || 'Waiting for a worker'));
       text($('#stepDescription'), state.terminal ? (job.state === 'succeeded' ? 'Inspect the model, review the recorded checks, then bring the available files into your game.' : state.subtitle) : (focus?.description || 'Your saved job will start when the service is ready.'));
       text($('#stepMessage'), state.focus?.message || '');
-      const issues = state.steps.filter((s) => ['failed', 'rejected', 'unavailable', 'skipped'].includes(s.state));
-      const robloxState = job.roblox_state || job.export_state;
+      const robloxState = robloxStatus(job);
       const robloxReason = (job.roblox_message || job.export_message || 'the export could not be prepared.').replace(/^Roblox (?:body|files) unavailable for this hero: /, '');
       const exportNote = job.state === 'succeeded' ? (robloxState === 'running' ? 'Roblox files: being prepared' : robloxState === 'ready' ? 'Roblox files: ready' : robloxState === 'unavailable' ? `Roblox files: not available for this hero: ${robloxReason}` : '') : '';
       text($('#exportStatus'), exportNote);
       $('#exportStatus').hidden = !exportNote;
-      $('#stageIssues').replaceChildren(...issues.map((s) => node('p', s.message || `${s.title} was skipped.`)));
-      $('#stageIssues').hidden = !issues.length;
+      $('#exportStatus').classList.toggle('sr', robloxState !== 'running');   // only "being prepared" needs words on screen: the pill and the banner say the rest
+      renderIssues(state, job);
       const available = imageChoices(job);
       const nextSignature = JSON.stringify(available.map(([k]) => [k, job.images[k]]));
       if (signature !== nextSignature) {
