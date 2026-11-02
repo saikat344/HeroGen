@@ -43,9 +43,11 @@ FROZEN = {
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
     "turnaround-v1": "e91c9ed957eadec81d24a0bee2c3bbd0c94eaac97dd1afd09b36ec54d6b3f7d1",
     "turnaround-v2": "8b9bb3ebf0d533efe7a80036e266e92bfd996dc3f916cff9361d8de1166fc44b",
+    "turnaround-v3": "c31ac5f2e8f146997d9afbfec6d83cc5d150e1d91abcd11ce9163c9bc82b42e2",
     "cover-complete-figure-v1": "7833b23d14ee1cf1ad9a6286211b1c93c724ed36854bdc905421981f9a9e789f",
     "cover-redo-v1": "75a790168a42d41ec46216be0193efb3af6f60966a0a87381484d378264be570",
     "turnaround-redo-v1": "b9f6a99f4ea46a88e7e1957beebb538c9305a28ae2bb09bd4fe5a643744c6ebd",
+    "turnaround-redo-v2": "206e3774dc4535016939d49e97cd28ca722011b7c88b5fc83d4dc18746bbd4dc",
 }
 
 
@@ -106,16 +108,46 @@ class FrozenVersions(unittest.TestCase):
         self.assertEqual(v2, v1)
 
     def test_turnaround_preserves_legacy_and_only_adds_gear_continuity(self):
-        from herogen.pipeline.stages import SHEET_SIZE, TURNAROUND_PROMPT
+        from herogen.pipeline.stages import SHEET_SIZE, TURNAROUND_V1_PROMPT
 
         before = prompts.load("turnaround-v1").step("sheet")
         after = prompts.load("turnaround-v2").step("sheet")
-        self.assertEqual(before["prompt"], TURNAROUND_PROMPT)
+        self.assertEqual(before["prompt"], TURNAROUND_V1_PROMPT)
         self.assertEqual(before["params"], {"size": SHEET_SIZE, "n": 1, "output_format": "png"})
         extra = (" Keep every carried item and accessory, including bags and their straps, attached to the same "
                  "place on the body in all four views, including both profiles; show each item's visible "
                  "parts with natural occlusion.")
         self.assertEqual(after, {**before, "prompt": before["prompt"] + extra})
+
+    def test_turnaround_v3_is_v1_plus_arms_hands_and_props(self):
+        from herogen.pipeline.stages import TURNAROUND_PROMPT
+
+        v1 = prompts.load("turnaround-v1").data
+        v3 = prompts.load("turnaround-v3").data
+        before, after = v1["steps"][0], v3["steps"][0]
+        self.assertEqual(len(v3["steps"]), 1)
+        self.assertEqual(after["prompt"], TURNAROUND_PROMPT)
+        self.assertTrue(after["prompt"].startswith(before["prompt"]))
+        extra = (" In the front and back views each arm is held clearly away from the body, with a strip of plain "
+                 "background between the arm and the torso along its whole length, and each arm ends in a "
+                 "complete open hand with fingers, outside any sleeve, cuff or cape. Wide sleeves, robes, capes "
+                 "and ponchos hang from the shoulders without covering the arms or hands. Every carried item and "
+                 "accessory, including bags and their straps, stays attached to the same place on the body in "
+                 "all four views; a weapon, staff or other prop held in a hand is worn on the back or belt "
+                 "instead, the same in all four views. The two side views face opposite ways.")
+        self.assertEqual(after, {**before, "prompt": before["prompt"] + extra})
+        same = {k: v for k, v in v3.items() if k not in ("name", "summary", "steps", "sha256")}
+        self.assertEqual(same, {k: v for k, v in v1.items() if k not in ("name", "summary", "steps", "sha256")})
+
+    def test_turnaround_redo_v2_is_redo_v1_on_the_v3_sheet(self):
+        r1 = prompts.load("turnaround-redo-v1").data
+        r2 = prompts.load("turnaround-redo-v2").data
+        self.assertEqual(r2["steps"], prompts.load("turnaround-v3").data["steps"])
+        self.assertEqual(r1["steps"], prompts.load("turnaround-v1").data["steps"])
+        self.assertEqual(r2["note_slot"], r1["note_slot"])
+        self.assertEqual(r2["note_max_chars"], r1["note_max_chars"])
+        self.assertEqual(r2["kind"], r1["kind"])
+        self.assertEqual(set(r2), set(r1))
 
 
 class Calibration(unittest.TestCase):
@@ -150,10 +182,15 @@ class Selection(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v2")
         self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
-        self.assertEqual(prompts.selected("turnaround").name, "turnaround-v1")
+        self.assertEqual(prompts.selected("turnaround").name, "turnaround-v3")
+        self.assertEqual(prompts.selected("turnaround_redo").name, "turnaround-redo-v2")
         self.assertEqual(prompts.selected("cover_complete_figure").name, "cover-complete-figure-v1")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v2"}):
             self.assertEqual(prompts.selected("turnaround").name, "turnaround-v2")
+        with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v1",
+                                          "HEROGEN_TURNAROUND_REDO_VERSION": "turnaround-redo-v1"}):
+            self.assertEqual(prompts.selected("turnaround").name, "turnaround-v1")
+            self.assertEqual(prompts.selected("turnaround_redo").name, "turnaround-redo-v1")
 
     def test_env_override_and_explicit(self):
         with mock.patch.dict(os.environ, {"HEROGEN_PROMPT_SKETCH_VERSION": "no-such-v9"}):
