@@ -20,6 +20,15 @@ from herogen.service.snapshot import LocalVolume  # noqa: E402
 from herogen.service.storage import VolumeView  # noqa: E402
 
 
+class SmokeImportTest(unittest.TestCase):
+    def test_the_script_imports_where_modal_mounts_it(self):
+        # Modal mounts the script as /root/modal_smoke.py, with no checkout above it; importing must not need one.
+        source = (ROOT / "tools" / "buildlog" / "modal_smoke.py").read_text()
+        namespace = {"__name__": "modal_smoke_in_container", "__file__": "/root/modal_smoke.py"}
+        exec(compile(source, "/root/modal_smoke.py", "exec"), namespace)
+        self.assertIsNone(namespace["ROOT"])
+
+
 class SmokeChecksTest(unittest.TestCase):
     def test_a_short_local_run_passes_every_check(self):
         with tempfile.TemporaryDirectory() as tmp:
