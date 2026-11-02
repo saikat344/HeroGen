@@ -975,6 +975,48 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['face_source']['atlas_sha256'],
                          hashlib.sha256(atlas.read_bytes()).hexdigest())
 
+    def logged_paid_run(self, **kwargs):
+        """`paid_run` with the build log on: the run's record and its view outcome lines, per view."""
+        from herogen.pipeline import events
+        log = self.run / 'events.jsonl'
+        with mock.patch.dict('os.environ', {events.ENV_FILE: str(log)}):
+            record, *_ = self.paid_run(**kwargs)
+        lines = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([events.validate(e) for e in lines], lines)
+        outcomes = {}
+        for e in lines:
+            if e['kind'] == 'decision' and e['what'] in ('view_selected', 'view_kept', 'extra_try'):
+                outcomes.setdefault(e['view'], []).append((e['what'], e.get('try'), (e.get('m') or {}).get('tries')))
+        repaints = [e for e in lines if e['kind'] == 'call_start' and e['who'] == 'muse-image']
+        # The default-head sub-run's requests are real calls too, logged without a try number.
+        self.assertTrue(all('try' in e or e.get('view') for e in repaints))
+        starts = Counter((e['view'], e['try']) for e in repaints if 'try' in e)
+        self.assertFalse([e for e in lines if e['kind'] == 'decision' and e['what'] == 'wave' and e['n'] < 10
+                          and e['m']['wave'] == 1])   # only the main run's waves are announced
+        # The face close-up's beauty slots choose their own winner and log no view outcome.
+        return record, outcomes, starts, sorted(self.expected_views - {'head+0'})
+
+    def test_build_log_selects_an_accepted_conditional_third_try(self):
+        record, outcomes, starts, views = self.logged_paid_run(reject=lambda view, kind: kind in ('beauty', 0))
+        for view in views:
+            self.assertEqual(record['views'][view]['winning_slot'], 3)
+            # Two rejections start a third try; it wins, and the view is never reported as keeping its paint.
+            self.assertEqual(outcomes[view], [('extra_try', 3, None), ('view_selected', 3, 3)])
+            self.assertEqual(starts[view, 3], 1)
+
+    def test_build_log_without_a_needed_third_try(self):
+        record, outcomes, starts, views = self.logged_paid_run()
+        for view in views:
+            slot = record['views'][view]['winning_slot']
+            self.assertEqual(outcomes[view], [('view_selected', slot, 2)])
+            self.assertEqual(starts[view, 3], 0)
+
+    def test_build_log_counts_the_third_try_when_every_try_is_rejected(self):
+        record, outcomes, starts, views = self.logged_paid_run(reject=lambda view, kind: True)
+        for view in views:
+            self.assertEqual(record['views'][view]['tries'], 3)
+            self.assertEqual(outcomes[view], [('extra_try', 3, None), ('view_kept', None, 3)])
+
     def test_double_rejection_pays_one_shared_third_sample(self):
         self.assert_double_rejection(False)
 
