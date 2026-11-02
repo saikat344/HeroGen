@@ -169,6 +169,43 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
                 self.assert_layout()
                 self.screenshot(f'workbench-{state}-{theme}-{size}.png')
 
+    def test_log_keeps_focus_and_open_folds_across_updates(self):
+        t = self.tab
+        t.goto(self.url + '/')
+        t.wait("!document.querySelector('#headerSignIn').disabled")
+        result = t.eval("""(async () => {
+          const {workbenchLog} = await import('/assets/workbench.js');
+          const root = document.createElement('div');
+          root.innerHTML = '<input id="followLive" type="checkbox"><button id="copyLog" type="button">Copy</button><span id="logStatus"></span><ol id="stageLog" tabindex="0"></ol>';
+          document.body.append(root);
+          const $ = selector => root.querySelector(selector);
+          const call = (i, outcome) => ({model: 'muse-image-1.0', purpose: 'texture refine', outcome, wall_seconds: 2, cost_usd: 0.01,
+            started: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()});
+          const record = {stage: '3f', started: '2026-01-01T00:00:00Z', seconds: 9, calls: [call(1, 'ok'), call(2, 'ok'), call(3, 'ok')]};
+          const job = n => ({id: 'job1', stages: [{key: '3f', label: 'texture refine', state: 'passed'}], models: n ? [{n, time: '2026-01-01T00:00:05Z'}] : []});
+          const wait = async test => { for (let i = 0; i < 100 && !test(); i++) await new Promise(r => setTimeout(r, 50)); };
+          const log = workbenchLog($, async () => record);
+          log.update(job(0));
+          await wait(() => $('#stageLog summary'));
+          const summary = $('#stageLog summary'), details = summary.parentElement;
+          summary.focus(); summary.click();
+          await wait(() => details.open);
+          const out = {opened: details.open, focusedBefore: document.activeElement === summary};
+          const before = $('#stageLog').firstElementChild;
+          log.update(job(0));
+          out.unchangedKeepsNodes = $('#stageLog').firstElementChild === before && document.activeElement === summary;
+          log.update(job(1));
+          const after = $('#stageLog summary');
+          out.rebuilt = after !== summary;
+          out.focusKept = document.activeElement === after;
+          out.openKept = after.parentElement.open;
+          root.remove();
+          return out;
+        })()""")
+        self.assertEqual(result, {'opened': True, 'focusedBefore': True, 'unchangedKeepsNodes': True, 'rebuilt': True,
+                                  'focusKept': True, 'openKept': True})
+        self.assertEqual(t.errors, [])
+
     def test_running_finished_tree_and_compare_fit_both_themes_and_sizes(self):
         import threading
         stage_gate = threading.Event()
@@ -192,7 +229,8 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         finally:
             stage_gate.set()
         t.wait("document.querySelector('#state').textContent === 'succeeded' && !document.querySelector('#refineVersion').disabled",timeout=45)
-        t.wait("!document.querySelector('#orbitHint').hidden",timeout=45)
+        # The log and the copied text do not depend on WebGL, so wait for them rather than for the orbit hint.
+        t.wait("document.querySelectorAll('#stageLog .log-step').length === document.querySelectorAll('#stages li').length && document.querySelectorAll('#stageLog .log-step.st-running').length === 0",timeout=45)
         self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"),'Your hero. Your next idea.')
         self.assertTrue(t.eval("document.querySelector('#cancelJob').hidden"))
         self.assertEqual(t.eval("document.querySelector('#viewSteps').getAttribute('aria-expanded')"),'false')

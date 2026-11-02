@@ -10,7 +10,7 @@ const STEP = {
   2: ['Character views', 'Muse Image draws a turnaround sheet (front, right, back and left) and a top view. SAM 3.1 outlines each figure so HeroGen can split the sheet, line the views up and check that they agree.'],
   3: ['3D shape', 'SAM 3D Objects builds a textured 3D mesh from the front view and SAM 3D Body finds the body joints, both on cloud GPUs. HeroGen then puts the mesh in its own frame and turns it to face forward.'],
   '3f': ['Texture refine', 'HeroGen renders the 3D shape from several cameras, asks Muse Image to repaint each render in better detail, and uses SAM 3.1 to check that each repaint still matches the outline. Accepted paint goes back onto the texture. A view that does not pass keeps its original paint.'],
-  4: ['Game body', 'HeroGen (local) turns the 3D shape into the 15 rigid parts Roblox R15 expects, placing the cuts at the joints and fitting the in-game triangle budget. No model is called here, and this is usually the longest step.'],
+  4: ['Game body', 'HeroGen (local) turns the 3D shape into the 15 rigid parts Roblox R15 expects, placing the cuts at the joints and fitting the in-game triangle budget. No model is called here.'],
   6: ['Roblox rig', 'HeroGen (local) writes the Roblox R15 rig and checks it with an independent reader. No model is called. If this step fails, your website model is unaffected.'],
   5: ['Results page', 'HeroGen (local) writes the results page for this build. No model is called.'],
 };
@@ -42,6 +42,7 @@ const PURPOSE = {
 function describe(call) {
   const purpose = String(call.purpose || '');
   if (String(call.model).startsWith('muse-spark')) return {label: 'Checked that the image is a drawing, not a photo of a real person'};
+  if (purpose === 'texture refine') return {label: 'Repainted a view of the 3D shape', gkey: 'repaint', group: n => `Repainted ${n} views`};
   if (purpose === 'edit') return {label: 'Edited an image', gkey: 'edit', group: n => `Edited ${n} images`};
   if (PURPOSE[purpose]) return {label: PURPOSE[purpose]};
   let m;
@@ -49,13 +50,17 @@ function describe(call) {
   if ((m = /^segment (face|hair|head) \(repaint (\S+)\)$/.exec(purpose))) return {
     label: `Checked the ${m[1]} on the repaint of ${regionName(m[2])}`, gkey: `check-${m[1]}`, group: n => `Checked the ${m[1]} on ${n} repaints`};
   if ((m = /^segment (character|creature|person|feet) \(cover art\)$/.exec(purpose))) return {label: `Looked for the ${m[1]} in the sketch`};
-  if ((m = /^segment (face|head) \((?:turnaround|texture refine)\)$/.exec(purpose))) return {label: `Outlined the ${m[1]}`};
+  if ((m = /^segment (face|hair|head) \(texture refine\)$/.exec(purpose))) return {
+    label: `Found the ${m[1]} on a render`, gkey: `render-${m[1]}`, group: n => `Found the ${m[1]} on ${n} renders`};
+  if ((m = /^segment (face|head) \(turnaround\)$/.exec(purpose))) return {label: `Outlined the ${m[1]}`};
   if ((m = /^segment (face|hair|head) \(segment\)$/.exec(purpose))) return {label: `Outlined the ${m[1]}`, gkey: `outline-${m[1]}`, group: n => `Outlined the ${m[1]} ${n} times`};
   return {label: purpose ? purpose[0].toUpperCase() + purpose.slice(1) : 'Model call'};
 }
 export function formatSeconds(s) {
   if (!Number.isFinite(s)) return null;
-  return s >= 120 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${s.toFixed(1)} s`;
+  if (s < 119.5) return `${s.toFixed(1)} s`;
+  const whole = Math.round(s);
+  return `${Math.floor(whole / 60)} min ${whole % 60} s`;
 }
 export function formatCost(usd) {
   if (!Number.isFinite(usd)) return null;
@@ -74,34 +79,43 @@ export function checksSummary(checks) {
   if (advisory) parts.push(`${advisory} advisory${unmet(others) ? ` (${unmet(others)} not met)` : ''}`);
   return parts.join(' · ');
 }
+// Only "ok" and a reused result are successes. Every other recorded outcome (a failure, an exception class name,
+// an unknown outcome or an unreadable answer) is a failure; some of them may still have been billed.
+const OUTCOME_WORD = {unknown: 'outcome unknown (may be billed)', unreadable: 'answer unreadable (may be billed)', cancelled: 'cancelled'};
 function callEvent(call, floor) {
   const start = Date.parse(call.started), {label, gkey, group} = describe(call);
-  const reused = call.cached === true || call.outcome === 'reused';
+  const outcome = typeof call.outcome === 'string' ? call.outcome : '';
+  const failed = !['', 'ok', 'reused'].includes(outcome);
+  const reused = !failed && (call.cached === true || outcome === 'reused');
   const number = v => typeof v === 'number' && Number.isFinite(v) ? v : null;
   const seconds = reused ? null : number(call.wall_seconds), cost = reused ? 0 : number(call.cost_usd);
-  const failed = call.outcome === 'failed', cancelled = call.outcome === 'cancelled';
-  return {kind: 'call', time: Math.max(Number.isFinite(start) ? start : floor, floor), who: modelName(call.model),
-    state: reused ? 'reused' : failed ? 'failed' : cancelled ? 'cancelled' : 'passed',
-    text: failed ? `${label} (failed)` : cancelled ? `${label} (cancelled)` : label, gkey, group,
-    seconds, cost,
-    meta: [reused ? 'reused a saved result' : formatSeconds(seconds), formatCost(cost)].filter(Boolean).join(' · ')};
+  return {kind: 'call', time: Math.max(Number.isFinite(start) ? start : floor, floor), who: call.model ? modelName(call.model) : 'model not recorded',
+    state: failed ? 'failed' : reused ? 'reused' : 'passed', text: failed ? `${label}: ${OUTCOME_WORD[outcome] || 'failed'}` : label, gkey, group,
+    seconds, cost, meta: [reused ? 'reused a saved result' : formatSeconds(seconds), formatCost(cost)].filter(Boolean).join(' \u00b7 ')};
 }
 // Three or more repeats of the same kind of call fold into one row that opens to list them.
 function foldCalls(calls, key) {
-  const groups = new Map();
-  const id = c => `${c.who}|${c.gkey}`;
-  for (const c of calls) if (c.gkey) groups.set(id(c), [...(groups.get(id(c)) || []), c]);
+  const groups = new Map(), id = c => `${c.who}|${c.gkey}`;
+  for (const c of calls) if (c.gkey) {
+    const list = groups.get(id(c));
+    if (list) list.push(c); else groups.set(id(c), [c]);
+  }
   const rows = [], folded = new Set();
   for (const c of calls) {
     const same = c.gkey && groups.get(id(c));
     if (!same || same.length < 3) { rows.push(c); continue; }
     if (folded.has(id(c))) continue;
     folded.add(id(c));
-    const longest = Math.max(...same.map(x => x.seconds ?? 0)), cost = same.reduce((sum, x) => sum + (x.cost ?? 0), 0);
-    const allReused = same.every(x => x.state === 'reused'), failed = same.filter(x => x.state === 'failed').length;
-    rows.push({kind: 'group', id: `${key}:${id(c)}`, time: Math.min(...same.map(x => x.time)), who: c.who,
-      state: failed ? 'failed' : allReused ? 'reused' : 'passed', text: c.group(same.length), children: same,
-      meta: [allReused ? 'reused saved results' : `longest ${formatSeconds(longest)}`, formatCost(cost)].filter(Boolean).join(' · ')});
+    let longest = 0, cost = null, failed = 0, reused = 0, first = Infinity;
+    for (const x of same) {
+      longest = Math.max(longest, x.seconds ?? 0); if (x.cost != null) cost = (cost ?? 0) + x.cost; first = Math.min(first, x.time);
+      if (x.state === 'failed') failed++; else if (x.state === 'reused') reused++;
+    }
+    const allReused = reused === same.length;
+    rows.push({kind: 'group', id: `${key}:${id(c)}`, time: first, who: c.who, failed, state: failed ? 'failed' : allReused ? 'reused' : 'passed',
+      text: c.group(same.length), children: same,
+      meta: [failed ? `${failed} failed` : null, allReused ? 'reused saved results' : longest > 0 ? `longest ${formatSeconds(longest)}` : null,
+        formatCost(cost)].filter(Boolean).join(' \u00b7 ')});
   }
   return rows;
 }
@@ -129,7 +143,7 @@ export function stageEvents(job, run, now = Date.now()) {
       .map(c => callEvent(c, start)).sort((a, b) => a.time - b.time);
     if (!calls.length && LOCAL_STEPS.has(stage.key)) calls.push({kind: 'call', time: start, who: LOCAL, state: 'passed', text: 'no model call',
       seconds: Number.isFinite(seconds) ? seconds : null, cost: 0, meta: [formatSeconds(seconds), '$0'].filter(Boolean).join(' · ')});
-    events.push(...foldCalls(calls, stage.key));
+    for (const row of foldCalls(calls, stage.key)) events.push(row);
   });
   for (const model of job.models || []) if (model.n && Number.isFinite(Date.parse(model.time))) {
     events.push({kind: 'version', time: Date.parse(model.time), text: `Refined version ${model.n} ready`, state: 'passed'});
@@ -161,11 +175,11 @@ function rowNode(e, open) {
   const li = el('li', `log-${e.kind} st-${e.state}`);
   if (e.kind === 'group') {
     const details = el('details', 'log-fold'), summary = el('summary');
-    summary.append(timeNode(e.time), lineNode(e));
+    summary.dataset.key = e.id; summary.append(timeNode(e.time), lineNode(e));
     const list = el('ul', 'log-children');
     for (const child of e.children) { const c = el('li', `log-call st-${child.state}`); c.append(timeNode(child.time), lineNode(child)); list.append(c); }
-    details.append(summary, list); details.open = open.has(e.id);
-    details.addEventListener('toggle', () => { if (details.open) open.add(e.id); else open.delete(e.id); });
+    details.append(summary, list); details.open = open.has(e.id) ? open.get(e.id) : e.failed > 0;
+    details.addEventListener('toggle', () => open.set(e.id, details.open));
     li.append(details); return li;
   }
   const body = el('span', 'log-body');
@@ -176,23 +190,32 @@ function rowNode(e, open) {
 }
 export function workbenchLog($, api) {
   let job = null, run = null, signature = '', request = 0, log = '';
-  const records = new Map(), open = new Set();
-  function render() {
+  const records = new Map(), open = new Map();
+  let shown = '';
+  // The list is rebuilt only when what it shows has changed. A rebuild keeps the focused fold focused and the
+  // folds open or closed as the reader left them.
+  function render(force = false) {
     const list = $('#stageLog'), follow = $('#followLive').checked;
-    const position = list.scrollTop;
     const rows = stageEvents(job, run);
+    const view = JSON.stringify(rows);
+    if (!force && view === shown) return;
+    shown = view;
+    const position = list.scrollTop;
+    const focused = document.activeElement?.closest?.('#stageLog [data-key]')?.dataset.key;
+    for (const summary of list.querySelectorAll('summary[data-key]')) open.set(summary.dataset.key, summary.parentElement.open);
     log = logText(rows);
     list.replaceChildren(...rows.map(row => rowNode(row, open)));
     if (!rows.length) { const li = document.createElement('li'); li.textContent = 'Waiting for recorded stage events.'; list.append(li); }
     list.scrollTop = follow ? list.scrollHeight : position;
+    if (focused) for (const summary of list.querySelectorAll('summary[data-key]')) if (summary.dataset.key === focused) summary.focus({preventScroll: true});
   }
-  $('#followLive').addEventListener('change', () => { if (job) render(); });
+  $('#followLive').addEventListener('change', () => { if (job) render(true); });
   $('#copyLog').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(log); $('#logStatus').textContent = 'Log copied'; }
     catch { $('#logStatus').textContent = 'Copy unavailable. Select the log text to copy it.'; }
   });
   return {update(next) {
-    if (job?.id !== next.id) { run = null; signature = ''; records.clear(); }
+    if (job?.id !== next.id) { run = null; signature = ''; shown = ''; records.clear(); open.clear(); }
     job = next; render();
     const current = JSON.stringify([job.id, job.stages?.map(s => [s.key, s.state]), job.models]);
     if (current === signature) return;
@@ -213,7 +236,7 @@ export function workbenchLog($, api) {
       $('#logStatus').textContent = failures.length ? `Could not load stage events: ${failures.join('; ')}` :
         results.some(r => r.status === 'rejected') ? 'Some stage times were not recorded.' : 'Recorded stage times';
     });
-  }, reset() { ++request; job = null; run = null; signature = ''; records.clear(); }};
+  }, reset() { ++request; job = null; run = null; signature = ''; shown = ''; records.clear(); open.clear(); }};
 }
 export function stageSource(key) {
   return SOURCE[key] ? `https://github.com/saikat344/HeroGen/blob/main/herogen/${SOURCE[key]}` : null;
