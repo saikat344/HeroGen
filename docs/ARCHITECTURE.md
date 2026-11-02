@@ -82,6 +82,7 @@ CSRF middleware:
 | `POST /api/jobs/<id>/retry-input` | Resubmits an owned hero rejected by a recorded stage-0 or stage-1 `input_rejected` check as a new root hero, preserving its cleaned input, name and profile. Requires session, CSRF, the normal job rate limit and `Idempotency-Key`; another owner's hero returns 404. |
 | `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains prior stage spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
 | `GET /api/jobs/<id>/versions` | Returns the owned family rooted at the oldest parent, including siblings and descendants. Deleted ancestors connect the family but are omitted. Entries include `parent_job`, `from_stage`, current `stage`, `note`, `status`, recorded `seconds` and `cost_usd`, `model_url`, and `cover_thumbnail_url`. Asset URLs use the existing owner-checked run routes. |
+| `GET /api/jobs/<id>/events?after=<cursor>&limit=<n>` | The owned job's build log (see "Build log" under Service): `{v, events, cursor, more, done}`. Another owner's, a deleted or an unknown job returns 404; a malformed cursor or limit returns 400. Exempt from the per-address API limit. |
 
 Every hero summary in `GET /api/jobs`, and `GET /api/jobs/<id>`, carries `thumbnail_url`: the image a hero card
 shows, or `null` while there is none. It is the cover once stage 1 has recorded it and is not running again,
@@ -2438,6 +2439,36 @@ avoid repeating completed calls. Stage costs accumulate across retries and backg
 `export_started_at`, `export_finished_at` and `export_seconds` record the export phase duration.
 Analytics reports time-to-model, total time-to-export (model time plus export duration), and export
 duration separately, while the admin table retains every stage's own timing and cost.
+
+### Build log
+
+Each run folder holds `events.jsonl`: one small JSON event per line describing what the job is doing, written by
+`herogen/pipeline/events.py`. The schema is closed: `kind`, `who`, `outcome`, `state` and `op` are fixed sets,
+`what`, `why`, `code`, `name` and `target` are lowercase identifiers, `m` maps identifiers to finite numbers, and
+there is no free-text field, so prompts, the user's text, paths, keys and exception messages are never written.
+An event that does not fit is dropped; writing one never fails a stage.
+
+- Stage subprocesses get `HEROGEN_EVENTS_FILE`, `HEROGEN_EVENTS_STEP` and `HEROGEN_EVENTS_ATTEMPT` from
+  `runner.events_env`. Without the file variable every emit is a no-op, so the standalone CLIs are unchanged.
+- The model client brackets every Muse Image, SAM 3.1 and Muse Spark call (`fast.tracked`) with `call_start` and
+  `call_end` sharing an id: outcome, duration, cost estimate, and a failure class from the transport (never the
+  error text). Cache hits end `reused` at $0. Full-lane retries and limiter waits are `call_retry`/`call_wait`.
+  GPU calls are `gpu_wait`/`gpu_end`; a second `gpu_wait` after 20 s says the call is still waiting, and
+  `gpu_end` carries the runner's model-load and inference seconds.
+- Pipeline stages add their checks summary and images; the service adds step boundaries around each stage and the
+  job-level events (start, queue time, requeue, cancel, model ready, end). The orchestrator writes only while none
+  of its job's groups runs, reloading the volume first and committing after.
+- Lines are appended with one `write()` under the file lock the call ledger uses; a run keeps at most 2,000
+  events or 512 KB, after which only step boundaries and outcomes are kept, behind one `truncated` event.
+- On Modal a stage runs on a local copy, so `worker.EventPump` copies the growing file to the volume and commits
+  every 3 s while the stage runs, and stops for good once the attempt is no longer current. Dev mode writes in
+  place.
+- `GET /api/jobs/<id>/events` reads at most 1,000 events and 256 KB per call inside the volume view's read lock,
+  validates and re-serialises every line, leaves a partial last line for the next call, and drops lines an older
+  attempt wrote after a newer one began. `done` is true once the job and its export have finished and the file is
+  read to its end (on Modal, after a short grace for the volume view to refresh). `.jsonl` is not a run-file type,
+  so the raw file is never served.
+- The fake runner writes a representative event sequence for every stage, paced by its delay.
 
 ### Authentication and administration
 
