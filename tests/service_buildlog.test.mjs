@@ -159,6 +159,8 @@ test('times round before minutes and seconds are split', () => {
   assert.equal(copy.elapsed(179600), '3:00');
   assert.equal(copy.elapsed(59600), '1:00');
   assert.equal(copy.about(179.6), '3 min');
+  assert.equal(copy.usually(0.04), 'usually under 1 s');
+  assert.equal(copy.usually(240), 'usually about 4 min');
 });
 
 test('a capped log says so, wherever the cap was recorded', () => {
@@ -412,4 +414,12 @@ test('a replayed real run (3D shape and texture refine) renders end to end in pl
   assert.equal(text.split('\n').length, events.filter(e => e.kind !== 'call_wait').length);
   for (const raw of ['lower_try_accepted', 'outline_moved', 'joint_from', 'head+0', 'body-90', 'a100-40gb', 'undefined', 'NaN', 'null'])
     assert.ok(!text.includes(raw), raw);
+});
+
+test('a check that missed inside a step that passed is a quiet note, not a red failure', () => {
+  const events = [ev(0, 'step_start', '3f'), ev(1, 'check', '3f', {name: 'outline_p90_px', ok: false, gate: true, op: '<=', m: {value: 18, limit: 16}})];
+  const [row] = rowsOf(buildModel(job({'3f': 'passed'}), events), '3f');
+  assert.equal(row.state, 'kept');
+  assert.equal(row.text, 'Outline p90 px: failed · measured 18, needs at most 16');
+  assert.equal(rowsOf(buildModel(job({'3f': 'failed'}), events), '3f')[0].state, 'failed');
 });
