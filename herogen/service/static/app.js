@@ -119,7 +119,8 @@ async function api(path, { method = 'GET', json, form, headers = {} } = {}) {
   if (!r.ok) {
     if (r.status === 401 && S.session?.signed_in) expireAccess();
     const msg = (data && data.error && data.error.message) || `Request failed (${r.status}).`;
-    const err = new Error(msg); err.status = r.status; err.code = data && data.error && data.error.code; throw err;
+    const err = new Error(msg); err.status = r.status; err.code = data && data.error && data.error.code;
+    err.retryAfter = r.headers.get('Retry-After'); throw err;
   }
   return data;
 }
