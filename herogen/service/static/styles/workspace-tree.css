@@ -178,6 +178,7 @@
 .refine__scope { margin: calc(-1 * var(--space-2)) 0 0; font-size: var(--text-caption); color: var(--color-text-muted); }
 .refine .field-error { margin: 0; }
 .refine .btn-help { margin: calc(-1 * var(--space-2)) 0 0; font-size: var(--text-body-s); }
+.refine__time { white-space: nowrap; }
 .refine__time:not(:empty)::before { content: " · "; }
 
 /* ---------- Modals: refine, compare, expanded tree ---------- */
