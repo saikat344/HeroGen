@@ -2617,8 +2617,10 @@ its nearest generated yaw, so a rejected yaw leaves its views on the standard re
 a yaw 90 degrees away (saved six-yaw folders keep their nearest-usable fallback). Without a usable front
 reference the beauty arm is off for the run, as for a saved folder, and the record notes that standard
 recipes were used. Generation runs beside setup and preparation; its calls count toward the stage's
-cost and cap, a model error drains every yaw and fails the stage loudly, and `beauty_generation` records
-the yaws, attempts, selection, cost and seconds. Ordinary fast waves
+cost and cap. Its requests are beauty-only, so an `ApiError` on a yaw's image or SAM query is contained
+as described under "Contained beauty-only model errors" below; any other model or replay error drains
+every yaw and fails the stage loudly. `beauty_generation` records the yaws, attempts, selection, cost,
+seconds and contained errors. Ordinary fast waves
 first resolve from the original ungraded base, using the same cover, gates and user note, but only
 attempt zero per pass. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
 back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
@@ -2724,7 +2726,8 @@ nor beauty references.
 Only when the existing gates reject both slot 1 and slot 2 does the pass launch conditional slot 3,
 inside the same frozen wave: the exact ordinary-fast attempt-one request (original cover, ordinary
 recipe, sample index one, the ordinary wave's frozen render, no turnaround or beauty reference).
-A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3. For the
+A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3; the one
+exception is a contained model error on slot 1 (below), which counts as a failed beauty sample. For the
 `head+0` pass only, face selection's rejection of a gate-accepted slot 1 (missing eyes or mouth, no
 ordinary paint, or less eye detail) counts as a failed beauty sample. A gate-accepted slot 1 whose
 prompt is not a beauty recipe (`RF6B`, `RF17B` or `RF18B`) is never a face source either, so it also
@@ -2749,6 +2752,40 @@ reference and preserves the same ordinary slots 2 and 3. This contains rejected 
 second enhanced sample or a weakened paint gate. Apart from a face-rejected head, a beauty paint that
 passes the gates keeps its slot, so a view whose ordinary attempt zero failed then has no ordinary
 attempt one in the nested atlas.
+
+Contained beauty-only model errors (fast profile only). Both enhancement passes, the beauty recipe and
+SideBeautyPass, roughly double a fast run's model requests, so an `ApiError` (any status: a timeout or
+dropped connection, HTTP 5xx, or HTTP 4xx including `content_policy_violation`) on a request only they
+make does not fail stage 3f. These requests are:
+- beauty reference generation (`beauty.generate_fast`): each yaw's `BT1` image edit, its SAM character
+  outline query and its SAM head-crop query. The failed yaw has no reference, exactly as for a rejected
+  sample: its views use the standard recipe, and when yaw 0 fails the beauty arm is off for the run;
+- each view's enhanced slot 1 with the beauty arm on: its beauty or art-conditioned request (`RF6B`,
+  `RF18B`, `RF16B`, or the standard or art-conditioned recipe on the graded render where no reference
+  applies) and every SAM query that judges that sample (part, facial-feature and hair-weight queries).
+  The view continues exactly as if slot 1 had been rejected: slot 2, the exact ordinary attempt-zero
+  request, decides, and the conditional slot-3 rule counts the errored slot 1 as a failed beauty sample.
+  For the face close-up, face selection sees no beauty candidate, as for a rejected beauty head;
+- with SideBeautyPass on and the beauty arm off (beauty switched off, or no usable front reference),
+  slot 1 of each view that receives turnaround art (yaws 90 through 270: `body+90`, `body-90`,
+  `body+180` and hair `upper+180`, sending `RF12R`, `RF12W` or `RF13H`). That view has no conditional
+  slot, so its existing slot 2 decides. Front views send plain fast's own request there and stay loud.
+No contained error pays an extra sample, retry or gate: per view, at most the samples the existing rule
+allows are sent. Every other request still fails the stage loudly: slot 2 and slot 3, the nested
+default-head run (which sends plain fast's requests), slot 2 of a SideBeautyPass-only view, the frontal
+skin query and face recovery, and every request of plain fast, the full lane and `best`, which are
+unchanged. `ReplayMiss`, budget stops and cancellation behave as before.
+Each contained error is recorded with `error` (the class), `http_status`, `error_code`, `message` (at
+most 160 characters) and `fallback`. Views record it in `views[].contained_errors` with `slot`, `prompt`,
+`request` (`image edit` or `SAM check`) and fallback `ordinary slots` (or `slot 2` without the beauty
+arm), and on the errored attempt as `contained_error` (reason `ApiError`). Reference yaws record it as
+the yaw's `error` in `beauty_references` and in `beauty_generation.contained_errors`, with `request`
+(`BT1 image edit`, `SAM character outline` or `SAM head crop`), the saved `image` when one came back and
+fallback `standard recipe` (`beauty off` for yaw 0). The run-level `contained_errors` list repeats every
+one, with `view` or `reference_yaw`; it is present, possibly empty, whenever beauty or SideBeautyPass is
+on in the fast profile. The build log adds a `view_result` decision for the errored try (`ok` false, why
+`model_error`) and, for a reference, a `beauty_reference` decision (`m.yaw`); both carry `m.fallback` 1,
+`m.http_status` and the matching `code` (`http_5xx`, `http_4xx`, ...) when an answer came back.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast

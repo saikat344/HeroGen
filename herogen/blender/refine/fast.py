@@ -12,7 +12,7 @@ import time
 import uuid
 from types import MethodType
 
-from herogen.pipeline.client import CallLog
+from herogen.pipeline.client import ApiError, CallLog
 from herogen.refine_budget import BudgetStop
 
 from . import buildlog
@@ -22,6 +22,18 @@ WAVES = ((('head+0', False), ('body+0', False), ('body+90', False),
           ('body-90', False), ('body+180', False)), (('upper+180', True),))
 CONCURRENCY = 5
 ATTEMPTS = 2
+MESSAGE_MAX = 160   # characters of a contained model error's message kept in the stage record
+
+
+def contained_error(exc, fallback, **where):
+    """A beauty-only model error (beauty or SideBeautyPass request) that the fast lane contains, as recorded.
+
+    ``where`` names the request (view and slot, or reference yaw); ``fallback`` names what was used instead.
+    """
+    message = " ".join(str(exc).split())
+    return {**where, 'error': type(exc).__name__, 'http_status': getattr(exc, 'http_status', None),
+            'error_code': getattr(exc, 'error_code', None), 'message': message[:MESSAGE_MAX],
+            'fallback': fallback}
 
 
 def isolated_client(parent, key, persistence_lock=None):
@@ -114,6 +126,8 @@ class Pass:
         self.slots, self.conditional = 0, 0
         self.prepare = self.launch = None
         self.reported = False
+        # Slots whose model errors are contained (an enhanced slot 1), those errors by slot, and what decides instead.
+        self.contained, self.errors, self.fallback = (), {}, 'ordinary slots'
         # Requests paid on this view's behalf outside its own tries' clients, by slot index (build log).
         self.shared_calls = lambda index: ()
 
@@ -189,7 +203,11 @@ class Pass:
                 or len(self.completed) != len(self.tasks)):
             return False
         for index, (future, _, private, _) in enumerate(self.tasks):
-            if not future.done() or future.cancelled() or future.exception() is not None:
+            if not future.done() or future.cancelled():
+                return False
+            if index in self.errors:
+                continue   # a contained model error on the enhanced sample counts as a failed beauty sample
+            if future.exception() is not None:
                 return False
             reason = private['attempts'][-1]['reason'] if private['attempts'] else 'incomplete'
             if ((private['accepted'] and index not in overruled) or reason == 'incomplete'
@@ -205,6 +223,9 @@ class Pass:
             private['reason'] = 'cancelled: lower attempt accepted'
         except BudgetStop as exc:
             private['reason'] = str(exc)
+        except ApiError as exc:
+            if not self.contain(index, exc):
+                raise
         if private.get('reference_style'):
             for trial in private['attempts']:
                 trial['reference_style'] = private['reference_style']
@@ -241,6 +262,24 @@ class Pass:
             self.record['reason'] = self.completed[len(self.tasks) - 1]['reason']
             if len(self.tasks) >= self.slots + self.conditional:
                 self.report_kept()   # no conditional slot can follow; otherwise the wave decides
+
+    def contain(self, index, exc):
+        """Record a model error on a contained slot as a failed sample; False when the slot is not contained.
+
+        The slot then completes like a gate rejection: the next slot decides, and the conditional rule counts it.
+        """
+        if index not in self.contained:
+            return False
+        private = self.tasks[index][2]
+        trial = private['attempts'][-1] if private['attempts'] else None
+        error = contained_error(exc, self.fallback, slot=index + 1, prompt=private.get('prompt'),
+                                request='SAM check' if trial is not None and 'checks' in trial else 'image edit')
+        private.update(accepted=False, reason=type(exc).__name__)
+        if trial is not None:
+            trial.update(accepted=False, reason=type(exc).__name__, contained_error=error)
+        self.errors[index] = error
+        self.record.setdefault('contained_errors', []).append(error)
+        return True
 
     def report_kept(self):
         """Log that the view keeps its original paint, once every launched try is known and none will follow.
@@ -422,8 +461,16 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 job.tasks[index][0].result()
             except (CancelledError, BudgetStop):
                 pass
+            except ApiError:
+                if index not in job.contained:
+                    raise
             with state_lock:
                 job.collect(index)
+                if index in job.errors:
+                    # The stage continues on the view's other slots; the error stays on the record and log.
+                    data.setdefault('contained_errors', []).append({'view': job.key, **job.errors[index]})
+            if index in job.errors:
+                buildlog.try_contained(job.key, job.tries[index], job.errors[index])
             if job.tasks[index][0].done() and not job.tasks[index][0].cancelled():
                 exc = job.tasks[index][0].exception()
                 if isinstance(exc, BudgetStop):
@@ -535,6 +582,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                     factory = face_control.pass_type(name) if face_control is not None else Pass
                     job = factory(key, name, hair, record, work / key)
                     if face_control is not None:
+                        # Slot 1 is the enhanced (beauty-only) sample: its model errors fall back to slots 2 and 3.
+                        job.contained = (0,)
                         # The default-head run pays a conditional slot's sample before the slot replays it.
                         job.shared_calls = (lambda index, key=key, job=job:
                                             face_control.paid_for(key) if index >= job.slots else ())
@@ -560,6 +609,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         from . import art_references
                         art_run, info, artwork = art_context
                         art, masks, framing = art_references(art_run, cams[job.name], cams['body+0'], info, artwork)
+                        if art and face_control is None:
+                            # SideBeautyPass without the beauty arm: slot 1's art-conditioned sample is enhanced
+                            # too. Its model errors fall back to slot 2, the view's other existing sample.
+                            job.contained, job.fallback = (0,), 'slot 2'
                     job.submit(pool, client, prep, current, tex, cams[job.name], folder, timeout, cover,
                                head_found, cams['body+0'], recipe, persistence_lock, user_note=user_note,
                                art=art, art_masks=masks, art_framing=framing, attempts=attempts,
