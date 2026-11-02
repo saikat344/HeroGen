@@ -46,13 +46,16 @@ def isolated_client(parent, key, persistence_lock=None):
     child._save_entry = MethodType(durable, child)
 
     def cached(self, request_key):
-        entry = load(request_key)
-        if entry is None and parent._load(request_key) is not None:
-            for source in parent.cache_dir.glob(request_key + '*'):
-                if source.is_file():
-                    shutil.copy2(source, self.cache_dir / source.name)
+        # Nested siblings can request the same parent family concurrently. Keep the
+        # entry unreadable until its complete image/mask family has been copied.
+        with persistence_lock:
             entry = load(request_key)
-        return entry
+            if entry is None and parent._load(request_key) is not None:
+                for source in parent.cache_dir.glob(request_key + '*'):
+                    if source.is_file():
+                        shutil.copy2(source, self.cache_dir / source.name)
+                entry = load(request_key)
+            return entry
 
     child._load = MethodType(cached, child)
     return child

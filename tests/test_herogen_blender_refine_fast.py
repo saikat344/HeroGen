@@ -84,6 +84,36 @@ class ConcurrentBudgetTests(unittest.TestCase):
             fast.publish(parent, child)
             self.assertEqual(parent._load('k'), {'value': 2})
 
+    def test_nested_siblings_wait_for_a_complete_shared_parent_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = ModelClient(tmp)
+            parent._save_entry('k', {'value': 1})
+            outer = fast.isolated_client(parent, 'outer')
+            a = fast.isolated_client(outer, 'a')
+            b = fast.isolated_client(outer, 'b')
+            copying, release = threading.Event(), threading.Event()
+            real_copy = fast.shutil.copy2
+            def slow_copy(source, target, *args, **kwargs):
+                target = Path(target)
+                if target == outer.cache_dir / 'k.json':
+                    target.write_bytes(b'')
+                    copying.set()
+                    if not release.wait(5):
+                        raise TimeoutError('copy was not released')
+                return real_copy(source, target, *args, **kwargs)
+            with mock.patch.object(fast.shutil, 'copy2', side_effect=slow_copy), \
+                    ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(a._load, 'k')
+                self.assertTrue(copying.wait(5))
+                second = pool.submit(b._load, 'k')
+                try:
+                    with self.assertRaises(TimeoutError):
+                        second.result(timeout=.05)
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=5), {'value': 1})
+                self.assertEqual(second.result(timeout=5), {'value': 1})
+
     def test_nested_cache_keeps_images_and_new_entries_with_their_client(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = ModelClient(tmp)
