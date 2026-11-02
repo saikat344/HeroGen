@@ -1386,8 +1386,10 @@ class ConsumerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             (run / "04-body").mkdir()
+            from herogen.service.fakes import box_glb
+            # Real (minimal) GLBs: the website publishes only complete model files.
             for name in ("04-body/high.glb", "03-source.glb", "03-refined.glb"):
-                (run / name).write_bytes(b"synthetic")
+                (run / name).write_bytes(box_glb())
             self.assertEqual(final_model(run).name, "03-refined.glb")
             self.assertEqual(glb_path(run).name, "03-source.glb", "unrecorded refinement is not published")
             (run / "stage-3f.json").write_text('{"ok":true,"status":"complete","outputs":["03-refined.glb"]}')
