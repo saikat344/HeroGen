@@ -1,15 +1,14 @@
 /* HeroGen design tokens: "Ember Workshop".
  *
  * Usage
- *   1. Load this file first, before any page stylesheet:  <link rel="stylesheet" href="/assets/tokens.css">
- *      (target path: herogen/service/static/tokens.css). theme.js already sets <html data-theme="dark|light">
- *      before first paint; these tokens key off that attribute. Dark is the primary theme and the default.
+ *   1. Load this file first, before any page stylesheet:  <link rel="stylesheet" href="/assets/tokens.css">.
+ *      theme.js already sets <html data-theme="dark|light"> before first paint; these tokens key off that attribute. Dark is the primary theme and the default.
  *   2. Components read only semantic tokens (--color-*, --font-*, --space-*, --radius-*, --shadow-*, --dur-*,
  *      --ease-*). Never write a raw hex, px font size or ms duration in a page stylesheet. If a value is missing,
  *      add a token here first.
  *   3. The 3D stage stays dark in both themes (studio convention). Anything placed on it uses the --stage-*
  *      tokens, not the page tokens.
- *   4. Fonts are self-hosted from /assets/fonts/ (see DESIGN-SPEC.md section 3). No CDN.
+ *   4. Fonts are self-hosted from /assets/fonts/ (declared by the @font-face rules below). No CDN.
  *   5. Motion tokens collapse to near-zero under prefers-reduced-motion; components need no extra media query
  *      for durations, only for animations that move things (see the "motion" section at the bottom).
  *

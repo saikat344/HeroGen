@@ -876,7 +876,7 @@ class TestPages(WebCase):
         from herogen.service import web
 
         css = (web.STATIC_DIR / "app.css").read_text()
-        marker = "/* legacy: delete per phase */"
+        marker = "/* legacy rules */"
         self.assertEqual(css.count(marker), 1)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css[:css.index(marker)]), [])
 

@@ -1,9 +1,9 @@
 /* HeroGen website styles. Load /assets/tokens.css first: every colour, size and duration below is a token from it,
    and this file never writes a hex colour.
 
-   Order: base (reset, icons, type helpers), site chrome (header, footer), components (DESIGN-SPEC section 6),
-   keyframes and reduced motion. Below the "legacy: delete per phase" marker sit the page rules from before the
-   redesign; each phase moves its page onto the components above and deletes its legacy rules. */
+   Order: base (reset, icons, type helpers), site chrome (header, footer), shared components, keyframes and
+   reduced motion. Below the "legacy rules" marker sit older page rules that the admin page and a few shared
+   elements still use; delete a rule there once nothing renders it. */
 
 /* ---------- Base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -39,7 +39,7 @@ a:hover { text-decoration-thickness: 2px; }
 .mono { font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
 .tabular { font-variant-numeric: tabular-nums; }
 
-/* ---------- Site header (DESIGN-SPEC 6.14) ---------- */
+/* ---------- Site header ---------- */
 .site-header { position: sticky; top: 0; z-index: var(--z-header); height: var(--header-h); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-5); padding: 0 var(--gutter); background: color-mix(in srgb, var(--color-bg) 86%, transparent); -webkit-backdrop-filter: blur(12px) saturate(1.2); backdrop-filter: blur(12px) saturate(1.2); border-bottom: var(--border-w) solid var(--color-border-subtle); }
 .brand { justify-self: start; display: inline-flex; align-items: center; gap: var(--space-3); min-width: 0; color: var(--color-text); text-decoration: none; font-family: var(--font-display); font-size: var(--text-brand); font-weight: var(--weight-display-strong); letter-spacing: -0.02em; line-height: 1; white-space: nowrap; font-variation-settings: var(--display-variation); border-radius: var(--radius-m); }
 .brand:hover { text-decoration: none; }
@@ -258,9 +258,9 @@ a:hover { text-decoration-thickness: 2px; }
   .btn:active:not(:disabled) { transform: none; }
 }
 
-/* legacy: delete per phase */
+/* legacy rules */
 /* Everything below predates the design system. The palette names it reads (--bg, --ink, --accent and the rest)
-   now resolve to tokens in both themes; a phase that rebuilds a page deletes that page's rules from here. */
+   now resolve to tokens in both themes. */
 :root {
   --bg: var(--color-bg); --card: var(--color-surface-1); --surface: var(--color-surface-2); --hover: var(--color-surface-3);
   --ink: var(--color-text); --muted: var(--color-text-muted); --line: var(--color-border);
