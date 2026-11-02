@@ -106,7 +106,8 @@ def fit_pivots(sections):
     """Keep existing pivots within both part envelopes; otherwise use the nearest shared cut edge.
 
     A cut centroid projected onto an infinite joint plane need not remain in the finite opening. A missing
-    child loop also used to leave the anatomical estimate in place. Both cases need the actual section.
+    child loop can leave the anatomical estimate in place. When no shared edge exists, retain the pivot
+    assigned by build_sections (the cut centroid or anatomical estimate) and record that fallback.
     Root has no neighbouring mesh, so its fallback is the nearest point on its own surface.
     """
     changes = {}
@@ -132,7 +133,9 @@ def fit_pivots(sections):
             shared = np.array([tuple(sorted((tuple(rounded[a]), tuple(rounded[b])))) in common for a, b in edges])
             edges = edges[shared]
             if not len(edges):
-                raise ValueError(f"{name} has no shared cut edge with {PARENT[name]}; cannot place its pivot")
+                changes[name] = {"source": "section pivot", "distance_studs": 0.0,
+                                 "pivot_fallback": f"no shared cut edge with {PARENT[name]}; retained section pivot"}
+                continue
             a, b = section.verts[edges[:, 0]], section.verts[edges[:, 1]]
             d = b - a
             t = np.clip(((pivot - a) * d).sum(1) / np.maximum((d * d).sum(1), 1e-20), 0, 1)

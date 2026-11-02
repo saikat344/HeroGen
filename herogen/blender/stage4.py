@@ -669,6 +669,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         lod_secs[lod] = {n: cands[pick[n]]["covered"][n] for n in SECTIONS}
         bare_secs[lod] = {n: cands[pick[n]]["bare"][n] for n in SECTIONS}
         pivot_repairs[lod] = rig_geometry.fit_pivots(lod_secs[lod])
+        for name, repair in pivot_repairs[lod].items():
+            if "pivot_fallback" in repair:
+                rec.note(f"{lod} {name} pivot fallback: {repair['pivot_fallback']}")
         owner = cands[pick[COVER_OWNER]]
         cover_info[lod] = owner["covers"]
         groups = _section_groups(build, profile)
@@ -1055,6 +1058,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                            + [str(Path(p).relative_to(run.resolve())) for p in bres["rest_textured"].values()])
     rec.data["mesh_source"] = mesh_source
     rec.data["joints_source"] = joints_source
+    rec.data["pivot_repairs"] = pivot_repairs
     rec.data["profile"] = {"name": profile, "lods": sorted(builds), "budgets": _budgets_record(profile)}
     rec.data["body"] = {"lods": lod_info, "decimation": dec["results"][0], "chosen_targets": chosen,
                         "sections_from": picks, "cuts": cut_record,
