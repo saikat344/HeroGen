@@ -2810,6 +2810,15 @@ Missing timings and costs remain absent. No percentage is inferred from elapsed 
 render published GLBs with textured, clay and wire shading, dispose replaced resources, and expose
 retry controls on load failure. Gallery routes require no session and never dispatch work.
 
+`/api/gallery` items list each published image as `assets.sketch` and `assets.artwork`, each with `url` (the
+full-size PNG at `/gallery-assets/<id>/<kind>`) and `thumb_url`, `/gallery-assets/<id>/<kind>-thumb?v=<token>`:
+a WebP whose long side is 512 pixels (never enlarged, quality 82, transparency kept). The token is the first
+16 hex digits of the image's catalog SHA-256. A thumbnail is made on its first request, after the same
+integrity check as the full image, and cached as `<data>/gallery-thumbs/<id>/<kind>-<token>.webp`, since the
+published gallery is read-only. It is written to a temporary file in that folder and renamed into place, so a
+half-written image is never served, and a republished image's older thumbnail is removed. A matching `v` is
+served with `Cache-Control: public, max-age=31536000, immutable`, any other with `public, max-age=3600`.
+
 ### First-party analytics and admin panel
 
 `analytics.js` sends bounded batches of enumerated first-party events to `POST /api/events`, protected
