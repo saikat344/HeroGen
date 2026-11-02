@@ -208,14 +208,15 @@ RF15B = RF6B.replace("The second image is the nearest beauty reference", "The la
     "Use that artwork for the visible side's colours, materials and surface construction; "
     "use the last beauty reference for identity and rendering style."
 ) + ART_MATERIALS + ART_FEATURES.replace("the cover for identity", "the last beauty reference for identity")
+RF16B = RF15B + DESIGN_ONLY
 
 PROMPTS = {"RF2R": RF2R, "RF2W": RF2W, "RF3H": RF3H, "RF4U": RF4U, "RF5U": RF5U,
            "RF6R": RF6R, "RF6W": RF6W, "RF7H": RF7H, "RF8U": RF8U, "RF9R": RF9R, "RF9W": RF9W,
            "RF10H": RF10H, "RF11R": RF11R, "RF11W": RF11W, "RF12R": RF12R, "RF12W": RF12W,
-           "RF13H": RF13H, "RF14U": RF14U, "RF5B": RF5B, "RF6B": RF6B, "RF15B": RF15B}
+           "RF13H": RF13H, "RF14U": RF14U, "RF5B": RF5B, "RF6B": RF6B, "RF15B": RF15B, "RF16B": RF16B}
 
 # Art-conditioned variant of each cover-only recipe, used when turnaround views are supplied.
-ART_VARIANTS = {"RF2R": "RF12R", "RF2W": "RF12W", "RF3H": "RF13H", "RF5U": "RF14U", "RF6B": "RF15B"}
+ART_VARIANTS = {"RF2R": "RF12R", "RF2W": "RF12W", "RF3H": "RF13H", "RF5U": "RF14U", "RF6B": "RF16B"}
 
 # Appended after all of a recipe's rules, never edited into them: the note is quoted data that loses to
 # every fixed rule (framing, outline, silhouette, pose, face and feature preservation, the artwork's details).

@@ -278,7 +278,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             continue
         # Beauty references already carry the intended light and palette; fitting them back to the
         # source render would remove their crease shading and material contrast.
-        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B") else I.colour_match(render_rgb, warped, figure & fig_e)
+        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B", "RF16B") else I.colour_match(render_rgb, warped, figure & fig_e)
         if hair:
             weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy,
                                    parts["face"] if face_exclusion else None)

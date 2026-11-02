@@ -2532,8 +2532,10 @@ distance ramp over 12 pixels at 1024 resolution; its local low-frequency colour 
 toward the surrounding rebaked atlas only within that band. This query changes the paint region, not
 view acceptance, retries or numeric gate thresholds. Default heads do not make this skin query.
 The three options compose independently in this order. SideBeautyPass first supplies matching turnaround
-references to side/back repaint requests, including beauty requests (`RF15B`, render first, turnaround in
+references to side/back repaint requests, including beauty requests (`RF16B`, render first, turnaround in
 between, beauty reference last). Front beauty/default candidates keep their original references and gates.
+The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
+proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
