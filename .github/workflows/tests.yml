@@ -1,16 +1,22 @@
 name: tests
 
+# Pushes to main and pull requests run the tests; a pull request's run already covers its branch pushes.
+# Release tags run these tests through release.yml, which deploys only when they pass.
 on:
   push:
-    branches: ["**"]
-    # Release tags run these tests through release.yml, which deploys only when they pass.
-    tags-ignore: ["v*"]
+    branches: [main]
   pull_request:
   workflow_call:
 
 jobs:
-  test:
+  # The unit tests in four parallel shards (tools/ci/test_shard.py splits them by module).
+  shard:
+    name: shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +34,7 @@ jobs:
       - name: Unit tests
         run: |
           set -o pipefail
-          python3 -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/unittest.log"
+          python3 tools/ci/test_shard.py ${{ matrix.shard }} 4 2>&1 | tee "$RUNNER_TEMP/unittest.log"
       - name: Skipped tests
         if: always()
         run: |
@@ -58,5 +64,22 @@ jobs:
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
                   f.write("\n".join(md) + "\n")
           EOF
+
+  # The required check: passes only when every shard passed, then runs the guard.
+  test:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        env:
+          SHARDS: ${{ needs.shard.result }}
+        run: test "$SHARDS" = success
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Guard
         run: python3 tools/guard/guard.py tree

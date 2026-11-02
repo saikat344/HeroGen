@@ -2026,7 +2026,9 @@ both work; an annotated tag is read as the commit it points at.
      answer that is not a list, a next page on another host, or more than 20 pages. This job alone has the
      `deployments: read` permission; its token goes to the check step only, and the checkout keeps none.
 2. **test** is `.github/workflows/tests.yml`, called as a reusable workflow: the same unit tests and guard as on
-   every branch push. Tags starting with `v` do not start `tests.yml` on their own, so a tag runs the tests once.
+   every push to main and every pull request. The tests run in four parallel shards split by module
+   (`tools/ci/test_shard.py`), and its `test` job passes only when every shard passed. Tags starting with `v` do
+   not start `tests.yml` on their own, so a tag runs the tests once.
 3. **deploy** needs both, and runs in the GitHub environment the plan chose, with that environment's secrets and
    variables. Deploys to one environment run one at a time: a running deploy is never cancelled, and a deploy
    waiting behind it is replaced by a newer one that starts waiting. Its steps:
