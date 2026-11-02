@@ -676,6 +676,7 @@ class TransientResendTests(unittest.TestCase):
                          [(False, "stopped"), (False, "model_error"), (True, None)])
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class FastBeautyStageTests(unittest.TestCase):
     setUp = note_fixture.FastNoteTests.setUp
     identity = staticmethod(fixture.StageTests.identity)
