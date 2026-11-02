@@ -31,13 +31,35 @@
 .side-panel .note-label { margin: 0; font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--ls-eyebrow); text-transform: uppercase; color: var(--color-text-muted); }
 .side-panel .follow-live { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-body-s); font-weight: var(--weight-regular); color: var(--color-text-muted); }
 .side-panel .follow-live input { accent-color: var(--color-accent); }
-.side-panel #stageLog { list-style: none; margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); max-height: 220px; overflow: auto; border-radius: var(--radius-m); background: var(--color-bg); font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
-.side-panel #stageLog li { display: flex; gap: var(--space-4); }
+.side-panel #stageLog { list-style: none; margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); max-height: 24rem; overflow: auto; border-radius: var(--radius-m); background: var(--color-bg); font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
+.side-panel #stageLog li { display: flex; gap: var(--space-4); min-width: 0; }
 .side-panel #stageLog time { flex: none; color: var(--color-text-faint); font-variant-numeric: tabular-nums; }
 .side-panel #stageLog span { overflow-wrap: anywhere; }
 .side-panel #stageLog .st-passed { color: var(--color-success); }
 .side-panel #stageLog .st-failed, .side-panel #stageLog .st-rejected { color: var(--color-danger-text); }
 .side-panel #stageLog .st-running { color: var(--color-accent-text); }
+.side-panel #stageLog .st-skipped { color: var(--color-warning); }
+.side-panel #stageLog .st-reused, .side-panel #stageLog .st-cancelled { color: var(--color-text-muted); }
+/* A step header opens each group; its calls follow, indented under it. */
+.side-panel #stageLog .log-step { margin-top: var(--space-4); }
+.side-panel #stageLog .log-step:first-child { margin-top: 0; }
+.side-panel #stageLog .log-call, .side-panel #stageLog .log-group, .side-panel #stageLog .log-version { padding-inline-start: var(--space-4); }
+.side-panel #stageLog .log-body, .side-panel #stageLog .log-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); min-width: 0; }
+.side-panel #stageLog .log-body { flex: 1; flex-direction: column; align-items: stretch; }
+.side-panel #stageLog .log-line { flex: 1; }
+.side-panel #stageLog .log-title { font-weight: var(--weight-semibold); }
+.side-panel #stageLog .log-text { flex: 1 1 10rem; min-width: 0; color: var(--color-text); }
+.side-panel #stageLog .log-title { flex: 1 1 100%; }
+.side-panel #stageLog .log-step .log-meta { margin-inline-start: 0; text-align: start; }
+.side-panel #stageLog .log-who { flex: none; padding: 0 var(--space-2); border-radius: var(--radius-s); background: var(--color-surface-2); color: var(--color-text-muted); font-size: var(--text-caption); }
+.side-panel #stageLog .log-who--local { color: var(--color-accent-text); }
+.side-panel #stageLog .log-meta { margin-inline-start: auto; color: var(--color-text-muted); font-variant-numeric: tabular-nums; text-align: end; }
+.side-panel #stageLog .log-checks, .side-panel #stageLog .log-message, .side-panel #stageLog .log-note { display: block; color: var(--color-text-muted); font-family: var(--font-ui); font-size: var(--text-body-s); line-height: var(--lh-body-s); }
+.side-panel #stageLog .log-message { color: var(--color-text); }
+.side-panel #stageLog .log-fold { flex: 1; min-width: 0; }
+.side-panel #stageLog .log-fold summary { display: flex; gap: var(--space-4); cursor: pointer; border-radius: var(--radius-s); }
+.side-panel #stageLog .log-children { list-style: none; margin: 0; padding: 0 0 0 var(--space-5); }
+.side-panel .log-caveat { margin: var(--space-3) 0 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); }
 .side-panel .log-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); font-size: var(--text-caption); color: var(--color-text-muted); }
 .side-panel .log-footer .link { margin: 0; padding: 0; border: 0; background: none; color: var(--color-accent-text); font: inherit; font-weight: var(--weight-semibold); cursor: pointer; }
 .side-panel .work-note { margin: 0; padding: var(--space-5); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border-subtle); background: var(--color-surface-2); box-shadow: none; color: var(--color-text-muted); }
