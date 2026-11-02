@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (DEFAULT_PROFILE, HEIGHT_STUDS, PARENT, PIVOT_JOINT, PROFILES, SECTIONS, VIEWS, bl, body_joints,
-               covers, cuts, joints, pose, split, texture)
+               covers, cuts, joints, pose, rig_geometry, split, texture)
 from .carve import winding_inside
 from .stage3 import IOU_GATE, MESH_SOURCES, iou
 from .views import load_mask
@@ -594,6 +594,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     # Where to cut: a cut moved along its normal only where the gate poses show a gain beyond noise, found once on
     # the reference body and used for every LOD (see cuts). The held-out poses never choose; the record shows the
     # reference body on both pose sets with the cuts unmoved and moved.
+    reference_mesh = np.load(outs["cutsearch"])
+    landmark_repairs = rig_geometry.reconcile_skeleton(sk, jrec, reference_mesh["verts"], reference_mesh["faces"],
+                                                      vs.views.get("front", vs.views.get("back")))
     bone_dirs = pose.bone_directions(sk)
     poses = pose.pose_library(bone_dirs)
     heldout = pose.heldout_poses(bone_dirs)
@@ -634,6 +637,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     # Covers are shaped from a coarse decimation of the body (2.7k triangles for the high settings' covers, 1.2k
     # for the low settings') so they stay cheap; they count in the budgets.
     chosen, lod_secs, bare_secs, lod_info, cover_info, picks = {}, {}, {}, {}, {}, {}
+    pivot_repairs = {}
     for lod, build in builds.items():
         cover_src = np.load(outs["cover" + build["cover"]])
         rings, ring_points = DOME[build["dome"]]
@@ -664,6 +668,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         picks[lod] = {n: cands[i]["key"] for n, i in pick.items()}
         lod_secs[lod] = {n: cands[pick[n]]["covered"][n] for n in SECTIONS}
         bare_secs[lod] = {n: cands[pick[n]]["bare"][n] for n in SECTIONS}
+        pivot_repairs[lod] = rig_geometry.fit_pivots(lod_secs[lod])
         owner = cands[pick[COVER_OWNER]]
         cover_info[lod] = owner["covers"]
         groups = _section_groups(build, profile)
@@ -1000,6 +1005,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             "pivot_check": pivot_rows[n],
         } for n in SECTIONS],
         "joints": sk.as_json(),
+        "landmark_repairs": landmark_repairs,
+        "pivot_repairs": pivot_repairs,
         "ends": {k: [round(float(c), 4) for c in v] for k, v in sk.ends.items()},
         "joint_evidence": sk.evidence,
         "joint_method": (body_joints.__doc__ if joints_source == "sam3d-body" else joints.__doc__).strip(),
