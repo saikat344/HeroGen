@@ -263,12 +263,17 @@ that removes an own or neighbouring joint's measurement is rejected and recorded
 
 In the fast lane (`HEROGEN_FAST_LANE=1`, or `herogen.blender run --fast`), baseline joints without a measurable
 rim stay at their estimated cuts. A bilateral cut kind is searched only when both sides are measurable.
-Candidates still cannot remove a measurable joint. Stage 4 builds the R15 sections and applies the unchanged
-gap limit to every measurable joint in each final LOD. `stage-4.json` records `fast_lane: true` and
+Candidates still cannot remove a measurable joint. Stage 4 builds the R15 sections and records the unchanged
+gap limit and pass/fail measurement for every measurable joint in each final LOD. `stage-4.json` records `fast_lane: true` and
 `unverified_joints`, with each joint's name, reason and user-facing `message`; the `measurable_joints` check is
 informational. Unknown gaps are omitted, and a gap check with no measurements has a null value and is
-informational. Empty final sections still fail `sections_non_empty`, and every other existing gate remains
-in force. The full lane retains the error above.
+informational. Measured gaps, silhouette and texture agreement, pivot placement and synthetic joint accuracy
+are also informational (`gate: false`). A completed export includes a user-facing sentence in `notes`, naming
+the widest measured seam when it exceeds the limit. Empty final sections still fail `sections_non_empty`;
+exported GLBs must contain all 15 nonempty R15 parts, and every listed output file must exist and be nonempty.
+Topology, triangle budgets, Roblox's existing 20,000-triangle per-mesh limit and texture size limits remain
+hard requirements. Export errors remain loud.
+The full lane retains every existing gate and the error above.
 The search evaluates candidates on `--cut-workers` threads (1 to 12, default 3) and consumes their results in the
 original order, so the chosen cuts and every trial record are identical for any worker count.
 
