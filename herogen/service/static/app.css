@@ -330,8 +330,8 @@ html { scroll-behavior:smooth; }
 .top #who { max-width:140px; overflow:hidden; text-overflow:ellipsis; font-size:12px; }
 main { padding:0; max-width:1600px; }
 
-.eyebrow { display:flex; align-items:center; gap:18px; font-size:11px; letter-spacing:3px; text-transform:uppercase; margin:0 0 20px; }
-.eyebrow span { height:1px; width:52px; background:var(--accent); }
+.admin-page .eyebrow { display:flex; align-items:center; gap:18px; font-size:11px; letter-spacing:3px; text-transform:uppercase; margin:0 0 20px; }
+.admin-page .eyebrow span { height:1px; width:52px; background:var(--accent); }
 
 button.primary { margin:0; background:var(--accent); border-color:var(--accent); border-radius:4px; padding:13px 20px; font-weight:600; font-size:14px; }
 
@@ -354,10 +354,10 @@ dialog h1 { font:700 34px var(--font-display); }dialog button.primary { margin-t
 .how-steps { padding-left:22px; }.how-steps li { padding:10px 0; }.how-steps p { margin:6px 0 0; color:var(--muted); font-size:14px; }
 
 @media(max-width:1100px) { .top nav { gap:15px; } }
-@media(max-width:760px) { .top,main,.foot { width:calc(100% - 36px); }.top { gap:10px; min-height:66px; }.top .brand { font-size:26px; gap:10px; }.top nav { display:none; }.top #headerSignIn { margin-left:auto; padding:7px 15px; }.top #who { display:none; }.eyebrow { font-size:9px; letter-spacing:2px; margin-bottom:20px; }.foot { flex-wrap:wrap; gap:10px; }.footer-rule { display:none; }.foot>span:first-child { width:100%; font-size:13px; }.foot>span:nth-child(3) { margin-right:auto; }.jobs { grid-template-columns:1fr; }.top #developerMode { font-size:11px; padding:6px; }dialog { padding:30px 22px; } }
+@media(max-width:760px) { .top,main,.foot { width:calc(100% - 36px); }.top { gap:10px; min-height:66px; }.top .brand { font-size:26px; gap:10px; }.top nav { display:none; }.top #headerSignIn { margin-left:auto; padding:7px 15px; }.top #who { display:none; }.foot { flex-wrap:wrap; gap:10px; }.footer-rule { display:none; }.foot>span:first-child { width:100%; font-size:13px; }.foot>span:nth-child(3) { margin-right:auto; }.jobs { grid-template-columns:1fr; }.top #developerMode { font-size:11px; padding:6px; }dialog { padding:30px 22px; } }
 @media(prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
 
-@media(max-width:760px) { .top,main,.foot { width:calc(100% - 36px); }.top { gap:10px; min-height:66px; }.top .brand { font-size:26px; gap:10px; }.top nav { display:none; }.top #headerSignIn { margin-left:auto; padding:7px 15px; }.top #who { display:none; }h1#entryH { font-size:clamp(46px,10vw,72px); letter-spacing:-3px; }.eyebrow { font-size:9px; letter-spacing:2px; margin-bottom:20px; }.gallery .small { display:none; }.foot { flex-wrap:wrap; gap:10px; }.foot>span:first-child { width:100%; font-size:13px; }.foot>span:nth-child(3) { margin-right:auto; }.jobs { grid-template-columns:1fr; }.top #developerMode { font-size:11px; padding:6px; }.composer { padding:14px 14px 8px; }#go { gap:12px; padding:12px 14px; font-size:12px; }.gallery h2 { font-size:25px; }dialog { padding:30px 22px; } }
+@media(max-width:760px) { .top,main,.foot { width:calc(100% - 36px); }.top { gap:10px; min-height:66px; }.top .brand { font-size:26px; gap:10px; }.top nav { display:none; }.top #headerSignIn { margin-left:auto; padding:7px 15px; }.top #who { display:none; }.gallery .small { display:none; }.foot { flex-wrap:wrap; gap:10px; }.foot>span:first-child { width:100%; font-size:13px; }.foot>span:nth-child(3) { margin-right:auto; }.jobs { grid-template-columns:1fr; }.top #developerMode { font-size:11px; padding:6px; }.gallery h2 { font-size:25px; }dialog { padding:30px 22px; } }
 body { overflow-x:clip; }
 
 /* Generation keeps the entry page's paper, typography and warm accent. */
@@ -368,9 +368,9 @@ body { overflow-x:clip; }
 .generation-grid { display:grid; grid-template-columns:minmax(0,2.4fr) minmax(260px,1fr); gap:26px; align-items:start; }
 .note-label { text-transform:uppercase; font-size:9px; letter-spacing:2px; color:var(--muted); margin:0 0 13px; }.work-note .note-label { color:#756347; }
 @media(max-width:900px) { .generation-grid { grid-template-columns:minmax(0,1.8fr) minmax(230px,1fr); gap:18px; }}
-@media(max-width:650px) { .workspace-heading { margin-bottom:20px; }.generation-heading { align-items:flex-start; gap:12px; margin-bottom:22px; }.generation-heading h1 { font-size:34px; letter-spacing:-1px; }.generation-heading .eyebrow { font-size:8px; letter-spacing:1.2px; }.generation-heading .eyebrow span { display:none; }.generation-subtitle { font-size:13px; }.generation-grid { grid-template-columns:1fr; }.generation-stages li { flex-basis:120px; } }
+@media(max-width:650px) { .workspace-heading { margin-bottom:20px; }.generation-heading { align-items:flex-start; gap:12px; margin-bottom:22px; }.generation-grid { grid-template-columns:1fr; }.generation-stages li { flex-basis:120px; } }
 @media(max-width:650px) { .workspace-heading { margin-bottom:20px; }.generation-grid { grid-template-columns:1fr; }.generation-notes { grid-template-columns:1fr; }.work-note { padding:22px; } }
-@media(max-width:650px) { .workspace-heading { margin-bottom:20px; }.generation-heading { align-items:flex-start; gap:12px; margin-bottom:22px; }.generation-heading h1 { font-size:34px; letter-spacing:-1px; }.generation-heading .eyebrow { font-size:8px; letter-spacing:1.2px; }.generation-heading .eyebrow span { display:none; }.generation-subtitle { font-size:13px; }.generation-grid { grid-template-columns:1fr; }.generation-stages li { flex-basis:120px; }.generation-notes { grid-template-columns:1fr; }.work-note { padding:22px; } }
+@media(max-width:650px) { .workspace-heading { margin-bottom:20px; }.generation-heading { align-items:flex-start; gap:12px; margin-bottom:22px; }.generation-grid { grid-template-columns:1fr; }.generation-stages li { flex-basis:120px; }.generation-notes { grid-template-columns:1fr; }.work-note { padding:22px; } }
 @media(max-width:760px) { .top #signOut { font-size:11px; padding:6px; } }
 #guestForm button { margin-top:18px; }.access-summary { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:14px 0; padding:12px 16px; border:1px solid var(--line); background:#fff6; font-size:12px; }.access-summary button { font-size:12px;white-space:nowrap; }
 
