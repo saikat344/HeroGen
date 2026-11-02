@@ -182,7 +182,9 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         try:
             self.signin(); self.make_hero('Clockwork gardener'); t = self.tab
             t.wait("document.querySelector('#stages .st-running')?.dataset.stage === '2'")
-            t.wait("document.querySelector('#stageLog').textContent.includes('started')")
+            t.wait("document.querySelector('#stageLog .log-step.st-running .log-note')?.textContent.includes('Muse Image draws a turnaround sheet')")
+            self.assertIn('Character views',t.eval("document.querySelector('#stageLog .log-step.st-running .log-title').textContent"))
+            self.assertIn('running',t.eval("document.querySelector('#stageLog .log-step.st-running .log-meta').textContent"))
             self.assertFalse(t.eval("document.querySelector('#cancelJob').hidden"))
             self.assertFalse(t.eval("document.querySelector('.site-header').contains(document.querySelector('#developerMode'))"))
             self.assertEqual(t.eval("document.querySelector('#who').textContent"),'Private workspace')
@@ -201,7 +203,10 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         t.eval("Object.defineProperty(navigator.clipboard,'writeText',{value:async text=>{window.copiedStageLog=text;},configurable:true});document.querySelector('#copyLog').click()")
         t.wait("document.querySelector('#logStatus').textContent === 'Log copied'")
         self.assertIn('Refined version 1 ready',t.eval('window.copiedStageLog'))
-        self.assertIn('started',t.eval('window.copiedStageLog'))
+        self.assertRegex(t.eval('window.copiedStageLog'),r'Step 1 of \d+ \u00b7 ')
+        self.assertIn('HeroGen (local): no model call',t.eval('window.copiedStageLog'))
+        self.assertIn('Game body',t.eval("document.querySelector('#stageLog').textContent"))
+        self.assertEqual(t.eval("document.querySelectorAll('#stageLog .log-step').length"),t.eval("document.querySelectorAll('#stages li').length"))
         root = t.eval("document.querySelector('#versionSelect').value")
         t.eval("document.querySelector('#refineNote').value='Weathered brass';document.querySelector('#refineForm').requestSubmit()")
         t.wait("document.querySelector('#versionSelect').options.length === 2 && !document.querySelector('#refineVersion').disabled")
