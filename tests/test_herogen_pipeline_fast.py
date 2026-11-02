@@ -92,8 +92,7 @@ class FastPipelineTests(unittest.TestCase):
                               ["character", "feet", "images/edits"])
         stage2_calls = [label for stage, label in sequence if stage == 2]
         # This fake top is pixel-identical to the input sketch, so its character response is cached.
-        self.assertEqual(stage2_calls[:3], ["images/edits", "character", "images/edits"])
-        self.assertCountEqual(stage2_calls[3:], ["face", "head"])
+        self.assertCountEqual(stage2_calls, ["images/edits", "character", "images/edits", "face", "head"])
         for n in ("p", 0, 1, 2):
             rec = run.read_stage(n)
             self.assertTrue(rec["ok"])
@@ -301,6 +300,14 @@ class FastPipelineTests(unittest.TestCase):
 class FastRefineTests(unittest.TestCase):
     setUp = refine_tests.StageTests.setUp
     identity = staticmethod(refine_tests.StageTests.identity)
+
+    def test_refine_without_top_uses_cover_and_mesh_renders(self):
+        self.assertFalse((self.run / "views/top.png").exists())
+        rec = refine.run_stage3f(self.run, self.client, fast=True)
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["status"], "complete")
+        self.assertEqual(rec["final_model"], "03-refined.glb")
+        self.assertEqual(len(self.client.inputs), len(refine.REFINE_ORDER) + len(refine.HAIR_ORDER))
 
     def test_every_repaint_once_and_applied_despite_all_gates_at_zero_cap(self):
         self.client.reject = True

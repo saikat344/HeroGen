@@ -9,7 +9,6 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 import math
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -666,11 +665,13 @@ def orient_sides(sq: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], d
     return checks_, notes, fixes
 
 
-def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg) -> dict[str, Any]:
+def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
+                   *, raw: Image.Image | None = None) -> dict[str, Any]:
     """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width).
     Complete attached foreground on its SAM seed; when SAM finds nothing, ``mask`` is None and the drawn
     view is not used."""
-    return scale_top_view(_draw_top_view(client, cover), sq, size, bg)
+    return scale_top_view(_draw_top_view(client, cover, image=raw), sq, size, bg,
+                          fast=getattr(client, "fast", False))
 
 
 def _draw_top_view(client, cover, figure_mask=None, image=None):
@@ -686,19 +687,26 @@ def _draw_top_view(client, cover, figure_mask=None, image=None):
     return img, sam, method, mask, completion
 
 
-def scale_top_view(drawn, sq, size, bg):
+def scale_top_view(drawn, sq, size, bg, *, fast=False):
     """Scale a previously generated top against this candidate, without changing its pixels or checks."""
     img, sam, method, mask, completion = drawn
     tb = imaging.bbox(mask)
     fb = imaging.bbox(sq["front"]["mask"])
     if tb is None or fb is None:
-        return {"raw": img, "mask": None, "mask_method": method}
+        out = {"raw": img, "mask": None, "mask_method": method}
+        if fast:
+            out["missing_reason"] = "No usable character mask in the drawn top view."
+        return out
     scale = (fb[2] - fb[0]) / max(1, tb[2] - tb[0])
     crop = img.crop(tb)
     cmask = imaging.to_mask_image(mask[tb[1] : tb[3], tb[0] : tb[2]])
     new = (max(1, round(crop.size[0] * scale)), max(1, round(crop.size[1] * scale)))
-    if max(new) > size and not getattr(client, "fast", False):
+    if max(new) > size and not fast:
         return {"raw": img, "mask": None, "mask_method": method, "scale": round(scale, 4)}
+    if max(new) > size and fast:
+        # Keep the whole drawing instead of clipping a long tail or narrow plan view to the canvas.
+        scale = min(scale, size / crop.width, size / crop.height)
+        new = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
     scaled_mask = cmask.resize(new, Image.NEAREST)
     tile = Image.new("RGB", new, bg)
     tile.paste(crop.resize(new, Image.LANCZOS), (0, 0), scaled_mask)
@@ -874,7 +882,7 @@ def _coverage_checks(split: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
-               height_units: float, requests=None) -> tuple:
+               height_units: float, requests=None, *, raw: Image.Image | None = None) -> tuple:
     """Select the top and check the final masks before ranking or accepting a sheet."""
     top_checks: list[dict[str, Any]] = []
     details: dict[str, Any] = {}
@@ -883,8 +891,9 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
     # figures at one scale). It is used if its depth/width agrees with the side views; otherwise the top
     # silhouette implied by the four side views is used instead.
     side_masks = {n: v["mask"] for n, v in sq.items()}
-    drawn = (model_top_view(client, cover, sq, size, bg) if requests is None
-             else scale_top_view(requests.top(), sq, size, bg))
+    drawn = (model_top_view(client, cover, sq, size, bg, raw=raw) if raw is not None else
+             model_top_view(client, cover, sq, size, bg) if requests is None else
+             scale_top_view(requests.top(), sq, size, bg))
     if getattr(client, "fast", False):
         client.purpose = "turnaround"
     used = None
@@ -913,7 +922,12 @@ def _sheet_top(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size
                 notes.append(f"Stage 3's carve with the drawn top view fails its IoU gate ({with_top['note']}), "
                                 "so the drawn top view is not used.")
     if used is None and getattr(client, "fast", False):
-        raise ValueError("fast lane: drawn top has no usable mask or cannot fit the view canvas")
+        reason = drawn.get("missing_reason", "The drawn top view could not be fitted to the view canvas.")
+        details.update(top_method="missing", top_method_detail=reason,
+                       missing_views=["top"], top_drawn_mask_method=drawn["mask_method"],
+                       top_drawn_scale=drawn.get("scale"))
+        notes.append(reason + " Continuing with the four side views; the top view is missing.")
+        return None, drawn["raw"], top_checks, details, notes
     if used is None:
         used = hull_top_view(sq, size, bg)
         details["top_method"] = "visual_hull"
@@ -1003,9 +1017,16 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         orient: list[dict[str, Any]] = []
         orient_notes: list[str] = []
         if st.fast:
-            attempt, sheet, bg, split, n_inst, size, sq, assignment = _fast_sheet_views(
-                st, client, cover, prompt, step["params"]["size"], tried
-            )
+            for stale in ("views/top.png", "masks/top.png", "02-top-drawn.png"):
+                (run.path / stale).unlink(missing_ok=True)
+            # The top depends only on the cover. Share receipts/cache, but give it its own purpose.
+            top_client = copy.copy(client)
+            top_client.purpose = "top view"
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                top_request = pool.submit(top_client.edit_image, TOP_PROMPT, [cover], size="1024x1024")
+                extracted = _fast_sheet_views(st, client, cover, prompt, step["params"]["size"], tried)
+            raw_top = top_request.result()
+            attempt, sheet, bg, split, n_inst, size, sq, assignment = extracted
         else:
             sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
                      if requests is None else requests.sheet(attempt))
@@ -1032,9 +1053,9 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         # Select and measure the saved top whenever the other side gates pass, even if the preliminary
         # carve fails. The hybrid still needs complete views if no retry produces a passing carve.
         if sq and (st.fast or C.gate_ok([c for c in side_checks if c["name"] != CARVE_GATE])):
-            top, top_raw, top_checks, top_details, top_notes = _sheet_top(
-                client, cover, sq, size, bg, height_units, requests
-            )
+            args = (client, cover, sq, size, bg, height_units)
+            top, top_raw, top_checks, top_details, top_notes = (
+                _sheet_top(*args, raw=raw_top) if st.fast else _sheet_top(*args, requests))
             # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
             side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
         attempt_details = {
@@ -1099,8 +1120,11 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
                 c["note"] = c.get("note", "") + "; " + note
         st.notes.append(note)
     st.notes += orient_notes + top_notes
-    if top is not None:
+    if st.fast and top_raw is not None:
         st.save_image("02-top-drawn.png", top_raw)
+    if top is not None:
+        if not st.fast:
+            st.save_image("02-top-drawn.png", top_raw)
         sq["top"] = {k: top[k] for k in ("image", "mask", "mask_method", "mask_completion") if k in top}
     if not sq:
         if st.fast:
@@ -1108,14 +1132,15 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
                            "Try again, or try a clearer full-body drawing.")
         st.notes.append("Could not split the sheet into four figures.")
         return st.finish()
-    if top is None:
+    if top is None and not st.fast:
         # Save what was cut so the failure can be inspected; no top was requested for this sheet.
         for name, v in sq.items():
             st.save_image(f"views/{name}.png", v["image"])
             st.save_image(f"masks/{name}.png", imaging.to_mask_image(v["mask"]))
         return st.finish()
 
-    for name in ALL_VIEWS:
+    saved_views = ALL_VIEWS if top is not None else SIDE_VIEWS
+    for name in saved_views:
         st.save_image(f"views/{name}.png", sq[name]["image"])
         st.save_image(f"masks/{name}.png", imaging.to_mask_image(sq[name]["mask"]))
     front_h = imaging.box_size(imaging.bbox(sq["front"]["mask"]))[1]
@@ -1123,12 +1148,14 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
         "pixels_per_unit": round(front_h / height_units, 4),
         "height_units": height_units,
         "image_size": size,
-        "views": list(ALL_VIEWS),
-        "mask_method": {n: method_kind(sq[n]["mask_method"]) for n in ALL_VIEWS},
-        "mask_method_detail": {n: sq[n]["mask_method"] for n in ALL_VIEWS},
-        "mask_completion": {n: sq[n]["mask_completion"] for n in ALL_VIEWS if "mask_completion" in sq[n]},
+        "views": list(saved_views),
+        "mask_method": {n: method_kind(sq[n]["mask_method"]) for n in saved_views},
+        "mask_method_detail": {n: sq[n]["mask_method"] for n in saved_views},
+        "mask_completion": {n: sq[n]["mask_completion"] for n in saved_views if "mask_completion" in sq[n]},
         "top_method": st.details["top_method"],
     }
+    if st.fast and top is None:
+        meta["missing_views"] = st.details.get("missing_views", [])
     run.write_json("views/meta.json", meta)
     st.outputs.append("views/meta.json")
     # Front-view part masks (face, head) for the later stages; imported here because parts uses the
