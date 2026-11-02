@@ -231,7 +231,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
             stage_gate.set()
         t.wait("document.querySelector('#state').textContent === 'succeeded' && !document.querySelector('#refineVersion').disabled",timeout=45)
         # The log and the copied text do not depend on WebGL, so wait for them rather than for the orbit hint.
-        t.wait("document.querySelectorAll('#stageLog .log-step').length === document.querySelectorAll('#stages li').length && document.querySelectorAll('#stageLog .log-step.st-running').length === 0",timeout=45)
+        t.wait("document.querySelectorAll('#stageLog .bl-step').length === document.querySelectorAll('#stages li').length && document.querySelectorAll('#stageLog .bl-step.st-running').length === 0",timeout=45)
         self.assertEqual(t.eval("document.querySelector('#generationTitle').textContent"),'Your hero. Your next idea.')
         self.assertTrue(t.eval("document.querySelector('#cancelJob').hidden"))
         self.assertEqual(t.eval("document.querySelector('#viewSteps').getAttribute('aria-expanded')"),'false')

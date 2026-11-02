@@ -4,7 +4,8 @@
 import * as copy from './buildlog-copy.js';
 import { recordLog } from './workbench.js';
 
-export const POLL_MS = 1500, IDLE_MS = 3000, MAX_MS = 12000;
+export const POLL_MS = 1500, IDLE_MS = 3000, MAX_MS = 15000;
+export const PAUSED = 'Log paused, retrying…';
 const GPU_WAIT_NOTE_MS = 20000;
 const CALL_START = new Set(['call_start', 'gpu_wait']), CALL_END = new Set(['call_end', 'gpu_end']);
 const CALL_NOTE = new Set(['call_wait', 'call_retry']);
@@ -257,7 +258,7 @@ function sync(parent, nodes) {
 export function buildLog($, api, {typical = null, timers = globalThis, now = () => Date.now(), motion = null} = {}) {
   let job = null, events = [], cursor = null, done = false, truncated = false, mode = 'waiting', request = 0;
   let timer = null, tick = null, empties = 0, delay = POLL_MS, offset = 0, model = null, busy = false;
-  let serverClock = false, answered = false;
+  let serverClock = false, answered = false, paused = false;
   let text = '', announced = new Map();
   const rows = new Map(), sections = new Map(), userOpen = new Map();
   // Runs without events show their stage records the way the page always has.
@@ -406,7 +407,7 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
       if (token !== request) return;
       const fresh = Array.isArray(res?.events) ? res.events.filter(e => e && typeof e === 'object') : [];
       if (Number.isFinite(res?.now)) { offset = res.now - now(); serverClock = true; }
-      events.push(...fresh);
+      for (const e of fresh) events.push(e);
       if (res?.cursor != null) cursor = res.cursor;
       truncated ||= res?.truncated === true;
       empties = fresh.length ? 0 : empties + 1;
@@ -414,12 +415,20 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
       // The server says when the record is complete; only a reply without that answer falls back to the job state.
       done = typeof res?.done === 'boolean' ? res.done : !fresh.length && isTerminal(job);
       answered = true;
+      if (paused) { paused = false; status(done || isTerminal(job) ? 'Recorded build log' : 'Following live'); }
       if (!events.length && done) mode = 'fallback';
     } catch (e) {
       if (token !== request) return;
       // No events route, or no events for this job: the stage records tell the story instead.
       if (e.status === 404 && !events.length) mode = 'fallback';
-      else delay = Math.min(Math.max(delay * 2, IDLE_MS), MAX_MS);
+      else {
+        // Busy server or no connection: wait (as long as the server asks, else twice as long, up to 15 s) and
+        // say so quietly. The page never raises an error banner for the log.
+        const asked = typeof e.retryAfter === 'string' && e.retryAfter.trim() ? Number(e.retryAfter) : NaN;
+        delay = e.status === 429 && Number.isFinite(asked) && asked >= 0 ? Math.min(asked * 1000, 60000)
+          : Math.min(Math.max(delay * 2, POLL_MS * 2), MAX_MS);
+        paused = true; status(PAUSED);
+      }
     } finally { if (token === request) busy = false; }
     if (token !== request) return;
     render();
@@ -430,7 +439,7 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
     ++request; records.reset(); timers.clearTimeout(timer); timers.clearTimeout(tick); timer = tick = null;
     job = null; events = []; cursor = null; done = false; truncated = false; mode = 'waiting'; empties = 0;
     delay = POLL_MS; offset = 0; model = null; text = ''; busy = false;
-    serverClock = false; answered = false;
+    serverClock = false; answered = false; paused = false;
     rows.clear(); sections.clear(); userOpen.clear(); announced = new Map();
     const ol = list(); ol.classList?.remove('is-records'); ol.replaceChildren();
   }
