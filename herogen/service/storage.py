@@ -124,6 +124,11 @@ class Storage:
         _check(user_id, job_id)
         return self.user_dir(user_id) / "inputs" / f"{job_id}.png"
 
+    def thumb_dir(self, user_id: str, job_id: str) -> Path:
+        """Small copies of a hero's card image (see `Web.job_thumbnail`); removed with the hero."""
+        _check(user_id, job_id)
+        return self.user_dir(user_id) / "thumbs" / job_id
+
     def cache_dir(self, user_id: str) -> Path:
         return self.user_dir(user_id) / "cache"
 
@@ -182,6 +187,11 @@ class Storage:
             shutil.rmtree(run)
         elif run.is_symlink():
             run.unlink()
+        thumbs = self.thumb_dir(user_id, job_id)
+        if thumbs.is_dir() and not thumbs.is_symlink():
+            shutil.rmtree(thumbs)
+        elif thumbs.is_symlink():
+            thumbs.unlink()
         inp = self.input_path(user_id, job_id)
         if inp.exists() or inp.is_symlink():
             inp.unlink()

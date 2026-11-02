@@ -612,25 +612,52 @@ class App:
         if job is None:
             return error(404, "not_found", "Not found.")
 
-        def read() -> tuple[bytes, str, str] | None:
-            states = {r["stage"]: r["state"] for r in self.svc.store.job_stages(jid)}
-            st = self.svc.storage
-            st.volume.refresh()
-            with st.volume.reading():
-                src = self._thumb_source(u["id"], job, states)
-                if src is None:
-                    return None
-                try:
-                    return src[1].read_bytes(), "image/png", self._thumb_token(*src)
-                except OSError:
-                    return None
-
-        got = await self.call(read)
+        got = await self.call(self._hero_thumb, u["id"], job)
         if got is None:
             return error(404, "not_found", "Not found.")
-        body, mime, token = got
+        body, token = got
         cache = THUMB_CACHE if request.query_params.get("v") == token else "private, no-cache"
-        return Response(body, media_type=mime, headers={"Cache-Control": cache})
+        return Response(body, media_type="image/webp", headers={"Cache-Control": cache})
+
+    def _hero_thumb(self, user_id: str, job: dict[str, Any]) -> tuple[bytes, str] | None:
+        """(WebP bytes, version token) of the hero's card image, or None when it has none or cannot be read.
+
+        The small copy is made on first request and kept in the owner's `thumbs` folder, named by the source's
+        token, so a new cover gets a new one. Every file read or written holds the volume's read lock; the decode
+        holds none, because it works on bytes already in memory and no file stays open."""
+        from herogen.service.gallery import webp_thumbnail, write_webp
+
+        st = self.svc.storage
+        states = {r["stage"]: r["state"] for r in self.svc.store.job_stages(job["id"])}
+        folder = st.thumb_dir(user_id, job["id"])
+        st.volume.refresh()
+        with st.volume.reading():
+            src = self._thumb_source(user_id, job, states)
+            if src is None:
+                return None
+            try:
+                token = self._thumb_token(*src)
+                dest = folder / f"{token}.webp"
+                if dest.is_file() and not dest.is_symlink() and not folder.is_symlink():
+                    return dest.read_bytes(), token
+                source = src[1].read_bytes()
+            except OSError:
+                return None
+        try:
+            body = webp_thumbnail(source)
+        except ValueError:
+            return None
+        wrote = False
+        with st.volume.reading():
+            try:
+                if not folder.is_symlink():
+                    write_webp(folder, dest, body)
+                    wrote = True
+            except OSError:
+                pass   # still served this time; the next request tries again
+        if wrote:
+            st.volume.commit()
+        return body, token
 
     @staticmethod
     def job_summary(j: dict[str, Any]) -> dict[str, Any]:

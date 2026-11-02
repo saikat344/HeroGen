@@ -52,6 +52,8 @@ class E2EImportTest(unittest.TestCase):
         self.assertEqual((result['errors'], result['failures']), ([], []))
         self.assertEqual(result['tests'], len(result['skipped']))
         self.assertGreater(result['tests'], 0)
+        classes = {test_id.rsplit('.', 2)[-2] for test_id, _ in result['skipped']}
+        self.assertEqual(classes, {'PublicGalleryTest', 'GalleryThumbnailTest'})
 
 
 if __name__ == "__main__":
