@@ -377,3 +377,46 @@ NORMAL_CALLS = [
     ("segment", "d38ec3d8617112edca5d1d5b"),
 ]
 NORMAL_DIGEST = "05a7116567d2b3a588b02b83a66d6ad69859c682aefea708fa0038e820f7d058"
+
+
+def _profile(toes: int) -> dict:
+    """A side-view figure whose toes point image right (+1) or image left (-1)."""
+    mask = np.zeros((100, 100), bool)
+    mask[0:97, 45:55] = True  # body and shin
+    mask[97:100, 45:80] = True  # sole reaching forward
+    if toes < 0:
+        mask = np.fliplr(mask)
+    image = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8)).convert("RGB")
+    return {"image": image, "mask": mask}
+
+
+class FastOrientSidesTests(unittest.TestCase):
+    def views(self, right: int, left: int) -> tuple[dict, dict]:
+        sq = {"right": _profile(right), "left": _profile(left)}
+        return sq, {"panel_for_view": {"right": "panel1", "left": "panel3"}}
+
+    def test_correct_sides_are_left_as_drawn(self):
+        sq, assignment = self.views(1, -1)
+        before = {n: v["mask"].copy() for n, v in sq.items()}
+        _, notes, fixes = stages.fast_orient_sides(sq, assignment)
+        self.assertEqual((notes, fixes), ([], {}))
+        for n in sq:
+            np.testing.assert_array_equal(sq[n]["mask"], before[n])
+
+    def test_exchanged_sides_are_swapped_not_mirrored(self):
+        sq, assignment = self.views(-1, 1)
+        right_drawing, left_drawing = sq["left"]["image"], sq["right"]["image"]
+        _, notes, fixes = stages.fast_orient_sides(sq, assignment)
+        self.assertEqual(fixes, {"swapped_sides": True})
+        self.assertIs(sq["right"]["image"], right_drawing)
+        self.assertIs(sq["left"]["image"], left_drawing)
+        self.assertEqual(assignment["panel_for_view"], {"right": "panel3", "left": "panel1"})
+        self.assertIn("exchanged", notes[0])
+
+    def test_two_views_facing_one_way_mirror_the_wrong_one_as_the_full_lane_does(self):
+        sq, assignment = self.views(1, 1)
+        _, notes, fixes = stages.fast_orient_sides(sq, assignment)
+        self.assertEqual(fixes, {"mirrored_left": True})
+        self.assertLess(stages.imaging.facing_offset(sq["left"]["mask"]), 0)
+        self.assertGreater(stages.imaging.facing_offset(sq["right"]["mask"]), 0)
+        self.assertIn("left view faced the wrong way", notes[0])
