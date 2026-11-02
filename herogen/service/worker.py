@@ -268,6 +268,17 @@ def website_model(run_dir: Path) -> Path | None:
     return glb_path(run_dir)
 
 
+# Stage 3's structural checks. A mesh that fails one (a flat carve from too few views, open edges) is never shown
+# as the hero; only a mesh rejected by the later visual acceptance checks is.
+STRUCTURAL_GATES = ("independent_views", "front_view_present", "open_edges")
+
+
+def structurally_sound(run_dir: Path) -> bool:
+    rec = read_record(run_dir, "stage-3.json") or {}
+    return not any(isinstance(c, dict) and c.get("name") in STRUCTURAL_GATES and c.get("gate", True)
+                   and not c.get("pass") for c in rec.get("checks", []))
+
+
 def degradation_note(spec, out):
     if spec.key == '3':
         return 'The 3D shape is rough. Showing the best mesh available.'
@@ -324,9 +335,12 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                                     **({"seconds": 0.0, "cost_usd": 0.0} if spec.key not in prior else {}))
                 continue
             rows = {r['stage']: r for r in store.job_stages(jid)}
-            dependency = '4' if spec.key == '6' else '3' if spec.key == '3f' else None
+            # The game body needs a passed stage 3 (`herogen.blender` refuses a rejected one), as refine does.
+            dependency = '4' if spec.key == '6' else '3' if spec.key in ('3f', '4') else None
             if dependency and rows.get(dependency, {}).get('state') in ('skipped', 'rejected'):
                 why = (rows[dependency]['message'] if spec.key == '6' else
+                       'Roblox body unavailable for this hero: the 3D shape did not pass its checks.'
+                       if spec.key == '4' else
                        'Texture refine was skipped because the 3D shape is rough. Showing the unrefined texture.')
                 skip_stage(store, jid, attempt, spec, ctx, why)
                 workdir.sync()
@@ -355,7 +369,8 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                               'The 3D shape did not pass its checks and no mesh was saved.',
                               'model_missing', detail=out.detail)
             degraded = out.state in ('failed', 'rejected') and (
-                spec.key in ('3f', '4', '6', '5') or spec.key == '3' and out.state == 'rejected'
+                spec.key in ('3f', '4', '6', '5')
+                or spec.key == '3' and out.state == 'rejected' and structurally_sound(ctx.run_dir)
             ) and website_model(ctx.run_dir) is not None
             if (spec.key in ('3f', '4', '6', '5') and out.state in ('failed', 'rejected')
                     and read_record(ctx.run_dir, spec.record) is None):

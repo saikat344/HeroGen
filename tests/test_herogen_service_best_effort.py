@@ -43,6 +43,13 @@ class BestEffortTest(JobCase):
                 if stage == '3':
                     self.assertIn('rough', rows['3']['message'])
                     self.assertEqual(rows['3f']['state'], 'skipped')
+                    # herogen.blender refuses stage 4 after a rejected stage 3: never started, honest reason.
+                    self.assertFalse({'3f', '4', '6'} & set(self.runner.calls))
+                    self.assertEqual(rows['4']['state'], 'skipped')
+                    self.assertIn('did not pass its checks', rows['4']['message'])
+                    self.assertEqual(rows['6']['message'], rows['4']['message'])
+                    self.assertNotIn('stopped unexpectedly', json.dumps(rows))
+                    self.assertEqual(saved['export_state'], 'unavailable')
 
     def test_rejected_joints_skip_rig_with_the_real_reason(self):
         from herogen.service.runner import write_record
@@ -97,6 +104,46 @@ class BestEffortTest(JobCase):
         job = self.new_job()
         self.assertEqual(self.go(job), 'failed')
         self.assertIn('no mesh was saved', self.store.job_get(job['id'])['error_message'])
+
+    def test_structurally_broken_shape_is_never_the_hero(self):
+        from herogen.service.runner import write_record
+
+        for gate in ('independent_views', 'open_edges'):
+            class Broken(FakeRunner):
+                def _stage_3(self, ctx, run):
+                    super()._stage_3(ctx, run)
+                    rec = json.loads((run / 'stage-3.json').read_text())
+                    write_record(run, {**rec, 'ok': False, 'checks': [
+                        {'name': gate, 'value': 1, 'threshold': 2, 'pass': False, 'gate': True}]})
+            with self.subTest(gate=gate):
+                self.runner = Broken()
+                job = self.new_job()
+                self.assertEqual(self.go(job), 'rejected')
+                self.assertEqual(self.stages(job)['3']['state'], 'rejected')
+                self.assertNotIn('3f', self.runner.calls)
+
+    def test_truncated_or_empty_meshes_are_never_published(self):
+        class Truncated(FakeRunner):
+            def _stage_3(self, ctx, run):
+                super()._stage_3(ctx, run)
+                (run / '03-mesh.glb').write_bytes(b'')
+                data = (run / '03-source.glb').read_bytes()
+                (run / '03-source.glb').write_bytes(data[:len(data) // 2])
+        self.runner = Truncated(fail={'3': 'reject'})
+        job = self.new_job()
+        self.assertEqual(self.go(job), 'failed')
+        self.assertIn('no mesh was saved', self.store.job_get(job['id'])['error_message'])
+        self.assertIsNone(glb_path(self.storage.run_dir(self.user['id'], job['id'])))
+
+    def test_a_truncated_refined_model_falls_back_to_the_source(self):
+        class TruncatedRefine(FakeRunner):
+            def _stage_3f(self, ctx, run):
+                super()._stage_3f(ctx, run)
+                (run / '03-refined.glb').write_bytes(b'glTF')
+        self.runner = TruncatedRefine()
+        job = self.new_job()
+        self.assertEqual(self.go(job), 'succeeded')
+        self.assertEqual(glb_path(self.storage.run_dir(self.user['id'], job['id'])).name, '03-source.glb')
 
     def test_early_permanent_error_keeps_its_message(self):
         self.runner = FakeRunner(fail={'1': 'error'})
