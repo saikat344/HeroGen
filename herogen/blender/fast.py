@@ -16,7 +16,7 @@ from .stage3 import error_text
 def run(a, stages):
     from .remote.client import DEFAULT_BODY_GPU, DEFAULT_OBJECTS_GPU, RemoteClient
     from .stage3 import DEFAULT_NZ, run_stage3
-    from .refine import run_stage3f
+    from .refine import fast_product_options, run_stage3f
 
     folder = RunFolder(a.run.parent, a.run.name)
     if "3" in stages:
@@ -37,7 +37,8 @@ def run(a, stages):
             rec = run_stage3f(a.run, ModelClient(a.refine_cache or a.run.parent / "_cache-model",
                                                 mode=a.refine, fast=True),
                               profile=a.profile, timeout=a.timeout, cap_usd=None,
-                              refine_profile="fast", recipe=a.refine_recipe, user_note=a.refine_note)
+                              refine_profile="fast", recipe=a.refine_recipe, user_note=a.refine_note,
+                              **fast_product_options(a.side_beauty, a.refine_beauty, a.refine_beauty_dir))
             print(f"stage 3f: {rec['status']} ({rec['seconds']} s)")
         except Exception as exc:
             print(f"stage 3f stopped: {error_text(exc, a.run)}", file=sys.stderr)
