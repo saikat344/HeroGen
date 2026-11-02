@@ -152,6 +152,7 @@ export function about(s, {minutesFrom = 90} = {}) {
   return `${Math.round(s / 60)} min`;
 }
 export const aboutCall = (s) => about(s, {minutesFrom: 600});
+export const usually = (s) => s < 1 ? 'usually under 1 s' : `usually about ${about(s)}`;
 export function usd(v) {
   if (!Number.isFinite(v)) return '';
   if (v === 0) return '$0';
@@ -188,6 +189,15 @@ const LOCAL = {
   joints_mapped: (m) => `mapped ${n(m.joints) || 'the'} joints into the front view${Number.isFinite(m.from_model) && Number.isFinite(m.from_outline)
     ? `: ${n(m.from_model)} from SAM 3D Body, ${n(m.from_outline)} from the outline` : ''}${Number.isFinite(m.flagged)
     ? `; ${n(m.flagged)} differ from the outline estimate by more than ${n(m.flag_studs ?? 0.5)} studs` : ''}`,
+  landmarks_loaded: (m) => `loaded ${n(m.joints) || 'the'} joint landmarks${Number.isFinite(m.from_model) ? ` (${n(m.from_model)} from SAM 3D Body)` : ''}`,
+  decimated: (m) => `reduced the ${n(m.source_triangles) || ''} triangle mesh to fit the in-game budget${Number.isFinite(m.high) && Number.isFinite(m.low)
+    ? `: ${n(m.high)} triangles (high), ${n(m.low)} (low)` : ''}`.replace('the  triangle', 'the'),
+  cuts_searched: () => 'searched for cleaner cut positions at the neck, waist, elbows, wrists, knees and ankles',
+  parts_split: (m) => `split the mesh into ${n(m.parts) || 15} Roblox R15 parts${Number.isFinite(m.high_triangles) && Number.isFinite(m.low_triangles)
+    ? ` (${n(m.high_triangles)} triangles high, ${n(m.low_triangles)} low)` : ''}`,
+  rig_written: (m) => `wrote the Roblox rig${Number.isFinite(m.parts) ? `: ${n(m.parts)} parts, ${n(m.joints)} joints, ${n(m.attachments)} accessory attachments` : ''}${
+    Number.isFinite(m.hip_height) ? `, hip height ${m.hip_height.toFixed(2)} studs` : ''}`,
+  results_written: () => 'wrote the results page',
   views_rendered: (m) => `rendered the 3D shape from ${n(m.cameras ?? m.views) || 'several'} ${m.cameras === 1 ? 'camera' : 'cameras'}${Number.isFinite(m.wave) ? ` for wave ${n(m.wave)}` : ''}`,
 };
 // Local lines are written without the speaker; the panel shows a HeroGen chip and "Copy log" adds "HeroGen (local): ".
@@ -270,6 +280,7 @@ const STEP_SKIPS = {
   views_rejected: 'Kept the unrefined texture because its views did not pass the checks.',
 };
 export function skipLine(e) {
+  if (e.what === 'identity_checks') return 'The fast lane keeps this sketch without the extra identity checks.';
   if (e.what === 'acceptance_judges') return 'The fast lane skips the visual acceptance judges; structural checks are informational.';
   if (e.what === 'view') return `${regionName(e.view)}: skipped (${reasonText(e.why)}).`;
   if (e.what === 'top_view') return 'No usable top view: continuing with the four side views.';
@@ -286,7 +297,7 @@ export function errorLine(e, stage) {
   return e.code && CODES[e.code] ? `This step stopped: ${CODES[e.code]}.` : 'This step stopped. Technical details are kept in the server logs.';
 }
 
-const IMAGES = {sketch: 'Sketch', cover: 'Artwork', turnaround: 'Turnaround sheet', front: 'Front view',
+const IMAGES = {design: 'Design drawing', full_body: 'Full-body sketch', sketch: 'Sketch', cover: 'Artwork', turnaround: 'Turnaround sheet', front: 'Front view',
   right: 'Right view', back: 'Back view', left: 'Left view', top: 'Top view'};
 export const imageLine = (e) => `${IMAGES[e.what] || 'A new image'} ready`;
 
