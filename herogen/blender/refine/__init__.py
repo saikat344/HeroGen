@@ -669,7 +669,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 save(ok=False, status="running")
         accepted = sum(v["accepted"] for v in rec.data["views"].values())
         rec.add(check("accepted_views", accepted, 1, gate=False))
-        if refine_profile == "fast" and (accepted or (beauty_refs is not None and output.is_file())):
+        if refine_profile == "fast" and (accepted or output.is_file()):
             rec.data.update(outputs=["03-refined.glb"], final_model="03-refined.glb")
         elif accepted or grade is not None:
             from .backend import blender

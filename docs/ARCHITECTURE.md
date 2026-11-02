@@ -872,6 +872,22 @@ the accepted set strictly contains the preceding version's. Each version resets 
 and re-projects saved accepted paint in fixed pass order, with hair last, retaining feather and hair
 agreement weights. Versions never accumulate previously blended atlas pixels.
 
+Face-only recovery: once `head+0` and `body+0` have both resolved with no accepted paint, a `head+0`
+sample that only the outline check rejected may still paint the face. No sample is added. The lowest such
+attempt is re-measured from its saved render and repaint (the outline must still fail), and the existing
+face-outside check runs on it with the existing SAM 3.1 face queries (render and repaint) and hair queries.
+It qualifies only when the repaint shows a face and at most 25% of it lies outside the render's face.
+Its paint is the ordinary colour-matched repaint, weighted inside the render's SAM face mask minus both
+images' hair and the outline-disagreement band (the same four-pixel dilation accepted paint excludes),
+with a 12-pixel (per 1024) inward smoothstep from that region's edge and zero outside it. It is saved in
+`blender-work/texture-refine/face-recovery` and projected first, at `head+0`'s place in the pass order,
+in every later version, never when a frontal paint is accepted. `stage-3f.json` records `face_recovery`:
+`applied`, `attempt`, `reason`, `mask_area_px` (pixels with nonzero weight), the render face size and each
+evaluated attempt's outline measures and face check. A published version that carries it records
+`face_recovery` (the attempt). If no outline-only sample qualifies, `applied` is false with the reason.
+A budget stop before these queries records the stop and paints nothing; model failures stay loud after
+every submitted attempt drains. `best` never runs recovery.
+
 `03-refined-v<n>.glb` is written to a temporary file and renamed before the atomic update of
 `stage-3f-progress.json`. Its schema is `{"profile":"fast","versions":[...],"done":false,"final_n":null}`.
 Each version has `n`, `glb`, ordered `accepted`, `rejected` and `pending` pass keys, UTC ISO `time`,
@@ -880,7 +896,7 @@ and unstarted waves; rejected includes exhausted or skipped passes. Immutable
 `stage-3f-progress-v<n>.json` snapshots retain each publication. On completion, an atomic copy of the
 last GLB becomes `03-refined.glb`, then progress sets `done:true` and `final_n` to its version number.
 With no accepted views, no version is published, `versions` stays empty, `final_n` stays null and the
-existing source-texture fallback applies. Errors leave progress unfinished and remain loud.
+existing source-texture fallback applies, unless a face recovery alone publishes a version. Errors leave progress unfinished and remain loud.
 
 Every attempt has its own call log and cache directory beneath `cache/fast/<pass>/attempt-<index>`.
 It copies matching root cache families on demand; after draining, complete families and call logs are
@@ -2606,7 +2622,13 @@ threshold keeps the beauty request. Such a reference shows another outline, and 
 otherwise reach the rear and hair paints. Side and frontal cameras keep their references.
 With fast beauty enabled, a nested cover-only ordinary run first submits only attempt zero for each view.
 Its atlas uses the accepted ordinary paints and the original base wherever they fail. This atlas
-supplies the default-head fallback and eye-detail comparison.
+supplies the default-head fallback and eye-detail comparison. Face-only recovery applies to that nested
+run's own frontal records, so it uses only ordinary head samples (the samples main slots 2 and 3 replay),
+never a beauty slot-1 sample. When ordinary attempt one is folded in, recovery is re-resolved: an
+accepted frontal removes it, and an outline-only attempt one can qualify when attempt zero did not (the
+lowest qualifying attempt wins). When the face source is `default-fast-fallback`, `face_source.face_recovery`
+repeats the nested run's view, attempt, reason and mask area; a `default` or `beauty` source has frontal
+paint and no recovery.
 Every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
 exact ordinary-fast first request for that pass: original cover, ordinary recipe, sample index zero and
 ordinary wave's frozen render. Slots 1 and 2 are submitted together. Slot 2 replays the actual nested
