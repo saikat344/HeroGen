@@ -36,6 +36,22 @@ class BundleUnavailable(Exception):
     """The download does not exist for this job; the message says why, for the user."""
 
 
+def complete_glb(path: Path) -> bool:
+    """A glTF 2.0 binary whose header length matches the file and whose JSON names at least one mesh: never a
+    0-byte or truncated file left by an interrupted export."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(20)
+            if len(head) < 20 or head[:4] != b"glTF" or int.from_bytes(head[4:8], "little") != 2:
+                return False
+            if int.from_bytes(head[8:12], "little") != path.stat().st_size or head[16:20] != b"JSON":
+                return False
+            doc = json.loads(f.read(int.from_bytes(head[12:16], "little")))
+        return bool(doc.get("meshes"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def glb_path(run_dir: Path, lod: str = "high") -> Path | None:
     if lod not in LODS:
         return None
@@ -51,9 +67,10 @@ def glb_path(run_dir: Path, lod: str = "high") -> Path | None:
                 except (OSError, ValueError, AttributeError):
                     continue
             p = _inside(run_dir, name)
-            if p is not None:
+            if p is not None and complete_glb(p):
                 return p
-        return final_model(run_dir)
+        p = final_model(run_dir)
+        return p if p is not None and complete_glb(p) else None
     p = run_dir / "04-body" / f"{lod}.glb"
     try:
         if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(run_dir.resolve()):
