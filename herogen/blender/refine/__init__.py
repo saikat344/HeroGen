@@ -84,7 +84,7 @@ class Budget:
             raise BudgetStop(f"API cap: projected ${projected:.4f} exceeds ${self.cap:.4f}")
 
 
-def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"):
+def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best", beauty=False):
     """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
     normal, hair = (3, 2) if maximum else (1, 1)
     if refine_profile == "fast":
@@ -96,6 +96,13 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
         normal = hair = ATTEMPTS
         images = normal_count * normal + hair_count * hair
         segments = 2 + normal_count * normal * 4 + hair_count * hair * 5
+        if beauty:
+            # One beauty head slot and two body-front slots: reference face/features,
+            # repaint features and both-eye regions, before any exact-cache discount.
+            segments += (1 + ATTEMPTS) * 9 + 1
+            # With no accepted frontal, resolve ordinary fast paint for the fallback face.
+            return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL]
+                         + cost_estimate(refine_profile="fast") + PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
         return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
     else:
         normal_count, hair_count = len(REFINE_ORDER), len(HAIR_ORDER)
@@ -107,15 +114,60 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
 
 
+def side_art_yaw(angle):
+    """Turnaround conditioning starts at either profile and includes the rear hemisphere."""
+    return 90 <= angle % 360 <= 270
+
+
+def side_orientation(run):
+    """Require the saved stage-2 toe-direction evidence before trusting side artwork."""
+    path = Path(run) / "stage-2.json"
+    if not path.is_file():
+        return {"enabled": False, "reason": "stage-2 orientation record missing"}
+    data = json.loads(path.read_text())
+    checks = {c["name"]: c for c in data.get("checks", [])}
+    names = ("right_view_toe_offset_as_drawn", "left_view_toe_offset_as_drawn")
+    fixes = data.get("details", {}).get("view_assignment", {}).get("side_fixes", {})
+    if any(fixes.values()):
+        return {"enabled": False, "reason": "stage-2 recorded a side orientation correction", "side_fixes": fixes}
+    if not all(name in checks for name in names):
+        return {"enabled": False, "reason": "stage-2 orientation checks missing"}
+    offsets = {name: checks[name].get("value") for name in names}
+    values = list(offsets.values())
+    valid = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+    if not valid or not (values[0] > 0 and values[1] < 0) or not all(checks[n].get("pass") is True for n in names):
+        return {"enabled": False, "reason": "stage-2 does not confirm unswapped sides", "offsets": offsets}
+    return {"enabled": True, "reason": "stage-2 confirms unswapped sides", "offsets": offsets}
+
+
+def art_references(run, cam, body_cam, info, artwork):
+    """Select side/rear yaw-matched art; front passes retain their cover-only recipe."""
+    if not artwork or not side_art_yaw(cam["angle"]):
+        return (), {}, {}
+    from .closeups import views_for_angle, framed_artwork, framed_mask
+    from .imaging import is_closeup
+    art = tuple((v, artwork[v]) for v in views_for_angle(cam["angle"]) if v in artwork)
+    masks, framing = {}, {}
+    if art and is_closeup(cam, body_cam):
+        cropped = []
+        for name, _ in art:
+            image, reference = framed_artwork(run, cam, info, name)
+            cropped.append((name, image))
+            framing[name] = reference
+            masks[name] = framed_mask(run, name, reference)
+        art = tuple(cropped)
+    return art, masks, framing
+
+
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
           closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
-          apply=None, attempts=None, attempt_start=0, cancelled=None, user_note=""):
+          apply=None, attempts=None, attempt_start=0, cancelled=None, user_note="", recipe_name=None, reference_record=None, face_keep=False, complete_face=False, save_face=False, art=(), art_masks=None):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
     from .backend import blender
     from .cameras import decode_pos, project, px_per_unit, read_exr
-    from .prompts import prompt
+    from .prompts import ART_VARIANTS, prompt
 
     folder.mkdir(parents=True, exist_ok=True)
     if rendered is None:
@@ -134,15 +186,32 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     positions, valid = decode_pos(read_exr(rendered / f"{cam['name']}.pos.exr"))
     _, _, depth = project(cam, positions)
     figure = alpha > 0.5
+    if art_masks:
+        from .closeups import silhouette_reference
+        aligned = []
+        for art_name, art_image in art:
+            art_image.save(folder / f"art-{art_name}-framed.png")
+            aligned.append((art_name, silhouette_reference(art_image, art_masks[art_name], figure)))
+            record["art_framing"][art_name]["silhouette_alignment"] = "uniform height fit and nearest artwork edge extension to render alpha"
+        art = tuple(aligned)
+    for art_name, art_image in art:
+        art_image.save(folder / f"art-{art_name}.png")
     parts = None
-    recipe = closeup_recipe if closeup_reference is not None else "RF3H" if hair else repaint
+    reference_features = None
+    recipe = recipe_name or (closeup_recipe if closeup_reference is not None else "RF3H" if hair else repaint)
+    if art:
+        recipe = ART_VARIANTS[recipe]
     record.update(prompt=recipe, camera=cam)
+    if art:
+        record["art_views"] = [name for name, _ in art]
     if closeup_reference is not None:
         measurable, source_checks = I.closeup_outline(figure, I.closeup_figure_mask(render_rgb, figure), cam["zoom"])
         record["source_outline_checks"] = source_checks
         if not measurable:
             record.update(accepted=False, reason="render outline not measurable")
             return current
+    if reference_record is not None:
+        record["reference"] = reference_record
     for attempt in range(attempt_start, attempt_start + (attempts if attempts is not None else I.HAIR_ATTEMPTS if hair else I.ATTEMPTS)):
         if cancelled is not None and cancelled.is_set():
             record.update(reason="cancelled: lower attempt accepted")
@@ -150,7 +219,9 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         trial = {"try": attempt + 1, "accepted": False, "reason": "incomplete"}
         record["attempts"].append(trial)
         record["tries"] = attempt + 1
-        references = [inp, cover] if closeup_reference is None else [inp, closeup_reference, cover]
+        art_images = [image for _, image in art]
+        references = ([inp, *art_images, cover] if closeup_reference is None
+                      else [inp, closeup_reference, *art_images, cover])
         edit = client.edit_image(prompt(recipe, cam["angle"], user_note), references,
                                  size=f"{cam['res'][0]}x{cam['res'][1]}", attempt=attempt)
         edit = edit.convert("RGB")
@@ -184,17 +255,45 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             edited_parts = I.part_masks(client, edit, figure.shape, mapx, mapy)
             passed, measures["parts"], _ = I.part_gate(parts, edited_parts, figure)
             reason = "new face outside the render face"
+        if passed and recipe == "RF6B" and cam["name"] in ("head+0", "body+0") and parts["face"].any():
+            from .beauty import facial_features
+            if reference_features is None:
+                reference_features = facial_features(client, cover)
+            painted = Image.fromarray((np.clip(warped, 0, 1) * 255).round().astype(np.uint8))
+            features = facial_features(client, painted, parts["face"])
+            if complete_face:
+                from .beauty import frontal_features
+                features.update(frontal_features(client, painted, parts["face"]))
+            missing = [name for name, present in reference_features.items() if present and not features[name]]
+            passed = any(reference_features.values()) and not missing
+            if complete_face:
+                passed = passed and features["both_eyes"] and features["mouth"]
+                missing += [name for name in ("both_eyes", "mouth") if not features[name] and name not in missing]
+            measures["facial_features"] = {"reference": reference_features, "repaint": features, "missing": missing}
+            reason = ("beauty reference has no facial features" if not any(reference_features.values())
+                      else "missing facial features: " + ", ".join(missing))
         trial["reason"] = "accepted" if passed else reason
         if not passed:
             record["reason"] = reason
             continue
-        refined = I.colour_match(render_rgb, warped, figure & fig_e)
+        # Beauty references already carry the intended light and palette; fitting them back to the
+        # source render would remove their crease shading and material contrast.
+        refined = warped.copy() if recipe in ("RF5B", "RF6B", "RF15B") else I.colour_match(render_rgb, warped, figure & fig_e)
         if hair:
             weight = I.hair_weight(client, inp, edit, render_rgb, warped, alpha, mapx, mapy,
                                    parts["face"] if face_exclusion else None)
         else:
             weight = (~ndimage.binary_dilation(figure ^ fig_e, iterations=4)).astype(np.float32)
             weight *= I.hair_allowed(client, inp, edit, mapx, mapy, figure.shape, hair_only=False)
+        if save_face:
+            Image.fromarray(parts["face"].astype(np.uint8) * 255).save(folder / "face.png")
+            Image.fromarray((np.clip(weight, 0, 1) * 255).round().astype(np.uint8)).save(folder / "source-weight.png")
+        if face_keep and parts is not None and parts["face"].any():
+            # Face-consistency guard (beauty recipe): with no accepted frontal repaint there is no
+            # coherent painted face to blend against, so this oblique view must not overwrite the
+            # render's face region; the atlas keeps its base paint there, as hair views already do.
+            weight *= ~ndimage.binary_dilation(
+                parts["face"], iterations=max(1, round(I.FACE_KEEP_PX * max(figure.shape) / 1024)))
         feather = I.feather_map(alpha, depth, valid, px_per_unit(cam), tex.height)
         if closeup_reference is not None:
             feather *= I.frame_feather(alpha.shape, cam["frame_border_px"])
@@ -210,8 +309,38 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     return current
 
 
+def _artwork_grade(run, prep, cam, folder, record, timeout, *, artwork=None, artwork_mask=None):
+    import numpy as np
+    from . import palette
+    from .backend import blender
+
+    artwork = Path(artwork) if artwork is not None else run / "views/front.png"
+    artwork_mask = Path(artwork_mask) if artwork_mask is not None else run / "masks/front.png"
+    missing = [str(path.relative_to(run)) if path.is_relative_to(run) else path.name
+               for path in (artwork, artwork_mask) if not path.is_file()]
+    if missing:
+        record.update(status="skipped", reason="missing artwork: " + ", ".join(missing))
+        return None
+    record.update(status="fitting")
+    try:
+        blender("render", {"blend": str(prep / "work.blend"), "texture": str(prep / "base.png"),
+                           "cams": [cam], "out": str(folder)}, folder / "blender.log", timeout=timeout)
+        with Image.open(folder / f"{cam['name']}.png") as image:
+            rgba = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255
+        with Image.open(artwork) as image:
+            art = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
+        with Image.open(artwork_mask) as image:
+            mask = np.asarray(image.convert("L")) > 127
+        record.update(palette.fit(rgba[..., :3], rgba[..., 3] > .5, art, mask))
+        return record
+    except Exception as exc:
+        record.update(status="error", reason=error_text(exc, run))
+        raise
+
+
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
-                upscale_texture=False, recipe="RF2R", refine_profile=None, user_note: str = ""):
+                upscale_texture=False, recipe="RF2R", refine_profile=None, user_note: str = "",
+                beauty_dir=None, side_beauty=None, region_palette=False):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -221,14 +350,29 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     repaint prompt as quoted data after all rules, so it cannot override framing, outline, silhouette, pose, face
     and feature preservation or the artwork's fixed details. An empty note changes nothing. The note comes only
     from this explicit parameter (or the CLI --refine-note flag). A non-empty note and its hash are recorded
-    in stage-3f.json.
+    in stage-3f.json. ``side_beauty`` opts side/rear yaws (90 through 270 degrees) into
+    yaw-matched turnaround conditioning; front-facing passes keep their default recipe and references. None reads
+    HEROGEN_SIDE_BEAUTY=1. It requires all four cardinal drawings, calibration and masks for close views.
     """
+    side_beauty = (os.environ.get("HEROGEN_SIDE_BEAUTY", "0") == "1" if side_beauty is None else side_beauty)
     user_note = clean_note(user_note, allow_empty=True)
     refine_profile = refine_profile or os.environ.get("HEROGEN_REFINE_PROFILE", "best")
     if refine_profile not in ("best", "fast"):
         raise ValueError("refine_profile must be best or fast")
     if refine_profile == "fast" and upscale_texture:
         raise ValueError("fast refinement cannot add upscale-texture passes")
+    beauty_dir = beauty_dir if beauty_dir is not None else os.environ.get("HEROGEN_REFINE_BEAUTY_DIR") or None
+    if beauty_dir is not None and not Path(beauty_dir).is_absolute():
+        beauty_dir = Path(run) / beauty_dir
+    beauty_refs = None
+    beauty_selection = None
+    if beauty_dir is not None:
+        from . import beauty
+        beauty_dir = Path(beauty_dir)
+        beauty_refs = beauty.load(beauty_dir)
+        beauty_selection = beauty_refs
+        if beauty.selected_yaw(beauty_refs, 0) is None:
+            beauty_refs = None
     run = Path(run).resolve()
     output = run / "03-refined.glb"
     pending = run / "03-refined.part.glb"
@@ -248,8 +392,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     # Guards the record and budget state. Without spend limits there is no budget, but fast waves still share it.
     state_lock = budget.lock if budget is not None else threading.RLock()
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
-                    estimate_usd=cost_estimate(upscale_texture=upscale_texture, refine_profile=refine_profile),
-                    estimate_max_samples_usd=cost_estimate(True, upscale_texture, refine_profile=refine_profile),
+                    estimate_usd=cost_estimate(upscale_texture=upscale_texture, refine_profile=refine_profile,
+                                               beauty=beauty_refs is not None),
+                    estimate_max_samples_usd=cost_estimate(True, upscale_texture, refine_profile=refine_profile,
+                                                          beauty=beauty_refs is not None),
                     recipes=[recipe, "RF3H"] + (["RF5U"] if upscale_texture else []),
                     repaint_recipe=recipe, upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
@@ -258,10 +404,16 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         rec.data["refine_profile"] = "fast"
         empty_progress(run)
     from .prompts import PROMPTS
-    rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()}
+    rec.data["prompt_sha256"] = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in PROMPTS.items()
+                                  if side_beauty or (beauty_refs is not None and name in ("RF5B", "RF6B"))
+                                  or name in ("RF2R", "RF2W", "RF3H", "RF4U", "RF5U")}
     if user_note:
         rec.data["user_note"] = user_note
         rec.data["user_note_sha256"] = hashlib.sha256(user_note.encode()).hexdigest()
+    if beauty_selection is not None:
+        rec.data["beauty_references"] = beauty_selection
+    if beauty_refs is not None:
+        rec.data.update(recipes=["RF6B"])
     start = len(client.log.calls)
     previous_guard = client.before_api_attempt
     previous_settle = client.after_api_attempt
@@ -344,8 +496,25 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         work = run / "blender-work" / "texture-refine"
         work.mkdir(parents=True, exist_ok=True)
         cover = Image.open(run / "01-cover.png").convert("RGB")
+        artwork = {}
+        if side_beauty:
+            rec.data["side_beauty_orientation"] = side_orientation(run)
+        use_side_art = side_beauty and rec.data["side_beauty_orientation"]["enabled"]
+        for view_name in (("front", "right", "back", "left") if use_side_art else ()):
+            view_path = run / "views" / f"{view_name}.png"
+            with Image.open(view_path) as view_image:
+                artwork[view_name] = view_image.convert("RGB")
+        if artwork:
+            rec.data["side_beauty"] = True
+            from .prompts import ART_VARIANTS
+            rec.data["recipes"] = [ART_VARIANTS[recipe], ART_VARIANTS["RF3H"]] + (
+                [ART_VARIANTS["RF5U"]] if upscale_texture else [])
+            rec.data["art_views"] = sorted(artwork)
         # All preparation is rebuilt from this invocation's source, never an earlier run's geometry or UVs.
-        info = C.setup(source, work, client, timeout=timeout)
+        palette_manifest = os.environ.get("HEROGEN_REFINE_REGION_PALETTE", "")
+        auto_palette = region_palette or palette_manifest.lower() in ("1", "true", "auto")
+        setup_options = {"save_palette_masks": True} if auto_palette else {}
+        info = C.setup(source, work, client, timeout=timeout, **setup_options)
         closeup_cams = []
         if upscale_texture:
             from . import closeups
@@ -364,14 +533,48 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         save(ok=False, status="running")
         prep = C.prep(source, info, work, timeout=timeout)
         cams = C.cameras_for(info)
+        if auto_palette:
+            from .region_palette import prepare_manifest
+            palette_manifest = prepare_manifest(run, prep, cams["body+0"], work / "region-palette-inputs")
         tex = I.Texture(prep, info)
         current = prep / "base.png"
+        grade = None
+        default_face_base = None
+        if beauty_refs is not None and refine_profile == "fast":
+            import shutil
+            default_face_base = work / "default-face-base.png"
+            shutil.copyfile(current, default_face_base)
+        if beauty_refs is not None:
+            import numpy as np
+            from .palette import apply
+            front_yaw = beauty.selected_yaw(beauty_refs, 0)
+            front = beauty_refs["views"][str(front_yaw)]
+            rec.data["palette_grade"] = {"target": "beauty reference", "yaw": front_yaw}
+            grade = _artwork_grade(run, prep, cams["body+0"], work / "palette",
+                                   rec.data["palette_grade"], timeout,
+                                   artwork=beauty_dir / front["image"],
+                                   artwork_mask=beauty_dir / front["mask"])
+            if grade is not None:
+                with Image.open(current) as image:
+                    base = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
+                Image.fromarray((apply(base, grade) * 255).round().astype(np.uint8)).save(current)
+                tex.T = apply(tex.T, grade)
+                if refine_profile == "fast":
+                    # Each progressive version rebuilds from the frozen graded base.
+                    tex.base = apply(tex.base, grade)
+                    rows, cols = np.divmod(tex.idx, tex.base.shape[1])
+                    tex.base_cov = tex.base[rows, cols].copy()
+            save(ok=False, status="running")
         sequence = [(name, False) for name in REFINE_ORDER] + [(name, True) for name in HAIR_ORDER]
         stopped = False
         if refine_profile == "fast":
             from .fast import waves
             current, stopped = waves(client, prep, current, tex, cams, work, rec.data, timeout,
-                                     cover, head_found, recipe, save, state_lock, user_note=user_note)
+                                     cover, head_found, recipe, save, state_lock, user_note=user_note,
+                                     art_context=(run, info, artwork) if artwork else None,
+                                     palette_manifest=palette_manifest,
+                                     **({"beauty_context": (beauty_dir, beauty_refs, default_face_base, info)}
+                                        if beauty_refs is not None else {}))
         else:
             for step, (name, hair) in enumerate(sequence):
                 key = ("hair-" if hair else "") + name
@@ -385,9 +588,33 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                     continue
                 save(ok=False, status="running")
                 try:
+                    art, art_masks, framing = art_references(run, cams[name], cams["body+0"], info, artwork)
+                    if framing:
+                        current_record["art_framing"] = framing
+                    view_cover, beauty_args = cover, {}
+                    if beauty_refs is not None:
+                        cam_angle = cams[name]["angle"]
+                        if beauty.selected_yaw(beauty_refs, cam_angle) is None:
+                            # A rear-quarter camera without a rear-facing reference stays on the
+                            # standard recipe for this view; it must never take a face-bearing crop.
+                            current_record.update(
+                                note=f"no face-free beauty reference at {cam_angle:+g} yaw; standard recipe")
+                        else:
+                            view_cover, ref_record = beauty.reference(beauty_dir, beauty_refs, cam_angle,
+                                                                       head=name.startswith("head"))
+                            beauty_args = {"recipe_name": "RF6B", "reference_record": ref_record}
+                    if beauty_refs is not None and name not in ("head+0", "body+0") and not any(
+                            rec.data["views"].get(frontal, {}).get("accepted")
+                            for frontal in ("head+0", "body+0")):
+                        # Face-consistency guard: an oblique camera may only repaint the face once a
+                        # frontal camera (head+0 or body+0) has an accepted repaint to stay coherent
+                        # with; until then the face region keeps its base paint.
+                        beauty_args["face_keep"] = True
+                        current_record["face_consistency_guard"] = "no accepted frontal repaint; face keeps base paint"
+                        rec.data["face_consistency_guard"] = True
                     current = _view(client, prep, current, tex, cams[name], hair, work / key,
-                                    current_record, timeout, cover, face_exclusion=head_found, body_cam=cams["body+0"], repaint=recipe,
-                                    user_note=user_note)
+                                    current_record, timeout, view_cover, face_exclusion=head_found,
+                                    body_cam=cams["body+0"], repaint=recipe, user_note=user_note, art=art, art_masks=art_masks, **beauty_args)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)
@@ -412,9 +639,12 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 current_record["references"] = references
                 save(ok=False, status="running")
                 try:
+                    from .closeups import nearest_view
+                    close_art = tuple((v, artwork[v]) for v in (nearest_view(cam["angle"]),)
+                                      if side_art_yaw(cam["angle"]) and v in artwork)
                     current = _view(client, prep, current, tex, cam, False, folder, current_record,
                                     timeout, cover, face_exclusion=head_found, closeup_reference=crop,
-                                    user_note=user_note)
+                                    user_note=user_note, art=close_art)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)
@@ -423,15 +653,20 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 save(ok=False, status="running")
         accepted = sum(v["accepted"] for v in rec.data["views"].values())
         rec.add(check("accepted_views", accepted, 1, gate=False))
-        if accepted and refine_profile == "fast":
+        if refine_profile == "fast" and (accepted or (beauty_refs is not None and output.is_file())):
             rec.data.update(outputs=["03-refined.glb"], final_model="03-refined.glb")
-        elif accepted:
+        elif accepted or grade is not None:
             from .backend import blender
             if I.EXPOSURE_SOLVE or I.CLOSEUP_FEATHER:
                 gains = I.rebake_views(tex, work, rec.data["views"], body_cam=cams["body+0"])
                 if gains and I.EXPOSURE_SOLVE:
                     rec.data["exposure_gains"] = gains
             final = tex.save(work / "texture.png")
+            if manifest := palette_manifest:
+                from .region_palette import export_texture
+                final, grades = export_texture(manifest, prep, final, cams["body+0"],
+                                               work / "region-palette", timeout=timeout)
+                rec.data["region_palette"] = grades
             blender("export", {"blend": str(prep / "work.blend"), "texture": str(final), "out": str(pending)},
                     work / "blender.log", timeout=timeout)
             os.replace(pending, output)

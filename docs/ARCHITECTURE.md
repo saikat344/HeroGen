@@ -768,6 +768,64 @@ For batch runners, `HEROGEN_REFINE_PROFILE=fast` supplies the stage's fallback w
 Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast uses the same close-up
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
 
+`HEROGEN_REFINE_REGION_PALETTE=path/to/manifest.json` enables an experimental export-time
+palette grade for both schedules. Unset or empty, it makes no additional calls or output changes.
+It uses only supplied saved masks; it makes no model requests and changes no repaint gates or requests.
+The normal stage entry accepts `region_palette=True`, and the CLI exposes `--refine-region-palette`.
+Equivalently, `HEROGEN_REFINE_REGION_PALETTE=auto` (also `1` or `true`) builds the manifest in
+`blender-work/texture-refine/region-palette-inputs` from this run's `views/front.png`, stage-2
+`masks/front{,-head,-face}.png`, and the face/head masks from the existing setup requests.
+No extra segmentation request is made. A missing artwork face mask becomes an explicitly empty skin
+region; foreground and head masks are required. Skin is the face proxy, and rest excludes the head and
+face; hair has no separate grade. Rest can include exposed body skin.
+The face masks are intersected after foreground-bounding-box alignment, avoiding a beard-to-bare-skin
+distribution fit. This intersection is used only for fitting. Application starts with the complete
+render face and grows connected skin chroma within the saved head silhouette. Per-channel
+Tukey chroma fences (`q25 - 1.5 IQR` to `q75 + 1.5 IQR`) bound growth.
+New pixels must have L* at least the seed's lower quartile, excluding dark hair; existing shadowed
+face pixels are always retained. Completion uses the current ungraded render, whose skin colours can
+differ substantially from the source probe. Closing at a radius of `round(sqrt(face_pixels) / 50)`
+(at least one pixel) fills small gaps;
+all semantic face pixels are retained. An absent face never falls back to the head/helmet.
+Original masks are retained alongside the fit and application masks. Atlas labels use front-facing
+normals and front-most projected depth with a one-render-pixel depth tolerance. Only front-visible
+surface texels are graded. These generated inputs are bound to this invocation's prepared atlas.
+Each fast version is graded after reprojection, without feeding its grade back into subsequent waves.
+Sequential refinement grades its final export. Calibration renders are flat Workbench texture renders.
+
+The manifest contains `artwork` (an image path), `artwork_masks`, `render_masks`, `atlas_masks`
+(objects mapping `skin`, `hair`, or `rest` to mask image paths), and `atlas_layout_sha256`
+(the prepared `pos.exr` SHA-256). Paths resolve relative to the manifest. Render masks use the
+`body+0` camera grid; atlas masks use the prepared texture grid. Masks within each set must be
+disjoint. Generated manifests additionally store `application_masks` on the render grid and
+`feather_pixels_at_1536`. Mask construction and semantic verification remain the caller's responsibility;
+no head-minus-face hair inference occurs. Unknown covered atlas pixels stay unchanged.
+Missing and empty regions are recorded separately and retain their original colours. Missing files,
+invalid masks, mismatched atlas layouts and rendering failures stop the stage with its recorded error.
+
+Each region independently fits 257 marginal quantiles in Lab. Repeated source knots are combined.
+Its maximum Lab displacement is the RMS distance between its source and artwork quantile vectors;
+there is no shared body curve, fixed mixing coefficient or manually selected colour cap. The cap applies
+before RGB gamut conversion and texture quantisation. This is a measured distribution correction bound,
+not a guarantee that corresponding artwork pixels improve. Grades and sample counts are written to
+`region-palette*/grades.json` and `stage-3f.json`. For generated manifests, application coverage uses
+the completed render masks projected to the prepared atlas; explicit legacy manifests use their atlas masks;
+front-only masks do not grade unseen surfaces. Per-region chroma, luminance and protected-pixel
+evaluation against unlit artwork remains necessary before enabling this option for product runs.
+After grading, uncovered atlas gutters receive their nearest covered texel's colour, matching ordinary
+texture export; leaving those gutters at the old colour would introduce fringes at UV island edges.
+Application uses a cubic smoothstep of interior distance from the application-mask boundary, zero at
+the outer pixel centres and full weight nine render pixels inward at 1536 resolution (scaled with
+camera resolution). Foreground background and atlas gutters do not count as semantic boundaries,
+avoiding an ungraded rim at the silhouette. The nine-pixel width spreads the measured 7.36 Lab scalp correction below the
+1.34 Lab/pixel natural boundary gradient, using the smoothstep maximum slope of 1.5/width.
+The continuous field is bilinearly projected to texels before grading so UV island scale cannot change
+the feather width. Front-facing weight also tapers smoothly over the last 15 degrees before tangency,
+removing the abrupt front/side support limit. Explicit legacy atlas-only manifests instead feather nine
+pixels at 1536 atlas resolution, scaled with atlas size. Zero-weight covered texels remain exact identities.
+Quantile correction can still amplify source texture grain; feathering smooths support boundaries,
+while completion prevents artwork alignment from grading only half a semantic face.
+
 `--refine-note` (or `run_stage3f(..., user_note=...)`) supplies optional design guidance after the fixed
 rules in one quoted slot. The shared note cleaner normalizes Unicode, removes slot delimiters, replaces
 control and format characters, and collapses whitespace. Notes over 300 cleaned characters are rejected.
@@ -2415,9 +2473,107 @@ The frozen named prompts `RF2R`, `RF2W` and `RF3H` live in `refine/prompts.py`; 
 Normal passes default to the clean repaint `RF2R`. `--refine-recipe RF2W` selects artwork wear,
 material contrast, painted highlights and value range while forbidding cast shadows and directional lighting.
 Hair passes always use `RF3H`; face and hair gates are recipe-independent.
-Every call supplies the current mesh render first and the cover second, including hair mode. Normal passes
-run head angles 0, 40, -40, 90, -90, 180, then body angles 0, 45, -45, 90, -90, 180. Head renders are 1024
-square; body renders are 1024 by 1536. The head frame is 1.30 times the detected head's larger side; the body
+`beauty_dir` (`--refine-beauty-dir` or `HEROGEN_REFINE_BEAUTY_DIR`, off by default) switches normal and hair passes to the experimental `RF6B`
+beauty recipe: saved style references per yaw replace the cover as the second image, and the base atlas is
+Lab-graded toward the front reference before any repaint. In that mode an oblique camera may only repaint
+the face region once a frontal camera (`head+0` or `body+0`) has an accepted repaint; until then the render's
+SAM face mask, grown like the hair views', keeps its base paint, so a rejected frontal view can never leave a
+half-repainted face.
+An exposed frontal face also requires every feature type detected in its reference (eyes, eyebrows and
+mouth) to be detected inside the registered repaint's face. Missing features reject the attempt before
+projection, retry within the existing limit and never release the oblique guard. A reference with no
+detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
+it does not measure sharpness, identity or expression, and does not apply when beauty is disabled.
+In the fast profile, beauty remains opt-in through the same `beauty_dir` parameter. The head pass's two
+independent slots run one beauty sample and one `RF2R` sample with the original cover. Both render the same
+frozen geometry; RF2R uses the original ungraded base atlas. The default sample cannot be cancelled by beauty
+acceptance. Body and hair use the selected beauty
+references where available, with the existing standard-recipe fallback for unavailable rear references.
+Before publishing the first version, every frontal candidate resolves. An accepted beauty `head+0`, then
+`body+0`, can own the face only when its registered face contains separate eye regions on both sides and a
+mouth. Otherwise the source is `default` when the independent RF2R head sample passed, or
+`default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM face masks.
+Both default sources resolve a separate ordinary fast atlas from the original ungraded base, with the
+same cover, gates, two attempts per pass and user note. Accepted body/side/head/hair paint and unpainted
+base residuals all contribute. The ordinary fast views remain recorded in `default_fast_fallback`.
+Every progressive version restores the whole head from that quantized atlas after rebaking beauty paint.
+
+Setup saves its existing highest-confidence SAM head mask as `probe/head.png` without another model call.
+Composition closes three-pixel gaps and closes the upper head volume through the face box's chin using
+the head bounds, padded laterally by 10% for ears and rear-head silhouette differences. Sampling this
+front-plane volume at the mesh's atlas positions includes every depth and facing direction, so scalp,
+ears, hair and the back of the head have no internal face-mask seam. Long hair below the chin keeps its
+segmented silhouette using the input hair masks already required by accepted ordinary-fast paints.
+Those exact input queries are read in replay mode, with no API fallback; a missing/corrupt result stays
+loud. Mesh depths contain the hair support in each accepted camera, so a broad setup mask cannot copy
+jewellery or unrelated rear torso paint. With no accepted paints, the setup hair silhouette uses a front
+mesh-depth band: 10% of the scalp-to-chin height (or three probe pixels, whichever is larger), fading over
+one further band behind that surface. An outward smoothstep transition spans 25% of the scalp-to-chin
+height into the neck/collar. The closed head
+interior is exactly default fast: no beauty grade, local colour correction or feathered beauty residual.
+Older preparations without the saved head mask use the closed cranial bounds; missing both head and face
+bounds records zero transferred texels and keeps an exportable result. `face_source.head_region` records
+mask availability, the chin and transition width, transferred texels and all-depth ownership.
+
+An initial beauty version is exported even if every beauty view was rejected. `face_source` records the
+source, view, attempt and painted texel count; `face_fallback` retains the independent default result,
+and each progressive version records its source. Empty exposed-face masks do not prevent whole-head
+restoration. All candidates retain the normal outline, face-containment and hair gates, with at most
+two slots per pass. Notes reach beauty and default samples through the existing quoted prompt slot.
+Submitted attempts always drain and every result is collected before a model error is raised.
+The fallback never converts a model transport or replay error into an accepted result.
+Face-source selection and metadata updates share the API checkpoint writer's lock, so concurrent saves
+cannot observe a dictionary being extended during serialization.
+
+A selected beauty frontal retains its face/skin composition: one SAM skin query inside the front probe's
+head bounds, including the same 25% neck context as beauty references, adds exposed scalp, ears and neck.
+Its face interior copies the selected repaint directly. The outer head-skin boundary uses a smooth
+distance ramp over 12 pixels at 1024 resolution; its local low-frequency colour difference is matched
+toward the surrounding rebaked atlas only within that band. This query changes the paint region, not
+view acceptance, retries or numeric gate thresholds. Default heads do not make this skin query.
+The three options compose independently in this order. SideBeautyPass first supplies matching turnaround
+references to side/back repaint requests, including beauty requests (`RF15B`, render first, turnaround in
+between, beauty reference last). Front beauty/default candidates keep their original references and gates.
+Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
+grades the composed export last; a restored default head's exact interior is excluded, and its outward
+collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
+fallback remains the ungraded, cover-only default, even with the other options on. Palette export never
+feeds grading back into subsequent repaint waves.
+
+SideBeautyPass requires saved stage-2 orientation evidence: both as-drawn toe-offset checks must pass,
+with a positive right offset and a negative left offset, and no recorded side correction. Missing or
+uncertain checks, reversed signs or a recorded mirror correction keep default references for the entire
+run. `side_beauty_orientation` records the decision and reason. This reads existing evidence without
+adding model checks or changing stage-2 behavior. All four artwork files are required only when the
+orientation evidence permits their use.
+
+Cover-only hair passes use `RF3H`; face and hair gates are recipe-independent.
+With SideBeautyPass off, every call supplies the current mesh render first and the cover second, including
+hair mode. Opt-in SideBeautyPass (`--side-beauty` or `HEROGEN_SIDE_BEAUTY=1`) requires all four `views/`
+drawings. It conditions only cameras at yaw 90 through 270 degrees (inclusive, modulo 360), including
+rear-quarter head and upper-body hair passes. Near-front cameras keep their original recipes and references:
+`RF2R` or `RF2W` for ordinary passes, and the existing crop plus cover with `RF5U` for upscale close-ups.
+For side and back cameras, normal passes use `RF12R` (default) or `RF12W` (wear), hair uses `RF13H`, and
+close-ups use `RF14U`.
+This applies to both best and fast refinement, retaining their schedules, gates, attempt caps, progressive
+versions and user design notes. With the option off, prompts, references and calls retain the cover-only
+behaviour. References between the render and cover are the nearest cardinal turnaround view,
+or both bracketing views when the camera is at least 30 degrees from every cardinal. These recipes require
+art-supported panels, straps, seams, patterns and colours while keeping the render authoritative for
+silhouette, pose and framing. The artwork determines colours and material appearance even when the
+render's blurred paint suggests another material; geometry stays fixed during those material changes.
+Diagonal straps, crossings, seams and panels remain visible. Ornaments, jewels, buckles and bosses
+must match the matching side's artwork in number and material, including plain crossings without hardware;
+unsupported ornaments in the blurred render are not authority to retain or duplicate them.
+Head and upper-body references are cropped and uniformly scaled to the camera's
+world scale using the stage-2 masks and calibration; no full-body turnaround is sent for those cameras.
+Those reference crops receive a uniform height fit. The nearest artwork foreground edge colours extend
+areas where the mesh silhouette is wider; a 0.4%-of-art-size mask inset keeps pale backdrop fringes out
+of those colour-extension seeds. The render grey fills pixels outside the mesh outline. This aligns the
+design reference before the model call; generated edits, projection and gate masks are never forced to that outline. Empty or mismatched reference masks are errors.
+The per-view `art_framing` record saves the output-to-artwork pixel transform. Earlier named recipes remain
+frozen for reproducible requests. Normal passes run head angles 0, 40, -40, 90, -90, 180, then body angles
+0, 45, -45, 90, -90, 180. Head renders are 1024 square; body renders are 1024 by 1536. The head frame is 1.30 times the detected head's larger side; the body
 frame is 1.06 times the height. Hair passes then run head angles 90, 135, 180, 225, 270 and upper-body angles
 135, 180, 225. Negative angle names in records represent the equivalent angle modulo 360. Upper-body cameras
 cover the top 55% of the body height.
@@ -2427,7 +2583,11 @@ Normal passes allow up to three samples. Body outline thresholds are IoU at leas
 6 median / 16 p90 pixels per 1024 render pixels. Finer-scale head cameras use the measured capped
 10 median / 24 p90 allowance with the same IoU. Distances use complete contours before excluding
 samples within 16 pixels of frame-cut surfaces. Background flooding starts outside the render figure
-and cannot enter grey armor through a covered frame border. A SAM 3.1
+and cannot enter grey armor through a covered frame border. The background colour is measured from pixels
+at least 16 pixels outside the render silhouette only when at least 90% of those samples match a uniform
+neutral colour within 0.07 per channel; otherwise the original render grey is used. This prevents a changed
+grey backdrop from filling the repaint mask. It changes neither the measured silhouette thresholds nor the
+use of the repaint's own contour. A SAM 3.1
 face occupying at least 0.005 of the figure may have at most 0.25 of its area outside the render's face mask.
 This containment check prevents a new face on a profile or back view without requiring soft and sharp face
 masks to have the same area. These recipe thresholds retain their original measured calibration; they are

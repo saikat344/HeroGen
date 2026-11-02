@@ -87,6 +87,24 @@ def nearest_view(angle):
     return min(ART_ANGLES, key=lambda v: abs((angle - ART_ANGLES[v] + 180) % 360 - 180))
 
 
+def _yaw_distance(angle, view_angle):
+    return abs((angle - view_angle + 180) % 360 - 180)
+
+
+def views_for_angle(angle):
+    """Turnaround views that condition a repaint camera at this yaw.
+
+    A camera within 30 degrees of a cardinal sees essentially one face, so it gets that view alone.
+    A camera farther from every cardinal (40/45/135-degree diagonals) sees two faces, so it gets both
+    bracketing views: choosing only one of them would arbitrarily drop the other face's artwork, and
+    +-135 in particular is equidistant from a side view and the back view.
+    """
+    ranked = sorted(ART_ANGLES, key=lambda v: (_yaw_distance(angle, ART_ANGLES[v]), v))
+    if _yaw_distance(angle, ART_ANGLES[ranked[0]]) >= 30:
+        return tuple(ranked[:2])
+    return (ranked[0],)
+
+
 def band_box(cam, info):
     """Eight corners of the camera's orthographic box through the mesh's full depth."""
     right, up, fwd = axes(cam)
@@ -154,3 +172,78 @@ def reference(run, cam, info, folder):
     return crop, {"render": "input.png", "crop": "reference-crop.png", "artwork": f"views/{view}.png",
                   "cover": "01-cover.png", "crop_box_px": box, "artwork_camera": art_cam,
                   "box_world": band_box(cam, info).tolist()}
+
+
+def framed_artwork(run, cam, info, view):
+    """Sample a cardinal design reference at the render's world scale and vertical framing.
+
+    Yaw stays cardinal: this is design artwork, not a synthesized view. A head camera receives just
+    the head region instead of a full body. Uniform scaling preserves the artwork's proportions;
+    prompts prohibit transferring them onto the mesh. No repaint or gate measurement fits this crop.
+    """
+    art_cam = artwork_camera(run, info, view)
+    with Image.open(Path(run) / f"views/{view}.png") as image:
+        source = image.convert("RGB")
+    ratio = px_per_unit(art_cam) / px_per_unit(cam)
+    cx, cy, _ = project(art_cam, np.asarray(cam["centre"]))
+    w, h = cam["res"]
+    affine = (ratio, 0, float(cx - ratio * w / 2), 0, ratio, float(cy - ratio * h / 2))
+    crop = source.transform((w, h), Image.Transform.AFFINE, affine,
+                            resample=Image.Resampling.BICUBIC,
+                            fillcolor=source.getpixel((0, 0)))
+    return crop, {"artwork": f"views/{view}.png", "artwork_camera": art_cam,
+                  "output_to_artwork_px": list(affine), "size": [w, h],
+                  "mask_edge_inset_px": max(1, round(max(source.size) * .004))}
+
+
+def framed_mask(run, view, framing):
+    """The stage-2 figure mask sampled by exactly the design reference's pixel transform."""
+    from scipy import ndimage
+
+    with Image.open(Path(run) / f"masks/{view}.png") as image:
+        mask = np.asarray(image.convert("L")) > 127
+    # SAM boundary pixels can include the artwork's pale backdrop. Keep colour-extension seeds
+    # inside the foreground so magnifying a crop does not stretch that halo into white streaks.
+    mask = ndimage.binary_erosion(mask, iterations=framing["mask_edge_inset_px"])
+    if not mask.any():
+        raise ValueError("silhouette reference needs a nonempty inset artwork mask")
+    return Image.fromarray(mask.astype(np.uint8) * 255).transform(
+        tuple(framing["size"]), Image.Transform.AFFINE, framing["output_to_artwork_px"],
+        resample=Image.Resampling.NEAREST, fillcolor=0)
+
+
+def silhouette_reference(image, source_mask, render_mask):
+    """Fit a close-up design reference to the mesh outline before requesting a repaint.
+
+    A uniform height fit keeps artwork details intact. Where the mesh extends beyond the artwork,
+    its nearest foreground edge colour extends the design. Only the reference is resampled; no
+    generated edit, projection or gate mask is changed.
+    """
+    import cv2
+    from scipy import ndimage
+
+    source = np.asarray(source_mask) > 127
+    target = np.asarray(render_mask, bool)
+    if source.shape != target.shape or image.size != target.shape[::-1]:
+        raise ValueError("silhouette reference needs matching image and mask dimensions")
+    sy, sx = np.where(source)
+    ty, tx = np.where(target)
+    if not len(sy) or not len(ty):
+        raise ValueError("silhouette reference needs nonempty artwork and render masks")
+    ratio = (sy.max() - sy.min() + 1) / (ty.max() - ty.min() + 1)
+    yy, xx = np.indices(target.shape, dtype=np.float32)
+    mapx = (xx - (tx.min() + tx.max()) / 2) * ratio + (sx.min() + sx.max()) / 2
+    mapy = (yy - ty.min() + .5) * ratio + sy.min() - .5
+    mapx, mapy = mapx.astype(np.float32), mapy.astype(np.float32)
+    pixels = cv2.remap(np.asarray(image.convert("RGB")), mapx, mapy, cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_REPLICATE)
+    sampled_mask = cv2.remap(source.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
+    if not sampled_mask.any():
+        raise ValueError("silhouette reference does not intersect the artwork")
+    extend = target & ~sampled_mask
+    if extend.any():
+        nearest = ndimage.distance_transform_edt(~sampled_mask, return_distances=False, return_indices=True)
+        pixels[extend] = pixels[nearest[0][extend], nearest[1][extend]]
+    pixels[~target] = round(255 * C.BG)
+    return Image.fromarray(pixels)

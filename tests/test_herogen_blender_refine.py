@@ -16,7 +16,7 @@ from herogen.blender import refine as stage
 from herogen.blender.final_model import final_model
 from herogen.pipeline.client import ApiError, CallLog, IMAGE_MODEL, SAM_MODEL, ModelClient, ReplayMiss, SamInstance
 try:
-    from herogen.blender.refine import cameras, character, imaging as refine, prompts
+    from herogen.blender.refine import cameras, character, imaging as refine, palette, prompts
     HAVE_REFINE = True
 except ImportError:
     HAVE_REFINE = False
@@ -223,6 +223,28 @@ class ColourTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class HairModeTests(unittest.TestCase):
+    def test_changed_neutral_background_preserves_outline_gate(self):
+        fig = disc((256, 256), 128, 128, 72)
+        edit = np.full((256, 256, 3), .82)
+        edit[fig] = (.15, .10, .06)  # dark leather is still foreground
+        measured = refine.figure_mask(edit, render_figure=fig)
+        passed, _ = refine.outline_gate(fig, measured)
+        self.assertTrue(passed)
+        # The same changed background must not hide genuinely moved geometry.
+        shifted = disc(fig.shape, 151, 128, 72)
+        edit[:] = .82
+        edit[shifted] = (.15, .10, .06)
+        passed, _ = refine.outline_gate(fig, refine.figure_mask(edit, render_figure=fig))
+        self.assertFalse(passed)
+
+    def test_textured_exterior_cannot_calibrate_away_added_geometry(self):
+        fig = disc((256, 256), 128, 128, 60)
+        edit = np.full((256, 256, 3), character.BG)
+        enlarged = disc(fig.shape, 128, 128, 100)
+        edit[enlarged] = (.20, .12, .08)
+        measured = refine.figure_mask(edit, render_figure=fig)
+        self.assertFalse(refine.outline_gate(fig, measured)[0])
+
     def test_interior_agreement_keeps_detail_and_drops_a_swapped_region(self):
         rng = np.random.default_rng(1)
         h = w = 256
@@ -460,6 +482,22 @@ class RegistrationTests(unittest.TestCase):
             "RF4U": "8bdcf59595af8968867cbd4c096d29d9dced84a96382a21fa3d4f025e088265e",
             "RF5U": "950c00c50c62bc9d35035a303de4c14622323b2fac5204ff029d87b0a2034791",
             "RF3H": "f4f45c11280cac98d8234ee729650cffe1bcc73c8f6fc844df9b407248936f2f",
+            "RF5B": "28268c4295a2096842f32bffe59ee16ac015cc1d6ccf425e08873450d83d108b",
+            "RF6B": "268a35751cc6d3a906789ccabbcbf52335999a87ec64797b90a23fb5c8fcec02",
+            "RF6R": "800c797079e531a0550ebeffd39bc52d69fe37d5817145a4626072ee79c6cb7b",
+            "RF6W": "a588e304cbb0bc14443c6982b98085218799f275015614815a9223cd6aeef4ac",
+            "RF7H": "20d561f846afda09b3a3283e428604e0b9d150ba5a5e011f07d0978b37f8160d",
+            "RF8U": "1a4e519d7433b5738d1eb595c9a5f08a8b5fa3d4abc905069664744962673d7d",
+            "RF9R": "1120ee8a70bb5bb8b9323277fcf50b81a46820346287e6011acba72d5cc075b2",
+            "RF9W": "5ba4b6d61ad6cc869a650d3d82ccf6e0944e747b2be02527d9b68bf625fc761e",
+            "RF10H": "1f3905148929083cffe1b4113939443f7e4988370cfb3c599a8d40943434ebb7",
+            "RF11R": "80b201b3420364fab604d00401e07f36a2592c23f0f184393bd0c14f232103a6",
+            "RF11W": "78d0e76946e04b3d20cd08fdf412422b6af63bf3e1269d57d03406292ffd8c6a",
+            "RF12R": "9e1b81a37c552f66ae070585d68813ad8ed6ab520e096cb923f897cc3865af7d",
+            "RF12W": "d1b5b85aace795d521cc698adcb34fa4e9f483e62244435604c2fc6f08b4c11b",
+            "RF13H": "c6526ad6fd0262f6d1a9a4b24ba86229544c079eaa1237e2ab3028cfa02caceb",
+            "RF14U": "ddce55ca0dd2abef013cf0043a8dfb209e69c17dd38fe3b96c3b5f9213a8214a",
+            "RF15B": "87df7485e7d276abc8a3dc9ee50cddbe4be03c7742518523e3a1adffab042b84",
         })
         info = {"height": 2, "body_centre": [0, 0, 1], "hi": [1, 1, 2],
                 "head_centre": [0, 0, 1.8], "head_side": 0.4}
@@ -751,6 +789,69 @@ class BudgetTests(unittest.TestCase):
             self.assertTrue(all(c["cached"] for c in client.log.calls))
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
+class PaletteTests(unittest.TestCase):
+    def test_quantile_grade_moves_luminance_85_percent_and_records_brightness(self):
+        source = np.repeat(np.linspace(.05, .35, 1024, dtype=np.float32).reshape(32, 32, 1), 3, -1)
+        art = source * 2 + .1
+        mask = np.ones((32, 32), bool)
+        grade = palette.fit(source, mask, art, mask)
+        graded = palette.apply(source, grade)
+        before = refine.cv2.cvtColor(source, refine.cv2.COLOR_RGB2Lab)[..., 0]
+        target = refine.cv2.cvtColor(art, refine.cv2.COLOR_RGB2Lab)[..., 0]
+        after = refine.cv2.cvtColor(graded, refine.cv2.COLOR_RGB2Lab)[..., 0]
+        np.testing.assert_allclose(np.quantile(after, [.05, .5, .95]),
+                                   .15 * np.quantile(before, [.05, .5, .95]) +
+                                   .85 * np.quantile(target, [.05, .5, .95]), atol=.3)
+        self.assertGreater(grade["brightness_after"]["p95"], grade["brightness_before"]["p95"])
+        self.assertEqual(grade["mix"], .85)
+        json.dumps(grade, allow_nan=False)
+
+    def test_chroma_scales_and_output_luminance_are_clamped(self):
+        rng = np.random.default_rng(4)
+        lab = np.empty((64, 64, 3), np.float32)
+        lab[..., 0] = rng.uniform(10, 40, (64, 64))
+        lab[..., 1] = rng.uniform(-1, 1, (64, 64))
+        lab[..., 2] = rng.uniform(-15, 15, (64, 64))
+        art_lab = lab.copy()
+        art_lab[..., 0] += 25
+        art_lab[..., 1] *= 10
+        art_lab[..., 2] *= .1
+        source = refine.cv2.cvtColor(lab, refine.cv2.COLOR_Lab2RGB)
+        art = refine.cv2.cvtColor(art_lab, refine.cv2.COLOR_Lab2RGB)
+        mask = np.ones(lab.shape[:2], bool)
+        grade = palette.fit(source, mask, art, mask)
+        np.testing.assert_allclose(grade["ab_scale"], [1.6, .6])
+        self.assertLessEqual(max(grade["L_dst"]), grade["L_cap_p99"])
+        white = palette.apply(np.ones((4, 4, 3), np.float32), grade)
+        actual_l = refine.cv2.cvtColor(white, refine.cv2.COLOR_RGB2Lab)[..., 0]
+        self.assertLessEqual(actual_l.max(), grade["L_cap_p99"] + .3)
+        self.assertTrue(np.isfinite(white).all())
+
+    def test_erodes_artwork_edges_and_handles_flat_source_quantiles(self):
+        source = np.full((32, 32, 3), .2, np.float32)
+        art = np.ones_like(source)
+        mask = np.zeros((32, 32), bool)
+        mask[4:28, 4:28] = True
+        art[6:26, 6:26] = .6
+        grade = palette.fit(source, mask, art, mask)
+        self.assertEqual(grade["artwork_pixels"], 400)
+        self.assertEqual(len(grade["L_src"]), 1)
+        np.testing.assert_allclose(grade["brightness_artwork"]["p5"], .6, atol=1e-6)
+        self.assertTrue(np.isfinite(palette.apply(source, grade)).all())
+
+    def test_invalid_images_masks_and_empty_eroded_figure_fail_loudly(self):
+        rgb = np.full((32, 32, 3), .3, np.float32)
+        mask = np.ones((32, 32), bool)
+        empty = np.zeros_like(mask)
+        empty[15, 15] = True
+        for src, sm, art, am in ((rgb * np.nan, mask, rgb, mask), (rgb, mask[:3], rgb, mask),
+                                 (rgb, mask, rgb, empty), (rgb, ~mask, rgb, mask),
+                                 (rgb * 4, mask, rgb, mask)):
+            with self.subTest(), self.assertRaises(ValueError):
+                palette.fit(src, sm, art, am)
+
+
 class FakeClient(ModelClient):
     def __init__(self, cache, reject=False, error=None):
         super().__init__(cache)
@@ -776,12 +877,45 @@ class FakeClient(ModelClient):
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class StageTests(unittest.TestCase):
+    def test_palette_flag_off_preserves_export_bytes_and_request_sequence(self):
+        with mock.patch.dict(os.environ, {"HEROGEN_REFINE_REGION_PALETTE": ""}), \
+                mock.patch("herogen.blender.refine.region_palette.export_texture") as grade:
+            before = stage.run_stage3f(self.run, self.client)
+            output = (self.run / "03-refined.glb").read_bytes()
+            calls = [(c["model"], c["kind"], c["key"]) for c in self.client.log.calls]
+            self.client.log = CallLog()
+            (self.run / "stage-3f.json").unlink()
+            after = stage.run_stage3f(self.run, self.client)
+        grade.assert_not_called()
+        self.assertEqual(output, (self.run / "03-refined.glb").read_bytes())
+        self.assertEqual(calls, [(c["model"], c["kind"], c["key"]) for c in self.client.log.calls])
+        self.assertEqual(before["views"], after["views"])
+        self.assertNotIn("region_palette", after)
+
+    def test_palette_flag_applies_only_at_export_and_failure_stays_loud(self):
+        target = self.run / "graded.png"
+        with mock.patch.dict(os.environ, {"HEROGEN_REFINE_REGION_PALETTE": "manifest.json"}), \
+                mock.patch("herogen.blender.refine.region_palette.export_texture", return_value=(target, {"skin": {"cap_lab": 2}})) as grade:
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertEqual(grade.call_count, 1)
+        self.assertEqual(grade.call_args.args[0], "manifest.json")
+        self.assertEqual(rec["region_palette"]["skin"]["cap_lab"], 2)
+        with mock.patch.dict(os.environ, {"HEROGEN_REFINE_REGION_PALETTE": "bad.json"}), \
+                mock.patch("herogen.blender.refine.region_palette.export_texture", side_effect=ValueError("wrong palette layout")):
+            with self.assertRaisesRegex(ValueError, "wrong palette layout"):
+                stage.run_stage3f(self.run, self.client)
+        self.assertEqual(json.loads((self.run / "stage-3f.json").read_text())["status"], "error")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.run = Path(self.tmp.name)
         (self.run / "03-source.glb").write_bytes(b"source")
         (self.run / "stage-3.json").write_text('{"ok":true}')
+        (self.run / "stage-2.json").write_text(json.dumps({"checks": [
+            {"name": "right_view_toe_offset_as_drawn", "value": .2, "pass": True},
+            {"name": "left_view_toe_offset_as_drawn", "value": -.2, "pass": True}],
+            "details": {"view_assignment": {"side_fixes": {}}}}))
         Image.new("RGB", (64, 64), "blue").save(self.run / "01-cover.png")
         self.client = FakeClient(self.run / "cache")
         self.tex = mock.Mock(height=2)
@@ -907,6 +1041,10 @@ class StageTests(unittest.TestCase):
         info = json.loads((self.run / "blender-work/texture-refine/character.json").read_text())
         self.assertIn("head", info["boxes_px"])
         self.assertNotIn("face", info["boxes_px"])
+        with Image.open(self.run / "blender-work/texture-refine/probe/head.png") as image:
+            saved_head = np.asarray(image) > 127
+        self.assertTrue(saved_head[8:24, 24:40].all())
+        self.assertEqual(int(saved_head.sum()), 16 * 16)
         prep_call = next(call for call in character.blender.call_args_list if call.args[0] == "prep")
         self.assertIsNotNone(prep_call.args[1]["head"])
 
@@ -999,6 +1137,339 @@ class StageTests(unittest.TestCase):
         self.assertTrue(all(len(images) == 2 for _, images, _ in self.client.inputs))
         self.assertTrue(all(images[1].getpixel((0, 0)) == (0, 0, 255) for _, images, _ in self.client.inputs))
         self.assertIsNone(self.client.before_api_attempt)
+
+    def artwork(self):
+        for folder in ("views", "masks", "prep"):
+            (self.run / folder).mkdir(exist_ok=True)
+        Image.new("RGB", (64, 64), (180, 200, 220)).save(self.run / "views/front.png")
+        Image.fromarray((disc((64, 64), 32, 32, 22) * 255).astype(np.uint8)).save(self.run / "masks/front.png")
+        Image.new("RGB", (64, 64), (60, 80, 100)).save(self.run / "prep/base.png")
+
+    def test_beauty_grade_missing_artwork_is_explicit(self):
+        rec = {}
+        self.assertIsNone(stage._artwork_grade(self.run, self.run / "prep", {},
+                                               self.run / "palette", rec, 10))
+        self.assertEqual(rec["status"], "skipped")
+        self.assertIn("views/front.png", rec["reason"])
+        self.assertIn("masks/front.png", rec["reason"])
+
+    def test_beauty_grade_fit_failure_stays_loud(self):
+        self.artwork()
+        Image.new("L", (64, 64)).save(self.run / "masks/front.png")
+        rec = {}
+        with self.assertRaisesRegex(ValueError, "no figure pixels"):
+            stage._artwork_grade(self.run, self.run / "prep", {"name": "front"},
+                                 self.run / "palette", rec, 10)
+        self.assertEqual(rec["status"], "error")
+
+    def test_beauty_off_is_byte_identical_with_or_without_artwork(self):
+        class Atlas:
+            def __init__(self, prep, info):
+                self.T = np.asarray(Image.open(prep / "base.png"), np.float32) / 255
+                self.Q = np.ones(1)
+                self.height = info["height"]
+
+            def apply(self, cam, refined, feather, depth, valid, weight, bonus):
+                self.T = .4 * self.T + .6 * refined[feather > 0].mean(0)
+                self.Q += 1
+                return 17
+
+            def save(self, path):
+                Image.fromarray((self.T * 255).round().astype(np.uint8)).save(path)
+                return path
+
+        self.artwork()
+        (self.run / "views/front.png").unlink()
+        requests = []
+
+        def reset_base():
+            yy, xx = np.indices((64, 64))
+            rgb = np.stack((60 + xx // 4, 80 + yy // 3, 100 + xx // 4), -1).astype(np.uint8)
+            Image.fromarray(rgb).save(self.run / "prep/base.png")
+
+        def segment(image, text):
+            requests.append((text, image.tobytes()))
+            return []
+
+        def render(mode, args, log, **kwargs):
+            self.blender(mode, args, log, **kwargs)
+            if mode == "render":
+                rgba = np.zeros((64, 64, 4), np.uint8)
+                with Image.open(args["texture"]) as image:
+                    rgba[..., :3] = np.asarray(image)[..., :3]
+                rgba[..., 3] = disc((64, 64), 32, 32, 22) * 255
+                Image.fromarray(rgba).save(Path(args["out"]) / (args["cams"][0]["name"] + ".png"))
+
+        self.client.segment = segment
+        with mock.patch.object(refine, "Texture", side_effect=Atlas), \
+                mock.patch("herogen.blender.refine.backend.blender", side_effect=render):
+            reset_base()
+            before = stage.run_stage3f(self.run, self.client)
+            old_inputs = [(p, [i.tobytes() for i in images], kw) for p, images, kw in self.client.inputs]
+            old_segments = requests.copy()
+            old_pngs = {name: (self.run / "blender-work/texture-refine" / name / "input.png").read_bytes()
+                        for name in before["views"]}
+            old_texture = np.asarray(Image.open(self.run / "blender-work/texture-refine/texture.png")).copy()
+            self.artwork()
+            reset_base()
+            self.client.inputs.clear()
+            requests.clear()
+            after = stage.run_stage3f(self.run, self.client)
+        self.assertEqual(old_inputs, [(p, [i.tobytes() for i in images], kw) for p, images, kw in self.client.inputs])
+        self.assertEqual(old_segments, requests)
+        self.assertNotEqual(old_inputs[0][1][0], old_inputs[1][1][0])
+        self.assertEqual(before["views"], after["views"])
+        for name, png in old_pngs.items():
+            self.assertEqual(png, (self.run / "blender-work/texture-refine" / name / "input.png").read_bytes())
+        self.assertNotIn("palette_grade", after)
+        new_texture = np.asarray(Image.open(self.run / "blender-work/texture-refine/texture.png"))
+        np.testing.assert_array_equal(new_texture, old_texture)
+        self.assertEqual((self.run / "03-refined.glb").read_bytes(), b"refined")
+
+    def test_beauty_recipe_uses_yaw_crop_and_preserves_shading(self):
+        from herogen.blender.refine import beauty
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder = self.run / "beauty"
+        folder.mkdir()
+        mask = (disc((64, 64), 32, 32, 22) * 255).astype(np.uint8)
+        mask[10:30, 5:20] = 255
+        Image.fromarray(mask).save(folder / "mask.png")
+        refs = {"sha256": beauty.BT1_SHA256, "views": {}}
+        for yaw in beauty.ANGLES:
+            Image.fromarray(mask).save(folder / f"expected{yaw:+d}.png")
+            name = f"yaw{yaw}.png"
+            Image.new("RGB", (64, 64), (100 + yaw // 10, 140, 180)).save(folder / name)
+            refs["views"][str(yaw)] = {"accepted": True, "image": name, "mask": "mask.png",
+                "head_box": [20, 5, 44, 25],
+                "attempts": [{"try": 1, "mask": "mask.png", "accepted": True, "iou": 1, "image": name}]}
+        refs["views"].pop("0")  # front palette and body camera both use the nearest usable yaw
+        (folder / "references.json").write_text(json.dumps(refs))
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+40", "body+0")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()), \
+                mock.patch.object(refine, "colour_match", side_effect=AssertionError("shading removed")):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertEqual(rec["recipes"], ["RF6B"])
+        self.assertEqual(rec["palette_grade"]["target"], "beauty reference")
+        self.assertEqual(rec["palette_grade"]["yaw"], 45)
+        self.assertTrue(rec["views"]["body+0"]["reference"]["fallback"])
+        self.assertEqual(rec["views"]["head+40"]["reference"]["yaw"], 45)
+        self.assertEqual(self.client.inputs[0][1][1].size, (24, 25))  # scalp box plus neck band
+        self.assertEqual(self.client.inputs[0][1][1].getpixel((0, 0)), (104, 140, 180))
+        self.assertEqual(self.client.inputs[1][1][1].size, (64, 64))
+        self.assertTrue(all(v["accepted"] for v in rec["views"].values()))
+        expected = self.identity(None, np.ones((64, 64)),
+                                 np.asarray(self.client.inputs[0][1][0], np.float32) / 255)[2]
+        np.testing.assert_array_equal(self.tex.apply.call_args_list[0].args[1], expected)
+        self.assertIsNone(self.client.before_api_attempt)
+
+    def test_rear_quarter_camera_without_rear_reference_keeps_standard_recipe(self):
+        from herogen.blender.refine import beauty
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder = self.run / "beauty"
+        folder.mkdir()
+        mask = (disc((64, 64), 32, 32, 22) * 255).astype(np.uint8)
+        mask[10:30, 5:20] = 255
+        Image.fromarray(mask).save(folder / "mask.png")
+        refs = {"sha256": beauty.BT1_SHA256, "views": {}}
+        for yaw in beauty.ANGLES:
+            Image.fromarray(mask).save(folder / f"expected{yaw:+d}.png")
+            name = f"yaw{yaw}.png"
+            Image.new("RGB", (64, 64), (100 + yaw // 10, 140, 180)).save(folder / name)
+            refs["views"][str(yaw)] = {"accepted": True, "image": name, "mask": "mask.png",
+                "head_box": [20, 5, 44, 25],
+                "attempts": [{"try": 1, "mask": "mask.png", "accepted": True, "iou": 1, "image": name}]}
+        refs["views"].pop("180")  # no rear-facing crop: the profile crop must not be bound instead
+        (folder / "references.json").write_text(json.dumps(refs))
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0",)), \
+                mock.patch.object(stage, "HAIR_ORDER", ("head+135",)):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertEqual(rec["recipes"], ["RF6B"])
+        self.assertEqual(rec["views"]["head+0"]["reference"]["yaw"], 0)
+        hair = rec["views"]["hair-head+135"]
+        self.assertNotIn("reference", hair)
+        self.assertIn("no face-free beauty reference", hair["note"])
+        self.assertEqual(hair["prompt"], "RF3H")
+        self.assertEqual(self.client.inputs[0][1][1].size, (24, 25))  # head+0 keeps its crop
+        self.assertEqual(self.client.inputs[1][1][1].getpixel((0, 0)), (0, 0, 255))  # the cover
+
+    def beauty_folder(self):
+        """All six reference yaws usable, front included, with a render face mask for part gating."""
+        from herogen.blender.refine import beauty
+        folder = self.run / "beauty"
+        folder.mkdir(exist_ok=True)
+        mask = (disc((64, 64), 32, 32, 22) * 255).astype(np.uint8)
+        mask[10:30, 5:20] = 255
+        Image.fromarray(mask).save(folder / "mask.png")
+        refs = {"sha256": beauty.BT1_SHA256, "views": {}}
+        for yaw in beauty.ANGLES:
+            Image.fromarray(mask).save(folder / f"expected{yaw:+d}.png")
+            name = f"yaw{yaw}.png"
+            Image.new("RGB", (64, 64), (100 + yaw // 10, 140, 180)).save(folder / name)
+            refs["views"][str(yaw)] = {"accepted": True, "image": name, "mask": "mask.png",
+                "head_box": [20, 5, 44, 25],
+                "attempts": [{"try": 1, "mask": "mask.png", "accepted": True, "iou": 1, "image": name}]}
+        (folder / "references.json").write_text(json.dumps(refs))
+        face = disc((64, 64), 32, 27, 6)
+
+        def segment(image, text):
+            self.client._call(SAM_MODEL, "segment")
+            mask = np.zeros(image.size[::-1], bool)
+            if text == "face":
+                mask |= np.asarray(Image.fromarray(face).resize(image.size, Image.Resampling.NEAREST))
+            elif text in ("eyes", "eyebrows", "mouth"):
+                mask[:] = True
+            return [SamInstance(mask, (26, 26, 38, 38))] if mask.any() else []
+
+        self.client.segment = mock.Mock(side_effect=segment)
+        return folder, face
+
+    def test_beauty_face_guard_blocks_oblique_face_without_frontal_repaint(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        edit = self.client.edit_image
+        self.client.edit_image = lambda prompt, images, **kw: (
+            Image.new("RGB", images[0].size, (115, 115, 115)) if "seen from the front" in prompt
+            else edit(prompt, images, **kw))
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertFalse(rec["views"]["head+0"]["accepted"])
+        self.assertTrue(rec["views"]["head+40"]["accepted"])
+        self.assertIn("face_consistency_guard", rec["views"]["head+40"])
+        self.assertTrue(rec["face_consistency_guard"])
+        weight = self.tex.apply.call_args.args[5]
+        self.assertEqual(weight[face].max(), 0)          # the oblique repaint leaves the face untouched
+        body = disc((64, 64), 32, 40, 5) & ~face
+        self.assertGreater(weight[body].min(), 0)
+
+    def test_beauty_face_guard_sleeps_once_a_frontal_view_is_accepted(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertTrue(all(v["accepted"] for v in rec["views"].values()))
+        self.assertNotIn("face_consistency_guard", rec["views"]["head+40"])
+        self.assertNotIn("face_consistency_guard", rec)
+        weight = self.tex.apply.call_args.args[5]
+        self.assertGreater(weight[face].max(), 0)        # an accepted frontal repaint anchors the face
+
+    def test_beauty_face_guard_follows_view_order(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        edit = self.client.edit_image
+        state = {"attempts": 0}
+
+        def reject_first_view(prompt, images, **kw):
+            state["attempts"] += 1
+            if state["attempts"] <= refine.ATTEMPTS:
+                return Image.new("RGB", images[0].size, (115, 115, 115))
+            return edit(prompt, images, **kw)
+
+        self.client.edit_image = reject_first_view
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40", "body+0", "head-40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertFalse(rec["views"]["head+0"]["accepted"])
+        self.assertIn("face_consistency_guard", rec["views"]["head+40"])   # ran before body+0
+        self.assertTrue(rec["views"]["body+0"]["accepted"])
+        self.assertNotIn("face_consistency_guard", rec["views"]["head-40"])  # body+0 anchors it
+
+    def test_blank_frontal_beauty_repaint_retries_before_projection(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        segment = self.client.segment
+        edit = self.client.edit_image
+        state = {"attempt": 0}
+
+        def paint(prompt, images, **kw):
+            state["attempt"] += 1
+            return edit(prompt, images, **kw)
+
+        def features(image, text):
+            # The reference head crop is narrow; repaint face crops are square.
+            if text in ("eyes", "eyebrows", "mouth") and image.width == image.height and state["attempt"] == 1:
+                return []
+            return segment(image, text)
+
+        self.client.edit_image = paint
+        self.client.segment = features
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        front = rec["views"]["head+0"]
+        self.assertEqual(front["tries"], 2)
+        self.assertFalse(front["attempts"][0]["accepted"])
+        self.assertEqual(front["attempts"][0]["checks"]["facial_features"]["missing"],
+                         ["eyes", "eyebrows", "mouth"])
+        self.assertTrue(front["attempts"][1]["accepted"])
+        self.assertEqual(self.tex.apply.call_count, 2)  # rejected blank never touches the atlas
+        self.assertGreater(self.tex.apply.call_args_list[0].args[5][face].max(), 0)
+        self.assertNotIn("face_consistency_guard", rec["views"]["head+40"])
+
+    def test_faceless_frontal_cannot_release_oblique_guard(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        segment = self.client.segment
+
+        def features(image, text):
+            if text in ("eyes", "eyebrows", "mouth") and image.width == image.height:
+                return []
+            return segment(image, text)
+
+        self.client.segment = features
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertFalse(rec["views"]["head+0"]["accepted"])
+        self.assertEqual(rec["views"]["head+0"]["tries"], refine.ATTEMPTS)
+        self.assertTrue(rec["views"]["head+40"]["accepted"])
+        self.assertEqual(self.tex.apply.call_count, 1)
+        self.assertEqual(self.tex.apply.call_args.args[5][face].max(), 0)
+        self.assertIn("face_consistency_guard", rec["views"]["head+40"])
+
+    def test_face_guard_never_applies_without_beauty(self):
+        self.use_character_setup(head=True)
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0", "head+40")), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertTrue(rec["views"]["head+40"]["accepted"])
+        self.assertNotIn("face_consistency_guard", rec["views"]["head+40"])
+        self.assertNotIn("face_consistency_guard", rec)
+
+    def test_unusable_beauty_references_use_standard_recipe(self):
+        from herogen.blender.refine import beauty
+        folder = self.run / "beauty"
+        folder.mkdir()
+        refs = {"sha256": beauty.BT1_SHA256, "views": {}}
+        (folder / "references.json").write_text(json.dumps(refs))
+        with mock.patch.object(stage, "REFINE_ORDER", ("body+0",)), \
+                mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        self.assertEqual(rec["recipes"], ["RF2R", "RF3H"])
+        self.assertEqual(rec["views"]["body+0"]["prompt"], "RF2R")
+        self.assertTrue(all(v is None for v in rec["beauty_references"]["fallbacks"].values()))
+
+    def test_beauty_off_never_calls_palette_even_with_artwork(self):
+        self.artwork()
+        with mock.patch.object(stage, "_artwork_grade", side_effect=AssertionError("default grade")):
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertNotIn("palette_grade", rec)
+        self.assertEqual(rec["recipes"], ["RF2R", "RF3H"])
 
     def test_all_rejected_is_recorded_fallback_with_attempts(self):
         self.client.reject = True
@@ -1200,8 +1671,9 @@ class StageTests(unittest.TestCase):
         (self.run / "views").mkdir()
         (self.run / "masks").mkdir()
         (self.run / "views/meta.json").write_text(json.dumps({"height_units": 5.5, "pixels_per_unit": 10}))
-        for v in ("front", "back"):
-            Image.new("RGB", (64, 64), "red").save(self.run / f"views/{v}.png")
+        for v, colour in (("front", "red"), ("right", "yellow"), ("back", "green"), ("left", "magenta")):
+            Image.new("RGB", (64, 64), colour).save(self.run / f"views/{v}.png")
+        for v in ("front", "right", "back", "left"):
             m = np.zeros((64, 64), np.uint8)
             m[5:60, 10:54] = 255
             Image.fromarray(m).save(self.run / f"masks/{v}.png")
@@ -1211,18 +1683,21 @@ class StageTests(unittest.TestCase):
         self.closeup_artwork()
         with mock.patch.object(closeups, "RES", (64, 64)), \
                 mock.patch.object(closeups, "BORDER_PX", 4):
-            rec = stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=5)
+            rec = stage.run_stage3f(self.run, self.client, side_beauty=True, upscale_texture=True, cap_usd=5)
         self.assertEqual(len(rec["views"]), 36)
         self.assertEqual(len(self.client.inputs), 36)
-        self.assertTrue(all(len(images) == 2 for _, images, _ in self.client.inputs[:20]))
-        for text, images, _ in self.client.inputs[20:]:
-            self.assertEqual(text, prompts.RF5U)
-            self.assertEqual(len(images), 3)
-            self.assertEqual(images[1].getpixel((0, 0)), (255, 0, 0))
-            self.assertEqual(images[2].getpixel((0, 0)), (0, 0, 255))
+        for (_, images, _), view in zip(self.client.inputs[:20], list(rec["views"].values())[:20]):
+            self.assertEqual(len(images), 2 + len(view.get("art_views", [])))
+        for (text, images, _), view in zip(self.client.inputs[20:], list(rec["views"].values())[20:]):
+            side = stage.side_art_yaw(view["camera"]["angle"])
+            self.assertEqual(text, prompts.RF14U if side else prompts.RF5U)
+            self.assertEqual(len(images), 4 if side else 3)
+            if side:
+                self.assertEqual(images[1].getpixel((0, 0)), images[2].getpixel((0, 0)))
+            self.assertEqual(images[-1].getpixel((0, 0)), (0, 0, 255))
         for name, view in list(rec["views"].items())[20:]:
             self.assertTrue(view["accepted"])
-            self.assertEqual(view["prompt"], "RF5U")
+            self.assertEqual(view["prompt"], "RF14U" if stage.side_art_yaw(view["camera"]["angle"]) else "RF5U")
             self.assertIn("crop_box_px", view["references"])
             self.assertEqual(view["camera"]["zoom"], 3)
         self.assertTrue(rec["upscale_texture"])
@@ -1238,7 +1713,7 @@ class StageTests(unittest.TestCase):
         self.closeup_artwork()
         with mock.patch.object(closeups, "RES", (64, 64)), \
                 mock.patch.object(closeups, "BORDER_PX", 4):
-            rec = stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=.445)
+            rec = stage.run_stage3f(self.run, self.client, side_beauty=True, upscale_texture=True, cap_usd=.445)
         self.assertEqual(rec["status"], "cap_reached")
         self.assertTrue(rec["views"]["close-chest+0"]["accepted"])
         self.assertFalse(rec["views"]["close-chest+45"]["accepted"])
@@ -1281,7 +1756,7 @@ class StageTests(unittest.TestCase):
         original = self.client.edit_image
 
         def edit(text, images, **kwargs):
-            if text == prompts.RF5U:
+            if text in (prompts.RF5U, prompts.RF14U):
                 raise ApiError("model failed")
             return original(text, images, **kwargs)
 
@@ -1289,7 +1764,7 @@ class StageTests(unittest.TestCase):
         with mock.patch.object(closeups, "RES", (64, 64)), \
                 mock.patch.object(closeups, "BORDER_PX", 4):
             with self.assertRaises(ApiError):
-                stage.run_stage3f(self.run, self.client, upscale_texture=True, cap_usd=5)
+                stage.run_stage3f(self.run, self.client, side_beauty=True, upscale_texture=True, cap_usd=5)
         rec = json.loads((self.run / "stage-3f.json").read_text())
         self.assertEqual(rec["status"], "error")
         self.assertEqual(rec["views"]["close-chest+0"]["reason"], "ApiError")
@@ -1318,6 +1793,138 @@ class StageTests(unittest.TestCase):
         rec = stage.run_stage3f(self.run, self.client, recipe="RF2R")
         self.assertEqual(rec["recipes"], ["RF2R", "RF3H"])
         self.assertTrue(any("Only make it sharp" in text for text, _, _ in self.client.inputs))
+
+    def test_views_for_angle_picks_cardinal_or_bracketing_pair(self):
+        from herogen.blender.refine import closeups
+        self.assertEqual(closeups.views_for_angle(0), ("front",))
+        self.assertEqual(closeups.views_for_angle(90), ("right",))
+        self.assertEqual(closeups.views_for_angle(-90), ("left",))
+        self.assertEqual(closeups.views_for_angle(180), ("back",))
+        self.assertEqual(set(closeups.views_for_angle(135)), {"back", "right"})
+        self.assertEqual(set(closeups.views_for_angle(-135)), {"back", "left"})
+        self.assertEqual(set(closeups.views_for_angle(45)), {"front", "right"})
+        self.assertEqual(set(closeups.views_for_angle(-45)), {"front", "left"})
+
+    def test_art_prompts_require_artwork_features_and_forbid_invention(self):
+        for text in (prompts.RF6R, prompts.RF6W, prompts.RF7H, prompts.RF8U):
+            self.assertIn("MUST be painted in", text)
+            self.assertIn("even when the first image does not show it yet", text)
+            self.assertIn("neither the first image nor the supplied artwork", text)
+        self.assertIn("never add a face", prompts.RF6W)
+        self.assertIn("never add ears, a face", prompts.RF7H)
+
+    def test_turnaround_reference_boundary_includes_profiles_and_wraps_yaw(self):
+        artwork = {"front": Image.new("RGB", (4, 4))}
+        for angle in (0, 40, -40, 45, -45, 89.999, -89.999, 360, -360, 720):
+            with self.subTest(angle=angle), mock.patch(
+                    "herogen.blender.refine.closeups.framed_artwork") as crop:
+                self.assertFalse(stage.side_art_yaw(angle))
+                self.assertEqual(stage.art_references(self.run, {"angle": angle}, {}, {}, artwork),
+                                 ((), {}, {}))
+                crop.assert_not_called()
+        for angle in (90, -90, 135, -135, 180, -180, 270, 450, -450):
+            with self.subTest(angle=angle):
+                self.assertTrue(stage.side_art_yaw(angle))
+
+    def test_art_views_condition_each_camera_by_yaw(self):
+        self.closeup_artwork()
+        colours = {"front": (255, 0, 0), "right": (255, 255, 0), "back": (0, 255, 0), "left": (255, 0, 255)}
+        for name, colour in colours.items():
+            Image.new("RGB", (64, 64), colour).save(self.run / f"views/{name}.png")
+        rec = stage.run_stage3f(self.run, self.client, side_beauty=True)
+        self.assertEqual(rec["recipes"], ["RF12R", "RF13H"])
+        self.assertEqual(rec["views"]["body+180"]["prompt"], "RF12R")
+        self.assertEqual(rec["views"]["body+180"]["art_views"], ["back"])
+        self.assertEqual(rec["views"]["body+90"]["art_views"], ["right"])
+        self.assertEqual(rec["views"]["body-90"]["art_views"], ["left"])
+        for key in ("head+0", "head+40", "head-40", "body+0", "body+45", "body-45"):
+            self.assertNotIn("art_views", rec["views"][key])
+            self.assertNotIn("art_framing", rec["views"][key])
+            self.assertEqual(rec["views"][key]["prompt"], "RF2R")
+        self.assertEqual(len(rec["views"]["hair-head+135"]["art_views"]), 2)
+        by_camera = {}
+        for (text, images, _), (key, view) in zip(self.client.inputs, rec["views"].items()):
+            by_camera[key] = (text, images, view)
+        text, images, _ = by_camera["body+180"]
+        self.assertEqual(text, prompts.prompt("RF12R", 180))
+        self.assertEqual(images[1].getpixel((0, 0)), colours["back"])
+        self.assertEqual(images[-1].getpixel((0, 0)), (0, 0, 255))
+        self.assertTrue((self.run / "blender-work/texture-refine/body+180/art-back.png").is_file())
+
+    def test_front_and_near_front_payloads_match_with_side_beauty_on_or_off(self):
+        from herogen.blender.refine import closeups
+        self.closeup_artwork()
+        note = "Keep the leather brown."
+        with mock.patch.object(closeups, "RES", (64, 64)), mock.patch.object(closeups, "BORDER_PX", 4):
+            baseline = stage.run_stage3f(self.run, self.client, side_beauty=False, upscale_texture=True,
+                                         recipe="RF2W", user_note=note, cap_usd=5)
+            original = dict(zip(baseline["views"], self.client.inputs))
+            self.client.inputs.clear()
+            candidate = stage.run_stage3f(self.run, self.client, side_beauty=True, upscale_texture=True,
+                                          recipe="RF2W", user_note=note, cap_usd=5)
+        compared = []
+        for (key, view), (text, images, kwargs) in zip(candidate["views"].items(), self.client.inputs):
+            if not stage.side_art_yaw(view["camera"]["angle"]):
+                with self.subTest(view=key):
+                    old_text, old_images, old_kwargs = original[key]
+                    self.assertEqual(text.encode(), old_text.encode())
+                    self.assertEqual(kwargs, old_kwargs)
+                    self.assertEqual([(im.mode, im.size, im.tobytes()) for im in images],
+                                     [(im.mode, im.size, im.tobytes()) for im in old_images])
+                    compared.append(key)
+        self.assertEqual(len(compared), 18)  # Six ordinary front views and twelve front close-ups.
+
+    def test_side_head_artwork_is_calibrated_crop_without_full_body_reference(self):
+        from herogen.blender.refine import closeups
+        self.closeup_artwork()
+        # Synthetic red head above green torso, both at known artwork coordinates.
+        art = np.zeros((64, 64, 3), np.uint8)
+        art[:15] = (255, 0, 0)
+        art[15:] = (0, 255, 0)
+        Image.fromarray(art).save(self.run / "views/right.png")
+        cam = character.cameras_for(self.info)["head+90"]
+        image, record = closeups.framed_artwork(self.run, cam, self.info, "right")
+        self.assertEqual(image.size, tuple(cam["res"]))
+        self.assertEqual(image.getpixel((32, 32)), (255, 0, 0))
+        self.assertLess(record["output_to_artwork_px"][0] * image.width, 20)
+        rec = stage.run_stage3f(self.run, self.client, side_beauty=True)
+        view = rec["views"]["head+90"]
+        self.assertIn("right", view["art_framing"])
+        self.assertEqual(view["prompt"], "RF12R")
+        images = self.client.inputs[3][1]
+        self.assertEqual(len(images), 3)
+        self.assertEqual(images[1].getpixel((32, 32)), (255, 0, 0))
+        self.assertIn("silhouette_alignment", view["art_framing"]["right"])
+        self.assertIn("never copy them", self.client.inputs[3][0])
+
+    def test_art_default_clean_recipe_and_opt_in_wear(self):
+        self.closeup_artwork()
+        rec = stage.run_stage3f(self.run, self.client, side_beauty=True)
+        self.assertEqual(rec["repaint_recipe"], "RF2R")
+        self.assertEqual(rec["recipes"], ["RF12R", "RF13H"])
+        self.assertIn("Only make it sharp", self.client.inputs[0][0])
+        self.assertNotIn("scratches, pitting, rust", self.client.inputs[0][0])
+        self.client.inputs.clear()
+        rec = stage.run_stage3f(self.run, self.client, side_beauty=True, recipe="RF2W")
+        self.assertEqual(rec["recipes"], ["RF12W", "RF13H"])
+        self.assertIn("scratches, pitting, rust", self.client.inputs[0][0])
+
+    def test_all_art_passes_preserve_construction_and_ornament_counts(self):
+        for name in prompts.ART_VARIANTS.values():
+            with self.subTest(recipe=name):
+                text = prompts.PROMPTS[name]
+                self.assertIn("diagonal straps, crossings, seams and panels", text)
+                self.assertIn("in number and material; nothing may be added", text)
+                self.assertIn("plain strap crossing stays a plain crossing", text)
+                self.assertIn("do not retain unsupported ornaments", text)
+        self.assertTrue(prompts.RF12R.startswith(prompts.RF11R))
+        self.assertTrue(prompts.RF12W.startswith(prompts.RF11W))
+
+    def test_art_materials_can_change_without_changing_geometry(self):
+        for text in (prompts.RF11R, prompts.RF11W):
+            self.assertIn("artwork determines surface colours and material appearance", text)
+            self.assertIn("If the artwork shows leather", text)
+            self.assertIn("preserving that surface's exact geometry", text)
 
     def test_unknown_recipe_is_rejected_before_any_call(self):
         with self.assertRaises(ValueError):
