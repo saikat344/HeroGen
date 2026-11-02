@@ -98,6 +98,7 @@ class FaceControl:
         self.default_tex = self.default_data = self.default_context = None
         self.default_passes = []
         self.extensions = {}
+        self.extension_calls = {}   # per view: the requests that paid its conditional slot (build log)
         self.root_client = self.persistence_lock = None
         # SideBeautyPass turnaround art turns side and rear beauty requests into RF16B.
         self.side_art = False
@@ -126,7 +127,7 @@ class FaceControl:
                        'art': (), 'art_masks': None}
             if index == 2:
                 # The default-head run pays ordinary attempt 1 first; this slot replays its cache entry.
-                options['before'] = lambda: self.extend_default(job.key)
+                options['before'] = lambda: self.extend_default(job.key, slot=index + 1)
             return cover, options
         angle = {'head+0': 0, 'body+0': 0, 'body+90': 90, 'body-90': -90,
                  'body+180': 180, 'upper+180': 180}[job.name]
@@ -279,7 +280,7 @@ class FaceControl:
                 (folder / 'texture.png').read_bytes()).hexdigest(), cap_reached=stopped)
         return stopped
 
-    def extend_default(self, key):
+    def extend_default(self, key, slot=None):
         """Pay ordinary attempt 1 for one view through the default-head run's own Pass.
 
         It runs on the main conditional slot's worker before that slot's identical request,
@@ -295,6 +296,9 @@ class FaceControl:
         from . import buildlog
         with buildlog.muted():   # the main slot that replays this sample logs its outcome
             run, child, private, folder = job.prepare(1)
+            if slot is not None:
+                # These requests pay the main run's conditional slot, so they are logged as that try.
+                child.event_fields = {**child.event_fields, 'try_': slot}
             try:
                 run()
             finally:
@@ -304,6 +308,12 @@ class FaceControl:
                     publish_files(self.root_client, child)
         with self.state_lock:
             self.extensions[key] = (private, folder)
+            self.extension_calls[key] = list(child.log.calls)
+
+    def paid_for(self, key):
+        """The requests that paid this view's conditional slot in the default-head run, if any."""
+        with self.state_lock:
+            return list(self.extension_calls.get(key, ()))
 
     def fold_default(self, key):
         """Add a paid ordinary attempt 1 to the default-head run, as ordinary fast selects it.

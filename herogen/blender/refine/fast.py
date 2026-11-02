@@ -114,6 +114,8 @@ class Pass:
         self.slots, self.conditional = 0, 0
         self.prepare = self.launch = None
         self.reported = False
+        # Requests paid on this view's behalf outside its own tries' clients, by slot index (build log).
+        self.shared_calls = lambda index: ()
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
                body_cam, recipe, persistence_lock, user_note="", view_options=None, art=(), art_masks=None, art_framing=None,
@@ -211,7 +213,8 @@ class Pass:
                                    for trial in self.completed[i]['attempts']]
         self.record['tries'] = len(self.record['attempts'])
         if private['reason'] == 'cancelled: lower attempt accepted':
-            buildlog.try_cancelled(self.key, self.tries[index], private, self.tasks[index][1].log.calls)
+            buildlog.try_cancelled(self.key, self.tries[index], private,
+                                   [*self.tasks[index][1].log.calls, *self.shared_calls(index)])
         # A higher-index answer cannot win until every lower attempt is known to have failed.
         for i in range(len(self.tasks)):
             if i not in self.completed:
@@ -442,6 +445,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 job.record['tries'] = len(job.record['attempts'])
             if error is None:
                 error = exc
+            if index < len(job.tries):
+                buildlog.try_failed(job.key, job.tries[index])
         if face_control is None:
             if job.name in ('head+0', 'body+0') and error is None and not stopped:
                 recover()
@@ -528,7 +533,12 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         buildlog.view_skipped(key, record['reason'])
                         continue
                     factory = face_control.pass_type(name) if face_control is not None else Pass
-                    jobs.append(factory(key, name, hair, record, work / key))
+                    job = factory(key, name, hair, record, work / key)
+                    if face_control is not None:
+                        # The default-head run pays a conditional slot's sample before the slot replays it.
+                        job.shared_calls = (lambda index, key=key, job=job:
+                                            face_control.paid_for(key) if index >= job.slots else ())
+                    jobs.append(job)
                 if not jobs:
                     continue
                 folder = work / f'wave-{wave_index}'
@@ -590,6 +600,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         try:
                             with state_lock:
                                 face_control.choose(jobs, work)
+                                source = dict(data.get('face_source') or {})
+                                view = source.get('view')
+                                buildlog.face_source(source.get('source'), view,
+                                                     (data['views'].get(view) or {}).get('winning_slot'))
                         except Exception as exc:
                             # Drain and collect every submitted future before reporting a
                             # missing face. A late model error must still be recorded and raised.
