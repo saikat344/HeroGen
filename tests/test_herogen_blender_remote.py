@@ -45,7 +45,9 @@ if os.environ.get("FAKE_FAIL_AFTER_OUTPUT"):
     print("line one\nline two", file=sys.stderr)
     sys.exit(4)
 env = {{k: v for k, v in os.environ.items() if k.startswith("HEROGEN_")}}
-json.dump({{"gpu": "fake", "env": env}}, open(os.path.join(out, "run.json"), "w"))
+run = {{"gpu": "fake", "env": env}}
+run.update(json.loads(os.environ.get("FAKE_RUN", "{{}}")))
+json.dump(run, open(os.path.join(out, "run.json"), "w"))
 print("using token hf_" + "a" * 30 + " Authorization: Bearer secret123")
 '''
 
@@ -257,6 +259,31 @@ class Live(Base):
         self.assertEqual(rc._gpu_timings({}), {})
         for odd in ([], "x", None, {"load_seconds": float("nan")}, {"load_seconds": "60"}):
             self.assertEqual(rc._gpu_timings(odd), {})
+
+    def test_build_log_says_cold_or_warm_with_load_and_inference_seconds(self):
+        from herogen.pipeline import events
+        log = self.tmp / "events.jsonl"
+        os.environ.update({events.ENV_FILE: str(log), events.ENV_STEP: "3"})
+        # A cold SAM 3D Objects container loads the model first; a warm SAM 3D Body one does not.
+        os.environ["FAKE_RUN"] = json.dumps({
+            "load_seconds": 60.4, "total_seconds": 157.1, "gpu_type": "A100-40GB",
+            "runs": {"job": {"seconds": 96.1, "glb_vertices": 8223, "glb_faces": 10161,
+                             "texture_size": [1024, 1024]}}})
+        rc.RemoteClient(self.cache, mode="live", timeout=60, fast=True).objects(self.img, self.msk)
+        os.environ["FAKE_RUN"] = json.dumps({"load_seconds": 0.0, "total_seconds": 4.9, "gpu_type": "A10G",
+                                             "runs": {"job": {"seconds": 4.2, "n_people": 1}}})
+        rc.RemoteClient(self.cache, mode="live", timeout=60, fast=True).body(self.img, [1, 2, 3, 4], "front mask")
+        ends = [events.validate(json.loads(x)) for x in log.read_text().splitlines()]
+        ends = [e for e in ends if e["kind"] == "gpu_end"]
+        self.assertEqual([(e["who"], e["what"], e["gpu"], e["m"]) for e in ends], [
+            ("sam-3d-objects", "3d_shape", "a100-40gb",
+             {"load_s": 60.4, "infer_s": 96.1, "vertices": 8223, "faces": 10161, "texture_px": 1024}),
+            ("sam-3d-body", "body_joints", "a10g", {"load_s": 0.0, "infer_s": 4.2, "people": 1})])
+        self.assertEqual([(e["step"], e["outcome"], "usd" in e) for e in ends], [("3", "ok", True)] * 2)
+        # A runner that reports no per-job time falls back to its time after loading; odd values are left out.
+        self.assertEqual(rc._gpu_timings({"load_seconds": 18.9, "total_seconds": 26.7}),
+                         {"load_s": 18.9, "infer_s": 7.8})
+        self.assertEqual(rc._gpu_result({"runs": {"job": {"glb_faces": True, "texture_size": "n/a (Error)"}}}), {})
 
     def test_body_needs_a_person_box(self):
         c = rc.RemoteClient(self.cache, mode="live", timeout=60)
