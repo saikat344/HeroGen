@@ -19,7 +19,9 @@
 .result-head .select-btn:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }
 
 /* ---------- Stage ---------- */
-.result-panel .viewer { --thumb-w: 76px; --thumb-h: 64px; --viewer-dock-space: var(--space-8);
+/* Every stage (the landing showcase too) sizes its dock thumbnails from these. */
+.viewer { --thumb-w: 76px; --thumb-h: 64px; }
+.result-panel .viewer { --viewer-dock-space: var(--space-8);
   height: clamp(420px, 62vh, 720px); border-radius: 0; container: stage / inline-size; }
 .viewer.has-dock { --viewer-dock-space: calc(var(--space-5) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
 .viewer.is-lit { background: radial-gradient(60% 55% at 50% 34%, color-mix(in srgb, var(--ember-300) 22%, transparent), transparent 72%), var(--stage-bg); }
@@ -48,8 +50,8 @@
 
 /* Top left: what is shown, plus model notes and the update notice. */
 .viewer__status { position: absolute; top: var(--space-5); left: var(--space-5); z-index: 4; display: grid; justify-items: start; gap: var(--space-3); max-width: calc(100% - 3 * var(--control-h-m) - 2 * var(--space-3) - 3 * var(--space-5)); }
-.viewer .viewer__label { margin: 0; display: inline-flex; align-items: center; height: var(--control-h-s); padding: 0 var(--space-4); border-radius: var(--radius-pill); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-caption); font-weight: var(--weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-.viewer[data-mode="empty"] .viewer__label { display: none; }
+.viewer__status .viewer__label { margin: 0; display: inline-flex; align-items: center; height: var(--control-h-s); padding: 0 var(--space-4); border-radius: var(--radius-pill); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-caption); font-weight: var(--weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.viewer[data-mode="empty"] .viewer__status .viewer__label { display: none; }
 .viewer .viewer__note { margin: 0; padding-left: var(--space-2); color: var(--stage-text-muted); font-size: var(--text-caption); }
 .viewer__notice { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4); border-radius: var(--radius-l); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); color: var(--stage-text); font-size: var(--text-body-s); box-shadow: var(--shadow-3); animation: banner-in var(--dur-slow) var(--ease-out); }
 .viewer__notice > .icon { color: var(--stage-accent-text); }
