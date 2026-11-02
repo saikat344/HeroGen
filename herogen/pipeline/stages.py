@@ -665,6 +665,24 @@ def orient_sides(sq: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], d
     return checks_, notes, fixes
 
 
+def fast_orient_sides(sq: dict[str, Any], assignment: dict[str, Any]
+                      ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """The fast lane's side-view correction: `orient_sides`, except that two side panels drawn exchanged
+    (right facing image left and left facing image right) are swapped rather than both mirrored, so
+    asymmetric details stay on their own side."""
+    fr = imaging.facing_offset(sq["right"]["mask"])
+    fl = imaging.facing_offset(sq["left"]["mask"])
+    if fr < -FACING_MIN and fl > FACING_MIN:
+        sq["right"], sq["left"] = sq["left"], sq["right"]
+        names = assignment.get("panel_for_view")
+        if isinstance(names, dict) and "right" in names and "left" in names:
+            names["right"], names["left"] = names["left"], names["right"]
+        checks_, notes, fixes = orient_sides(sq)
+        return checks_, ["The right and left views were exchanged on the sheet; swapped them."] + notes, {
+            "swapped_sides": True, **fixes}
+    return orient_sides(sq)
+
+
 def model_top_view(client: ModelClient, cover: Image.Image, sq: dict[str, Any], size: int, bg,
                    *, raw: Image.Image | None = None) -> dict[str, Any]:
     """Ask Muse Image for a top view and bring it to the shared scale (its width set to the front width).
@@ -1027,6 +1045,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
                 extracted = _fast_sheet_views(st, client, cover, prompt, step["params"]["size"], tried)
             raw_top = top_request.result()
             attempt, sheet, bg, split, n_inst, size, sq, assignment = extracted
+            if sq:
+                orient, orient_notes, assignment["side_fixes"] = fast_orient_sides(sq, assignment)
         else:
             sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
                      if requests is None else requests.sheet(attempt))

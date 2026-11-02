@@ -212,6 +212,10 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   The attempt records `split_source: "sam-3.1:instances"`, the original `column_runs` and
   `instance_split` boxes, height agreement and minimum area fraction. Fewer than four instances or
   implausible parts remain unusable. The full lane retains its column-only split and assignment.
+  After extraction, the fast lane applies the full lane's toe-direction correction to the side views
+  (`orient_sides`, local and free): a profile whose toes point the wrong way is mirrored. Two side panels
+  drawn exchanged (right facing image left, left facing image right) are swapped instead, so asymmetric
+  details keep their side; `assignment.side_fixes` records `swapped_sides` or `mirrored_<view>`.
   If four views cannot be extracted, stage 2 requests exactly one recovery sheet with the same prompt and
   a different sample index. Both attempts are recorded in `stage-2.json`. Quality scores never trigger
   recovery. If neither sheet can be extracted, it stops with a plain message asking the user to try again
