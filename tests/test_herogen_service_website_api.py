@@ -129,5 +129,79 @@ class HeroThumbnailTest(WebCase):
         self.assertTrue(all(j["thumbnail_url"] for j in jobs.values()))
 
 
+@web_test
+class QueuePositionTest(WebCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.alice = self.signin()
+        self.bob = self.signin("bob@example.com")
+        self.n = 0
+
+    def create(self, b) -> str:
+        self.n += 1
+        r = self.make_job(b, key=f"key-q{self.n:07d}")
+        self.assertEqual(r.status_code, 201, r.text)
+        return r.json()["id"]
+
+    def place(self, b, jid) -> tuple:
+        v = b.get(f"/api/jobs/{jid}").json()
+        listed = {j["id"]: j for j in b.get("/api/jobs").json()["jobs"]}[jid]
+        self.assertEqual((listed["queue_position"], listed["queued_ahead"]), (v["queue_position"], v["queued_ahead"]))
+        return v["queue_position"], v["queued_ahead"]
+
+    def line(self, jobs) -> list[str]:
+        """Waiting jobs in the order the service reports, from each owner's own view."""
+        places = {jid: self.place(b, jid)[0] for b, jid in jobs}
+        return sorted((j for j, p in places.items() if p), key=places.get)
+
+    def test_positions_follow_the_dispatch_order_across_workspaces(self):
+        from herogen.service.worker import dispatch_queued
+        a1, a2 = self.create(self.alice), self.create(self.alice)
+        self.assertEqual(self.submitted, [a1, a2], "two workers start; the rest wait")
+        b1, a3, b2 = self.create(self.bob), self.create(self.alice), self.create(self.bob)
+        jobs = [(self.alice, a1), (self.alice, a2), (self.bob, b1), (self.alice, a3), (self.bob, b2)]
+        self.assertEqual(self.place(self.alice, a1), (0, 0), "dispatched: a worker is starting it")
+        self.assertEqual(self.place(self.bob, b1), (1, 0))
+        self.assertEqual(self.place(self.alice, a3), (2, 1))
+        self.assertEqual(self.place(self.bob, b2), (3, 2))
+        body = self.bob.get("/api/jobs").text + self.bob.get(f"/api/jobs/{b2}").text
+        for other in (a1, a2, a3):
+            self.assertNotIn(other, body, "only counts cross workspaces")
+
+        # Each freed slot goes to the job that stood first.
+        self.alice.post(f"/api/jobs/{a1}/cancel", json={})
+        expected = self.line(jobs)
+        self.submitted.clear()
+        dispatch_queued(self.store, self.s, self.svc.submit)
+        self.assertEqual(self.submitted, expected[:1])
+        self.assertEqual(self.place(self.bob, b1), (0, 0))
+        self.assertEqual(self.place(self.alice, a3), (1, 0))
+
+        # Unclaimed dispatches go back in line at their own place once their grace runs out.
+        self.clock.advance(301)
+        expected = self.line(jobs)
+        self.assertEqual(expected, [a2, b1, a3, b2])
+        self.submitted.clear()
+        dispatch_queued(self.store, self.s, self.svc.submit)
+        self.assertEqual(self.submitted, expected[:2])
+
+    def test_only_queued_jobs_report_a_place(self):
+        a1 = self.create(self.alice)
+        self.assertEqual(self.place(self.alice, a1), (0, 0))
+        self.finish(a1)
+        self.assertEqual(self.store.job_get(a1)["state"], "succeeded")
+        self.assertEqual(self.place(self.alice, a1), (None, None))
+        a2, a3, a4 = self.create(self.alice), self.create(self.alice), self.create(self.alice)
+        self.alice.post(f"/api/jobs/{a4}/cancel", json={})
+        self.assertEqual(self.place(self.alice, a4), (None, None))
+        self.alice.send("DELETE", f"/api/jobs/{a2}", json={})
+        self.assertEqual(self.store.queue_positions([a2, a3, "j_notanid", "../x"]), {a3: 0})
+
+    def test_running_jobs_report_no_place(self):
+        a1 = self.create(self.alice)
+        self.assertIsNotNone(self.store.job_claim(a1, "call-1", 600, 3))
+        self.assertEqual(self.place(self.alice, a1), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()
