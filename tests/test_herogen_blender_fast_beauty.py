@@ -50,6 +50,15 @@ class FaceRuleTests(unittest.TestCase):
         self.assertEqual(stage.cost_estimate(refine_profile='fast'), .25)
         self.assertEqual(stage.cost_estimate(refine_profile='fast', beauty=True), .5725)
 
+    def test_fast_default_estimate_adds_one_image_and_two_sam_queries_per_reference_yaw(self):
+        # Four yaws: 4 x ($0.01 + 2 x $0.0025) = $0.06 over the beauty arm, still below the $0.80 cap.
+        self.assertEqual(stage.cost_estimate(refine_profile='fast', beauty=True, references=True), .6325)
+        self.assertEqual(stage.cost_estimate(True, refine_profile='fast', beauty=True, references=True), .6325)
+        self.assertLess(stage.cost_estimate(refine_profile='fast', beauty=True, references=True),
+                        stage.DEFAULT_CAP_USD)
+        self.assertEqual(stage.cost_estimate(), .425)
+        self.assertEqual(stage.cost_estimate(True), .825)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -709,7 +718,8 @@ class FastBeautyStageTests(unittest.TestCase):
             return result
         return view
 
-    def run_beauty(self, *, complete=True, default=True, reject=None, **kwargs):
+    def run_beauty(self, *, complete=True, default=True, reject=None, generate=None, **kwargs):
+        """`generate`, when given, replaces beauty.generate_fast and the run uses generate_beauty=True."""
         folder, _ = self.beauty_folder()
         self.tex.idx = np.arange(16)
         prep = self.run / 'prep'
@@ -729,9 +739,83 @@ class FastBeautyStageTests(unittest.TestCase):
              mock.patch.object(beauty, 'frontal_features', return_value=features), \
              mock.patch.object(B.FaceControl, 'paint') as paint, \
              mock.patch.object(stage, '_view', side_effect=view):
-            record = self.run_fast(beauty_dir=folder, **kwargs)
-        self.assertGreater(paint.call_count, 0)
+            if generate is None:
+                record = self.run_fast(beauty_dir=folder, **kwargs)
+            else:
+                with mock.patch.object(beauty, 'generate_fast', side_effect=generate):
+                    record = self.run_fast(generate_beauty=True, **kwargs)
+        if record.get('beauty_references') is None or beauty.selected_yaw(record['beauty_references'], 0) is not None:
+            self.assertGreater(paint.call_count, 0)
         return record
+
+    def generated(self, edit=None):
+        """A generate_fast stand-in: the fixture folder already holds the references; `edit` may change them."""
+        calls = []
+        def generate(run, client, out):
+            calls.append((Path(run), Path(out), threading.current_thread() is threading.main_thread()))
+            if edit is not None:
+                path = Path(out) / 'references.json'
+                path.write_text(json.dumps(edit(json.loads(path.read_text()))))
+            return {'angles': list(beauty.FAST_ANGLES), 'attempts_per_angle': 1, 'fallback': 'none',
+                    'selected': {}, 'status': 'complete', 'cost_usd': 0.0, 'seconds': 0.0, 'views': {}}
+        return generate, calls
+
+    def test_generated_references_drive_the_fast_beauty_arm(self):
+        generate, calls = self.generated()
+        record = self.run_beauty(generate=generate, cap_usd=5)
+        run = self.run.resolve()
+        self.assertEqual(calls, [(run, run / 'beauty', False)])
+        self.assertEqual(record['beauty_generation']['angles'], [0, 90, -90, 180])
+        self.assertEqual(record['beauty_generation']['attempts_per_angle'], 1)
+        self.assertEqual(record['face_source']['source'], 'beauty')
+        self.assertIn('RF18B', record['prompt_sha256'])
+        self.assertEqual(record['estimate_usd'],
+                         stage.cost_estimate(refine_profile='fast', beauty=True, references=True))
+        self.assertEqual(record['views']['body+0']['prompt'], 'RF18B')
+
+    def test_generated_front_rejection_keeps_every_standard_recipe(self):
+        def reject_front(rec):
+            rec.update(angles=list(beauty.FAST_ANGLES), fallback='none')
+            rec['views']['0'] = {'accepted': False, 'attempts': []}
+            return rec
+        generate, calls = self.generated(reject_front)
+        record = self.run_beauty(generate=generate, cap_usd=5)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(record['beauty_references']['views']['0']['accepted'])
+        self.assertNotIn('face_source', record)
+        self.assertIn('no usable front beauty reference; standard recipes', record['notes'])
+        self.assertTrue(all(v.get('prompt') in ('RF2R', 'RF3H') for v in record['views'].values()
+                            if v['accepted']))
+        self.assertEqual(record['status'], 'complete')
+
+    def test_generated_rejected_side_yaw_uses_the_standard_recipe(self):
+        def fast_record(rec):
+            rec.update(angles=list(beauty.FAST_ANGLES), fallback='none')
+            rec['views']['90'] = {'accepted': False, 'attempts': []}
+            return rec
+        generate, _ = self.generated(fast_record)
+        record = self.run_beauty(generate=generate, cap_usd=5)
+        self.assertEqual(record['face_source']['source'], 'beauty')
+        self.assertIsNone(record['beauty_references']['fallbacks']['90'])
+        side = record['views']['body+90']
+        self.assertIn('standard recipe', side.get('note', ''))
+        self.assertTrue(all(a.get('prompt') in ('RF2R', None) for a in side['attempts']))
+
+    def test_generation_model_error_is_loud_after_setup_drains(self):
+        def generate(run, client, out):
+            raise ApiError('reference edit failed')
+        with self.assertRaisesRegex(ApiError, 'reference edit failed'):
+            self.run_beauty(generate=generate, cap_usd=5)
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
+    def test_generated_references_need_the_fast_profile_and_no_saved_folder(self):
+        with self.assertRaisesRegex(ValueError, 'fast refine profile'):
+            stage.run_stage3f(self.run, self.client, refine_profile='best', generate_beauty=True)
+        with self.assertRaisesRegex(ValueError, 'not both'):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast', generate_beauty=True,
+                              beauty_dir=self.run / 'beauty')
 
     def paid_run(self, *, all_flags=False, reject=None, beauty=True):
         """Run with the real request-key cache and fake only the paid transport.

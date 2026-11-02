@@ -84,10 +84,15 @@ class Budget:
             raise BudgetStop(f"API cap: projected ${projected:.4f} exceeds ${self.cap:.4f}")
 
 
-def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best", beauty=False):
-    """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples."""
+def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best", beauty=False,
+                  references=False):
+    """Per-run list-price projection; no cache discount or transport retries. Hair uses up to two samples.
+
+    ``references`` adds fast-lane beauty-reference generation: one image and two SAM queries per yaw.
+    """
     normal, hair = (3, 2) if maximum else (1, 1)
     if refine_profile == "fast":
+        from .beauty import FAST_ANGLES
         from .fast import ATTEMPTS, WAVES
         sequence = [view for wave in WAVES for view in wave]
         normal_count = sum(not hair for _, hair in sequence)
@@ -96,6 +101,10 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
         normal = hair = ATTEMPTS
         images = normal_count * normal + hair_count * hair
         segments = 2 + normal_count * normal * 4 + hair_count * hair * 5
+        if references:
+            # One BT1 sample per yaw, its outline mask and, when style selection would use it, its head crop.
+            images += len(FAST_ANGLES)
+            segments += 2 * len(FAST_ANGLES)
         if beauty:
             # One beauty head slot and two body-front slots: reference face/features,
             # repaint features and both-eye regions, before any exact-cache discount.
@@ -112,6 +121,30 @@ def cost_estimate(maximum=False, upscale_texture=False, *, refine_profile="best"
         images += 16 * normal
         segments += 16 * (3 + normal)
     return round(images * PRICE_PER_IMAGE_USD[IMAGE_MODEL] + segments * PRICE_PER_IMAGE_USD[SAM_MODEL], 6)
+
+
+def fast_product_options(side_beauty=None, beauty=None, beauty_dir=None, env=None):
+    """The fast product lane's stage-3f defaults: SideBeautyPass and generated beauty references on.
+
+    Explicit flags win; otherwise HEROGEN_SIDE_BEAUTY and HEROGEN_REFINE_BEAUTY (0 or 1, unset means 1)
+    decide. A saved folder (flag or HEROGEN_REFINE_BEAUTY_DIR) replaces generation. The region palette
+    stays opt-in. Returns run_stage3f keyword arguments.
+    """
+    env = os.environ if env is None else env
+
+    def switch(name, value):
+        if value is not None:
+            return bool(value)
+        raw = env.get(name) or "1"
+        if raw not in ("0", "1"):
+            raise ValueError(f"{name} must be 0 or 1")
+        return raw == "1"
+
+    side, enabled = switch("HEROGEN_SIDE_BEAUTY", side_beauty), switch("HEROGEN_REFINE_BEAUTY", beauty)
+    saved = beauty_dir or env.get("HEROGEN_REFINE_BEAUTY_DIR") or None
+    if saved is not None and not enabled:
+        raise ValueError("beauty is switched off but a saved beauty folder was given")
+    return {"side_beauty": side, **({"beauty_dir": saved} if saved is not None else {"generate_beauty": enabled})}
 
 
 def side_art_yaw(angle):
@@ -349,7 +382,7 @@ def _artwork_grade(run, prep, cam, folder, record, timeout, *, artwork=None, art
 
 def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAULT_CAP_USD, timeout=900.0,
                 upscale_texture=False, recipe="RF2R", refine_profile=None, user_note: str = "",
-                beauty_dir=None, side_beauty=None, region_palette=False):
+                beauty_dir=None, side_beauty=None, region_palette=False, generate_beauty=False):
     """Write 03-refined.glb after stage 3. Rejected views and cap stops are successful recorded fallbacks.
 
     Model failures are recorded and re-raised. A retry counts this run's previous stage-3f spend toward its cap;
@@ -362,6 +395,9 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     in stage-3f.json. ``side_beauty`` opts side/rear yaws (90 through 270 degrees) into
     yaw-matched turnaround conditioning; front-facing passes keep their default recipe and references. None reads
     HEROGEN_SIDE_BEAUTY=1. It requires all four cardinal drawings, calibration and masks for close views.
+    ``generate_beauty`` (fast profile only, instead of ``beauty_dir``) generates this run's beauty references
+    into ``<run>/beauty`` with `beauty.generate_fast`, beside setup and preparation, then uses them as a saved
+    folder. Its calls count toward this stage's cost and cap.
     """
     side_beauty = (os.environ.get("HEROGEN_SIDE_BEAUTY", "0") == "1" if side_beauty is None else side_beauty)
     user_note = clean_note(user_note, allow_empty=True)
@@ -370,12 +406,18 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         raise ValueError("refine_profile must be best or fast")
     if refine_profile == "fast" and upscale_texture:
         raise ValueError("fast refinement cannot add upscale-texture passes")
+    if generate_beauty:
+        if refine_profile != "fast":
+            raise ValueError("generated beauty references need the fast refine profile")
+        if beauty_dir is not None:
+            raise ValueError("use saved or generated beauty references, not both")
+        beauty_dir = Path(run).resolve() / "beauty"
     beauty_dir = beauty_dir if beauty_dir is not None else os.environ.get("HEROGEN_REFINE_BEAUTY_DIR") or None
     if beauty_dir is not None and not Path(beauty_dir).is_absolute():
         beauty_dir = Path(run) / beauty_dir
     beauty_refs = None
     beauty_selection = None
-    if beauty_dir is not None:
+    if beauty_dir is not None and not generate_beauty:
         from . import beauty
         beauty_dir = Path(beauty_dir)
         beauty_refs = beauty.load(beauty_dir)
@@ -402,9 +444,11 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     state_lock = budget.lock if budget is not None else threading.RLock()
     rec.data.update(profile=profile, views={}, cost_basis=COST_BASIS + "; replayed (cached) calls cost 0",
                     estimate_usd=cost_estimate(upscale_texture=upscale_texture, refine_profile=refine_profile,
-                                               beauty=beauty_refs is not None),
+                                               beauty=beauty_refs is not None or generate_beauty,
+                                               references=generate_beauty),
                     estimate_max_samples_usd=cost_estimate(True, upscale_texture, refine_profile=refine_profile,
-                                                          beauty=beauty_refs is not None),
+                                                          beauty=beauty_refs is not None or generate_beauty,
+                                                          references=generate_beauty),
                     recipes=[recipe, "RF3H"] + (["RF5U"] if upscale_texture else []),
                     repaint_recipe=recipe, upscale_texture=upscale_texture, texture_size=4096, final_model="03-source.glb",
                     thresholds={})
@@ -476,6 +520,13 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         client.before_api_attempt = guard
         client.after_api_attempt = settle
     current_record = None
+    generation = None
+
+    def drain():
+        # Generated references run beside setup; never record a result while their calls can still settle.
+        if generation is not None:
+            generation[0].shutdown(wait=True)
+
     try:
         save(ok=False, status="running")
         if recipe not in ("RF2R", "RF2W"):
@@ -527,6 +578,11 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         setup_options = {"save_palette_masks": True} if auto_palette else {}
         if beauty_dir is not None:
             setup_options["save_head_mask"] = True
+        if generate_beauty:
+            from concurrent.futures import ThreadPoolExecutor
+            from . import beauty
+            pool = ThreadPoolExecutor(max_workers=1)
+            generation = (pool, pool.submit(beauty.generate_fast, run, client, beauty_dir))
         info = C.setup(source, work, client, timeout=timeout, **setup_options)
         closeup_cams = []
         if upscale_texture:
@@ -539,10 +595,12 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                 closeups.artwork_camera(run, info, view)
         head_found = info["head_centre"] is not None
         head_note = "head on the front render" if head_found else "no head on the front render; head views skipped"
-        rec.add(check("head_found", head_found, gate=False, note=head_note))
-        if not head_found:
-            rec.note(head_note)
-            rec.note("face exclusion skipped: no head on the front render")
+        # Generated references may checkpoint this record from their own threads.
+        with state_lock:
+            rec.add(check("head_found", head_found, gate=False, note=head_note))
+            if not head_found:
+                rec.note(head_note)
+                rec.note("face exclusion skipped: no head on the front render")
         save(ok=False, status="running")
         prep = C.prep(source, info, work, timeout=timeout)
         cams = C.cameras_for(info)
@@ -553,6 +611,23 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         current = prep / "base.png"
         grade = None
         default_face_base = None
+        if generation is not None:
+            generated = generation[1].result()
+            drain()
+            rec.data["beauty_generation"] = {k: generated.get(k) for k in (
+                "angles", "attempts_per_angle", "fallback", "selected", "status", "cost_usd", "seconds")}
+            beauty_selection = beauty_refs = beauty.load(beauty_dir)
+            if beauty.selected_yaw(beauty_refs, 0) is None:
+                beauty_refs = None
+            rec.data["beauty_references"] = beauty_selection
+            if beauty_refs is not None:
+                rec.data["prompt_sha256"].update({name: hashlib.sha256(PROMPTS[name].encode()).hexdigest()
+                                                  for name in ("RF5B", "RF6B", "RF17B", "RF18B")})
+                if not artwork:
+                    rec.data["recipes"] = ["RF6B"]
+            else:
+                rec.note("no usable front beauty reference; standard recipes")
+            save(ok=False, status="running")
         if beauty_refs is not None and refine_profile == "fast":
             import shutil
             default_face_base = work / "default-face-base.png"
@@ -688,17 +763,20 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             rec.note("all views rejected; keeping 03-source.glb")
         return save(status="cap_reached" if stopped else "complete")
     except BudgetStop as exc:
+        drain()
         if refine_profile == "fast":
             empty_progress(run, done=True)
         rec.data["stop_reason"] = str(exc)
         rec.note(str(exc))
         return save(status="cap_reached")
     except Exception as exc:
+        drain()
         if current_record is not None:
             current_record.update(accepted=False, reason=type(exc).__name__)
         save(ok=False, status="error", error=error_text(exc, run))
         raise
     finally:
+        drain()
         if budget is not None:
             client.before_api_attempt = previous_guard
             client.after_api_attempt = previous_settle
