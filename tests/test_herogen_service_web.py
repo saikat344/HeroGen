@@ -370,7 +370,7 @@ class TestJobsApi(WebCase):
         listed = b.get("/api/jobs").json()["jobs"]
         self.assertEqual([j["id"] for j in listed], [job["id"]])
 
-    def test_the_hero_list_carries_the_start_time_for_run_times(self):
+    def test_the_hero_list_carries_the_start_and_export_fields_for_run_times(self):
         b = self.signin()
         job = self.make_job(b).json()
         queued = b.get("/api/jobs").json()["jobs"][0]
@@ -382,6 +382,9 @@ class TestJobsApi(WebCase):
         detail = b.get(f"/api/jobs/{job['id']}").json()
         self.assertGreaterEqual(done["started_at"], done["created_at"] + 120, "run time starts after the wait")
         self.assertEqual(done["started_at"], detail["started_at"])
+        self.assertEqual((done["export_state"], done["export_seconds"]), (detail["export_state"], detail["export_seconds"]))
+        self.assertEqual(done["export_state"], "ready")
+        self.assertIsNotNone(done["export_seconds"])
 
     def test_an_accepted_hero_warms_the_3d_models_and_a_page_load_does_not(self):
         warm = mock.Mock()

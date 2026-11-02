@@ -663,7 +663,7 @@ class App:
     def job_summary(j: dict[str, Any]) -> dict[str, Any]:
         return {"id": j["id"], "kind": j["kind"], "name": j["name"], "profile": j["profile"], "state": j["state"],
                 "created_at": j["created_at"], "started_at": j["started_at"], "finished_at": j["finished_at"],
-                "stage": j["stage"],
+                "export_state": j["export_state"], "export_seconds": j["export_seconds"], "stage": j["stage"],
                 "stage_label": STAGE_LABELS.get(j["stage"] or "", None),
                 "parent_job": j["parent_job"], "from_stage": j["from_stage"], "note": j["note"],
                 "stop_after": j["stop_after"], "build_all": bool(j["build_all"])}
@@ -783,12 +783,12 @@ class App:
         return {**self.job_summary(job), "thumbnail_url": thumb, **self.queue_fields(place), "prompt": job["prompt"],
                 "attempts": job["attempts"], "stages": stages, "error": err, "seconds": job["seconds"],
                 "cost_usd": job["cost_usd"], "cost_is_estimate": True,
-                "model_ready_at": job["model_ready_at"], "export_state": job["export_state"],
+                "model_ready_at": job["model_ready_at"],
                 "roblox_state": ('ready' if files['downloads']['roblox']['available'] else 'unavailable'
                     if any(rows.get(k, {}).get('state') in ('skipped', 'failed', 'rejected') for k in ('4', '6'))
                     else job['export_state']),
                 "roblox_message": files['downloads']['roblox'].get('reason', ''),
-                "export_message": job["export_message"], "export_seconds": job["export_seconds"],
+                "export_message": job["export_message"],
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
                 "code_commit": job["code_commit"] or None, "images": files["images"],
                 "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],

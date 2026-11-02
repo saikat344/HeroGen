@@ -99,8 +99,12 @@ export function heroStatus(job, detail) {
       return { tone: 'run', icon: 'loader-circle', label: 'Running', note, now: label, progress, active: true };
     }
     case 'succeeded': {
-      const note = finishedNote({ ...job, export_state: detail?.export_state, export_seconds: detail?.export_seconds }, span, detail?.started_at ?? job.started_at);
-      if (detail?.roblox_state === 'ready') return { tone: 'ok', icon: 'person-standing', label: 'Roblox ready', note, progress, active: false };
+      // The list carries the export fields too, so a card without its detail record still knows the Roblox steps are
+      // running. The list is the fresher of the two (it is polled; the detail is fetched once), so it wins.
+      const exporting = (job.export_state ?? detail?.export_state) === 'running';
+      const note = finishedNote({ ...job, export_state: job.export_state ?? detail?.export_state,
+        export_seconds: job.export_seconds ?? detail?.export_seconds }, span, job.started_at ?? detail?.started_at);
+      if (detail?.roblox_state === 'ready' && !exporting) return { tone: 'ok', icon: 'person-standing', label: 'Roblox ready', note, progress, active: false };
       return { tone: 'ok', icon: 'circle-check', label: 'Ready', note, progress, active: false };
     }
     case 'failed':
@@ -127,6 +131,11 @@ export function thumbnailOf(job, detail) {
     if (first) return first;
   }
   return null;
+}
+
+// A hero is still changing while it waits or runs, and for a succeeded hero while its Roblox steps run on.
+export function stillWorking(job) {
+  return ACTIVE.has(job.state) || (job.state === 'succeeded' && job.export_state === 'running');
 }
 
 // Which cards need GET /api/jobs/{id}. Running heroes always do (live progress); finished ones only when the
@@ -298,7 +307,7 @@ export function heroesView($, { api, open, create, refresh, clock = () => Date.n
     const wanted = roots.map(({ job }, index) => ({ job, index })).filter(({ job, index }) => needsDetail(job, index))
       .filter(({ job }) => {
         const cached = details.get(job.id);
-        return ACTIVE.has(job.state) || !cached || cached.state !== job.state;
+        return stillWorking(job) || !cached || cached.state !== job.state || cached.data?.export_state === 'running';
       });
     if (!wanted.length) return;
     await Promise.all(wanted.map(async ({ job }) => {
@@ -310,7 +319,7 @@ export function heroesView($, { api, open, create, refresh, clock = () => Date.n
 
   function schedule() {
     clearTimeout(timer);
-    if (!visible || document.hidden || !jobs.some((job) => ACTIVE.has(job.state))) return;
+    if (!visible || document.hidden || !jobs.some(stillWorking)) return;
     timer = setTimeout(() => { Promise.resolve(refresh()).catch(() => {}); }, 3000);
   }
 
