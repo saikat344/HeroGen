@@ -378,18 +378,19 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertEqual(digest, NORMAL_CONTENT_DIGEST)
 
 
-# Request keys and output bytes hash encoded PNGs; these pins were recorded with the macOS encoder.
+# Request keys and output bytes hash encoded PNGs; these pins were recorded with the macOS encoder. The two
+# sheet request keys and both digests include the default sheet prompt (turnaround-v3); output bytes do not.
 ENCODED_PINS = sys.platform == "darwin"
 NORMAL_CALLS = [
-    ("edit", "0867a0385b7feb0c63468c66"),
+    ("edit", "804398e827dc012db9f1b940"),
     ("segment", "9302b952f81373828870cd26"),
-    ("edit", "735c9c6f449b82c89401d21b"),
+    ("edit", "04cf7d09a3b79d7201325e73"),
     ("segment", "2dcb9fb7700a2af50b009578"),
     ("edit", "41740058fdaa10cf327b133a"),
     ("segment", "d38ec3d8617112edca5d1d5b"),
 ]
-NORMAL_DIGEST = "05a7116567d2b3a588b02b83a66d6ad69859c682aefea708fa0038e820f7d058"
-NORMAL_CONTENT_DIGEST = "ba7ddb6d59eaa4e85abdeed44e1fada0ed0f03937f7de5c3be55d4dedfebdcb7"
+NORMAL_DIGEST = "3d18075af0971c21d49463a2831e72fe5bb755d988c68b7c28588b5390c719e1"
+NORMAL_CONTENT_DIGEST = "02e621aaff89b56ecad019e35bfd23e52bb462bfd74ea37163b8926dd5f239fe"
 
 
 def _profile(toes: int) -> dict:
