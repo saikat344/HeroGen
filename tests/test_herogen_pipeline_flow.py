@@ -115,7 +115,7 @@ class FakeAPI:
         elif prompt.startswith(stages.COVER_PROMPT):
             src = _decode_data_url(body["images"][0]["image_url"])
             img = paint(imaging.threshold_mask(src), colour=(30, 80, 160), bg=(235, 235, 235))
-        elif prompt.startswith(stages.TURNAROUND_PROMPT):
+        elif prompt.startswith(stages.TURNAROUND_V1_PROMPT):  # the stem every turnaround version extends
             img, _ = sheet(order=self.sheet_order)
         elif prompt == stages.TOP_PROMPT:
             img = paint(place(figure_mask(200, "front"), (300, 280), (50, 40)))  # not a real top view
@@ -386,7 +386,7 @@ class RedoFlowTest(_RunsTest):
         after = RunFolder(self.root, "child").read_stage(2)
         self.assertEqual(before["checks"], after["checks"])
         self.assertIn("«left view: satchel missing»", after["details"]["prompt"])
-        self.assertEqual(after["details"]["prompt_version"]["name"], "turnaround-redo-v1")
+        self.assertEqual(after["details"]["prompt_version"]["name"], "turnaround-redo-v2")
         self.assertEqual(len(after["details"]["attempts"]), 1)
 
 
@@ -417,7 +417,7 @@ class FlowTest(_RunsTest):
         self.assertEqual(meta["top_method"], "visual_hull")
         s2 = json.loads((run / "stage-2.json").read_text())
         self.assertTrue(s2["ok"])
-        self.assertEqual(s2["details"]["prompt_version"], prompts.load("turnaround-v1").ref())
+        self.assertEqual(s2["details"]["prompt_version"], prompts.load("turnaround-v3").ref())
         self.assertEqual(s2["details"]["prompt"], stages.TURNAROUND_PROMPT)
         self.assertEqual(len(s2["details"]["attempts"]), 1)
         # sheet and top view; SAM on the sheet, the top view and the front view's face and head

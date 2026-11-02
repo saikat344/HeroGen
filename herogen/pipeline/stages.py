@@ -37,7 +37,7 @@ COVER_PROMPT = (
     "Plain flat light-grey background, no ground shadow, no scenery, no text."
 )
 
-TURNAROUND_PROMPT = (
+TURNAROUND_V1_PROMPT = (
     "Character turnaround sheet of this exact character: same costume, colours and proportions. "
     "Four full-body views side by side in one horizontal row, all at exactly the same scale, feet on one "
     "shared baseline, heads at the same height, evenly spaced with wide empty gaps between the figures. "
@@ -54,6 +54,19 @@ TURNAROUND_PROMPT = (
     "body, the same in every view. "
     "Orthographic projection, no perspective. "
     "Plain flat white background, no shadows, no text, no labels, no grid lines."
+)
+
+# The default sheet prompt (turnaround-v3): the turnaround-v1 text plus arms clear of the body, visible hands,
+# stowed props and opposite-facing profiles.
+TURNAROUND_PROMPT = TURNAROUND_V1_PROMPT + (
+    " In the front and back views each arm is held clearly away from the body, with a strip of plain background "
+    "between the arm and the torso along its whole length, and each arm ends in a complete open hand with "
+    "fingers, outside any sleeve, cuff or cape. "
+    "Wide sleeves, robes, capes and ponchos hang from the shoulders without covering the arms or hands. "
+    "Every carried item and accessory, including bags and their straps, stays attached to the same place on "
+    "the body in all four views; a weapon, staff or other prop held in a hand is worn on the back or belt "
+    "instead, the same in all four views. "
+    "The two side views face opposite ways."
 )
 
 TOP_PROMPT = (
