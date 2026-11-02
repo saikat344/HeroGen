@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -24,6 +25,10 @@ from test_herogen_pipeline_fast import ConcurrentAPI
 from test_herogen_pipeline_prompt import draw
 import test_herogen_pipeline_flow as flow
 
+
+
+# Request bodies embed encoded PNGs and records hash them; these pins were recorded with the macOS encoder.
+ENCODED_PINS = sys.platform == "darwin"
 
 class FastInputTests(unittest.TestCase):
     def setUp(self):
@@ -421,6 +426,10 @@ class FastInputTests(unittest.TestCase):
             "ok": "9c3bd4ab703e7c93163cded2a7447ab4c629ac4b6ac698ae293b96731fc5d88b",
             "cut": "7e4a380f510c56e0a8da8f947d3a745b30201af289e4cf9f23b55e6050bc7f13",
         }
+        expected_content = {
+            "ok": "ed938b460077a77ba8f53a974b6065043f5d45d386264787e21b60bd484417b1",
+            "cut": "30827d241b859795be266b67f885b0e75e9db2e27f9203ef25a033f04383e2ff",
+        }
         for scenario in ("ok", "cut"):
             with self.subTest(scenario=scenario):
                 self.input(scenario)
@@ -440,9 +449,16 @@ class FastInputTests(unittest.TestCase):
                 self.assertNotIn("upload_failed_checks", record["details"])
                 self.assertNotIn("prompt_version", record["details"])
                 stable = {k: v for k, v in record.items() if k not in {"started", "seconds"}}
-                encoded = json.dumps({"requests": self.requests, "record": stable},
+                if ENCODED_PINS:
+                    # Recorded on macOS: request bodies embed encoded PNGs and record keys hash them.
+                    encoded = json.dumps({"requests": self.requests, "record": stable},
+                                         sort_keys=True, separators=(",", ":")).encode()
+                    self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected[scenario])
+                # Platform-independent: decoded pixels and request content, derived on macOS where the encoded
+                # pins above also hold, so it pins the same flow.
+                content = json.dumps(flow.stable_content({"requests": self.requests, "record": stable}),
                                      sort_keys=True, separators=(",", ":")).encode()
-                self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected[scenario])
+                self.assertEqual(hashlib.sha256(content).hexdigest(), expected_content[scenario])
 
     def test_prompt_hidden_or_single_foot_is_informational_without_completion(self):
         for feet in ("missing", "single", "upper"):

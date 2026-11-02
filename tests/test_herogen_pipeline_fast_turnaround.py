@@ -4,6 +4,7 @@ from contextlib import nullcontext
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -33,6 +34,7 @@ class FastTurnaroundTests(unittest.TestCase):
         self.good = flow.sheet()[0]
         self.bad = flow.sheet(order=("front", "right", "front"))[0]
         self.client = ModelClient(self.root / "cache", mode="live", fast=True)
+        self.requests = []
 
     def execute(self, sheets, *, attempts=9, instances=None, top=None, barrier=None, inspect_edits=True):
         self.api = flow.SheetsAPI(sheets)
@@ -44,6 +46,7 @@ class FastTurnaroundTests(unittest.TestCase):
             self.run.write_json("masks/parts.json", {})
             return {}
         def post(client, endpoint, body, **_):
+            self.requests.append([endpoint, body])
             if endpoint == "images/edits" and body["prompt"] in (stages.TOP_PROMPT, stages.TURNAROUND_PROMPT):
                 if barrier is not None and body["prompt"] == stages.TOP_PROMPT:
                     barrier.wait(timeout=5)
@@ -358,16 +361,25 @@ class FastTurnaroundTests(unittest.TestCase):
     def test_non_fast_recorded_call_sequence_and_outputs_unchanged(self):
         self.client = ModelClient(self.root / "cache", mode="live", fast=False)
         record = self.execute([self.bad, self.good], attempts=4)
-        # Recorded from the original normal-mode flow, including request/cache identities.
-        sequence = [(c["kind"], c["key"]) for c in record["calls"]]
-        self.assertEqual(sequence, NORMAL_CALLS)
         stable = {k: v for k, v in record.items() if k not in ("started", "seconds", "calls")}
-        stable["output_bytes"] = {p: hashlib.sha256((self.run.path / p).read_bytes()).hexdigest()
-                                  for p in record["outputs"]}
-        digest = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
-        self.assertEqual(digest, NORMAL_DIGEST)
+        if ENCODED_PINS:
+            # Recorded on macOS from the original normal-mode flow; request keys and output bytes hash
+            # encoded PNGs, which depend on the platform's PNG encoder.
+            self.assertEqual([(c["kind"], c["key"]) for c in record["calls"]], NORMAL_CALLS)
+            encoded = {**stable, "output_bytes": {p: hashlib.sha256((self.run.path / p).read_bytes()).hexdigest()
+                                                  for p in record["outputs"]}}
+            self.assertEqual(hashlib.sha256(json.dumps(encoded, sort_keys=True).encode()).hexdigest(), NORMAL_DIGEST)
+        # Platform-independent: request content with decoded pixels, call kinds, the record and decoded outputs.
+        # Derived on macOS where the encoded pins above also hold, so it pins the same original flow.
+        content = flow.stable_content({"requests": self.requests, "calls": [c["kind"] for c in record["calls"]],
+                                       "record": stable})
+        content["outputs"] = {p: flow.file_digest(self.run.path / p) for p in record["outputs"]}
+        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+        self.assertEqual(digest, NORMAL_CONTENT_DIGEST)
 
 
+# Request keys and output bytes hash encoded PNGs; these pins were recorded with the macOS encoder.
+ENCODED_PINS = sys.platform == "darwin"
 NORMAL_CALLS = [
     ("edit", "0867a0385b7feb0c63468c66"),
     ("segment", "9302b952f81373828870cd26"),
@@ -377,6 +389,7 @@ NORMAL_CALLS = [
     ("segment", "d38ec3d8617112edca5d1d5b"),
 ]
 NORMAL_DIGEST = "05a7116567d2b3a588b02b83a66d6ad69859c682aefea708fa0038e820f7d058"
+NORMAL_CONTENT_DIGEST = "ba7ddb6d59eaa4e85abdeed44e1fada0ed0f03937f7de5c3be55d4dedfebdcb7"
 
 
 def _profile(toes: int) -> dict:
