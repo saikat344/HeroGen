@@ -382,6 +382,7 @@ class BuildLogEventsTest(unittest.TestCase):
     """A fake transport drives the real request path; the build log's event sequence is asserted."""
 
     def setUp(self):
+        self.addCleanup(events.reset_step, events.set_step(None))   # no step left over from another test
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.events = Path(self.tmp.name) / events.FILE

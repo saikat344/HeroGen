@@ -203,6 +203,8 @@ INFORMATIONAL = {"meshes_bound"}
 
 class BuildLogEventsTest(unittest.TestCase):
     def setUp(self):
+        from herogen.pipeline import events as build_log
+        self.addCleanup(build_log.reset_step, build_log.set_step(None))   # no step left over from another test
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "run"
         self.events = Path(self.tmp.name) / "events.jsonl"

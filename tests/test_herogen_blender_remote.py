@@ -169,6 +169,8 @@ class Replay(Base):
 
 class Live(Base):
     def setUp(self):
+        from herogen.pipeline import events as build_log
+        self.addCleanup(build_log.reset_step, build_log.set_step(None))   # no step left over from another test
         super().setUp()
         fake = self.tmp / "modal"
         fake.write_text(FAKE_MODAL.format(python=sys.executable))
