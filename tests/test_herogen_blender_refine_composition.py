@@ -78,7 +78,7 @@ class CompositionTests(unittest.TestCase):
         self.assertIn('never copy them', text)
         self.assertEqual(prompts.ART_VARIANTS['RF6B'], 'RF16B')
 
-    def test_rejected_side_beauty_uses_the_existing_ordinary_artwork_slot(self):
+    def test_rejected_side_beauty_uses_the_exact_ordinary_default_slot(self):
         self.artwork()
         original = stage._view
         def repaint(*args, **kwargs):
@@ -97,11 +97,12 @@ class CompositionTests(unittest.TestCase):
             view = rec['views'][key]
             self.assertTrue(view['accepted'])
             self.assertEqual(view['selected_attempt'], 1)
-            self.assertEqual(view['prompt'], 'RF13H' if key.startswith('hair-') else 'RF12R')
-            self.assertEqual(view['reference_style'], 'turnaround artwork and original cover')
+            self.assertEqual(view['prompt'], 'RF3H' if key.startswith('hair-') else 'RF2R')
+            self.assertEqual(view['winning_slot'], 2)
+            self.assertNotIn('art_views', view)
             self.assertLessEqual(view['tries'], fast.ATTEMPTS)
             self.assertEqual(view['attempts'][1]['try'], 1)
-            self.assertEqual(view['attempts'][1]['reference_style'], view['reference_style'])
+            self.assertNotIn('reference_style', view['attempts'][1])
         for text, images, _ in self.client.inputs:
             self.assertTrue(text.endswith('«Keep brown leather.»'))
             if 'turnaround artwork for this viewpoint' in text:

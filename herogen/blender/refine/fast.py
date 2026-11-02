@@ -118,6 +118,8 @@ class Pass:
                 options['attempt_start'] = 0
             attempt_index = options.pop('attempt_start', index)
             attempt_render = options.pop('rendered', rendered)
+            attempt_art = options.pop('art', art)
+            attempt_masks = options.pop('art_masks', art_masks)
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
@@ -131,7 +133,7 @@ class Pass:
                                  timeout, view_cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=attempt_render, apply=lambda *args: 0,
                                  attempts=1, attempt_start=attempt_index, cancelled=self.cancelled, user_note=user_note,
-                                 art=art, art_masks=art_masks, **options)
+                                 art=attempt_art, art_masks=attempt_masks, **options)
             self.tasks.append((future, child, private, folder))
 
     def collect(self, index):
@@ -159,6 +161,7 @@ class Pass:
                     self.selected = i
                     self.record.update({k: v for k, v in candidate.items() if k not in ('attempts', 'tries')})
                     self.record['selected_attempt'] = i
+                    self.record['winning_slot'] = i + 1
                     self.folder.mkdir(parents=True, exist_ok=True)
                     for source in self.tasks[i][3].iterdir():
                         if source.is_file():
@@ -287,6 +290,14 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         face_client = isolated_client(client, 'face-source', persistence_lock)
         if hasattr(face_client, 'network_attempts'):
             face_client._initial_network_attempts = face_client.network_attempts
+        try:
+            stopped = bool(face_control.default_fast(face_client, prep, tex, cams, work, timeout, cover,
+                                                   head_found, recipe, save, user_note))
+        finally:
+            publish(client, face_client)
+            face_client.log.calls.clear()
+            if hasattr(face_client, 'network_attempts'):
+                face_client._initial_network_attempts = face_client.network_attempts
     data['waves'] = []
     all_passes = []
     for sequence in WAVES:
@@ -359,7 +370,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                                    'cams': [cams[j.name] for j in jobs], 'out': str(folder), 'pos': True},
                         folder / 'blender.log', timeout=timeout)
                 if face_control is not None and wave_index == 1 and head_found:
-                    face_control.render_default(prep, cams['head+0'], folder, timeout)
+                    face_control.default_render = face_control.default_work / 'wave-1'
                 for job in jobs:
                     art, masks, framing = (), None, None
                     if art_context is not None:
