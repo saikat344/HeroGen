@@ -58,12 +58,14 @@ class TestLandingPage(ServiceBrowserCase):
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'light')
         self.assertEqual(self.tab.errors, [])
 
-    def test_mobile_orders_steps_before_sketchbook_without_overflow(self):
+    def test_mobile_layout_has_no_overflow_or_missing_art(self):
         t = self.tab
-        t.call('Emulation.setDeviceMetricsOverride', width=390, height=844, deviceScaleFactor=1, mobile=True)
-        self.ready()
-        self.assertTrue(t.eval("document.querySelector('.sketchbook').getBoundingClientRect().top > document.querySelector('.journey').getBoundingClientRect().bottom"))
-        self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'))
+        for width in (360, 390):
+            t.call('Emulation.setDeviceMetricsOverride', width=width, height=844, deviceScaleFactor=1, mobile=True)
+            self.ready()
+            self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'), width)
+        self.assertIsNone(t.eval("document.querySelector('.sketchbook, img[src*=\"/assets/art/\"]')"))
+        self.assertEqual(t.eval("document.querySelectorAll('.journey > .step').length"), 4)
         self.assertTrue(t.eval("document.querySelector('#landingCanvas').getBoundingClientRect().top > document.querySelector('#jobForm').getBoundingClientRect().bottom"))
         self.assertTrue(t.eval("document.querySelector('#headerSignIn').hidden"))
         self.assertEqual(self.tab.errors, [])
@@ -75,18 +77,59 @@ class TestLandingPage(ServiceBrowserCase):
         self.assertEqual(self.store.users_list(), [])
         self.assertEqual(self.store.jobs_admin_list(), [])
 
-    def test_shading_icons_render_when_studio_static_is_absent(self):
+    def test_shading_icons_come_from_the_site_sprite_when_studio_static_is_absent(self):
         from unittest.mock import patch
 
         with patch('herogen.service.labapi.studio_static', return_value=None):
             self.ready()
-            self.tab.wait("Array.from(document.querySelectorAll('.shade-switch img')).every(i => i.complete && i.naturalWidth > 0)")
-            imgs = self.tab.eval("[...document.querySelectorAll('.shade-switch img')].map(i => ({src: i.getAttribute('src'), complete: i.complete, naturalWidth: i.naturalWidth}))")
-            self.assertEqual(len(imgs), 3)
-            for img in imgs:
-                self.assertTrue(img['src'].startswith('/assets/icons/hg-shade-'), img)
-                self.assertGreater(img['naturalWidth'], 0, img)
+            hrefs = self.tab.eval("[...document.querySelectorAll('[data-shade] use')].map(u => u.getAttribute('href'))")
+            self.assertEqual(hrefs, [f'/assets/icons/sprite.svg#i-hg-shade-{m}' for m in ('textured', 'clay', 'wire')])
+            self.assertEqual(self.tab.eval("fetch('/assets/icons/sprite.svg').then(r => r.status)"), 200)
             self.assertEqual(self.tab.errors, [])
+
+    def test_segmented_control_drives_the_form_kind_and_drop_zone(self):
+        t = self.tab
+        self.ready()
+        kind = "document.querySelector('input[name=kind]:checked').value"
+        self.assertEqual(t.eval(kind), 'prompt')
+        self.assertTrue(t.eval("document.querySelector('#dropZone').hidden"))
+        t.eval("document.querySelector('[data-start=sketch]').click()")
+        self.assertEqual(t.eval(kind), 'sketch')
+        self.assertFalse(t.eval("document.querySelector('#dropZone').hidden"))
+        self.assertTrue(t.eval("document.querySelector('#promptIn').hidden"))
+        self.assertEqual(t.eval("document.activeElement.id"), 'browseUpload')
+        self.assertIn('sketch', t.eval("document.querySelector('#dropTitle').textContent"))
+        # Arrow keys move along the group like a radio group.
+        t.eval("document.querySelector('[data-start=sketch]').focus(); document.querySelector('.composer__modes').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}))")
+        self.assertEqual(t.eval("document.querySelector('[data-start=upload]').getAttribute('aria-pressed')"), 'true')
+        self.assertIn('artwork', t.eval("document.querySelector('#dropTitle').textContent"))
+        # Submitting with no image is an inline error on the composer, not a dialog or a request.
+        t.eval("document.querySelector('#jobForm').requestSubmit()")
+        self.assertEqual(t.eval("document.querySelector('#jobMsg').textContent"), 'Choose an image to upload.')
+        self.assertEqual(t.eval("document.querySelector('#jobMsg').dataset.tone"), 'error')
+        self.assertFalse(t.eval("document.querySelector('#guestDialog').open"))
+        t.eval("document.querySelector('[data-idea=forest]').click()")
+        self.assertEqual(t.eval(kind), 'prompt')
+        self.assertEqual(t.eval("document.querySelector('[data-start=prompt]').getAttribute('aria-pressed')"), 'true')
+        self.assertEqual(t.eval("document.querySelector('#jobMsg').textContent"), '')
+        self.assertEqual(self.store.users_list(), [])
+        self.assertEqual(self.tab.errors, [])
+
+    def test_generation_closed_shows_the_server_sentence_without_opening_a_workspace(self):
+        t = self.tab
+        self.store.generation_update(actor='fixture', enabled=False)
+        self.ready()
+        sentence = t.eval("fetch('/api/session').then(r => r.json()).then(s => s.generation.sentence)")
+        t.wait("!document.querySelector('#generationClosed').hidden")
+        self.assertEqual(t.eval("document.querySelector('#generationSentence').textContent"), sentence)
+        t.eval("document.querySelector('[data-idea=moon]').click(); document.querySelector('#jobForm').requestSubmit()")
+        t.wait(f"document.querySelector('#jobMsg').textContent === {sentence!r}")
+        self.assertIn('moonlit mage', t.eval("document.querySelector('#prompt').value"))
+        self.assertEqual(self.store.users_list(), [])
+        self.store.generation_update(actor='fixture', enabled=True)
+        t.eval("document.querySelector('#checkGeneration').click()")
+        t.wait("document.querySelector('#generationClosed').hidden")
+        self.assertEqual(self.tab.errors, [])
 
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, 'set E2E_CDP_PORT')
 class TestLandingModels(ServiceBrowserCase):
@@ -118,7 +161,11 @@ class TestLandingModels(ServiceBrowserCase):
         t = self.tab
         t.goto(self.url + '/')
         t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
-        t.wait("document.querySelectorAll('.model-thumb img').length === 2")
+        t.wait("document.querySelectorAll('.g-card__model[src]').length === 2")
+        # Picker thumbnails are the real artwork (the small thumbnail when the catalog offers one), loaded lazily.
+        thumbs = t.eval("[...document.querySelectorAll('#modelPicker img')].map(i => [i.getAttribute('src'), i.loading])")
+        self.assertEqual(thumbs, [['/gallery-assets/woodland-scout/artwork', 'lazy'], ['/gallery-assets/second-model/artwork', 'lazy']])
+        self.assertEqual(t.eval("document.querySelectorAll('.step__art img').length"), 4)
         for mode in ['clay', 'wire', 'textured']:
             t.eval(f"document.querySelector('[data-shade={mode}]').click()")
             self.assertTrue(t.eval(f"document.querySelector('[data-shade={mode}]').getAttribute('aria-pressed') === 'true'"))
@@ -137,9 +184,9 @@ class TestLandingModels(ServiceBrowserCase):
         t.call('Page.addScriptToEvaluateOnNewDocument', source="const originalFetch=window.fetch; window.fetch=(url,options)=>(url instanceof Request?url.url:String(url)).includes('/model')&&!window.allowModels?Promise.reject(new Error('offline fixture')):originalFetch(url,options);")
         t.goto(self.url + '/')
         t.wait("!document.querySelector('#retryLanding').hidden && document.querySelector('#landingStatus').textContent.includes('could not be loaded')")
-        self.assertEqual(t.eval("document.querySelectorAll('.model-thumb img').length"), 0)
+        self.assertEqual(t.eval("document.querySelectorAll('.g-card__model[src]').length"), 0)
         t.eval("window.allowModels=true;document.querySelector('#retryLanding').click()")
-        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.model-thumb img').length === 2 && document.querySelector('.thumbnail-render') === null")
+        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.g-card__model[src]').length === 2 && document.querySelector('.thumbnail-render') === null")
         self.assertEqual(self.store.jobs_admin_list(), [])
         self.assertEqual(self.tab.errors, [])
 
@@ -147,7 +194,7 @@ class TestLandingModels(ServiceBrowserCase):
         t = self.tab
         t.call('Emulation.setDeviceMetricsOverride', width=1440, height=960, deviceScaleFactor=1, mobile=False)
         t.goto(self.url + '/')
-        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.model-thumb img').length === 2")
+        t.wait("document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom' && document.querySelectorAll('.g-card__model[src]').length === 2")
         box = t.eval("document.querySelector('#landingCanvas').getBoundingClientRect().toJSON()")
         clip = {'x': box['x'] + 150, 'y': box['y'] + 60, 'width': 260, 'height': 320, 'scale': 1}
         scout_shot = t.call('Page.captureScreenshot', format='png', clip=clip)['data']

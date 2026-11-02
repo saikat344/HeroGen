@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/assets/tokens.css">
 <link rel="stylesheet" href="/assets/app.css">
 <link rel="stylesheet" href="/assets/styles/workspace-progress.css">
+<link rel="stylesheet" href="/assets/styles/landing.css">
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
@@ -81,52 +82,99 @@
     <p id="verifyMsg" class="msg" role="status"></p>
   </section>
 
-  <section id="entry" aria-labelledby="entryH" hidden>
-    <div class="hero-layout">
-      <div class="hero-copy">
-        <p class="eyebrow">For the characters you imagine <span></span></p>
-        <h1 id="entryH">Every hero starts<br>with an idea.</h1>
-        <p class="intro">Turn artwork, sketches, or a description into a textured 3D character.</p>
-        <form id="jobForm" novalidate>
+  <section id="entry" class="landing" aria-labelledby="entryH" hidden>
+    <div class="landing__hero">
+      <div class="landing__copy">
+        <p class="eyebrow landing__kicker">Idea, sketch or drawing <svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-arrow-right"></use></svg> 3D hero</p>
+        <h1 id="entryH" class="display-xl landing__title">Every hero starts with an <em>idea.</em></h1>
+        <p class="lede">Describe a character or bring a drawing. HeroGen paints it, builds a textured 3D model and, when it passes the checks, a rigged Roblox R15 body.</p>
+        <form id="jobForm" class="composer" novalidate aria-label="Create a hero">
           <fieldset hidden><legend>Start from</legend><label><input type="radio" name="kind" value="prompt" checked>Describe it</label><label><input type="radio" name="kind" value="sketch">Upload an image</label></fieldset>
-          <div class="composer">
-            <label for="prompt">Your hero idea</label>
-            <div id="promptIn"><textarea id="prompt" name="prompt" rows="3" aria-describedby="promptCount" placeholder="A forest courier with an orange coat and a teal scarf…"></textarea></div>
-            <div id="sketchIn" hidden><img id="uploadPreview" alt="Your selected character"><div><b id="uploadName"></b><button type="button" class="link" id="removeUpload">Remove image</button></div></div>
-            <div class="composer-bottom"><span class="input-hint">▧ <span>Start with a sketch or coloured artwork</span></span><button type="submit" class="primary" id="go">Create my hero <span aria-hidden="true">→</span></button></div>
+          <div class="seg-ctl composer__modes" role="group" aria-label="Start from">
+            <button type="button" data-start="prompt" aria-pressed="true"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-pencil"></use></svg>Describe</button>
+            <button type="button" data-start="sketch" aria-pressed="false"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-image"></use></svg>Sketch</button>
+            <button type="button" data-start="upload" aria-pressed="false"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-upload"></use></svg>Upload</button>
           </div>
-          <p id="promptCount" class="small msg muted" aria-live="polite" aria-atomic="true"></p>
-          <p class="spark-label">Need a spark?</p>
-          <div class="suggestions" aria-label="Character ideas"><button type="button" data-idea="forest"><span aria-hidden="true">🍃</span> Forest courier</button><button type="button" data-idea="clockwork"><span aria-hidden="true">⚙</span> Clockwork gardener</button><button type="button" data-idea="moon"><span aria-hidden="true">☾</span> Moonlit mage</button></div>
-          <label class="upload-button" for="sketch"><span class="upload-icon" aria-hidden="true">↥</span><span>Or upload your own image<small>Sketch, illustration, or photo · PNG, JPEG, WebP</small></span></label>
-          <input class="sr" id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp">
-          <details class="creation-options"><summary>Name &amp; export target</summary><div class="options-grid"><div><label for="name">Hero name (optional)</label><input id="name" name="name" type="text" maxlength="60"></div><div><label for="profile">Target</label><select id="profile" name="profile"></select></div></div></details>
-          <p id="jobMsg" class="msg" role="status"></p>
+          <div id="promptIn" class="composer__field">
+            <label for="prompt" class="sr">Your hero idea</label>
+            <textarea id="prompt" class="composer__text" name="prompt" rows="3" aria-describedby="promptCount" placeholder="A forest courier with an orange coat and a teal scarf…"></textarea>
+          </div>
+          <div id="dropZone" class="dropzone" hidden>
+            <button type="button" id="browseUpload" class="dropzone__target" aria-describedby="dropHint">
+              <span class="dropzone__icon" aria-hidden="true"><svg class="icon icon--l"><use href="/assets/icons/sprite.svg#i-upload"></use></svg></span>
+              <span class="dropzone__title" id="dropTitle">Drop your sketch here, or browse</span>
+              <span class="dropzone__hint" id="dropHint">A pencil sketch or line drawing of one full-body character · PNG, JPEG or WebP</span>
+            </button>
+          </div>
+          <div id="sketchIn" class="upload-preview" hidden>
+            <img id="uploadPreview" alt="Your selected character">
+            <div class="upload-preview__body"><b id="uploadName"></b><span class="upload-preview__note">Ready to build. HeroGen keeps your character as drawn.</span><button type="button" class="btn btn--ghost btn--s" id="removeUpload"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-x"></use></svg>Remove image</button></div>
+          </div>
+          <input class="sr" id="sketch" name="sketch" type="file" accept="image/png,image/jpeg,image/webp" tabindex="-1" aria-hidden="true">
+          <details class="creation-options"><summary><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-right"></use></svg>Name &amp; export target <span id="targetSummary" class="faint"></span></summary><div class="options-grid"><div class="field"><label class="label" for="name">Hero name (optional)</label><input id="name" class="input" name="name" type="text" maxlength="60"></div><div class="field"><label class="label" for="profile">Target</label><select id="profile" class="select" name="profile"></select></div></div></details>
+          <div id="generationClosed" class="banner banner--warning composer__closed" role="status" hidden>
+            <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-pause"></use></svg>
+            <div class="banner__body"><p class="banner__title" id="generationSentence"></p><p class="banner__text">Your idea stays here. You can still explore the generated heroes below.</p></div>
+            <button type="button" id="checkGeneration" class="btn btn--secondary btn--s">Check again</button>
+          </div>
+          <div class="composer__foot">
+            <p id="promptCount" class="composer__count" aria-live="polite" aria-atomic="true"></p>
+            <button type="submit" class="btn btn--primary btn--l" id="go">Create my hero<svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-arrow-right"></use></svg></button>
+          </div>
+          <p id="jobMsg" class="composer__msg" role="status"></p>
         </form>
-      </div>
-      <section class="landing-gallery" id="gallery" aria-label="Explore previously generated heroes">
-        <div class="landing-viewer">
-          <div class="viewer-toolbar"><p class="eyebrow">Generated with HeroGen</p><div class="shade-switch" role="group" aria-label="Model shading">
-            <button type="button" data-shade="textured" aria-pressed="true"><img src="/assets/icons/hg-shade-textured.svg" alt="">Textured</button><button type="button" data-shade="clay" aria-pressed="false"><img src="/assets/icons/hg-shade-clay.svg" alt="">Clay</button><button type="button" data-shade="wire" aria-pressed="false"><img src="/assets/icons/hg-shade-wire.svg" alt="">Wire</button>
-          </div></div>
-          <h2 id="featuredTitle">Explore generated heroes</h2>
-          <canvas id="landingCanvas" aria-label="Saved 3D character. Drag to rotate or scroll to zoom."></canvas>
-          <details class="artwork-inset" open><summary>Original artwork</summary><img id="featuredArtwork" alt="" hidden><a id="featuredDetails" hidden>Inspect saved run ↗</a></details>
-          <div class="viewer-caption"><p id="landingStatus" role="status">Loading the public gallery…</p><button type="button" id="retryLanding">Retry</button></div>
-          <p class="saved-label">Previously generated with HeroGen</p>
+        <div class="sparks" role="group" aria-labelledby="sparkLabel">
+          <span class="sparks__label" id="sparkLabel">Need a spark?</span>
+          <button type="button" class="chip" data-idea="forest" aria-pressed="false"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg>Forest courier</button>
+          <button type="button" class="chip" data-idea="clockwork" aria-pressed="false"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg>Clockwork gardener</button>
+          <button type="button" class="chip" data-idea="moon" aria-pressed="false"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-moon"></use></svg>Moonlit mage</button>
         </div>
-        <div id="modelPicker" class="model-picker" role="group" aria-label="Select a saved 3D model"></div>
+        <ul class="trust" aria-label="What to expect">
+          <li><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-lock"></use></svg>Private to this browser, no sign-in</li>
+          <li><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-timer"></use></svg>About 10 minutes</li>
+          <li><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-layers"></use></svg>Saved step by step</li>
+          <li><button type="button" class="trust__link" id="howButton">How it works<svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-down"></use></svg></button></li>
+        </ul>
+      </div>
+
+      <section class="showcase" aria-labelledby="featuredTitle">
+        <div class="viewer showcase__stage">
+          <div class="showcase__sweep" aria-hidden="true"></div>
+          <div class="viewer__label showcase__label"><p class="eyebrow">Made with HeroGen</p><h2 id="featuredTitle">Explore generated heroes</h2></div>
+          <div class="viewer__tools" role="group" aria-label="Model shading">
+            <button type="button" class="viewer__btn" data-shade="textured" aria-pressed="true" aria-label="Textured" title="Textured"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-textured"></use></svg></button>
+            <button type="button" class="viewer__btn" data-shade="clay" aria-pressed="false" aria-label="Clay" title="Clay"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-clay"></use></svg></button>
+            <button type="button" class="viewer__btn" data-shade="wire" aria-pressed="false" aria-label="Wireframe" title="Wireframe"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-hg-shade-wire"></use></svg></button>
+          </div>
+          <canvas id="landingCanvas" class="showcase__canvas" aria-label="Saved 3D character. Drag to rotate or scroll to zoom."></canvas>
+          <div class="showcase__status"><p id="landingStatus" role="status">Loading the public gallery…</p><button type="button" id="retryLanding" class="btn btn--secondary btn--s" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Retry</button></div>
+          <div id="modelPicker" class="viewer__dock showcase__dock" role="group" aria-label="Featured heroes"></div>
+        </div>
+        <p class="showcase__foot"><span class="faint">Real results, saved from earlier runs.</span><a id="featuredDetails" class="showcase__details" hidden>Inspect the saved run<svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-arrow-right"></use></svg></a></p>
       </section>
     </div>
-    <section class="gallery" id="starterGallery" aria-labelledby="galleryH" hidden><div class="row"><h2 id="galleryH">Start from a character</h2><div class="spacer"></div><span class="small muted">Choose an image to make it yours</span></div><div id="templates" class="template-grid"></div><p id="templateMsg" class="small msg" role="status"></p></section>
-    <button type="button" class="link" id="howButton">How it works</button>
-    <section class="landing-how" id="howItWorks" aria-labelledby="howHeading">
-      <div class="sketchbook"><img src="/assets/art/hero-collage.png" id="heroArtwork" alt="Character sketchbook with a forest courier in an orange coat, a clockwork gardener, and a moonlit mage" loading="lazy"></div>
-      <div class="how-content"><p class="eyebrow">From imagination to another dimension</p><h2 id="howHeading">How your hero comes to life</h2><p class="muted">Start with artwork, a sketch, or an idea.</p>
-        <ol class="journey"><li><span class="step-number">1</span><h3>Bring your idea</h3><p>Describe your forest courier, or bring artwork or a sketch. An orange coat. A teal scarf. Your character.</p><span class="journey-note">Your idea → character artwork</span></li>
-        <li><span class="step-number">2</span><h3>Build your character</h3><p>Muse Image draws front, side and back views.<br>SAM 3D Objects builds the mesh.<br>HeroGen repaints the texture.</p><span class="journey-note">Artwork → views → textured mesh</span></li>
-        <li><span class="step-number">3</span><h3>Explore in 3D</h3><p>Rotate the result. Switch to clay or wireframe to inspect the geometry. Review the saved run before downloading.</p><a href="/#gallery">Explore real generated models ↑</a></li></ol>
+
+    <section class="band" id="howItWorks" aria-labelledby="howHeading">
+      <div class="band__head" data-reveal>
+        <p class="eyebrow">How it works</p>
+        <h2 id="howHeading" class="display-m">From a line of text to a rigged hero.</h2>
+        <p class="lede">Every step is saved as it lands, so you watch your character take shape instead of waiting on a spinner.</p>
       </div>
+      <ol class="journey" id="journey">
+        <li class="step" data-reveal><div class="step__art step__art--paper" data-step="sketch"></div><h3><span class="step__num">01</span>Sketch</h3><p>Your words become a full-body pencil sketch, or bring your own drawing.</p></li>
+        <li class="step" data-reveal><div class="step__art step__art--paper" data-step="artwork"></div><h3><span class="step__num">02</span>Artwork</h3><p>Coloured character art, then front, side and back views.</p></li>
+        <li class="step" data-reveal><div class="step__art" data-step="clay"></div><h3><span class="step__num">03</span>3D shape</h3><p>The views become a mesh you can orbit, in clay or wireframe.</p></li>
+        <li class="step" data-reveal><div class="step__art" data-step="textured"></div><h3><span class="step__num">04</span>Textured hero</h3><p>A repainted texture and a GLB file and, when every Roblox check passes, an R15 body.</p></li>
+      </ol>
+      <p class="journey__credit faint" id="journeyCredit" hidden></p>
+    </section>
+
+    <section class="band" id="gallery" aria-labelledby="galleryH">
+      <div class="band__head band__head--row" data-reveal>
+        <div><p class="eyebrow">Gallery</p><h2 id="galleryH" class="display-m">Heroes made with HeroGen.</h2></div>
+        <p class="lede">Open any hero to orbit the model, compare it with its artwork and see how it was built.</p>
+      </div>
+      <div id="galleryGrid" class="gallery-grid" aria-live="polite"></div>
     </section>
   </section>
   <dialog id="howDialog"><button type="button" class="dialog-close" id="closeHow" aria-label="Close how it works">×</button><p class="eyebrow">From imagination to your game</p><h2>Meet your next hero.</h2><ol class="how-steps"><li><b>Start with an idea.</b><p>Describe your character, choose a starting image, or upload your own artwork.</p></li><li><b>Watch it take shape.</b><p>Follow the artwork, character views, 3D reconstruction, and quality checks in your workshop.</p></li><li><b>Bring it into your world.</b><p>Inspect the result in 3D, download the GLB or available Roblox bundle, and follow the included setup notes.</p></li></ol><p class="muted small">Results depend on the input. Quality checks and export availability are shown for each hero.</p></dialog>

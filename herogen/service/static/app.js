@@ -102,6 +102,7 @@ async function loadSession() {
   S.session = await api('/api/session');
   S.csrf = S.session.csrf;
   setCsrf(S.csrf);
+  entry?.generation(S.session.generation);
   return S.session;
 }
 
@@ -403,7 +404,7 @@ function initJobs() {
     const length = Array.from(prompt.value).length;
     const over = length > limit;
     count.textContent = `${length} / ${limit} characters${over ? ' (over limit)' : ''}`;
-    count.className = `small msg ${over ? 'err' : 'muted'}`;
+    count.dataset.level = over ? 'over' : length >= limit * 0.9 ? 'near' : '';
     prompt.setAttribute('aria-invalid', String(over));
   }
   prompt.addEventListener('input', updatePromptCount);
@@ -417,11 +418,13 @@ function initJobs() {
   const names = { 'roblox-ingame': 'Roblox in-game', 'roblox-avatar': 'Roblox avatar', best: 'Best quality (GLB only)' };
   sel.replaceChildren(...S.session.limits.profiles.map((p) => el('option', { value: p, text: names[p] || p })));
   sel.value = S.session.limits.default_profile;
+  sel.dispatchEvent(new Event('change'));
+  entry.generation(S.session.generation);
   $('#jobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if ($('#go').disabled) return;
     track('create_clicked');
-    const msg = $('#jobMsg');
+    const say = entry.say;
     const fd = new FormData();
     const kind = document.querySelector('input[name=kind]:checked').value;
     fd.append('kind', kind);
@@ -430,20 +433,28 @@ function initJobs() {
     let file = null;
     if (kind === 'sketch') {
       file = entry.file();
-      if (!file) { track('create_result', { result: 'no_file' }); msg.textContent = 'Choose an image to upload.'; return; }
-      if (file.size > S.session.limits.upload_max_bytes) { track('create_result', { result: 'upload_too_large' }); msg.textContent = `Choose an image smaller than ${Math.round(S.session.limits.upload_max_bytes / 1024 / 1024)} MB.`; return; }
+      if (!file) { track('create_result', { result: 'no_file' }); say('Choose an image to upload.'); $('#browseUpload').focus(); return; }
+      if (file.size > S.session.limits.upload_max_bytes) { track('create_result', { result: 'upload_too_large' }); say(`Choose an image smaller than ${Math.round(S.session.limits.upload_max_bytes / 1024 / 1024)} MB.`); return; }
       fd.append('sketch', file, 'sketch');
     } else {
-      if (!prompt.value.trim()) { track('create_result', { result: 'empty_prompt' }); msg.textContent = 'Describe your hero or choose an image to start.'; prompt.focus(); return; }
-      if (Array.from(prompt.value).length > limit) { track('create_result', { result: 'prompt_too_long' }); msg.textContent = `Keep your idea within ${limit} characters.`; prompt.focus(); return; }
+      if (!prompt.value.trim()) { track('create_result', { result: 'empty_prompt' }); say('Describe your hero or choose an image to start.'); prompt.focus(); return; }
+      if (Array.from(prompt.value).length > limit) { track('create_result', { result: 'prompt_too_long' }); say(`Keep your idea within ${limit} characters.`); prompt.focus(); return; }
       fd.append('prompt', prompt.value);
     }
-    $('#go').disabled = true;
+    $('#go').disabled = true; $('#go').setAttribute('aria-busy', 'true');
     const key = idemKey();
+    const done = () => { $('#go').disabled = false; $('#go').removeAttribute('aria-busy'); };
     try {
+      // While live generation is closed, re-check once and say why instead of opening a workspace for nothing.
+      if (S.session.generation?.accepting === false) await loadSession();
+      if (S.session.generation?.accepting === false) {
+        track('create_result', { result: 'generation_closed' });
+        say(S.session.generation.sentence || 'Live generation is paused right now.', 'closed'); done(); return;
+      }
+      // The first create opens a private guest workspace silently; there is no guest dialog.
       if (!S.session.signed_in) { await openGuestWorkspace(); await signedIn(); }
-    } catch (e) { msg.textContent = e.message; $('#go').disabled = false; return; }
-    msg.textContent = 'Starting…';
+    } catch (e) { say(e.message); done(); return; }
+    say('Starting your hero…', 'info');
     try {
       const submit = () => api('/api/jobs', { method: 'POST', form: fd, headers: { 'Idempotency-Key': key } });
       let j;
@@ -454,13 +465,14 @@ function initJobs() {
       }
       track('create_result', { result: 'accepted' });
       ++S.revision; followJob(j, true);
-      msg.textContent = '';
+      say('');
       refreshList().catch((e) => banner(e.message));
     } catch (e) {
       track('create_result', { result: knownCreateResult(e.code, e.status) });
-      msg.textContent = e.message;
+      say(e.message);
+      if (e.code === 'generation_paused' || e.code === 'generation_budget_exhausted') loadSession().catch(() => {});
     }
-    finally { $('#go').disabled = false; }
+    finally { done(); }
   });
   $('#cancelJob').addEventListener('click', async () => {
     const id = S.current; ++S.revision; clearTimeout(S.timer);
@@ -506,21 +518,16 @@ async function signedIn() {
   if (want) await openJob(want, true);
 }
 function updateAccessSummary() {
-  const guest = S.session?.user?.kind === 'guest';
-  // Limit and recovery copy is a refusal notice: it appears only while this workspace cannot start generation.
-  const refused = guest && S.session.generation?.accepting === false;
-  show('#guestAccessSummary', refused);
-  if (!refused) return;
-  const reasons = { generation_paused: 'Live generation is paused right now.',
-    generation_budget_exhausted: 'The live-generation budget is used up for now.' };
-  $('#guestAccessText').textContent = `${reasons[S.session.generation.reason] || reasons.generation_paused} You can still explore the generated heroes.`;
+  // The composer shows the generation-closed notice (with the server's sentence) for guests and visitors alike.
+  show('#guestAccessSummary', false);
+  entry?.generation(S.session?.generation);
 }
 function expireAccess() {
   if (S.session) S.session.signed_in = false;
   returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
   $('#heroLibrary').hidden = true; $('#jobs').replaceChildren();
   show('#guestAccessSummary', false); show('#headerSignIn', false);
-  $('#jobMsg').textContent = 'Your workspace session has expired. Create your hero to open guest access.';
+  entry?.say('Your workspace session has expired. Create your hero to open a new private workspace.', 'info');
 }
 async function refreshAccess() {
   await loadSession();
@@ -536,6 +543,12 @@ async function openGuestWorkspace() {
   try { await guestOpening; } finally { guestOpening = null; }
 }
 function initGuestAccess() {
+  $('#checkGeneration').addEventListener('click', async () => {
+    $('#checkGeneration').disabled = true; $('#checkGeneration').setAttribute('aria-busy', 'true');
+    try { await loadSession(); if (S.session.generation?.accepting !== false) { entry.say(''); $('#go').focus(); } }
+    catch (e) { entry.say(e.message); }
+    finally { $('#checkGeneration').disabled = false; $('#checkGeneration').removeAttribute('aria-busy'); }
+  });
   $('#closeGuest').addEventListener('click', () => $('#guestDialog').close());
   $('#checkAvailability').addEventListener('click', async () => {
     $('#checkAvailability').disabled=true;

@@ -5,78 +5,118 @@ const IDEAS = {
   clockwork: 'A friendly clockwork gardener robot, round brass head, expressive eyes, moss-green overalls, tiny seedlings in a backpack and a watering can. Full body, standing, plain background.',
   moon: 'A moonlit mage with silver hair, layered midnight-blue robes, leafy shoulder cape, crescent pendant and embroidered stars. Full body, standing, plain background.'
 };
-export const TEMPLATES = [
-  ['trail-keeper', 'Trail keeper', 'Sketch'], ['little-inventor', 'Little inventor', 'Artwork'],
-  ['cloud-sailor', 'Cloud sailor', 'Sketch'], ['garden-guardian', 'Garden guardian', 'Artwork']
-];
+// The two image modes send the same `sketch` input; they differ only in what the drop zone asks for.
+const MODES = {
+  sketch: { title: 'Drop your sketch here, or browse', hint: 'A pencil sketch or line drawing of one full-body character · PNG, JPEG or WebP' },
+  upload: { title: 'Drop your artwork here, or browse', hint: 'Coloured art, an illustration or a photo of one full-body character · PNG, JPEG or WebP' }
+};
+const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
 export function entryPage($, onChange) {
-  let selected = null, preview = null, selection = 0;
+  let selected = null, preview = null, mode = 'prompt';
+  const form = $('#jobForm');
+
+  // One message line under the composer. Errors carry an icon and the danger colour; progress notes do not.
+  function say(text, tone = 'error') {
+    const msg = $('#jobMsg');
+    msg.textContent = text || '';
+    if (text) msg.dataset.tone = tone; else delete msg.dataset.tone;
+    form.classList.toggle('has-error', Boolean(text) && tone === 'error');
+    // A refused create while generation is closed repeats the notice for screen readers and draws the eye to it.
+    if (tone === 'closed') { const notice = $('#generationClosed'); notice.classList.remove('is-flash'); void notice.offsetWidth; notice.classList.add('is-flash'); }
+  }
+  function setMode(next, { focus = false } = {}) {
+    mode = next;
+    for (const b of document.querySelectorAll('[data-start]')) b.setAttribute('aria-pressed', String(b.dataset.start === next));
+    const image = next !== 'prompt';
+    document.querySelector(`input[name=kind][value=${image ? 'sketch' : 'prompt'}]`).checked = true;
+    if (image && MODES[next]) { $('#dropTitle').textContent = MODES[next].title; $('#dropHint').textContent = MODES[next].hint; }
+    $('#promptIn').hidden = image;
+    $('#promptCount').hidden = image;
+    $('#sketchIn').hidden = !(image && selected);
+    $('#dropZone').hidden = !image || Boolean(selected);
+    form.dataset.mode = next;
+    if ($('#jobMsg').dataset.tone === 'error') say('');
+    if (focus) (image ? (selected ? $('#removeUpload') : $('#browseUpload')) : $('#prompt')).focus();
+  }
   function setFile(file) {
-    selection++;
     selected = file;
     if (preview) URL.revokeObjectURL(preview);
     preview = file ? URL.createObjectURL(file) : null;
     if (preview) $('#uploadPreview').src = preview; else $('#uploadPreview').removeAttribute('src');
     $('#uploadName').textContent = file ? (file.name || 'Your character image') : '';
-    $('#sketchIn').hidden = !file;
-    $('#promptIn').hidden = !!file;
-    $('#promptCount').hidden = !!file;
-    document.querySelector(`input[name=kind][value=${file ? 'sketch' : 'prompt'}]`).checked = true;
     $('#sketch').value = '';
     for (const b of document.querySelectorAll('[data-idea]')) b.setAttribute('aria-pressed', 'false');
+    // Choosing a file switches to an image mode; removing it keeps the current image mode so the drop zone returns.
+    setMode(file ? (mode === 'prompt' ? 'upload' : mode) : (mode === 'prompt' ? 'prompt' : mode));
     onChange();
   }
+  function accept(file) {
+    if (!file) return;
+    if (!TYPES.includes(file.type)) { say('Choose a PNG, JPEG or WebP image.'); return; }
+    say(''); setFile(file); track('upload_selected');
+  }
+
+  for (const b of document.querySelectorAll('[data-start]')) b.addEventListener('click', () => {
+    if (b.dataset.start === 'prompt' && selected) setFile(null);
+    setMode(b.dataset.start, { focus: true });
+  });
+  // Arrow keys move between the three modes, like a radio group.
+  $('.composer__modes').addEventListener('keydown', event => {
+    const buttons = [...document.querySelectorAll('[data-start]')], i = buttons.indexOf(document.activeElement);
+    if (i < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (i + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next].focus(); buttons[next].click();
+  });
   $('#sketch').addEventListener('change', () => {
     const f = $('#sketch').files[0];
-    if (f && !['image/png', 'image/jpeg', 'image/webp'].includes(f.type)) {
-      $('#jobMsg').textContent = 'Choose a PNG, JPEG or WebP image.'; $('#sketch').value = ''; return;
-    }
+    if (f && !TYPES.includes(f.type)) { say('Choose a PNG, JPEG or WebP image.'); $('#sketch').value = ''; return; }
+    if (f) say('');
     setFile(f || null);
     if (f) track('upload_selected');
   });
-  $('#removeUpload').addEventListener('click', () => { setFile(null); $('#prompt').focus(); });
+  $('#browseUpload').addEventListener('click', () => $('#sketch').click());
+  const zone = $('#dropZone');
+  for (const type of ['dragenter', 'dragover']) zone.addEventListener(type, event => {
+    event.preventDefault(); zone.classList.add('is-over');
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  for (const type of ['dragleave', 'dragend']) zone.addEventListener(type, event => {
+    if (!zone.contains(event.relatedTarget)) zone.classList.remove('is-over');
+  });
+  zone.addEventListener('drop', event => {
+    event.preventDefault(); zone.classList.remove('is-over');
+    accept(event.dataTransfer?.files?.[0]);
+  });
+  $('#removeUpload').addEventListener('click', () => { setFile(null); $('#browseUpload').focus(); });
   for (const b of document.querySelectorAll('[data-idea]')) b.addEventListener('click', () => {
-    setFile(null); $('#prompt').value = IDEAS[b.dataset.idea]; onChange();
+    if (selected) setFile(null);
+    setMode('prompt');
+    $('#prompt').value = IDEAS[b.dataset.idea]; onChange();
+    for (const other of document.querySelectorAll('[data-idea]')) other.setAttribute('aria-pressed', 'false');
     b.setAttribute('aria-pressed', 'true'); $('#prompt').focus();
     track('suggestion_click', { id: b.dataset.idea });
   });
   $('#prompt').addEventListener('input', () => {
     for (const b of document.querySelectorAll('[data-idea]')) b.setAttribute('aria-pressed', 'false');
+    if ($('#jobMsg').dataset.tone === 'error' && $('#prompt').getAttribute('aria-invalid') !== 'true') say('');
     if (!$('#entry')?.hidden && $('#prompt').value.trim()) trackOnce('idea_typed', 'idea_typed');
   });
-  $('#heroArtwork').addEventListener('error', () => { $('#heroArtwork').hidden = true; });
-  for (const [id, name, kind] of TEMPLATES) {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'template';
-    button.setAttribute('aria-label', `Start from ${name}, ${kind.toLowerCase()}`);
-    const image = document.createElement('img'); image.alt = ''; image.src = `/assets/art/${id}.png`;
-    const title = document.createElement('b'); title.textContent = name;
-    const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = kind;
-    const arrow = document.createElement('span'); arrow.className = 'arrow'; arrow.textContent = '›'; arrow.setAttribute('aria-hidden', 'true');
-    button.append(image, title, tag, arrow); button.hidden = true;
-    image.addEventListener('load', () => { button.hidden = false; $('#starterGallery').hidden = false; });
-    button.addEventListener('click', async () => {
-      track('starter_select', { id });
-      const current = ++selection;
-      button.disabled = true; $('#templateMsg').textContent = `Selecting ${name}…`;
-      try {
-        const response = await fetch(image.src, { credentials: 'same-origin' });
-        if (!response.ok) throw new Error('The image could not be loaded. Please try again.');
-        const blob = await response.blob();
-        if (current !== selection) return;
-        setFile(new File([blob], `${id}.png`, { type: 'image/png' }));
-        $('#name').value = name;
-        $('#templateMsg').textContent = `${name} selected. Review it above, then create your hero.`;
-        $('#entry').scrollIntoView({ block: 'start' }); $('#go').focus({ preventScroll: true });
-      } catch (e) { if (current === selection) $('#templateMsg').textContent = e.message; }
-      finally { button.disabled = false; }
-    });
-    $('#templates').append(button);
-  }
+  $('#profile').addEventListener('change', () => { $('#targetSummary').textContent = `· ${$('#profile').selectedOptions[0]?.textContent || ''}`; });
   $('#howButton').addEventListener('click', () => {
     if ($('#entry').hidden) { $('#howDialog').showModal(); return; }
     $('#howHeading').tabIndex = -1; $('#howHeading').focus({preventScroll: true});
     $('#howItWorks').scrollIntoView({block: 'start'});
   });
   $('#closeHow').addEventListener('click', () => $('#howDialog').close());
-  return { setFile, file: () => selected || $('#sketch').files[0] || null };
+
+  // The live-generation switch: when the service is not accepting heroes, say so with the server's own sentence.
+  function generation(state) {
+    const closed = state?.accepting === false;
+    $('#generationClosed').hidden = !closed;
+    if (closed) $('#generationSentence').textContent = state.sentence || 'Live generation is paused right now.';
+    form.classList.toggle('is-closed', closed);
+  }
+  return { setFile, setMode, say, generation, file: () => selected || $('#sketch').files[0] || null };
 }
