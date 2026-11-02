@@ -621,3 +621,13 @@ test('row keys follow arrival, so a late event with an earlier time does not ren
   assert.equal(after.length, before.length + 1);
   assert.equal(after[0], 'e:3', 'the late row sorts first by time but keeps its own key');
 });
+
+test('the face line says where the face paint comes from', () => {
+  const line = (why, extra = {}) => copy.decisionLine({kind: 'decision', what: 'face_source', why, ...extra});
+  assert.equal(line('beauty', {view: 'head+0', try: 3}), 'Face: using the beauty repaint (Face close-up, try 3).');
+  assert.equal(line('default', {view: 'head+0', try: 1}), 'Face: using the ordinary repaint (Face close-up, try 1).');
+  assert.equal(line('default_fast_fallback'), 'Face: no face repaint was accepted, so the face keeps the paint from the ordinary texture.');
+  assert.equal(line('something_else'), null);
+  assert.equal(copy.decisionLine({kind: 'decision', what: 'view_result', view: 'body+0', try: 1, ok: false, why: 'model_error'}),
+    'Front, try 1: not used (the model call failed)');
+});
