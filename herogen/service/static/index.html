@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/assets/styles/landing.css">
 <link rel="stylesheet" href="/assets/styles/workspace-stage.css">
 <link rel="stylesheet" href="/assets/styles/workspace-tree.css">
+<link rel="stylesheet" href="/assets/styles/heroes.css">
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
 {
@@ -184,13 +185,28 @@
   <section id="app" hidden>
     <div class="workspace-heading row"><button type="button" id="backToIdeas" class="link">← Back to ideas</button><div class="spacer"></div><button type="button" id="showLibrary" class="link" aria-expanded="false" aria-controls="heroLibrary">This workspace</button></div>
     <p id="jobLoading" role="status" hidden>Opening your hero…</p>
-    <div id="heroLibrary" class="grid" hidden>
-      <section class="card" aria-labelledby="listH">
-        <h2 id="listH">This workspace</h2>
-        <ul id="jobs" class="jobs"></ul>
-        <p id="noJobs" class="muted" hidden>None yet.</p>
-      </section>
-    </div>
+    <section id="heroLibrary" class="heroes" aria-labelledby="heroesH" hidden>
+      <header class="heroes__head">
+        <div class="heroes__title">
+          <p class="eyebrow">Saved in this browser</p>
+          <h1 id="heroesH" class="display-l" tabindex="-1">Your heroes</h1>
+          <p id="heroesSummary" class="heroes__summary muted" role="status"></p>
+        </div>
+        <a id="newHero" class="btn btn--primary" href="/"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg>New hero</a>
+      </header>
+      <div id="heroesBanner" class="banner banner--danger" role="alert" hidden>
+        <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg>
+        <div class="banner__body"><p class="banner__title">Your heroes could not be loaded</p><p class="banner__text"><span id="heroesBannerText"></span> Your heroes are safe and still saved.</p></div>
+        <button type="button" id="retryHeroes" class="btn btn--secondary btn--s">Try again</button>
+      </div>
+      <ul id="jobs" class="heroes__grid" aria-label="Your heroes" aria-busy="false"></ul>
+      <div id="noJobs" class="empty" hidden>
+        <span class="empty__icon" aria-hidden="true"><svg class="icon icon--xl"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg></span>
+        <h2 class="display-s">Your first hero is one sentence away.</h2>
+        <p class="muted">Describe a character or upload a sketch. Each hero appears here while it is being built and stays saved in this browser.</p>
+        <a id="createFirstHero" class="btn btn--primary btn--l" href="/">Create a hero</a>
+      </div>
+    </section>
 
     <section id="detail" class="generation" tabindex="-1" hidden aria-labelledby="generationTitle">
       <div class="workspace-top">
