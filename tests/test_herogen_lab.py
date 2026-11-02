@@ -313,6 +313,28 @@ class RunIndexTest(unittest.TestCase):
             self.assertIsNone(runindex.run_dir(self.root, bad), bad)
 
 
+class ServiceAssetTest(unittest.TestCase):
+    def test_service_assets_stay_inside_the_allowed_files_and_folders(self):
+        from unittest import mock
+
+        from herogen.lab import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            static = Path(tmp)
+            write(static / "tokens.css", b":root{}")
+            write(static / "app.css", b"body{}")
+            write(static / "fonts" / "ok.css", b"@font-face{}")
+            try:
+                os.symlink(static / "app.css", static / "fonts" / "leak.css")
+            except OSError:
+                self.skipTest("symlinks are not available here")
+            with mock.patch.object(server, "SERVICE_STATIC_DIR", static):
+                self.assertIsNotNone(safe_service_asset("tokens.css"))
+                self.assertIsNotNone(safe_service_asset("fonts/ok.css"))
+                self.assertIsNone(safe_service_asset("app.css"))
+                self.assertIsNone(safe_service_asset("fonts/leak.css"))
+
+
 class PathSafetyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
