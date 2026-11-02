@@ -162,7 +162,7 @@ def art_references(run, cam, body_cam, info, artwork):
 def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover, *, face_exclusion=True, body_cam=None,
           closeup_reference=None, closeup_recipe="RF5U", repaint="RF2R", rendered=None,
           apply=None, attempts=None, attempt_start=0, cancelled=None, user_note="", recipe_name=None, reference_record=None, face_keep=False, complete_face=False, save_face=False, art=(), art_masks=None,
-          surface_reference_mask=None):
+          surface_reference_mask=None, fast_outline=False):
     import numpy as np
     from scipy import ndimage
     from . import character as C, imaging as I
@@ -251,7 +251,10 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
                       and abs(reg["scale"] - 1) <= I.HAIR_GATE["scale_max_change"])
             reason = "hair outline, scale or colour agreement"
         else:
-            passed, measures = I.outline_gate(figure, fig_e, closeup=(body_cam is not None and I.is_closeup(cam, body_cam)))
+            # Fast measures the outline with near-grey cloth the repaint kept (`figure_mask`); the
+            # limits are unchanged, and paint weights keep the established mask.
+            measured = I.figure_mask(warped, render_figure=figure, render_rgb=render_rgb) if fast_outline else fig_e
+            passed, measures = I.outline_gate(figure, measured, closeup=(body_cam is not None and I.is_closeup(cam, body_cam)))
             reason = "outline moved"
         trial.update(registration=reg, checks=measures)
         if cancelled is not None and cancelled.is_set():

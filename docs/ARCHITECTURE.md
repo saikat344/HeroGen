@@ -850,6 +850,14 @@ face containment and hair exclusion logic with unchanged thresholds. The lowest-
 wins after all lower indices have failed; scores never choose between passing attempts. Higher attempts
 are cancelled before further calls where possible; active requests drain and retain their caches.
 A missing head skips the head close-up. Fast cannot be combined with close-up texture upscaling.
+Fast's non-hair outline gate measures the repaint's figure with one correction, with the limits
+unchanged: inside the render's figure, a repaint pixel within the background tolerance (0.07 per channel)
+of the render's own colour there is surface the repaint kept, so the background flood from the known
+exterior cannot pass through it. Without it, cloth close to the backdrop grey (s037's grey sleeve) is
+flooded as background and the outline appears to move (head view: median 1.0 px, p90 40.5 px before,
+p90 1.8 px after). Outside the render's figure nothing changes, and a real outline move onto coloured
+cloth is still measured. Paint weights and colour matching keep the established figure mask, and `best`
+keeps its measurement exactly.
 This schedule changes repaint inputs and is a quality/latency tradeoff, not an output-equivalent execution of `best`.
 
 Once wave 1's first attempts finish, accepted paint is re-projected from the base atlas in the listed
