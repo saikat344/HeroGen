@@ -216,12 +216,15 @@ def apply_to_skeleton(sk, rec: dict):
     return sk
 
 
-def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray):
-    """Keep the selected joints unless they leave an R15 part without source vertices.
+def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | None = None,
+                        *, lod_vertices: tuple = ()):
+    """Keep the selected joints unless they leave an R15 part without mesh vertices.
 
     Silhouette limb roots can disagree with the model's distal joints. Try the recorded anatomical roots,
-    changing the fewest roots that give every part vertices. All other joints, radii and ends stay selected.
-    This is independent of lane and pose-gap thresholds; it never selects on a gap measurement.
+    changing the fewest roots that give every part vertices, including the actual decimation candidates.
+    If radius weighting still loses a merged limb, partition its existing surface by nearest bone distance.
+    That requires the recorded proximal and distal limb segments to be inside the mesh; absent limbs fail.
+    All other joints, radii and ends stay selected. No pose-gap measurement selects this fallback.
     """
     from copy import deepcopy
     from itertools import combinations
@@ -229,9 +232,29 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray):
     from . import SECTIONS, split
 
     def empty(skeleton):
-        labels = split.Labeller(split.build_rig(skeleton)).labels(verts)
-        counts = np.bincount(labels, minlength=len(SECTIONS))
-        return [name for name, count in zip(SECTIONS, counts) if count == 0]
+        lb = split.Labeller(split.build_rig(skeleton))
+        missing = set()
+        for points in (verts, *lod_vertices):
+            counts = np.bincount(lb.labels(points), minlength=len(SECTIONS))
+            missing.update(name for name, count in zip(SECTIONS, counts) if count == 0)
+        return [name for name in SECTIONS if name in missing]
+
+    def replace_roots(names):
+        candidate = deepcopy(sk)
+        for name in names:
+            candidate.joints[name] = np.asarray(anatomical[name], float)
+        candidate.ends["HipCentre"] = (candidate.joints["LeftHip"] + candidate.joints["RightHip"]) / 2
+        return candidate
+
+    def describe(candidate, names):
+        reason = "selected joints left no mesh vertices in " + ", ".join(missing)
+        if reversed_selected:
+            reason += "; limb roots opposed the recorded segment direction: " + ", ".join(reversed_selected)
+        for name in names:
+            candidate.evidence[name] = "recorded SAM 3D Body anatomical limb root; " + reason
+        if names:
+            candidate.notes.append("anatomical limb root fallback (" + ", ".join(names) + "): " + reason)
+        return candidate
 
     missing = empty(sk)
     if not missing:
@@ -242,18 +265,52 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray):
              and (sources.get(name, "").startswith("silhouette")
                   or (name not in sources and rec.get("limb_roots") == "silhouette"))
              and not np.array_equal(sk.joints[name], anatomical[name])]
+
+    def reversed_roots(skeleton):
+        out = []
+        for root in roots:
+            distal = root.replace("Shoulder", "Elbow").replace("Hip", "Knee")
+            recorded = np.asarray(anatomical.get(distal, skeleton.joints[distal])) - anatomical[root]
+            selected = skeleton.joints[distal] - skeleton.joints[root]
+            if float(selected @ recorded) <= 0:
+                out.append(root)
+        return out
+
+    reversed_selected = reversed_roots(sk)
     for count in range(1, len(roots) + 1):
         for names in combinations(roots, count):
-            candidate = deepcopy(sk)
-            for name in names:
-                candidate.joints[name] = np.asarray(anatomical[name], float)
-            candidate.ends["HipCentre"] = (candidate.joints["LeftHip"] + candidate.joints["RightHip"]) / 2
-            if empty(candidate):
+            candidate = replace_roots(names)
+            if reversed_roots(candidate) or empty(candidate):
                 continue
-            reason = "selected joints left no source vertices in " + ", ".join(missing)
-            for name in names:
-                candidate.evidence[name] = "recorded SAM 3D Body anatomical limb root; " + reason
-            candidate.notes.append("anatomical limb root fallback (" + ", ".join(names) + "): " + reason)
+            return describe(candidate, names)
+    if faces is not None:
+        from .meshindex import MeshIndex
+
+        chains = {split.build_rig(sk).chain[name] for name in missing} - {"torso"}
+        chains.update(name.replace("Shoulder", "Arm").replace("Hip", "Leg") for name in reversed_selected)
+        names = [name for name in roots
+                 if name.replace("Shoulder", "Arm").replace("Hip", "Leg") in chains]
+        candidate = replace_roots(names)
+        rig = split.build_rig(candidate)
+        mesh = MeshIndex(verts, faces)
+        for chain in sorted(chains):
+            side, kind = (chain[:-3], chain[-3:])
+            # Hand/toe tips come from the silhouette, so the recorded limb support is shoulder-elbow-wrist
+            # or hip-knee-ankle. Require both segment interiors rather than stealing a remote surface.
+            segments = [side + "Upper" + kind, side + "Lower" + kind]
+            for section in segments:
+                a, b, _ = rig.bones[section]
+                if not mesh.inside(((a + b) / 2)[None])[0]:
+                    raise ValueError(f"stage 4 cannot recover {chain}: no mesh around the recorded {section} "
+                                     "segment midpoint; limb surface is absent or joints lie outside the mesh")
+        candidate.surface_chains = tuple(sorted(set(candidate.surface_chains) | chains))
+        remaining = empty(candidate)
+        if not remaining:
+            describe(candidate, names)
+            candidate.notes.append("merged limb surface partition by nearest recorded bone segment: "
+                                   + ", ".join(sorted(chains)))
             return candidate
+        raise ValueError("stage 4 cannot recover R15 parts: " + ", ".join(remaining)
+                         + "; no existing mesh surface in the recorded limb's joint-plane bands")
     raise ValueError("stage 4 joints leave R15 parts without source vertices: " + ", ".join(missing)
                      + "; no recorded anatomical limb-root combination gives every part vertices")
