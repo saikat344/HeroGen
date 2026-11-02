@@ -37,7 +37,6 @@ function release(model) {
   });
   textures.forEach(v => v.dispose()); materials.forEach(v => v.dispose()); geometries.forEach(v => v.dispose());
 }
-export function createPreview({damping = true, floor = true} = {}) {
 // A soft elliptical contact shadow drawn once into a small canvas texture.
 function contactShadow() {
   const canvas = globalThis.document?.createElement?.('canvas');
@@ -55,11 +54,12 @@ function contactShadow() {
 }
 
 /**
- * Options (all off by default so thumbnail and comparison viewers keep their plain framing):
+ * Options (defaults keep the plain framing that thumbnail and comparison viewers use):
+ * - floor: show the floor grid under a model (on by default).
  * - stage: the lit workspace stage. Front framing lifted above the dock, a contact shadow instead of the grid,
  *   an eased reveal on first load, an idle auto-orbit after 4 s without input, eased camera presets.
  */
-export function createPreview({damping = true, stage = false} = {}) {
+export function createPreview({damping = true, floor = true, stage = false} = {}) {
   let state = null, request = 0, mode = 'textured', paused = false, viewListener = null, syncing = false;
   let orbitWanted = true, presetListener = null, preset = null;
   function emitPreset(value) { if (preset !== value) { preset = value; presetListener?.(value); } }
@@ -227,8 +227,7 @@ export function createPreview({damping = true, stage = false} = {}) {
       restore();
       const first = !state.model;
       if (state.model) { state.scene.remove(state.model); release(state.model); }
-      state.model = gltf.scene; state.url = url; state.grid.visible = floor; state.scene.add(gltf.scene);
-      state.model = gltf.scene; state.url = url; state.grid.visible = !stage; state.scene.add(gltf.scene);
+      state.model = gltf.scene; state.url = url; state.grid.visible = floor && !stage; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
       const radius = Math.max(size.x, size.y, size.z, 0.01);
