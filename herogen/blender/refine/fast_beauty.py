@@ -14,6 +14,19 @@ from .cameras import axes, project, px_per_unit
 from .fast import Pass
 
 
+def window_slope(facing, k):
+    """Depth a texel's own surface gains across the visibility window's minimum.
+
+    The window minimum guards silhouettes, yet on a steep jaw or chin the same surface is
+    nearer at a neighbouring pixel centre by its slope. Without this allowance, alternate
+    texels fail and a hatched band of face paint lands beside unpainted texels. A texel can
+    sit up to half the window from that centre on each axis. The slope is held at its value
+    15 degrees before tangency, so near-tangent texels cannot reach past an occluder.
+    """
+    cos = np.clip(facing, np.sin(np.deg2rad(15)), 1)
+    return I.VIS_WINDOW / 2 * np.sqrt(2) * np.sqrt(1 - cos * cos) / cos / k
+
+
 def eye_quality(candidate, default, boxes):
     """Compare corresponding eye detail at a fixed scale, without another model call.
 
@@ -585,9 +598,11 @@ class FaceControl:
         xi, yi = np.clip(xi, 0, w - 1), np.clip(yi, 0, h - 1)
         front = ndimage.minimum_filter(np.where(view['valid'], view['depth'], np.inf), size=I.VIS_WINDOW)
         _, _, forward = axes(view['cam'])
+        facing = -(tex.N @ forward)
+        k = px_per_unit(view['cam'])
         visible = (inside & region[yi, xi] & view['valid'][yi, xi]
-                   & (d <= front[yi, xi] + 3 / px_per_unit(view['cam']) + .001 * tex.height)
-                   & ((tex.N @ forward) < 0))
+                   & (d <= front[yi, xi] + 3 / k + .001 * tex.height + window_slope(facing, k))
+                   & (facing > 0))
         indices = np.flatnonzero(visible)
         if not len(indices):
             raise ValueError('Accepted frontal repaint has no visible face texels')
