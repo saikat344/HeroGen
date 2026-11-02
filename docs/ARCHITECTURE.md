@@ -2581,6 +2581,12 @@ between, beauty reference last). SideBeautyPass adds no turnaround reference to 
 frontal recipe checks remain active.
 The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
 proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
+In fast beauty with SideBeautyPass, a rear camera (`body+180` or hair `upper+180`) whose selected beauty
+reference is style-only, with a style IoU below that yaw's generation threshold (0.90 for cardinal yaws),
+does not receive it: its slot 1 sends the art-conditioned standard recipe (`RF12R`/`RF12W` or `RF13H`)
+with the cover, records a note, and slots 2 and 3 are unchanged. A reference record without a generation
+threshold keeps the beauty request. Such a reference shows another outline, and its costume and drape
+otherwise reach the rear and hair paints. Side and frontal cameras keep their references.
 With fast beauty enabled, a nested cover-only ordinary run first submits only attempt zero for each view.
 Its atlas uses the accepted ordinary paints and the original base wherever they fail. This atlas
 supplies the default-head fallback and eye-detail comparison.

@@ -625,6 +625,74 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(head['recipe_name'], 'RF6B')
         self.assertNotIn('surface_reference_mask', head)
 
+    def test_style_only_rear_reference_keeps_side_art_rear_slot_one_on_standard_recipe(self):
+        import hashlib
+        folder, _ = self.beauty_folder()
+        references = json.loads((folder / 'references.json').read_text())
+        for yaw, view in references['views'].items():
+            view['image_sha256'] = hashlib.sha256((folder / view['image']).read_bytes()).hexdigest()
+            # Every reference passed style selection at IoU .80, below the .90 geometry threshold.
+            view['threshold'] = .9
+            view['attempts'][0]['style_iou'] = .8
+        cover = Image.new('RGB', (64, 64), 'grey')
+
+        def slot_one(name, side_art):
+            control = B.FaceControl(folder, references, data={'views': {}})
+            control.side_art = side_art
+            job = SimpleNamespace(name=name, record={})
+            return job, control.options(job, 0, cover)
+
+        for name in ('body+180', 'upper+180'):
+            with self.subTest(name=name):
+                job, (image, options) = slot_one(name, True)
+                self.assertIs(image, cover)
+                self.assertEqual(options, {'face_keep': True, 'save_face': True})
+                self.assertEqual(job.record['note'], 'style-only beauty reference at +180 yaw; standard recipe')
+                # Without turnaround art (no RF16B) the beauty reference is unchanged.
+                job, (_, options) = slot_one(name, False)
+                self.assertEqual(options['recipe_name'], 'RF6B')
+                self.assertNotIn('note', job.record)
+        for name in ('body+90', 'body-90', 'head+0'):
+            with self.subTest(name=name):
+                _, (_, options) = slot_one(name, True)
+                self.assertEqual(options['recipe_name'], 'RF6B')
+        _, (_, options) = slot_one('body+0', True)
+        self.assertEqual(options['recipe_name'], 'RF18B')
+        # A geometry-matched rear reference keeps the enhanced RF16B slot.
+        references['views']['180']['attempts'][0]['style_iou'] = .95
+        _, (_, options) = slot_one('upper+180', True)
+        self.assertEqual(options['recipe_name'], 'RF6B')
+        # Slots 2 and 3 are unchanged.
+        control = B.FaceControl(folder, references, data={'views': {}})
+        control.side_art = True
+        references['views']['180']['attempts'][0]['style_iou'] = .8
+        _, options = control.options(SimpleNamespace(name='body+180', record={}, hair=False, key='body+180'),
+                                     1, cover)
+        self.assertEqual(options['attempt_start'], 0)
+        self.assertEqual(options['art'], ())
+
+    def test_style_only_rear_slot_one_pays_two_with_art_conditioned_standard_recipe(self):
+        with mock.patch.object(beauty, 'style_only', side_effect=lambda rec, yaw: yaw == 180):
+            record, paid, _, edits = self.paid_run(all_flags=True)
+        self.assertEqual(paid, Counter({view: 2 for view in self.expected_views}))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+        for key, recipe in (('body+180', 'RF12R'), ('hair-upper+180', 'RF13H')):
+            view = record['views'][key]
+            self.assertEqual((view['winning_slot'], view['prompt']), (1, recipe))
+            self.assertNotIn('reference', view)
+            self.assertEqual(view['art_views'], ['back'])
+            self.assertEqual(view['note'], 'style-only beauty reference at +180 yaw; standard recipe')
+        self.assertEqual(record['views']['body+90']['prompt'], 'RF16B')
+
+    def test_style_only_needs_a_recorded_geometry_threshold(self):
+        rec = {'views': {'180': {'image': 'b.png', 'attempts': [
+            {'image': 'a.png', 'style_iou': .95}, {'image': 'b.png', 'style_iou': .74}]}}}
+        self.assertFalse(beauty.style_only(rec, 180))
+        rec['views']['180']['threshold'] = .9
+        self.assertTrue(beauty.style_only(rec, 180))
+        rec['views']['180']['attempts'][1]['style_iou'] = .9
+        self.assertFalse(beauty.style_only(rec, 180))
+
     @staticmethod
     def slot_kind(kw):
         return 'beauty' if kw.get('recipe_name') else kw.get('attempt_start', 0)

@@ -99,6 +99,8 @@ class FaceControl:
         self.default_passes = []
         self.extensions = {}
         self.root_client = self.persistence_lock = None
+        # SideBeautyPass turnaround art turns side and rear beauty requests into RF16B.
+        self.side_art = False
 
     def render_default(self, prep, cam, folder, timeout):
         """Render the same frozen geometry with default fast's original, ungraded atlas."""
@@ -128,12 +130,17 @@ class FaceControl:
             return cover, options
         angle = {'head+0': 0, 'body+0': 0, 'body+90': 90, 'body-90': -90,
                  'body+180': 180, 'upper+180': 180}[job.name]
-        if beauty.selected_yaw(self.references, angle) is None:
+        yaw = beauty.selected_yaw(self.references, angle)
+        if yaw is None:
             job.record['note'] = f'no face-free beauty reference at {angle:+g} yaw; standard recipe'
+            return cover, options
+        if self.side_art and angle == 180 and beauty.style_only(self.references, yaw):
+            # A style-only rear reference has another outline. Its costume and drape reach RF16B's
+            # rear and hair paints; slot 1 uses the art-conditioned standard recipe instead.
+            job.record['note'] = f'style-only beauty reference at {yaw:+g} yaw; standard recipe'
             return cover, options
         reference, record = beauty.reference(self.folder, self.references, angle, head=job.name.startswith('head'))
         if job.name == 'body+0':
-            yaw = beauty.selected_yaw(self.references, angle)
             with Image.open(self.folder / self.references['views'][str(yaw)]['mask']) as mask:
                 mask = mask.convert('L')
             return reference, {**options, 'recipe_name': 'RF18B', 'reference_record': record,
