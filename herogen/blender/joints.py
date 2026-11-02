@@ -31,6 +31,10 @@ import numpy as np
 from .views import ViewSet, label
 
 
+class JointEstimationError(ValueError):
+    """The silhouette cannot supply the measurements needed to construct a skeleton."""
+
+
 @dataclass
 class Plane:
     """A mask resampled so that axis 0 runs up in world Z (or Y for the top view) and axis 1 runs +world."""
@@ -94,6 +98,8 @@ class Skeleton:
 def _band_centre(w: np.ndarray, z: np.ndarray, lo: int, hi: int, tol: float) -> tuple[float, float]:
     """Centre z and width of the contiguous band of near-minimal width around the minimum of w[lo:hi]."""
     seg = w[lo:hi]
+    if not len(seg):
+        raise JointEstimationError(f"silhouette joint estimation has no width samples in rows [{lo}, {hi})")
     i = int(np.argmin(seg))
     wmin = seg[i]
     a = b = i
@@ -424,6 +430,13 @@ def estimate(vs: ViewSet, height: float) -> Skeleton:
     # Waist: narrowest torso band between crotch and armpit.
     ap = min(armpit.values())
     lo_r, hi_r = F.row(crotch_z + 0.15 * (ap - crotch_z)), F.row(ap - 0.1 * (ap - crotch_z))
+    if ap <= crotch_z or hi_r <= lo_r:
+        raise JointEstimationError(
+            f"silhouette waist cannot be measured: crotch at {crotch_z:.3f} studs ({crotch_z / height:.3f} H), "
+            f"lowest armpit at {ap:.3f} studs ({ap / height:.3f} H); "
+            f"no waist search rows [{lo_r}, {hi_r}). "
+            f"A measurable torso band above the crotch and below both armpits is required. "
+            f"Crotch evidence: {evidence['Crotch']}")
     wz, wmin = _band_centre(w, zr, lo_r, hi_r, 0.03)
     r_w = F.row(wz)
     above, below = w[r_w:hi_r + 1].max(initial=0), w[lo_r:r_w + 1].max(initial=0)
