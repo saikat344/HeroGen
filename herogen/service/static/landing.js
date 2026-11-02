@@ -73,9 +73,11 @@ function revealer(root) {
   return { watch };
 }
 
-export function landingGallery() {
+// `visible` is false when the page opens on another screen (#heroes): the catalog, picker and gallery then wait
+// until the landing is first shown, so that screen makes no gallery requests.
+export function landingGallery({ visible: shown = true } = {}) {
   const $ = s => document.querySelector(s), viewer = createPreview({ floor: false });
-  let items = [], selected = null, revision = 0, visible = true, destroyed = false, ready = false;
+  let items = [], selected = null, revision = 0, visible = shown, destroyed = false, ready = false, started = false;
   let thumbViewer = null, thumbCanvas = null, thumbBusy = false;
   const shots = new Map();   // id -> {textured, clay} data URLs, rendered once from the saved model
   const status = $('#landingStatus'), canvas = $('#landingCanvas'), retry = $('#retryLanding'), picker = $('#modelPicker');
@@ -239,6 +241,7 @@ export function landingGallery() {
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('pagehide', () => { destroyed = true; ++revision; stopOrbit(); viewer.dispose(); closeThumbs(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { destroyed = false; startOrbit(); visibility(); } });
-  catalog();
-  return {setVisible(value) { visible = value; visibility(); }};
+  function start() { if (!started) { started = true; catalog(); } }
+  if (visible) start();
+  return {setVisible(value) { visible = value; if (visible) start(); visibility(); }};
 }

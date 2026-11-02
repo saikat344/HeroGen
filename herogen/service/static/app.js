@@ -601,8 +601,8 @@ async function boot() {
   show('#loading', false);
   const heroesRoute = location.hash === '#heroes';
   if (!heroesRoute) { show('#entry'); trackOnce('page:landing', 'page_view', { page: 'landing' }); }
-  landing = landingGallery();
-  if (heroesRoute) { landing.setVisible(false); setScreen('heroes'); heroes.loading(); $('#heroesH').focus({ preventScroll: true }); }
+  landing = landingGallery({ visible: !heroesRoute });
+  if (heroesRoute) { setScreen('heroes'); heroes.loading(); $('#heroesH').focus({ preventScroll: true }); }
   try { if (S.session.signed_in) await signedIn(); else if (heroesRoute) heroes.update([]); }
   catch (e) { if (heroesRoute) heroes.fail(e); else throw e; }
   if (location.hash === '#gallery') $('#gallery').scrollIntoView({block:'start'});
