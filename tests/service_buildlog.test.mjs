@@ -95,7 +95,7 @@ test('texture views, reasons and speakers read as plain text', () => {
     ['kept', 'Front, try 1: not used (outline moved too far: 90th percentile 18.0 px (limit 16))'],
     ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, median drift 3.6 px)'],
     ['kept', 'Face close-up: no try passed. Keeping the original paint for this view.'],
-    ['info', 'Front: both tries were rejected, so Muse Image gets one more try (try 3).'],
+    ['info', 'Front: the earlier tries were not used, so Muse Image gets one more try (try 3).'],
     ['info', 'Rendered the 3D shape from 5 cameras'],
     ['passed', 'Your model now shows version 1 (3 of 6 views repainted).'],
     ['skipped', 'Texture refine reached its spending cap. Showing the best texture so far.']]);
