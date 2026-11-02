@@ -56,7 +56,8 @@ class Selection(unittest.TestCase):
         cands = [candidate({n: k for n in SECTIONS}) for k in (100, 300, 500)]     # totals 1500, 4500, 7500
         build = {"budget": 5000}
         self.assertEqual(set(S4._pick(cands, build, "roblox-ingame").values()), {1})
-        self.assertEqual(set(S4._pick(cands, {"budget": 1000}, "roblox-ingame").values()), {0})   # none fits
+        with self.assertRaisesRegex(ValueError, "body 1500 > 1000"):
+            S4._pick(cands, {"budget": 1000}, "roblox-ingame")
         self.assertEqual(set(S4._pick(cands[:1], {"budget": None}, "best").values()), {0})
 
     def test_part_groups_choose_their_own_candidate(self):
@@ -70,7 +71,8 @@ class Selection(unittest.TestCase):
         self.assertEqual(pick["LeftHand"], 0)             # 3 x 400 = 1,200
         self.assertEqual(len({pick[n] for n in AVATAR_GROUPS["LeftArm"][0]}), 1)
         too_big = [candidate({n: 2000 for n in SECTIONS})]
-        self.assertEqual(set(S4._pick(too_big, {"budget": "groups"}, "roblox-avatar").values()), {0})
+        with self.assertRaisesRegex(ValueError, "Torso 4000 > 1750"):
+            S4._pick(too_big, {"budget": "groups"}, "roblox-avatar")
 
     def test_unknown_profile_is_refused(self):
         with self.assertRaises(ValueError):

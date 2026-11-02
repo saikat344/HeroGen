@@ -956,6 +956,12 @@ and the scorer checks the same names (`--profile`):
 | `roblox-ingame` | `high.glb` and `low.glb`, each the largest whole-body decimation whose sectioned total fits | `triangles_high` <= 24,000, `triangles_low` <= 6,000 |
 | `roblox-avatar` | one `high.glb` (Roblox makes its own LODs) that meets the triangle, watertight-part and texture limits of Roblox's character body specification; each part group takes, from a ladder of whole-body decimations, the densest candidate that fits its own budget (sections are separate closed meshes, so groups may come from different candidates), with the low cap and cover settings | `triangles_total` <= 10,742; per group `triangles_Head` <= 4,000, `triangles_Torso` (`UpperTorso`, `LowerTorso`) <= 1,750, each arm and leg (three sections) <= 1,248; `watertight_parts` (every part closed and manifold after welding); `texture_max_px` <= 2048 |
 
+Triangle selection counts the finished sections, including new cut faces, caps and shoulder covers. If none of
+the initial whole-body targets fits, stage 4 halves the smallest target until the finished geometry fits, then
+refines a whole-body bracket at the initial ladder's target spacing. Part-group budgets extend downward too.
+A fitting initial ladder is unchanged. If even a one-triangle target cannot fit the required added geometry,
+stage 4 fails explicitly with the remaining budget shortfalls instead of selecting an over-budget fallback.
+
 Budget gates apply only under a Roblox profile; every other gate (sections, open edges, watertight parts, pivots, joint gaps,
 rest IoU, texture) is the same under every profile, applied to the LODs the profile builds. The rest of the
 specification is not built, so a `roblox-avatar` body is not yet a complete avatar body: the R15 bone rig with
