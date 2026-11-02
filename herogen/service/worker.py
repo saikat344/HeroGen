@@ -62,7 +62,7 @@ RENEW_EVERY_S = 120.0
 # While a stage runs on a local copy (Modal), its build-log file is copied to the data volume and committed this
 # often, when it has grown, so the website can show the events live. Without it they would appear only when the
 # stage ends and the whole run folder is copied back.
-PUMP_EVERY_S = 3.0
+PUMP_EVERY_S = 2.0
 
 
 class LeaseKeeper:
