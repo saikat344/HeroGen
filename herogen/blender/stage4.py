@@ -500,12 +500,12 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         if mesh_npz.exists():
             with np.load(mesh_npz) as mesh:
                 source_verts = mesh["verts"]
+                source_faces = mesh["faces"]
         else:
             from .glb import load_glb
 
-            source_verts, _ = load_glb(mesh_src).merged()
-        sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts)
-        del source_verts
+            source_verts, source_faces = load_glb(mesh_src).merged()
+        sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts, source_faces)
         joints_source = "sam3d-body"
     source = None
     from . import refined_colour
@@ -527,8 +527,6 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         with _Image.open(src_tex) as im:
             source = texture.SourceColour(d["verts"], d["faces"], d["corner_uv"],
                                           np.asarray(im.convert("RGB"), dtype=np.float64))
-    for n in sk.notes:
-        rec.note(n)
     budgets = {lod: b["budget"] for lod, b in builds.items()}
     if profile == "best":
         rec.note("profile best: no triangle budget, the high body keeps the stage 3 mesh's full detail, no low LOD")
@@ -561,6 +559,18 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     dec = bl.run_job({"tasks": [{"task": "decimate", "mesh": str(mesh_src.resolve()), "targets": targets,
                                  "out": outs}]}, work, "stage4-decimate", timeout=timeout)
     rec.data["tools"] = [f"blender {dec['blender']}"]
+    if joints_source == "sam3d-body":
+        # A handful of source vertices can disappear during decimation. Resolve on every mesh that can
+        # become an exported body, before the cut search, so all LODs and candidates share one partition.
+        candidates = []
+        for key in ["cutsearch", *(key for keys in ladder.values() for key in keys)]:
+            with np.load(outs[key]) as mesh:
+                candidates.append(mesh["verts"])
+        sk = body_joints.nonempty_limb_roots(sk, jrec, source_verts, source_faces,
+                                            lod_vertices=tuple(candidates))
+        del source_verts, source_faces, candidates
+    for n in sk.notes:
+        rec.note(n)
     method = vs.meta.get("mask_method") or {}
     observed = []
     for name, v in vs.views.items():

@@ -539,6 +539,97 @@ class TestBodyJoints(HybridBase):
             for name, value in getattr(before, attr).items():
                 self.assertEqual(np.asarray(getattr(sk, attr)[name]).tobytes(), np.asarray(value).tobytes())
 
+    def test_merged_limb_uses_existing_surface_without_radius_weighting(self):
+        from copy import deepcopy
+        from herogen.blender import split
+
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightArm"] = .001
+        before = deepcopy(sk)
+        vertices, triangles = self.verts.copy(), self.faces.copy()
+        self.assertEqual(self.part_counts(sk)["RightUpperArm"], 0)
+        result = body_joints.nonempty_limb_roots(sk, rec, vertices, triangles)
+        self.assertEqual(result.surface_chains, ("RightArm",))
+        self.assertEqual(sk.surface_chains, ())
+        self.assertTrue(all(self.part_counts(result).values()))
+        self.assertEqual(result.as_json(), before.as_json())
+        self.assertEqual(result.radii, before.radii)
+        np.testing.assert_array_equal(vertices, self.verts)
+        np.testing.assert_array_equal(triangles, self.faces)
+        # Splitting assigns the original surface exactly once; its exterior area is conserved.
+        _, _, pos, sections, _, _ = split.split_mesh(vertices, triangles, result)
+
+        def area(v, f):
+            t = v[f]
+            return np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1).sum() / 2
+
+        self.assertAlmostEqual(sum(area(pos, f) for f in sections.values()), area(vertices, triangles), places=8)
+        self.assertTrue(all(len(f) for f in sections.values()))
+
+    def test_actual_lod_vertices_trigger_fallback_when_source_is_nonempty(self):
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightArm"] = .08
+        self.assertTrue(all(self.part_counts(sk).values()))
+        # Decimation can omit a small labelled patch while keeping the surrounding sleeve surface.
+        from herogen.blender import SECTIONS, split
+
+        labels = split.Labeller(split.build_rig(sk)).labels(self.verts)
+        sparse = self.verts[labels != SECTIONS.index("RightUpperArm")]
+        self.assertIs(body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces), sk)
+        result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces, lod_vertices=(sparse,))
+        self.assertTrue(all(self.part_counts(result, sparse).values()))
+        self.assertEqual(result.surface_chains, ("RightArm",))
+
+    def test_recovery_also_corrects_a_reversed_root_that_still_owns_surface(self):
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightArm"] = .001
+        sk.joints["LeftShoulder"] = sk.joints["LeftElbow"] + [0, 0, -.12]
+        result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        for side in ("Left", "Right"):
+            np.testing.assert_array_equal(result.joints[side + "Shoulder"],
+                                          rec["sources"]["sam3d-body"][side + "Shoulder"])
+        self.assertEqual(result.surface_chains, ("LeftArm", "RightArm"))
+        self.assertTrue(all(self.part_counts(result).values()))
+
+    def test_absent_limb_fails_with_specific_segment_and_does_not_claim_remote_surface(self):
+        sk, rec = self.selected_skeleton()
+        for name in ("RightShoulder", "RightElbow", "RightWrist"):
+            sk.joints[name] += [0, 10, 0]
+        rec["joint_sources"] = {"RightShoulder": "sam3d-body"}
+        before = sk.as_json()
+        with self.assertRaisesRegex(ValueError, "RightArm: no mesh around the recorded RightUpperArm"):
+            body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+        self.assertEqual(before, sk.as_json())
+        self.assertEqual(sk.surface_chains, ())
+
+    def test_supported_limb_with_no_surface_in_a_distal_band_still_fails(self):
+        from copy import deepcopy
+        from herogen.blender import SECTIONS, split
+
+        sk, rec = self.selected_skeleton()
+        sk.radii["RightArm"] = .001
+        partition = deepcopy(sk)
+        partition.surface_chains = ("RightArm",)
+        labels = split.Labeller(split.build_rig(partition)).labels(self.verts)
+        sparse = self.verts[labels != SECTIONS.index("RightHand")]
+        with self.assertRaisesRegex(ValueError, "RightHand; no existing mesh surface.*joint-plane bands"):
+            body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces, lod_vertices=(sparse,))
+        self.assertEqual(sk.surface_chains, ())
+
+    def test_merged_costume_radius_cannot_put_the_root_cut_past_the_next_joint(self):
+        from herogen.blender import split
+
+        for kind, root in (("Arm", "Shoulder"), ("Leg", "Hip")):
+            with self.subTest(kind=kind):
+                sk, rec = self.selected_skeleton()
+                sk.radii["Right" + kind] = 10.0
+                self.assertFalse(all(self.part_counts(sk).values()))
+                result = body_joints.nonempty_limb_roots(sk, rec, self.verts, self.faces)
+                self.assertEqual(result.surface_chains, ("Right" + kind,))
+                self.assertTrue(all(self.part_counts(result).values()))
+                p, _ = split.build_rig(result).planes["Right" + root]
+                np.testing.assert_array_equal(p, result.joints["Right" + root])
+
     def test_reversed_shoulder_restores_hand_with_only_one_root_changed(self):
         from copy import deepcopy
 
@@ -610,9 +701,9 @@ class TestBodyJoints(HybridBase):
         rec["joints"]["RightShoulder"] = (np.asarray(rec["joints"]["RightElbow"]) + [0, 0, -.12]).tolist()
         resolve = body_joints.nonempty_limb_roots
 
-        def resolve_and_check(sk, record, verts):
+        def resolve_and_check(sk, record, verts, faces):
             self.assertEqual(self.part_counts(sk, verts)["RightHand"], 0)
-            result = resolve(sk, record, verts)
+            result = resolve(sk, record, verts, faces)
             self.assertTrue(all(self.part_counts(result, verts).values()))
             return result
 
