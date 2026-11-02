@@ -646,7 +646,7 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.tab.eval("document.querySelector('#backToIdeas').click()")
         self.make_hero('Queued hero')
         self.tab.eval("document.querySelector('#backToIdeas').click()")
-        self.tab.goto(self.url + '/')
+        self.tab.goto(self.url + '/#heroes')
         card = ("([...document.querySelectorAll('.hero-card')].find((c) => c.querySelector('.hero-card__name').textContent === %s)"
                 "?.querySelector('.hero-card__note')?.textContent || '')")
         self.tab.wait(card % json.dumps('Queued hero'))
@@ -655,7 +655,7 @@ class TestPublicLivePage(ServiceBrowserCase):
         time.sleep(2)   # the second hero waits in the queue; that wait is not its run time
         self.runner.gate.set()
         self.backend.wait(60)
-        self.tab.goto(self.url + '/')
+        self.tab.goto(self.url + '/#heroes')
         for job in self.store.jobs_admin_list():
             ran = job['finished_at'] - job['started_at']
             waited = job['finished_at'] - job['created_at']
@@ -666,6 +666,44 @@ class TestPublicLivePage(ServiceBrowserCase):
             if job['name'] == 'Queued hero':
                 self.assertLess(round(ran + (job['export_seconds'] or 0)), round(waited), 'the test must have a queue wait')
         self.assertEqual(self.tab.errors, [])
+
+    def test_a_hero_card_without_detail_says_the_roblox_files_are_still_coming(self):
+        self.runner.delay_s = 0.3
+        exports = threading.Event()
+        run = self.runner.run
+
+        def hold_roblox(spec, ctx):
+            if spec.key == '4':
+                exports.wait(60)
+            return run(spec, ctx)
+        self.runner.run = hold_roblox
+        self.runner.gate.set()
+        self.signin()
+        self.make_hero('Exporting hero')
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            job = self.store.jobs_admin_list()[0]
+            if job['state'] == 'succeeded' and job['export_state'] == 'running':
+                break
+            time.sleep(0.1)
+        self.assertEqual((job['state'], job['export_state']), ('succeeded', 'running'))
+        t = self.tab
+        t.call('Network.enable')
+        t.call('Network.setBlockedURLs', urls=['*/api/jobs/j_*'])   # no detail record: only the list answers
+        t.goto(self.url + '/#heroes')
+        note = "(document.querySelector('.hero-card__note')?.textContent || '')"
+        t.wait(note)
+        self.assertRegex(t.eval(note), r'^Model ready in \d+ s · Roblox files in progress$')
+        self.assertEqual(t.eval("document.querySelector('.hero-pill').textContent"), 'Ready')
+        t.call('Network.setBlockedURLs', urls=[])
+        time.sleep(POLL_S + 1)   # the next poll fetches the detail while the exports are still running
+        self.assertRegex(t.eval(note), r'^Model ready in')
+        self.assertEqual(t.eval("document.querySelector('.hero-pill').textContent"), 'Ready', 'no Roblox claim yet')
+        exports.set()
+        self.backend.wait(60)
+        t.wait(note + ".match(/^Finished in \\d+ s$/)", timeout=30)   # the open page keeps polling until the exports end
+        t.wait("document.querySelector('.hero-pill').textContent === 'Roblox ready'", timeout=30)
+        self.assertEqual(t.errors, [])
 
     def test_same_click_network_retry_uses_one_key_and_creates_one_hero(self):
         self.signin()
