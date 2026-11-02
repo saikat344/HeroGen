@@ -115,6 +115,11 @@ def fit_pivots(sections):
         if not len(section.faces):
             continue
         parent = sections.get(PARENT[name])
+        edges = _shared_edges(section, parent) if parent is not None else None
+        if edges is not None and not len(edges):
+            changes[name] = {"source": "section pivot", "distance_studs": 0.0,
+                             "pivot_fallback": f"no shared cut edge with {PARENT[name]}; retained section pivot"}
+            continue
         neighbours = [section] + ([parent] if parent is not None else [])
         pivot = section.pivot
         if all(np.all(pivot >= s.verts.min(0) - 1e-4) and np.all(pivot <= s.verts.max(0) + 1e-4)
@@ -125,17 +130,6 @@ def fit_pivots(sections):
             face, bary, _ = index.closest(pivot[None])
             new = bary[0] @ section.verts[section.faces[face[0]]]
         else:
-            rounded_parent = np.round(parent.verts, 7)
-            parent_edges = np.concatenate([parent.faces[:, [0, 1]], parent.faces[:, [1, 2]], parent.faces[:, [2, 0]]])
-            common = {tuple(sorted((tuple(rounded_parent[a]), tuple(rounded_parent[b])))) for a, b in parent_edges}
-            rounded = np.round(section.verts, 7)
-            edges = np.concatenate([section.faces[:, [0, 1]], section.faces[:, [1, 2]], section.faces[:, [2, 0]]])
-            shared = np.array([tuple(sorted((tuple(rounded[a]), tuple(rounded[b])))) in common for a, b in edges])
-            edges = edges[shared]
-            if not len(edges):
-                changes[name] = {"source": "section pivot", "distance_studs": 0.0,
-                                 "pivot_fallback": f"no shared cut edge with {PARENT[name]}; retained section pivot"}
-                continue
             a, b = section.verts[edges[:, 0]], section.verts[edges[:, 1]]
             d = b - a
             t = np.clip(((pivot - a) * d).sum(1) / np.maximum((d * d).sum(1), 1e-20), 0, 1)
@@ -145,3 +139,14 @@ def fit_pivots(sections):
                          "distance_studs": round(float(np.linalg.norm(new - pivot)), 6)}
         section.pivot = new.copy()
     return changes
+
+
+def _shared_edges(section, parent):
+    """The section's mesh edges that also appear in its parent, matched on rounded vertex positions."""
+    rounded_parent = np.round(parent.verts, 7)
+    parent_edges = np.concatenate([parent.faces[:, [0, 1]], parent.faces[:, [1, 2]], parent.faces[:, [2, 0]]])
+    common = {tuple(sorted((tuple(rounded_parent[a]), tuple(rounded_parent[b])))) for a, b in parent_edges}
+    rounded = np.round(section.verts, 7)
+    edges = np.concatenate([section.faces[:, [0, 1]], section.faces[:, [1, 2]], section.faces[:, [2, 0]]])
+    shared = np.array([tuple(sorted((tuple(rounded[a]), tuple(rounded[b])))) in common for a, b in edges], bool)
+    return edges[shared]

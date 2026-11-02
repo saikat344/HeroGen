@@ -144,6 +144,16 @@ class PivotTests(unittest.TestCase):
             "source": "section pivot", "distance_studs": 0.0,
             "pivot_fallback": "no shared cut edge with UpperTorso; retained section pivot"})
 
+    def test_disconnected_part_inside_its_parent_still_records_the_fallback(self):
+        parent = box("UpperTorso", [-2, -2, -2], [2, 2, 2], [0, -2, 0])
+        child = box("Head", [-.5, -.5, -.5], [.5, .5, .5], [0, 0, 0])
+        before = child.pivot.copy()
+        changes = rig_geometry.fit_pivots({"UpperTorso": parent, "Head": child})
+        np.testing.assert_array_equal(child.pivot, before)
+        self.assertEqual(changes["Head"], {
+            "source": "section pivot", "distance_studs": 0.0,
+            "pivot_fallback": "no shared cut edge with UpperTorso; retained section pivot"})
+
     def test_root_falls_on_its_own_section_surface(self):
         section = box("LowerTorso", [0, 0, 0], [1, 1, 1], [-.5, .5, .5])
         changes = rig_geometry.fit_pivots({"LowerTorso": section})
