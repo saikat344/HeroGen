@@ -72,7 +72,12 @@ class JointMeasurementTests(unittest.TestCase):
             rec = json.loads((run / "stage-4.json").read_text())
             self.assertFalse(rec["ok"])
             self.assertEqual(rec["status"], "error")
-            self.assertIn("silhouette waist cannot be measured", rec["error"])
+            self.assertIn("silhouette waist cannot be measured", rec["notes"])
+            self.assertIn("waist or limbs", rec["error"])
+            # The service shows a record's error only when it is short and contains no path separators.
+            self.assertLess(len(rec["error"]), 300)
+            self.assertNotIn("/", rec["error"])
+            self.assertNotIn("\\", rec["error"])
             self.assertEqual(rec["outputs"], [])
 
 
