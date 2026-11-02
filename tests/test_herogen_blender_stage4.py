@@ -165,11 +165,38 @@ class FastJointRecordTests(unittest.TestCase):
                     self.assertEqual(c["value"], 14)
                     self.assertEqual(c["missing_or_empty"], ["RightHand"])
 
-    def test_invalid_topology_and_profile_limits_stay_hard_failures(self):
+    def test_fast_profile_budgets_and_watertight_parts_are_informational(self):
         from herogen.blender.record import check
 
-        for name in ("open_edges", "watertight_parts", "triangles_high", "triangles_total", "triangles_Head",
-                     "texture_max_px"):
+        for name, value, threshold in (("triangles_high", 24001, 24000), ("triangles_low", 7128, 6000),
+                                       ("watertight_parts", 1, 0)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                rec.add(check(name, value, threshold, passed=False, note="original measurement"))
+                self.assertTrue(self.finish_fast(rec)["ok"])
+                c = next(c for c in rec.data["checks"] if c["name"] == name)
+                self.assertFalse(c["gate"])
+                self.assertFalse(c["pass"])
+                self.assertEqual((c["value"], c["threshold"]), (value, threshold))
+                self.assertIn("original measurement; fast lane:", c["note"])
+                self.assertIn("informational", c["note"])
+                self.assertIn("Some shape or texture details may need refinement.", rec.data["notes"])
+
+    def test_full_profile_budgets_and_watertight_parts_stay_hard_failures(self):
+        from herogen.blender.record import check
+
+        for name in ("triangles_high", "triangles_low", "watertight_parts"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                rec = self.make_record(tmp)
+                measured = check(name, 1, 0, passed=False)
+                rec.add(measured.copy())
+                self.assertFalse(rec.finish()["ok"])
+                self.assertEqual(rec.data["checks"][-1], measured)
+
+    def test_other_topology_and_profile_limits_stay_hard_failures(self):
+        from herogen.blender.record import check
+
+        for name in ("open_edges", "triangles_total", "triangles_Head", "texture_max_px"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 rec = self.make_record(tmp)
                 rec.add(check(name, 1, passed=False))

@@ -268,11 +268,13 @@ gap limit and pass/fail measurement for every measurable joint in each final LOD
 `unverified_joints`, with each joint's name, reason and user-facing `message`; the `measurable_joints` check is
 informational. Unknown gaps are omitted, and a gap check with no measurements has a null value and is
 informational. Measured gaps, silhouette and texture agreement, pivot placement and synthetic joint accuracy
-are also informational (`gate: false`). A completed export includes a user-facing sentence in `notes`, naming
+are also informational (`gate: false`). The profile's `triangles_high`, `triangles_low` and `watertight_parts`
+measurements retain their values, thresholds and pass status but are informational with an explicit note.
+A completed export includes a user-facing sentence in `notes`, naming
 the widest measured seam when it exceeds the limit. Empty final sections still fail `sections_non_empty`;
 exported GLBs must contain all 15 nonempty R15 parts, and every listed output file must exist and be nonempty.
-Topology, triangle budgets, Roblox's existing 20,000-triangle per-mesh limit and texture size limits remain
-hard requirements. Export errors remain loud.
+Open-edge checks, avatar group and total triangle limits, Roblox's existing 20,000-triangle per-mesh limit
+and texture size limits remain hard requirements. Export errors remain loud.
 The full lane retains every existing gate and the error above.
 The search evaluates candidates on `--cut-workers` threads (1 to 12, default 3) and consumes their results in the
 original order, so the chosen cuts and every trial record are identical for any worker count.
