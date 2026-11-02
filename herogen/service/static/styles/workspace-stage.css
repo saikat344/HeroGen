@@ -103,6 +103,7 @@
 .actions__help { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; }
 .actions__note { grid-column: 1 / -1; margin: var(--space-2) 0 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; text-wrap: balance; }
 .actions__note .icon { display: inline-block; vertical-align: -0.2em; margin-right: var(--space-2); }
+.actions__time { white-space: nowrap; }
 .actions__time:not(:empty)::before { content: " · "; }
 .actions__error { justify-content: center; margin: 0; padding: 0 var(--space-6) var(--space-4); text-align: center; }
 
