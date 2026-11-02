@@ -2516,7 +2516,7 @@ recorded in `default_fast_fallback`, including when a beauty face is retained.
 The head pass's two independent slots run one beauty sample and the ordinary recipe's first sample
 (`RF2R` or `RF2W`) with the original cover and ungraded render. Both frontal samples drain before face
 selection. Body and hair use selected beauty references where available, with the existing standard
-recipe for unavailable rear references. Fast beauty `body+0` uses `RF17B`: its reference is uniformly
+recipe for unavailable rear references. Fast beauty `body+0` uses `RF18B` (`RF17B` stays frozen for earlier runs): its reference is uniformly
 height-fitted and clipped to the rendered silhouette, extending nearest foreground colours to uncovered
 render pixels. This changes only the conditioning reference. Generated samples and acceptance masks are
 never reshaped. The prompt requests surface details and the reference's cloth and leather colours while

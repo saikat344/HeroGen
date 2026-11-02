@@ -617,7 +617,7 @@ class FastBeautyStageTests(unittest.TestCase):
         before = len(self.client.log.calls)
         reference, options = control.options(SimpleNamespace(name='body+0', record={}), 0,
                                              Image.new('RGB', (64, 64)))
-        self.assertEqual(options['recipe_name'], 'RF17B')
+        self.assertEqual(options['recipe_name'], 'RF18B')
         self.assertEqual(options['reference_record']['yaw'], 0)
         self.assertEqual(options['surface_reference_mask'].size, reference.size)
         self.assertEqual(len(self.client.log.calls), before)
