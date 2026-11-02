@@ -1170,6 +1170,24 @@ class FastBeautyStageTests(unittest.TestCase):
         # Attempt one was folded into the default-head run; attempt zero still wins.
         self.assertEqual(record['default_fast_fallback']['views']['head+0']['tries'], 2)
 
+    def test_default_head_recovery_budget_stop_stops_the_run(self):
+        from herogen.blender.refine import face_recovery
+        original = face_recovery.resolve
+        def resolve(client, *args, **kwargs):
+            if 'face-recovery-fold' in Path(client.cache_dir).parts:
+                raise BudgetStop('API cap reached during default-head face recovery')
+            return original(client, *args, **kwargs)
+        calls = []
+        with self.fake_recovery(calls), mock.patch.object(face_recovery, 'resolve', side_effect=resolve):
+            record = self.run_beauty(cap_usd=5, reject=lambda view, kind: view in ('head+0', 'body+0'))
+        reason = 'API cap reached during default-head face recovery'
+        nested = record['default_fast_fallback']
+        self.assertEqual(nested['face_recovery'], {'applied': False, 'view': 'head+0', 'reason': reason})
+        self.assertEqual(nested['stop_reason'], reason)
+        self.assertEqual(record['stop_reason'], reason)
+        self.assertTrue(record['face_source']['cap_reached'])
+        self.assertEqual(record['status'], 'cap_reached')
+
     def test_no_face_recovery_when_the_default_head_has_frontal_paint(self):
         calls = []
         with self.fake_recovery(calls):

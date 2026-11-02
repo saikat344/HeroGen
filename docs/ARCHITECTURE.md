@@ -2675,7 +2675,9 @@ supplies the default-head fallback and eye-detail comparison. Face-only recovery
 run's own frontal records, so it uses only ordinary head samples (the samples main slots 2 and 3 replay),
 never a beauty slot-1 sample. When ordinary attempt one is folded in, recovery is re-resolved: an
 accepted frontal removes it, and an outline-only attempt one can qualify when attempt zero did not (the
-lowest qualifying attempt wins). When the face source is `default-fast-fallback`, `face_source.face_recovery`
+lowest qualifying attempt wins). A budget stop during that re-resolution records `applied` false with the
+stop, sets the nested run's `stop_reason` and `face_source.cap_reached`, and then stops the main run with
+its own `stop_reason`, as any other budget stop does. When the face source is `default-fast-fallback`, `face_source.face_recovery`
 repeats the nested run's view, attempt, reason and mask area; a `default` or `beauty` source has frontal
 paint and no recovery.
 Every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
