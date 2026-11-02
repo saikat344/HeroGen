@@ -1,4 +1,4 @@
-"""A bounded, global Lab grade from the source front render to the character artwork."""
+"""Global Lab calibration, with colour-preserving clusters for opt-in beauty bases."""
 import cv2
 import numpy as np
 
@@ -23,9 +23,11 @@ def brightness(rgb, mask):
     return dict(zip(("p5", "p50", "p95", "p99"), np.quantile(values, [.05, .5, .95, .99]).tolist()))
 
 
-def fit(source, source_mask, art, art_mask):
+def fit(source, source_mask, art, art_mask, *, preserve_colours=False):
     """Fit the prototype's 85% L quantile curve and bounded a/b mean/spread match.
 
+    ``preserve_colours`` instead uses independent matched colour clusters, source hue/chroma
+    protection and full exclusion of strong accents. The original pooled controls are omitted.
     Artwork edges are eroded by 5x5 pixels to exclude background contamination. Output L is capped at the
     mixed p99; repeated source quantiles share their mean destination, keeping flat palettes deterministic.
     """
@@ -50,6 +52,12 @@ def fit(source, source_mask, art, art_mask):
              "L_src": unique.tolist(), "L_dst": np.minimum(dst_l, cap).tolist(), "L_cap_p99": cap,
              "ab_scale": scale.tolist(), "ab_shift": shift.tolist(),
              "brightness_before": brightness(source, source_mask), "brightness_artwork": brightness(art, art_mask)}
+    if preserve_colours:
+        from .region_palette import _clothing
+        for key in ("mix", "L_src", "L_dst", "L_cap_p99", "ab_scale", "ab_shift"):
+            grade.pop(key)
+        grade["mode"] = "matched_colour_clusters"
+        grade["colour_clusters"] = _clothing(src, dst)
     grade["brightness_after"] = brightness(apply(source, grade), source_mask)
     return grade
 
@@ -60,6 +68,14 @@ def apply(rgb, grade):
     out = np.empty_like(rgb)
     for row in range(0, len(rgb), 256):
         lab = cv2.cvtColor(rgb[row:row + 256], cv2.COLOR_RGB2Lab)
+        if "colour_clusters" in grade:
+            from .region_palette import _clothing_target, _colour_rgb
+            mapped = _clothing_target(lab.reshape(-1, 3), grade["colour_clusters"]).reshape(lab.shape)
+            pixels = _colour_rgb(lab, mapped, rgb[row:row + 256])
+            unchanged = np.all(mapped == lab, axis=2)
+            pixels[unchanged] = rgb[row:row + 256][unchanged]
+            out[row:row + 256] = pixels
+            continue
         lab[..., 0] = np.minimum(np.interp(lab[..., 0], grade["L_src"], grade["L_dst"]), grade["L_cap_p99"])
         lab[..., 1:] = lab[..., 1:] * np.asarray(grade["ab_scale"]) + np.asarray(grade["ab_shift"])
         out[row:row + 256] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)

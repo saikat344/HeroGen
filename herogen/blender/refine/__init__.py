@@ -318,7 +318,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
     return current
 
 
-def _artwork_grade(run, prep, cam, folder, record, timeout, *, artwork=None, artwork_mask=None):
+def _artwork_grade(run, prep, cam, folder, record, timeout, *, artwork=None, artwork_mask=None, preserve_colours=False):
     import numpy as np
     from . import palette
     from .backend import blender
@@ -340,7 +340,8 @@ def _artwork_grade(run, prep, cam, folder, record, timeout, *, artwork=None, art
             art = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
         with Image.open(artwork_mask) as image:
             mask = np.asarray(image.convert("L")) > 127
-        record.update(palette.fit(rgba[..., :3], rgba[..., 3] > .5, art, mask))
+        record.update(palette.fit(rgba[..., :3], rgba[..., 3] > .5, art, mask,
+                                  preserve_colours=preserve_colours))
         return record
     except Exception as exc:
         record.update(status="error", reason=error_text(exc, run))
@@ -562,7 +563,7 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             grade = _artwork_grade(run, prep, cams["body+0"], work / "palette",
                                    rec.data["palette_grade"], timeout,
                                    artwork=beauty_dir / front["image"],
-                                   artwork_mask=beauty_dir / front["mask"])
+                                   artwork_mask=beauty_dir / front["mask"], preserve_colours=True)
             if grade is not None:
                 with Image.open(current) as image:
                     base = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
