@@ -443,12 +443,70 @@ class FaceRuleTests(unittest.TestCase):
         client.segment.assert_not_called()
 
 
+class EyeQualityTests(unittest.TestCase):
+    boxes = [[10, 16, 46, 40], [74, 16, 110, 40]]
+
+    @staticmethod
+    def face(blur=0):
+        from PIL import ImageDraw, ImageFilter
+        image = Image.new('RGB', (120, 64), (190, 155, 130))
+        draw = ImageDraw.Draw(image)
+        for x in (10, 74):
+            draw.ellipse((x, 16, x + 36, 40), fill='white', outline='black', width=2)
+            draw.ellipse((x + 11, 17, x + 25, 39), fill=(30, 90, 130), outline='black', width=2)
+            draw.ellipse((x + 16, 22, x + 21, 35), fill='black')
+        return image.filter(ImageFilter.GaussianBlur(blur))
+
+    def test_identical_eyes_pass_and_soft_blobs_fail(self):
+        image = self.face()
+        self.assertTrue(B.eye_quality(image, image, self.boxes)['accepted'])
+        result = B.eye_quality(self.face(3), image, self.boxes)
+        self.assertFalse(result['accepted'])
+        self.assertTrue(all(not eye['accepted'] for eye in result['eyes']))
+
+    def test_sharper_eyes_pass_and_each_eye_is_required(self):
+        image, soft = self.face(), self.face(3)
+        self.assertTrue(B.eye_quality(image, soft, self.boxes)['accepted'])
+        image.paste(soft.crop((70, 0, 120, 64)), (70, 0))
+        result = B.eye_quality(image, self.face(), self.boxes)
+        self.assertFalse(result['accepted'])
+        self.assertTrue(result['eyes'][0]['accepted'])
+        self.assertFalse(result['eyes'][1]['accepted'])
+
+    def test_missing_or_invalid_boxes_cannot_pass(self):
+        image = self.face()
+        self.assertFalse(B.eye_quality(image, image, self.boxes[:1])['accepted'])
+        with self.assertRaises(ValueError):
+            B.eye_quality(image, image.resize((60, 32)), self.boxes)
+        with self.assertRaises(ValueError):
+            B.eye_quality(image, image, [[10, 10, 10, 20], self.boxes[1]])
+
+
+
 class FastBeautyStageTests(unittest.TestCase):
     setUp = note_fixture.FastNoteTests.setUp
     identity = staticmethod(fixture.StageTests.identity)
     render_many = note_fixture.FastNoteTests.render_many
     run_fast = note_fixture.FastNoteTests.run_fast
     beauty_folder = fixture.StageTests.beauty_folder
+
+    def test_body_reference_uses_surface_prompt_and_retained_mask_without_a_model_call(self):
+        import hashlib
+        folder, _ = self.beauty_folder()
+        references = json.loads((folder / 'references.json').read_text())
+        for view in references['views'].values():
+            view['image_sha256'] = hashlib.sha256((folder / view['image']).read_bytes()).hexdigest()
+        control = B.FaceControl(folder, references, data={'views': {}})
+        before = len(self.client.log.calls)
+        reference, options = control.options(SimpleNamespace(name='body+0', record={}), 0,
+                                             Image.new('RGB', (64, 64)))
+        self.assertEqual(options['recipe_name'], 'RF17B')
+        self.assertEqual(options['reference_record']['yaw'], 0)
+        self.assertEqual(options['surface_reference_mask'].size, reference.size)
+        self.assertEqual(len(self.client.log.calls), before)
+        _, head = control.options(SimpleNamespace(name='head+0', record={}), 0, reference)
+        self.assertEqual(head['recipe_name'], 'RF6B')
+        self.assertNotIn('surface_reference_mask', head)
 
     def run_beauty(self, *, complete=True, default=True, **kwargs):
         folder, _ = self.beauty_folder()

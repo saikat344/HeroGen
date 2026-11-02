@@ -14,6 +14,41 @@ from .cameras import axes, project, px_per_unit
 from .fast import Pass
 
 
+def eye_quality(candidate, default, boxes):
+    """Compare corresponding eye detail at a fixed scale, without another model call.
+
+    Boxes come from the existing feature check's largest connected eye in each half.
+    A small context margin includes eyelids. Both eyes must retain the ordinary paint's
+    Laplacian variance and edge density; a high-contrast soft blob cannot win on contrast.
+    """
+    if candidate.size != default.size:
+        raise ValueError('Eye comparison needs identical view dimensions')
+    if len(boxes) != 2:
+        return {'accepted': False, 'reason': 'two eye boxes unavailable', 'eyes': []}
+    eyes = []
+    for box in boxes:
+        x0, y0, x1, y1 = box
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError('Eye comparison needs nonempty boxes')
+        pad = round((x1 - x0) * .15)
+        region = (max(0, x0 - pad), max(0, y0 - pad),
+                  min(candidate.width, x1 + pad), min(candidate.height, y1 + pad))
+        measures = []
+        for image in (candidate, default):
+            grey = np.asarray(image.crop(region).convert('L').resize(
+                (64, 48), Image.Resampling.BILINEAR), dtype=np.float64) / 255
+            gradient = np.hypot(ndimage.sobel(grey, axis=0) / 8, ndimage.sobel(grey, axis=1) / 8)
+            measures.append({'laplacian_variance': float(ndimage.laplace(grey)[1:-1, 1:-1].var()),
+                             'edge_density': float((gradient > .04).mean())})
+        enhanced, ordinary = measures
+        eyes.append({'box': list(region), 'beauty': enhanced, 'default': ordinary,
+                     'ratios': {k: (enhanced[k] / ordinary[k] if ordinary[k] else None) for k in ordinary},
+                     'accepted': all(enhanced[k] >= ordinary[k] for k in ordinary)})
+    accepted = all(eye['accepted'] for eye in eyes)
+    return {'accepted': accepted, 'reason': 'accepted' if accepted else 'less eye detail than ordinary fast',
+            'eyes': eyes}
+
+
 class FacePass(Pass):
     """The head's two slots are independent beauty and default samples, never retries."""
 
@@ -76,6 +111,12 @@ class FaceControl:
             job.record['note'] = f'no face-free beauty reference at {angle:+g} yaw; standard recipe'
             return cover, options
         reference, record = beauty.reference(self.folder, self.references, angle, head=job.name.startswith('head'))
+        if job.name == 'body+0':
+            yaw = beauty.selected_yaw(self.references, angle)
+            with Image.open(self.folder / self.references['views'][str(yaw)]['mask']) as mask:
+                mask = mask.convert('L')
+            return reference, {**options, 'recipe_name': 'RF17B', 'reference_record': record,
+                               'surface_reference_mask': mask, 'complete_face': True}
         return reference, {**options, 'recipe_name': 'RF6B', 'reference_record': record,
                            'complete_face': job.name in ('head+0', 'body+0')}
 
@@ -83,7 +124,7 @@ class FaceControl:
         """Choose by declared view order after all frontal attempts have drained."""
         for key in ('head+0', 'body+0'):
             record = self.data['views'][key]
-            if record['accepted'] and record.get('prompt') == 'RF6B':
+            if record['accepted'] and record.get('prompt') in ('RF6B', 'RF17B'):
                 selected = next(a for a in record['attempts'] if a.get('accepted'))
                 features = selected.get('checks', {}).get('facial_features', {}).get('repaint', {})
                 if features.get('both_eyes') and features.get('mouth'):
