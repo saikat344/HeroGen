@@ -81,6 +81,12 @@ class EventsTest(unittest.TestCase):
         self.assertEqual(events.target_for("feet"), "feet")
         self.assertEqual(events.slug("Full-body sketch"), "full_body_sketch")
 
+    def test_small_measurements_keep_six_significant_digits(self):
+        event = events.validate({"v": 1, "t": 1, "kind": "check", "name": "tol", "ok": True,
+                                 "m": {"value": 5e-08, "limit": 0.123456789}, "s": 1234.56789})
+        self.assertEqual(event["m"], {"value": 5e-08, "limit": 0.123457})
+        self.assertEqual(event["s"], 1234.568)
+
     def test_every_documented_example_validates(self):
         examples = [
             {"v": 1, "t": 1, "kind": "job_start", "a": 1, "of": 2},
