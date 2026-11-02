@@ -10,10 +10,24 @@ class TestLandingPage(ServiceBrowserCase):
 
     def ready(self):
         self.tab.goto(self.url + '/')
-        self.tab.wait("document.querySelector('#themePreference') && !document.querySelector('#entry').hidden")
+        self.tab.wait("document.querySelector('[data-theme-toggle]')?.dataset.preference && !document.querySelector('#entry').hidden")
 
     def choose(self, value):
-        self.tab.eval(f"document.querySelector('#themePreference').value='{value}'; document.querySelector('#themePreference').dispatchEvent(new Event('change'))")
+        # The header toggle cycles dark -> light -> system; click it until it shows the wanted preference.
+        for _ in range(3):
+            if self.tab.eval("document.querySelector('[data-theme-toggle]').dataset.preference") == value:
+                return
+            self.tab.eval("document.querySelector('[data-theme-toggle]').click()")
+        self.assertEqual(self.tab.eval("document.querySelector('[data-theme-toggle]').dataset.preference"), value)
+
+    def test_first_visit_is_dark_even_when_the_os_is_light(self):
+        t = self.tab
+        t.call('Emulation.setEmulatedMedia', features=[{'name': 'prefers-color-scheme', 'value': 'light'}])
+        self.ready()
+        self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'dark')
+        self.assertEqual(t.eval("document.querySelector('[data-theme-toggle]').getAttribute('aria-label')"),
+                         'Theme: Dark. Switch to light.')
+        self.assertEqual(self.tab.errors, [])
 
     def test_theme_persists_and_system_choice_tracks_os(self):
         t = self.tab
@@ -24,10 +38,10 @@ class TestLandingPage(ServiceBrowserCase):
         self.choose('light')
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'light')
         t.goto(self.url + '/')
-        t.wait("document.querySelector('#themePreference')?.value === 'light'")
+        t.wait("document.querySelector('[data-theme-toggle]')?.dataset.preference === 'light'")
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'light')
         self.choose('dark')
-        self.assertEqual(t.eval("getComputedStyle(document.body).backgroundColor"), 'rgb(21, 23, 25)')
+        self.assertEqual(t.eval("getComputedStyle(document.body).backgroundColor"), 'rgb(11, 14, 18)')
         self.choose('system')
         t.call('Emulation.setEmulatedMedia', features=[{'name': 'prefers-color-scheme', 'value': 'light'}])
         t.wait("document.documentElement.dataset.theme === 'light'")
@@ -112,7 +126,7 @@ class TestLandingModels(ServiceBrowserCase):
         t.wait("document.querySelector('#featuredTitle').textContent === 'woodland-scout' && document.querySelector('#landingStatus').textContent === 'Drag to rotate · Scroll to zoom'")
         self.assertEqual(self.store.users_list(), [])
         self.assertEqual(self.store.jobs_admin_list(), [])
-        t.eval("document.querySelector('#themePreference').value='dark';document.querySelector('#themePreference').dispatchEvent(new Event('change'))")
+        t.eval("window.herogenTheme.choose('dark')")
         t.goto(self.url + '/gallery/woodland-scout')
         t.wait("document.querySelector('#publicModelStatus').textContent.includes('Drag to orbit')")
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'dark')

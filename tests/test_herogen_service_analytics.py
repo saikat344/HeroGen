@@ -314,7 +314,7 @@ class TestAnalyticsAndAdminBrowser(ServiceBrowserCase):
         t.eval("document.querySelector('[data-idea=forest]').click()")
         t.eval("document.querySelector('[data-shade=clay]').click()")
         t.eval("document.querySelectorAll('#modelPicker button')[1].click()")
-        t.eval("document.querySelector('#themePreference').value='dark'; document.querySelector('#themePreference').dispatchEvent(new Event('change'))")
+        t.eval("window.herogenTheme.choose('dark')")
         t.wait("sessionStorage.getItem('hg-vid') !== null")
         self.assertIsNone(t.eval("localStorage.getItem('hg-vid')"))
         t.eval("import('/assets/analytics.js').then(m => m.flush())")
