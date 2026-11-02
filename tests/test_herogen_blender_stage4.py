@@ -579,6 +579,56 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertTrue(all(len(m.faces) for m in meshes))
         self.assertTrue(all("RightElbow" not in row for row in body["pose_test"]["gaps_high"].values()))
 
+    def test_backwards_mesh_with_heels_fails_facing_after_stage4(self):
+        import copy
+        from herogen.blender import body_joints, stage4
+        from herogen.roblox.export import run_export
+
+        run = self.tmp / "backwards"
+        figure = synth.humanoid()
+        synth.write_run(run, figure, size=256, ppu=40.)
+        vs = views.load_views(run, 5.5)
+        verts, faces, _ = carve.build_mesh(vs, 5.5, 80)
+        sk = body_joints.apply_to_skeleton(joints.estimate(vs, 5.5), {"joints": figure.joints})
+        # Reflect the complete upstream mesh and skeleton, including the real heel protrusion.
+        # The silhouette estimator assumes -Y facing; supply the correctly reflected upstream skeleton
+        # here so this regression exercises stage 4's reconciliation, sectioning and export.
+        verts[:, 1] *= -1
+        faces = faces[:, ::-1]
+        for point in (*sk.joints.values(), *sk.ends.values()):
+            point[1] *= -1
+        anatomical = copy.deepcopy(sk.as_json())
+        ends = copy.deepcopy(sk.ends)
+        for side in ("Left", "Right"):
+            ankle = sk.joints[side + "Ankle"]
+            foot = verts[(np.abs(verts[:, 0] - ankle[0]) < .14) & (verts[:, 2] < .15)]
+            self.assertLess(foot[:, 1].min(), ankle[1])
+            self.assertGreater(ends[side + "Toe"][1], ankle[1])
+        # Exercise the retained hand and anatomical-root repairs on the backwards body as well.
+        sk.joints["RightHip"] = np.array([.8, 0., 2.8])
+        sk.joints["LeftHip"] = np.array([1., 0., 2.8])
+        sk.joints["RightShoulder"] = np.array([-.1, 0., 2.9])
+        sk.ends["RightHandTip"] = np.array([0., 0., .8])
+        work = run / "blender-work"
+        work.mkdir()
+        np.savez(work / "03-mesh.npz", verts=verts, faces=faces)
+        (run / "stage-3.json").write_text(json.dumps({"mesh_source": "carve"}))
+        (run / "03-joints.json").write_text(json.dumps({
+            "source": "sam3d-body", "joints": sk.as_json(),
+            "sources": {"sam3d-body": anatomical}}))
+        with mock.patch.object(joints, "estimate", return_value=sk):
+            stage4.run_stage4(run, profile="roblox-ingame", cut_search=False)
+        exported = run_export(run / "04-body", run / "06-roblox")
+        facing = next(c for c in exported["checks"] if c["name"] == "faces_minus_z")
+        self.assertFalse(facing["pass"], facing)
+        self.assertGreater(facing["value"], .9)
+        self.assertFalse(exported["ok"])
+        body = json.loads((run / "04-body" / "sections.json").read_text())
+        self.assertEqual(set(body["landmark_repairs"]),
+                         {"LeftHip", "RightHip", "RightShoulder", "RightHandTip"})
+        for side in ("Left", "Right"):
+            np.testing.assert_allclose(body["ends"][side + "Toe"], ends[side + "Toe"], atol=1e-4)
+
     @unittest.skipUnless(importlib.util.find_spec("scipy") is not None, "scipy is required for refined colour")
     def test_refined_colours_reach_exported_head_and_torso_in_both_lods(self):
         import hashlib

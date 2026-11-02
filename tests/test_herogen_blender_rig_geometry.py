@@ -40,15 +40,14 @@ class LandmarkTests(unittest.TestCase):
             np.testing.assert_array_equal(before.ends[name], self.sk.ends[name])
         self.assertEqual(before.radii, self.sk.radii)
 
-    def test_reversed_side_toes_follow_the_mesh_without_rotating_it(self):
+    def test_contradictory_toes_are_preserved(self):
         before = self.verts.copy()
         for side in ("Left", "Right"):
             self.sk.ends[side + "Toe"][1] = .5
-        changes = self.reconcile()
-        self.assertEqual(set(changes), {"LeftToe", "RightToe"})
-        for side in ("Left", "Right"):
-            self.assertLess(self.sk.ends[side + "Toe"][1], self.sk.joints[side + "Ankle"][1])
-            self.assertGreater(changes[side + "Toe"]["distance_studs"], .5)
+        ends = copy.deepcopy(self.sk.ends)
+        self.assertEqual(self.reconcile(), {})
+        for name in ends:
+            np.testing.assert_array_equal(self.sk.ends[name], ends[name])
         np.testing.assert_array_equal(self.verts, before)
 
     def test_a_staff_endpoint_is_replaced_by_the_actual_hand(self):
@@ -76,6 +75,16 @@ class LandmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RightShoulder.*without a recorded anatomical"):
             self.reconcile()
 
+    def test_mirrored_anatomical_hips_are_not_relabelled(self):
+        mirrored = copy.deepcopy(self.figure.joints)
+        for name, point in mirrored.items():
+            mirrored[name] = [-point[0], point[1], point[2]]
+        self.record["sources"]["sam3d-body"] = mirrored
+        self.sk.joints["LeftHip"] *= [-1, 1, 1]
+        self.sk.joints["RightHip"] *= [-1, 1, 1]
+        with self.assertRaisesRegex(ValueError, "anatomical hips do not straddle"):
+            self.reconcile()
+
     def test_a_silhouette_only_skeleton_is_not_treated_as_a_hybrid(self):
         self.sk.joints["RightShoulder"] = np.array([-.7, 0., 2.9])
         before = self.sk.as_json()
@@ -83,11 +92,6 @@ class LandmarkTests(unittest.TestCase):
                                                         self.vs.views["front"]), {})
         self.assertEqual(self.sk.as_json(), before)
 
-    def test_no_foot_surface_is_loud(self):
-        self.sk.ends["LeftToe"][1] = .5
-        with self.assertRaisesRegex(ValueError, "no source foot surface"):
-            rig_geometry.reconcile_skeleton(self.sk, self.record, self.verts + [0, 0, 10], self.faces,
-                                            self.vs.views["front"])
 
 
 def box(name, lo, hi, pivot):
@@ -116,6 +120,19 @@ class PivotTests(unittest.TestCase):
         child = box("LeftUpperArm", [0, 0, 0], [1, 1, 1], [.5, .5, 0])
         rig_geometry.fit_pivots({"UpperTorso": parent, "LeftUpperArm": child})
         np.testing.assert_allclose(child.pivot, [0, .5, 0])
+
+    def test_shared_edge_fit_preserves_a_reflected_foot_cut(self):
+        parent = box("LeftLowerLeg", [-1, -.2, 1], [1, .3, 2], [0, 0, 1.5])
+        child = box("LeftFoot", [-1, -.2, 0], [1, .3, 1], [0, .6, 1])
+        original = {"LeftLowerLeg": parent, "LeftFoot": child}
+        reflected = copy.deepcopy(original)
+        for section in reflected.values():
+            section.verts[:, 1] *= -1
+            section.pivot[1] *= -1
+            section.faces = section.faces[:, ::-1]
+        rig_geometry.fit_pivots(original)
+        rig_geometry.fit_pivots(reflected)
+        np.testing.assert_allclose(reflected["LeftFoot"].pivot, child.pivot * [1, -1, 1])
 
     def test_disconnected_parts_are_not_hidden_by_an_arbitrary_clamp(self):
         parent = box("UpperTorso", [-2, 0, 0], [-1, 1, 1], [-1.5, .5, .5])
