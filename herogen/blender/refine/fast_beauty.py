@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+from herogen.pipeline.client import ApiError
 from herogen.refine_budget import BudgetStop
 from . import beauty, imaging as I
 from .cameras import axes, project, px_per_unit
@@ -73,11 +74,15 @@ class FacePass(Pass):
 
     def collect(self, index):
         future, _, private, folder = self.tasks[index]
-        # The wave collector handles budget stops and propagates every other model error.
+        # The wave collector handles budget stops and propagates every other model error, except
+        # a contained error on the enhanced slot 1, which completes as a failed beauty sample.
         try:
             future.result()
         except BudgetStop as exc:
             private['reason'] = str(exc)
+        except ApiError as exc:
+            if not self.contain(index, exc):
+                raise
         self.completed[index] = private
         for trial in private['attempts']:
             trial['face_candidate'] = 'beauty' if index == 0 else 'default'

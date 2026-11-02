@@ -272,9 +272,11 @@ class BeautyTests(unittest.TestCase):
 class FastClient:
     """A cache-backed client shape that `isolated_client` can copy; each yaw draws its own image."""
 
-    def __init__(self, cache_dir, mask, *, unusable=(), headless=(), failing=(), barrier=None):
+    def __init__(self, cache_dir, mask, *, unusable=(), headless=(), failing=(), failing_sam=(), barrier=None,
+                 error=None):
         self.cache_dir, self.mask, self.log = Path(cache_dir), mask, CallLog()
         self.unusable, self.headless, self.failing, self.barrier = unusable, headless, failing, barrier
+        self.failing_sam, self.error = failing_sam, error or ApiError("edit failed")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.edits, self.segments = [], []
 
@@ -295,13 +297,15 @@ class FastClient:
         if self.barrier is not None:
             self.barrier.wait()  # every yaw must be in flight at once
         if yaw in self.failing:
-            raise ApiError("edit failed")
+            raise self.error
         return Image.new("RGB", images[0].size, (100 + yaw // 2, 50, 50))
 
     def segment(self, image, text):
         yaw = (image.getpixel((0, 0))[0] - 100) * 2
         self.segments.append((yaw, text))
         self.log.add(SAM_MODEL, "segment", f"{text}{yaw}", False)
+        if (yaw, text) in self.failing_sam:
+            raise self.error
         if text == "character" and yaw in self.unusable:
             return []
         if text == "head":
@@ -361,14 +365,61 @@ class FastGenerationTests(unittest.TestCase):
         self.assertFalse(rec["selected"]["180"])
         self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 180))
 
-    def test_model_error_drains_every_yaw_and_propagates(self):
-        with self.assertRaises(ApiError):
-            self.fast(failing=(-90,))
+    # The three model errors seen in held-out runs: a read timeout, an HTTP 500 and a content-policy 400.
+    ERRORS = (ApiError("images/edits failed after 1 attempts: TimeoutError: The read operation timed out"),
+              ApiError("images/edits failed after 1 attempts: HTTP 500: internal server error", http_status=500),
+              ApiError("images/edits failed: HTTP 400: filtered (not retried)", http_status=400,
+                       error_code="content_policy_violation"))
+
+    def test_model_error_on_a_yaw_leaves_it_without_a_reference(self):
+        for error in self.ERRORS:
+            with self.subTest(error=str(error)):
+                rec, client = self.fast(failing=(-90,), error=error)
+                self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+                self.assertNotIn(-90, [yaw for yaw, _ in client.segments])
+                saved = json.loads((self.out / "references.json").read_text())
+                expected = {"request": "BT1 image edit", "error": "ApiError", "http_status": error.http_status,
+                            "error_code": error.error_code, "message": str(error), "fallback": "standard recipe"}
+                self.assertEqual(saved["views"]["-90"]["error"], expected)
+                self.assertEqual(saved["views"]["-90"]["attempts"], [])
+                self.assertEqual(saved["contained_errors"], [{"yaw": -90, **expected}])
+                self.assertEqual((saved["status"], saved["selected"]["-90"]), ("rejected", False))
+                self.assertNotIn("error_type", saved)
+                loaded = beauty.load(self.out)
+                self.assertIsNone(beauty.selected_yaw(loaded, -90))
+                self.assertEqual([beauty.selected_yaw(loaded, a) for a in (0, 90, 180)], [0, 90, 180])
+                # No retry or substitute sample: one image per yaw, as without the error.
+                self.assertEqual(sum(c["kind"] == "edit" for c in client.log.calls), 4)
+                self.assertEqual(rec["cost_usd"], client.log.cost_usd())
+
+    def test_sam_errors_on_a_yaw_leave_it_without_a_reference(self):
+        rec, client = self.fast(failing_sam=((90, "character"), (180, "head")), error=self.ERRORS[1])
+        saved = json.loads((self.out / "references.json").read_text())
+        self.assertEqual([(e["yaw"], e["request"], e["image"]) for e in saved["contained_errors"]],
+                         [(90, "SAM character outline", "beauty+90-try1.png"),
+                          (180, "SAM head crop", "beauty+180-try1.png")])
+        for yaw in ("90", "180"):
+            self.assertEqual(saved["views"][yaw]["attempts"], [])
+            self.assertNotIn("image", saved["views"][yaw])
+        loaded = beauty.load(self.out)
+        self.assertEqual([beauty.selected_yaw(loaded, a) for a in beauty.FAST_ANGLES], [0, None, -90, None])
+        self.assertEqual(rec["selected"], {"0": True, "90": False, "-90": True, "180": False})
+
+    def test_front_model_error_turns_the_beauty_arm_off(self):
+        rec, _ = self.fast(failing=(0,), error=self.ERRORS[2])
+        self.assertEqual([(e["yaw"], e["fallback"], e["error_code"]) for e in rec["contained_errors"]],
+                         [(0, "beauty off", "content_policy_violation")])
+        self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 0))
+
+    def test_replay_miss_drains_every_yaw_and_propagates(self):
+        with self.assertRaises(ReplayMiss):
+            self.fast(failing=(-90,), error=ReplayMiss("no cache entry"))
         client = self.fast_client
         self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
         rec = json.loads((self.out / "references.json").read_text())
-        self.assertEqual((rec["status"], rec["error_type"]), ("error", "ApiError"))
+        self.assertEqual((rec["status"], rec["error_type"]), ("error", "ReplayMiss"))
         self.assertEqual(rec["views"]["-90"]["attempts"], [])
+        self.assertNotIn("error", rec["views"]["-90"])
         self.assertTrue(all(len(rec["views"][str(a)]["attempts"]) == 1 for a in (0, 90, 180)))
         self.assertEqual(rec["cost_usd"], client.log.cost_usd())
         self.assertEqual(sum(c["kind"] == "edit" for c in client.log.calls), 4)

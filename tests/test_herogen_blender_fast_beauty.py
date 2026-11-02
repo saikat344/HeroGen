@@ -857,14 +857,17 @@ class FastBeautyStageTests(unittest.TestCase):
             stage.run_stage3f(self.run, self.client, refine_profile='fast', generate_beauty=True,
                               beauty_dir=self.run / 'beauty')
 
-    def paid_run(self, *, all_flags=False, reject=None, beauty=True):
+    def paid_run(self, *, all_flags=False, reject=None, beauty=True, fail=None, errored=None):
         """Run with the real request-key cache and fake only the paid transport.
 
         The fixture's usual edit override counts cache replays as paid, so it cannot prove this cap.
         Every edit is recorded with its view, slot folder, run (nested default-head or main) and key.
+        `fail(view, slot, nested)` may return a model error that edit request raises instead of an
+        answer; such sent requests are counted in `errored` (a Counter), never in `paid`.
         """
         self.client.mode = 'live'
         paid = Counter()
+        errored = Counter() if errored is None else errored
         ordinary = Counter()
         edits = []
         lock = threading.Lock()
@@ -881,11 +884,18 @@ class FastBeautyStageTests(unittest.TestCase):
         def post(client, endpoint, body, **kwargs):
             self.assertEqual(endpoint, 'images/edits')
             view = client.cache_dir.parts[-2]
+            nested = 'face-source' in client.cache_dir.parts
+            error = fail(view, client.cache_dir.parts[-1], nested) if fail is not None else None
             with lock:
-                paid[view] += 1
-                if 'face-source' in client.cache_dir.parts:
-                    ordinary[view] += 1
-                self.assertLessEqual(paid[view], 3, f'fourth paid sample for {view}')
+                if error is not None:
+                    errored[view] += 1
+                else:
+                    paid[view] += 1
+                    if nested:
+                        ordinary[view] += 1
+                self.assertLessEqual(paid[view] + errored[view], 3, f'fourth sent sample for {view}')
+            if error is not None:
+                raise error
             png = body['images'][0]['image_url'].split(',', 1)[1]
             return {'data': [{'b64_json': png}]}
         def edit(client, *args, **kwargs):
@@ -912,8 +922,9 @@ class FastBeautyStageTests(unittest.TestCase):
                 record = self.run_beauty(cap_usd=None, side_beauty=all_flags, region_palette=all_flags,
                                          reject=reject)
             else:
-                with mock.patch.object(stage, '_view', side_effect=self.rejecting(stage._view, reject)):
-                    record = self.run_fast(cap_usd=None)
+                with mock.patch.object(stage, '_view', side_effect=self.rejecting(
+                        stage._view, reject or (lambda view, kind: False))):
+                    record = self.run_fast(cap_usd=None, side_beauty=all_flags)
         self.assertEqual(sum(paid.values()), sum(c['kind'] == 'edit' and not c['cached']
                                                for c in self.client.log.calls))
         return record, paid, ordinary, edits
@@ -1171,6 +1182,243 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(sorted((e['slot'], e['attempt']) for e in edits),
                          sorted([('attempt-0', 0), ('attempt-1', 1)] * len(expected)))
         self.assertTrue(all(v['tries'] == 2 and not v['accepted'] for v in record['views'].values()))
+
+    # Beauty-only model errors in the fast profile, in the three shapes seen in held-out runs.
+    TIMEOUT = ApiError('images/edits failed after 1 attempts: TimeoutError: The read operation timed out')
+    SERVER = ApiError('images/edits failed after 1 attempts: HTTP 500: internal server error', http_status=500)
+    POLICY = ApiError('images/edits failed: HTTP 400: filtered (not retried)', http_status=400,
+                      error_code='content_policy_violation')
+
+    @staticmethod
+    def enhanced(error, *views):
+        """Fail the main run's slot-1 (enhanced) edit of each named view (every view when none is named)."""
+        return lambda view, slot, nested: (error if slot == 'attempt-0' and not nested
+                                           and (not views or view in views) else None)
+
+    def contained_run(self, fail, **kwargs):
+        """`paid_run` with the build log on: the record, sent samples per view and the build-log lines."""
+        errored = Counter()
+        (record, paid, _, edits), lines = self.logged(
+            lambda: self.paid_run(fail=fail, errored=errored, **kwargs))
+        self.assertEqual(record['status'], 'complete')
+        self.assertTrue((self.run / '03-refined.glb').is_file())
+        return record, paid + errored, errored, edits, lines
+
+    def assert_contained(self, record, lines, view, error, *, slot_after, prompts, request='image edit'):
+        """One contained error on `view`'s slot 1: in the view, its attempt, the run list and the build log."""
+        expected = {'slot': 1, 'request': request, 'error': 'ApiError', 'http_status': error.http_status,
+                    'error_code': error.error_code, 'message': str(error), 'fallback': 'ordinary slots'}
+        found = [e for e in record['contained_errors'] if e['view'] == view]
+        self.assertEqual(len(found), 1)
+        self.assertIn(found[0].pop('prompt'), prompts)
+        self.assertEqual(found[0], {'view': view, **expected})
+        attempts = record.get('beauty_head_candidate', record['views'][view]) if view == 'head+0' else \
+            record['views'][view]
+        failed = [a for a in attempts['attempts'] if 'contained_error' in a]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual((failed[0]['accepted'], failed[0]['reason']), (False, 'ApiError'))
+        self.assertEqual({k: v for k, v in failed[0]['contained_error'].items() if k != 'prompt'}, expected)
+        if slot_after is not None:
+            self.assertEqual(record['views'][view]['winning_slot'], slot_after)
+        results = [e for e in lines if e['kind'] == 'decision' and e['what'] == 'view_result'
+                   and e['view'] == view and e['try'] == 1]
+        status = error.http_status
+        self.assertEqual([(e['ok'], e['why'], e.get('code'), e['m']) for e in results],
+                         [(False, 'model_error', None if status is None else f'http_{status // 100}xx',
+                           {'fallback': 1, **({'http_status': status} if status else {})})])
+
+    def test_enhanced_side_timeout_falls_back_to_slot_two(self):
+        record, sent, errored, _, lines = self.contained_run(self.enhanced(self.TIMEOUT, 'body+90'),
+                                                             all_flags=True)
+        self.assertEqual(errored, Counter({'body+90': 1}))
+        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assert_contained(record, lines, 'body+90', self.TIMEOUT, slot_after=2, prompts=('RF16B',))
+        self.assertEqual(len(record['contained_errors']), 1)
+        self.assertEqual(self.outcomes(lines)['body+90'], [('view_selected', 2, 2)])
+        self.assertEqual(record['face_source']['source'], 'beauty')
+
+    def test_enhanced_head_server_error_is_a_failed_beauty_sample(self):
+        record, sent, errored, edits, lines = self.contained_run(self.enhanced(self.SERVER, 'head+0'))
+        self.assertEqual(errored, Counter({'head+0': 1}))
+        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        # As for a rejected beauty head: the accepted beauty body+0 owns the face, slot 2 stays the default candidate.
+        self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=None, prompts=('RF6B',))
+        head = record['views']['head+0']
+        self.assertEqual([(a['face_candidate'], a['accepted']) for a in head['attempts']],
+                         [('beauty', False), ('default', True)])
+        self.assertTrue(record['face_fallback']['accepted'])
+        self.assertEqual((record['face_source']['source'], record['face_source']['view']), ('beauty', 'body+0'))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+
+    def test_enhanced_head_error_without_a_beauty_body_uses_the_ordinary_head(self):
+        record, sent, errored, edits, lines = self.contained_run(
+            self.enhanced(self.SERVER, 'head+0'), reject=lambda view, kind: view == 'body+0' and kind == 'beauty')
+        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=2, prompts=('RF6B',))
+        self.assertEqual((record['face_source']['source'], record['face_source']['attempt']), ('default', 0))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+
+    def test_enhanced_front_content_policy_error_falls_back_to_slot_two(self):
+        record, sent, errored, _, lines = self.contained_run(self.enhanced(self.POLICY, 'body+0'))
+        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assert_contained(record, lines, 'body+0', self.POLICY, slot_after=2, prompts=('RF18B',))
+        self.assertEqual(record['views']['body+0']['prompt'], 'RF2R')
+
+    def test_enhanced_error_with_rejected_slot_two_pays_the_conditional_third(self):
+        # An errored slot 1 counts as a failed beauty sample: with slot 2 rejected, slot 3 follows, never a fourth.
+        record, sent, errored, edits, lines = self.contained_run(
+            self.enhanced(self.SERVER, 'head+0', 'body+90'),
+            reject=lambda view, kind: view in ('head+0', 'body+90') and kind == 0)
+        self.assertEqual(sent, Counter({view: 3 if view in ('head+0', 'body+90') else 2
+                                        for view in self.expected_views}))
+        self.assert_contained(record, lines, 'body+90', self.SERVER, slot_after=3, prompts=('RF6B',))
+        self.assert_contained(record, lines, 'head+0', self.SERVER, slot_after=None, prompts=('RF6B',))
+        self.assertEqual(self.outcomes(lines)['body+90'], [('extra_try', 3, None), ('view_selected', 3, 3)])
+        self.assertEqual([e['view'] for e in lines if e['kind'] == 'decision' and e['what'] == 'extra_try'
+                          and e['view'] == 'head+0'], ['head+0'])
+        self.assertEqual(sorted(e['view'] for e in edits if e['slot'] == 'attempt-2'), ['body+90', 'head+0'])
+        self.assertEqual([a['face_candidate'] for a in record['views']['head+0']['attempts']],
+                         ['beauty', 'default', 'default'])
+
+    def test_enhanced_errors_on_every_view_keep_two_samples_each(self):
+        record, sent, errored, edits, lines = self.contained_run(self.enhanced(self.TIMEOUT), all_flags=True)
+        expected = self.expected_views
+        self.assertEqual(errored, Counter({view: 1 for view in expected}))
+        self.assertEqual(sent, Counter({view: 2 for view in expected}))
+        self.assertEqual(sorted(e['view'] for e in record['contained_errors']), sorted(expected))
+        self.assertTrue(all(record['views'][view]['winning_slot'] == 2 for view in expected))
+        self.assertEqual(record['face_source']['source'], 'default')
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+
+    def test_enhanced_judging_sam_error_falls_back_to_slot_two(self):
+        original = I.part_masks
+        def part_masks(client, image, *args, **kwargs):
+            # The SAM 3.1 part queries that judge the enhanced body+0 sample fail.
+            parts = client.cache_dir.parts
+            if parts[-2:] == ('body+0', 'attempt-0') and 'face-source' not in parts:
+                raise self.SERVER
+            return original(client, image, *args, **kwargs)
+        with mock.patch.object(I, 'part_masks', side_effect=part_masks):
+            record, sent, errored, _, lines = self.contained_run(None)
+        self.assertFalse(errored)
+        self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
+        self.assert_contained(record, lines, 'body+0', self.SERVER, slot_after=2, prompts=('RF18B',),
+                              request='SAM check')
+
+    def test_side_art_error_without_beauty_falls_back_to_slot_two(self):
+        # SideBeautyPass with beauty references off: the rear view's art-conditioned slot 1 fails.
+        errored = Counter()
+        (record, paid, _, edits), lines = self.logged(lambda: self.paid_run(
+            beauty=False, all_flags=True, fail=self.enhanced(self.POLICY, 'body+180'), errored=errored))
+        self.assertEqual(record['status'], 'complete')
+        self.assertNotIn('face_source', record)
+        self.assertEqual(errored, Counter({'body+180': 1}))
+        self.assertEqual(paid + errored, Counter({view: 2 for view in self.expected_views}))
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+        error, = record['contained_errors']
+        self.assertEqual(error, {'view': 'body+180', 'slot': 1, 'prompt': 'RF12R', 'request': 'image edit',
+                                 'error': 'ApiError', 'http_status': 400, 'error_code': 'content_policy_violation',
+                                 'message': str(self.POLICY), 'fallback': 'slot 2'})
+        rear = record['views']['body+180']
+        self.assertEqual((rear['winning_slot'], rear['prompt']), (2, 'RF12R'))
+        self.assertEqual(rear['contained_errors'], [{k: v for k, v in error.items() if k != 'view'}])
+        results = [(e['try'], e['ok'], e['why'], e.get('code'), e['m']) for e in lines if e['kind'] == 'decision'
+                   and e['what'] == 'view_result' and e['view'] == 'body+180' and not e['ok']]
+        self.assertEqual(results, [(1, False, 'model_error', 'http_4xx', {'fallback': 1, 'http_status': 400})])
+        self.assertEqual(self.outcomes(lines)['body+180'], [('view_selected', 2, 2)])
+
+    def test_side_art_run_front_error_stays_loud(self):
+        # Front views take no turnaround art, so their slot 1 is plain fast's own request.
+        self.assert_loud(self.enhanced(self.SERVER, 'head+0'), beauty=False, all_flags=True)
+
+    def assert_loud(self, fail, error=None, **kwargs):
+        error = error or self.SERVER
+        with self.assertRaises(type(error)) as caught:
+            self.paid_run(fail=fail, **kwargs)
+        self.assertIs(caught.exception, error)
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertFalse(record.get('contained_errors'))
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
+    def test_ordinary_attempt_zero_error_stays_loud(self):
+        # The nested default-head run sends plain fast's attempt 0, which slot 2 replays.
+        self.assert_loud(lambda view, slot, nested: self.SERVER if nested and view == 'body+90' else None)
+
+    def test_ordinary_attempt_one_error_for_slot_three_stays_loud(self):
+        self.assert_loud(lambda view, slot, nested: self.POLICY if nested and slot == 'attempt-1' else None,
+                         self.POLICY, reject=lambda view, kind: view == 'body+90' and kind in ('beauty', 0))
+
+    def test_plain_fast_errors_stay_loud(self):
+        self.assert_loud(lambda view, slot, nested: self.TIMEOUT if view == 'body+90' else None,
+                         self.TIMEOUT, beauty=False)
+
+    def test_enhanced_replay_miss_stays_loud(self):
+        miss = ReplayMiss('no cache entry')
+        self.assert_loud(self.enhanced(miss, 'body+90'), miss)
+
+    def test_contained_slot_counts_as_a_failed_sample_only_once_collected(self):
+        job = fast.Pass('body+90', 'body+90', False, {'attempts': []}, self.run / 'selected')
+        job.slots, job.conditional, job.contained = 2, 1, (0,)
+        failed = Future()
+        failed.set_exception(self.SERVER)
+        rejected = Future()
+        rejected.set_result(None)
+        for future in (failed, rejected):
+            job.tasks.append((future, None, {'accepted': False, 'reason': 'incomplete', 'prompt': 'RF16B',
+                                             'attempts': [{'accepted': False, 'reason': 'incomplete'}]},
+                              self.run / f'candidate-{len(job.tasks)}'))
+        job.tasks[1][2].update(reason='outline moved', attempts=[{'accepted': False, 'reason': 'outline moved'}])
+        job.completed[1] = job.tasks[1][2]
+        job.collect(0)
+        self.assertEqual(job.errors[0]['http_status'], 500)
+        self.assertEqual(job.record['contained_errors'], [job.errors[0]])
+        self.assertTrue(job.conditional_due())
+        job.contained = ()   # an uncontained slot's model error propagates and never launches a slot
+        job.errors.clear()
+        self.assertFalse(job.conditional_due())
+        with self.assertRaises(ApiError):
+            job.collect(0)
+
+    def generated_errors(self, *yaws):
+        """A generate_fast stand-in whose reference requests at `yaws` failed with a contained model error."""
+        errors = [{'yaw': yaw, 'request': 'BT1 image edit', 'error': 'ApiError', 'http_status': 500,
+                   'error_code': None, 'message': 'internal server error',
+                   'fallback': 'standard recipe' if yaw else 'beauty off'} for yaw in yaws]
+        def drop(rec):
+            rec.update(angles=list(beauty.FAST_ANGLES), fallback='none')
+            for error in errors:
+                rec['views'][str(error['yaw'])] = {'accepted': False, 'attempts': [], 'error': error}
+            return rec
+        generate, _ = self.generated(drop)
+        def wrapped(run, client, out):
+            return {**generate(run, client, out), 'status': 'rejected', 'contained_errors': errors}
+        return wrapped, errors
+
+    def test_reference_error_keeps_the_standard_recipe_for_that_yaw(self):
+        generate, errors = self.generated_errors(90)
+        record, lines = self.logged(lambda: self.run_beauty(generate=generate, cap_usd=5))
+        self.assertEqual(record['status'], 'complete')
+        self.assertEqual(record['face_source']['source'], 'beauty')
+        self.assertEqual(record['beauty_generation']['contained_errors'], errors)
+        self.assertEqual(record['contained_errors'], [{'reference_yaw': 90, **{k: v for k, v in errors[0].items()
+                                                                                if k != 'yaw'}}])
+        self.assertEqual(record['beauty_references']['views']['90']['error'], errors[0])
+        self.assertIn('standard recipe', record['views']['body+90'].get('note', ''))
+        events = [e for e in lines if e['kind'] == 'decision' and e['what'] == 'beauty_reference']
+        self.assertEqual([(e['ok'], e['why'], e['code'], e['m']) for e in events],
+                         [(False, 'model_error', 'http_5xx', {'yaw': 90, 'fallback': 1, 'http_status': 500})])
+
+    def test_front_reference_error_turns_the_beauty_arm_off(self):
+        generate, errors = self.generated_errors(0)
+        record, lines = self.logged(lambda: self.run_beauty(generate=generate, cap_usd=5))
+        self.assertEqual(record['status'], 'complete')
+        self.assertNotIn('face_source', record)
+        self.assertIn('no usable front beauty reference; standard recipes', record['notes'])
+        self.assertEqual([(e['reference_yaw'], e['fallback']) for e in record['contained_errors']],
+                         [(0, 'beauty off')])
+        self.assertEqual([e['m']['yaw'] for e in lines if e['kind'] == 'decision'
+                          and e['what'] == 'beauty_reference'], [0])
 
     def test_complete_beauty_front_is_kept_and_progress_and_note_survive(self):
         record = self.run_beauty(user_note=NOTE, cap_usd=5)
