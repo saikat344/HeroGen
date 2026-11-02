@@ -420,7 +420,6 @@ button.primary:hover:not(:disabled) { background:var(--color-accent-hover); bord
 
   .top #headerSignIn { font-size:12px; padding:6px 8px; }
 }
-@media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation:none!important; transition:none!important; } }
 /* Workshop and public-detail surfaces follow the same theme. Artwork keeps its source colors. */
 .result-section,.quality-note { border-color:var(--line); }
 .public-viewer-grid canvas { background:var(--stage); }
