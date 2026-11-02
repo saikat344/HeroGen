@@ -9,9 +9,14 @@ from unittest import mock
 import numpy as np
 from PIL import Image
 
-from herogen.blender.refine import region_palette as palette
+try:
+    from herogen.blender.refine import region_palette as palette
+    HAVE_REFINE = True
+except ImportError:
+    HAVE_REFINE = False
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class RegionPaletteTests(unittest.TestCase):
     def setUp(self):
         self.source = np.full((8, 8, 3), (.25, .2, .15), np.float32)
@@ -208,6 +213,7 @@ class RegionPaletteTests(unittest.TestCase):
                 self.assertFalse(np.asarray(mask)[0].any())
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class GeneratedManifestTests(unittest.TestCase):
     def setUp(self):
         from herogen.blender.refine.cameras import camera
