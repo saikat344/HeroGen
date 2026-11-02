@@ -799,6 +799,84 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['face_source']['source'], 'default-fast-fallback')
         self.assertFalse([e for e in edits if e['slot'] not in ('attempt-0', 'attempt-1', 'attempt-2')])
 
+    def head_edits(self, edits):
+        return sorted((e['slot'], e['attempt'], e['nested']) for e in edits if e['view'] == 'head+0')
+
+    def test_face_rejected_beauty_head_with_rejected_default_pays_exactly_three(self):
+        # The gates accept the beauty head; the ordinary head's attempt 0 fails in both runs,
+        # so face selection has no ordinary paint and rejects the beauty face.
+        record, paid, ordinary, edits = self.paid_run(
+            reject=lambda view, kind: view == 'head+0' and kind == 0)
+        expected = self.expected_views
+        self.assertEqual(paid, Counter({view: 3 if view == 'head+0' else 2 for view in expected}))
+        self.assertEqual(ordinary, Counter({view: 2 if view == 'head+0' else 1 for view in expected}))
+        self.assertEqual(self.head_edits(edits), [('attempt-0', 0, False), ('attempt-0', 0, True),
+                                                  ('attempt-1', 0, False), ('attempt-1', 1, True),
+                                                  ('attempt-2', 1, False)])
+        self.assertEqual([e['view'] for e in edits if e['slot'] == 'attempt-2'], ['head+0'])
+        head = record.get('beauty_head_candidate', record['views']['head+0'])
+        self.assertEqual([a['face_candidate'] for a in head['attempts']], ['beauty', 'default', 'default'])
+        self.assertEqual([a['accepted'] for a in head['attempts']], [True, False, True])
+        # The face goes through the existing selection with slot 3's ordinary paint available.
+        quality = head['attempts'][0]['checks']['eye_quality']
+        self.assertNotEqual(quality['reason'], 'ordinary face paint unavailable')
+        if quality['accepted']:
+            self.assertEqual(record['face_source']['source'], 'beauty')
+        else:
+            self.assertEqual((record['face_source']['source'], record['face_source']['attempt']),
+                             ('default', 1))
+            self.assertEqual(record['views']['head+0']['winning_slot'], 3)
+        nested = record['default_fast_fallback']['views']['head+0']
+        self.assertEqual((nested['accepted'], nested['tries'], nested['selected_attempt']), (True, 2, 1))
+
+    def test_face_rejected_head_with_rejected_third_slot_never_pays_a_fourth(self):
+        record, paid, ordinary, edits = self.paid_run(
+            reject=lambda view, kind: view == 'head+0' and kind in (0, 1))
+        self.assertEqual(paid['head+0'], 3)
+        self.assertEqual(self.head_edits(edits)[-1], ('attempt-2', 1, False))
+        self.assertFalse([e for e in edits if e['slot'] not in ('attempt-0', 'attempt-1', 'attempt-2')])
+        head = record['views']['head+0']
+        self.assertEqual(head['tries'], 3)
+        # No ordinary head paint exists, so the beauty head stays rejected; body+0 may own the face.
+        self.assertEqual(head['attempts'][0]['checks']['eye_quality']['reason'], 'ordinary face paint unavailable')
+        self.assertNotEqual(record['face_source'].get('view'), 'head+0')
+
+    def test_face_accepted_beauty_head_still_pays_two(self):
+        accepted = {'accepted': True, 'reason': 'accepted', 'eyes': []}
+        with mock.patch.object(B, 'eye_quality', return_value=accepted):
+            record, paid, _, edits = self.paid_run()
+        self.assertEqual(record['face_source']['source'], 'beauty')
+        self.assertEqual(paid['head+0'], 2)
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+
+    def test_face_rejected_beauty_head_with_accepted_default_pays_two(self):
+        rejected = {'accepted': False, 'reason': 'less eye detail than ordinary fast', 'eyes': []}
+        with mock.patch.object(B, 'eye_quality', return_value=rejected):
+            record, paid, _, edits = self.paid_run()
+        self.assertEqual((record['face_source']['source'], record['face_source']['attempt']), ('default', 0))
+        self.assertEqual(paid['head+0'], 2)
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+
+    def test_overruled_accepted_slot_counts_as_a_rejection_once(self):
+        job = fast.Pass('head+0', 'head+0', False, {'attempts': []}, self.run / 'selected')
+        job.slots, job.conditional = 2, 1
+        for index, outcome in enumerate(('accepted', 'outline moved')):
+            future = Future()
+            future.set_result(None)
+            record = {'accepted': outcome == 'accepted', 'reason': outcome,
+                      'attempts': [{'accepted': outcome == 'accepted', 'reason': outcome}]}
+            job.tasks.append((future, None, record, self.run / f'candidate-{index}'))
+            job.completed[index] = record
+        self.assertFalse(job.conditional_due())
+        self.assertTrue(job.conditional_due(overruled=(0,)))
+        future = Future()
+        future.set_result(None)
+        third = {'accepted': False, 'reason': 'outline moved',
+                 'attempts': [{'accepted': False, 'reason': 'outline moved'}]}
+        job.tasks.append((future, None, third, self.run / 'candidate-2'))
+        job.completed[2] = third
+        self.assertFalse(job.conditional_due(overruled=(0,)))
+
     def test_plain_fast_never_launches_a_conditional_slot(self):
         record, paid, ordinary, edits = self.paid_run(beauty=False, reject=lambda view, kind: True)
         expected = self.expected_views

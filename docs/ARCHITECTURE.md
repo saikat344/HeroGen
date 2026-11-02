@@ -2592,15 +2592,19 @@ nor beauty references.
 Only when the existing gates reject both slot 1 and slot 2 does the pass launch conditional slot 3,
 inside the same frozen wave: the exact ordinary-fast attempt-one request (original cover, ordinary
 recipe, sample index one, the ordinary wave's frozen render, no turnaround or beauty reference).
-A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3. Slot 3's
+A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3. For the
+`head+0` pass only, face selection's rejection of a gate-accepted slot 1 (missing eyes or mouth, no
+ordinary paint, or less eye detail) counts as a failed beauty sample. When slot 2 was also rejected,
+the head launches slot 3 under the same rule before the face source is chosen, and that selection then
+runs unchanged with slot 3's accepted ordinary paint available for the eye-detail comparison. Slot 3's
 worker first runs ordinary attempt one through the nested run's own pass, which pays that sample once
 and publishes its cache family to the root cache, and then submits the identical main request, which
 replays it. The nested run adds that attempt to its record, as ordinary fast selects it, and rebuilds
 its atlas from every accepted record before later publications use it. The nested run therefore pays
 attempt one only when attempt zero and the enhanced sample were both rejected.
-Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes, and three
-(one enhanced, two ordinary) only when both are rejected, never more, including when SideBeautyPass
-and region palette are also on.
+Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes (for the head,
+when slot 2 passes or face selection accepts slot 1), and three (one enhanced, two ordinary) only when
+both are rejected, never more, including when SideBeautyPass and region palette are also on.
 The lowest passing slot wins (1, then 2, then 3); higher body/hair slots are cancelled when a lower slot
 wins. Head candidates drain because eye-detail selection requires the ordinary paint; the lowest
 accepted default slot (2, then 3) is the head's default candidate. Wave 1 chooses the face source only
@@ -2608,8 +2612,9 @@ after any frontal slot 3 resolves. A flat ordinary eye crop is
 ineligible for that comparison and records that ordinary eye detail is unavailable. `selected_attempt` is zero-based;
 `winning_slot` records the one-based winner. Missing side orientation keeps slot 1 on its usual beauty
 reference and preserves the same ordinary slots 2 and 3. This contains rejected enhancements without a
-second enhanced sample or a weakened paint gate. A beauty paint that passes the gates keeps its slot,
-so a view whose ordinary attempt zero failed then has no ordinary attempt one in the nested atlas.
+second enhanced sample or a weakened paint gate. Apart from a face-rejected head, a beauty paint that
+passes the gates keeps its slot, so a view whose ordinary attempt zero failed then has no ordinary
+attempt one in the nested atlas.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
