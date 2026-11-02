@@ -1,0 +1,224 @@
+/* Workspace side panel: "Behind the build" (Live / Recipe / Branches tabs), the variations tree, the failed-attempt
+   banner, the refine box and the compare / expanded-tree modals. Colours, type, spacing and durations come from
+   tokens.css; components (.tabs, .node, .connector, .chip, .banner, .btn, .field) come from app.css and are only
+   arranged here. */
+
+/* ---------- Panel ---------- */
+@media (min-width: 1100px) {
+  .generation { grid-template-columns: minmax(0, 1fr) var(--side-panel-w); column-gap: var(--space-6); }
+}
+.generation-notes.side-panel { grid-column: 2; grid-row: 1 / 5; min-width: 0; padding: 0; overflow: hidden; color: var(--color-text);
+  background: var(--color-surface-1); border: var(--border-w) solid var(--color-border-subtle); border-radius: var(--radius-xl); box-shadow: var(--shadow-inset-top); }
+.side-panel > #inputRefusal { margin: var(--space-5) var(--space-5) 0; }
+.side-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-2) var(--space-4); padding: var(--space-6) var(--space-6) var(--space-4); }
+.side-head__icon { display: grid; place-items: center; width: var(--tap-min); height: var(--tap-min); border-radius: var(--radius-m); border: var(--border-w-strong) solid var(--color-accent); color: var(--color-accent-text); }
+.side-head .behind-heading { margin: 0; font-family: var(--font-display); font-size: var(--text-display-m); line-height: var(--lh-display-m); letter-spacing: var(--ls-display-m); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); text-wrap: balance; }
+.side-head .behind-intro { grid-column: 1 / -1; margin: 0; font-size: var(--text-body); color: var(--color-text-muted); }
+.behind-tabs.tabs { margin: 0 var(--space-5); }
+.side-body { display: grid; gap: var(--space-5); padding: var(--space-5); min-width: 0; }
+.side-body[hidden] { display: none; }
+.side-panel #developerMode { margin: 0 var(--space-5) var(--space-5); }
+
+/* ---------- Live tab ---------- */
+.side-panel .live-log { padding: var(--space-4); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border); background: var(--color-surface-2); }
+.side-panel .live-log .row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.side-panel .note-label { margin: 0; font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--ls-eyebrow); text-transform: uppercase; color: var(--color-text-muted); }
+.side-panel .follow-live { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-body-s); font-weight: var(--weight-regular); color: var(--color-text-muted); }
+.side-panel .follow-live input { accent-color: var(--color-accent); }
+.side-panel #stageLog { list-style: none; margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); max-height: 220px; overflow: auto; border-radius: var(--radius-m); background: var(--color-bg); font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
+.side-panel #stageLog li { display: flex; gap: var(--space-4); }
+.side-panel #stageLog time { flex: none; color: var(--color-text-faint); font-variant-numeric: tabular-nums; }
+.side-panel #stageLog span { overflow-wrap: anywhere; }
+.side-panel #stageLog .st-passed { color: var(--color-success); }
+.side-panel #stageLog .st-failed, .side-panel #stageLog .st-rejected { color: var(--color-danger-text); }
+.side-panel #stageLog .st-running { color: var(--color-accent-text); }
+.side-panel .log-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); font-size: var(--text-caption); color: var(--color-text-muted); }
+.side-panel .log-footer .link { margin: 0; padding: 0; border: 0; background: none; color: var(--color-accent-text); font: inherit; font-weight: var(--weight-semibold); cursor: pointer; }
+.side-panel .work-note { margin: 0; padding: var(--space-5); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border-subtle); background: var(--color-surface-2); box-shadow: none; color: var(--color-text-muted); }
+.side-panel .work-note h2 { margin: var(--space-3) 0; font-family: var(--font-display); font-size: var(--text-display-s); line-height: var(--lh-display-s); font-weight: var(--weight-display-strong); color: var(--color-text); }
+.side-panel .work-note > p:not(.note-label) { margin: 0 0 var(--space-3); font-size: var(--text-body-s); line-height: var(--lh-body-s); color: var(--color-text-muted); }
+.side-panel .work-note #stepMessage:empty { display: none; }
+.side-panel .work-note .work-note-foot { margin: var(--space-4) 0 0; padding-top: var(--space-4); border-top: var(--border-w) solid var(--color-border-subtle); font-size: var(--text-caption); color: var(--color-text-faint); }
+.side-panel .generation-facts h2 { margin: 0; font-size: var(--text-title); line-height: var(--lh-title); font-weight: var(--weight-semibold); }
+.side-panel .generation-facts p { margin: var(--space-1) 0 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+
+/* ---------- Recipe tab (read-only) ---------- */
+.recipe-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-3) var(--space-5); margin: 0; padding: var(--space-4) var(--space-5); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border-subtle); background: var(--color-surface-2); }
+.recipe-facts dt { font-size: var(--text-body-s); color: var(--color-text-muted); }
+.recipe-facts dd { margin: 0; font-size: var(--text-body-s); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+.recipe-stage { padding-top: var(--space-4); border-top: var(--border-w) solid var(--color-border-subtle); }
+.recipe-stage h3 { margin: 0 0 var(--space-2); font-size: var(--text-body-s); font-weight: var(--weight-semibold); }
+.recipe-stage p { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); overflow-wrap: anywhere; }
+
+/* ---------- Variations tree ---------- */
+.tree { min-width: 0; padding: var(--space-5) var(--space-4) var(--space-6); }
+.tree-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-5); }
+.tree-head__title { margin: 0; font-family: var(--font-display); font-size: var(--text-title); line-height: var(--lh-title); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); }
+.tree-head__sub { margin: var(--space-1) 0 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.tree-head .btn { flex: none; background: var(--color-surface-1); }
+.tree-status { margin: 0 0 var(--space-4); font-size: var(--text-body-s); color: var(--color-text-muted); }
+.tree-hint { margin: var(--space-5) 0 0; text-align: center; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.tree-home { min-width: 0; }
+
+.vtree {
+  --vt-gap: var(--space-4);          /* column gap between the root and its branches */
+  --vt-y: var(--space-9);                      /* where a branch line leaves the root's side */
+  --vt-drop: calc(var(--space-12) + var(--space-2));                   /* where branch children start, below the root's top */
+  --vt-rail-x: var(--space-5);                 /* rail position for stacked children */
+  --vt-indent: var(--space-8);                 /* stacked child indent */
+  --vt-tick: calc(var(--space-10) - var(--space-1));                   /* where a rail tick enters a stacked child */
+  --vt-line: var(--border-w-strong) solid var(--color-border-strong);
+  --node-w: min(100%, 208px);
+  container-type: inline-size; min-width: 0; overflow-x: auto; overflow-y: visible; padding: var(--space-1) var(--space-1) var(--space-2);
+}
+.vtree:empty { display: none; }
+.vt-node { grid-template-columns: minmax(0, 1fr); width: var(--node-w); max-width: none; min-width: 108px; padding: var(--space-3); }
+.vt-node .node__head { gap: var(--space-2); }
+.vt-node .num { flex: none; padding: var(--space-1) var(--space-2); }
+.vt-node .status-icon { flex: none; width: var(--icon-s); height: var(--icon-s); }
+.vt-node .node__thumb { position: relative; }
+.vt-node .node__thumb img { width: 100%; height: 64px; object-fit: cover; object-position: 50% 30%; }
+.vt-node .node__thumb--clay img { object-fit: contain; }
+.node__thumb--clay img { filter: grayscale(1) contrast(0.92) brightness(1.08); }
+.node__placeholder { color: var(--stage-text-muted); }
+.node__status { justify-self: center; font-size: var(--text-caption); }
+.node--fail .node__status { color: var(--color-danger-text); }
+.node--run .node__status { color: var(--color-accent-text); }
+.node--wait .node__status { color: var(--color-text-muted); }
+.badge--fail.status-icon { color: var(--color-danger); }
+.vt-node[aria-current="true"] { padding: calc(var(--space-3) - 1px); }
+.vt-node:focus-visible { outline: var(--focus-w) solid var(--color-focus); }
+.status-icon.is-spinning { animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
+
+/* Spine: Artwork -> 3D shape -> Original texture, joined by .connector stems. */
+.vt-spine { display: grid; justify-items: start; }
+.vt-spine > .connector { margin-left: calc(var(--node-w) / 2 - 1px); }
+.vt-center { display: grid; justify-items: start; }
+
+/* Narrow (default): children hang from a rail under their parent, Refine first, then Retry. */
+.vt-branches, .vt-nest { position: relative; }
+.vt-side.is-empty { display: none; }
+.vt-rail { position: relative; display: block; padding-left: var(--vt-indent);
+  background: linear-gradient(var(--color-border-strong), var(--color-border-strong)) no-repeat var(--vt-rail-x) 0 / var(--border-w-strong) 100%; }
+.vt-rail.vt-end { background-size: var(--border-w-strong) calc(var(--vt-tick) + 1px); }
+.vt-label { display: block; padding-top: var(--space-4); padding-bottom: var(--space-2); font-size: var(--text-body-s); font-weight: var(--weight-semibold); line-height: 1.2; color: var(--color-text-muted); }
+.vt-item { padding-top: var(--space-1); padding-bottom: var(--space-4); }
+.vt-item::before { content: ""; position: absolute; left: var(--vt-rail-x); top: var(--vt-tick); width: calc(var(--vt-indent) - var(--vt-rail-x) - 3px); border-top: var(--vt-line); }
+.vt-item::after { content: ""; position: absolute; left: calc(var(--vt-indent) - 9px); top: calc(var(--vt-tick) - 3px); width: 7px; height: 7px; border-top: var(--vt-line); border-right: var(--vt-line); transform: rotate(45deg); }
+.vt-item.vt-end { padding-bottom: 0; }
+.vt-sub { display: grid; justify-items: start; }
+.vt-nest { width: 100%; }
+.vt-nest .vt-node { width: min(var(--node-w), 100%); }
+.vt-extra { margin-top: var(--space-6); padding-top: var(--space-5); border-top: var(--border-w) dashed var(--color-border); }
+.vt-extra__label { margin: 0 0 var(--space-4); font-size: var(--text-caption); color: var(--color-text-muted); }
+
+/* Wide: the root's Refine children branch to the left, Retry children to the right. */
+@container (min-width: 360px) {
+  .vtree > * { --node-w: clamp(108px, 34cqi, 176px); }
+  .vt-spine, .vt-center { justify-items: center; }
+  .vt-spine > .connector { margin-left: 0; }
+  .vt-fork { display: grid; grid-template-columns: minmax(0, 1fr) var(--node-w) minmax(0, 1fr); grid-template-areas: "refine center retry"; column-gap: var(--vt-gap); align-items: start; }
+  .vt-center { grid-area: center; }
+  .vt-branches { display: contents; }
+  .vt-side { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; align-content: start; min-width: 0; padding-top: var(--vt-drop); }
+  .vt-side--refine { grid-area: refine; }
+  .vt-side--retry { grid-area: retry; }
+  .vt-side.is-empty { display: block; }
+  /* Elbow: a line from the root's side, along to the column centre, then down to the first child. */
+  .vt-side:not(.is-empty)::before { content: ""; position: absolute; top: var(--vt-y); height: calc(var(--vt-drop) - var(--vt-y) - 2px); border-top: var(--vt-line); }
+  .vt-side--refine::before { left: 50%; right: calc(-1 * var(--vt-gap)); border-left: var(--vt-line); border-top-left-radius: var(--radius-s); }
+  .vt-side--retry::before { right: 50%; left: calc(-1 * var(--vt-gap)); border-right: var(--vt-line); border-top-right-radius: var(--radius-s); }
+  .vt-side:not(.is-empty)::after { content: ""; position: absolute; top: calc(var(--vt-drop) - 9px); left: 50%; width: 7px; height: 7px; border-right: var(--vt-line); border-bottom: var(--vt-line); transform: translateX(-50%) rotate(45deg); }
+  .vt-side--retry:not(.is-empty)::after { left: auto; right: 50%; transform: translateX(50%) rotate(45deg); }
+  .vt-side > .vt-rail { width: 100%; padding-left: 0; background: none; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .vt-side > .vt-label { position: absolute; top: calc(var(--vt-y) - var(--space-6) - var(--space-1)); display: block; width: auto; padding: 0; white-space: nowrap; }
+  .vt-side--refine > .vt-label { left: calc(50% + var(--space-3)); }
+  .vt-side--retry > .vt-label { right: calc(50% + var(--space-3)); }
+  .vt-side > .vt-item { padding: 0; }
+  .vt-side > .vt-item::before, .vt-side > .vt-item::after { content: none; }
+  /* A second attempt on the same side: a dashed stem says "also from the root", not "made from the one above". */
+  .vt-side > .vt-item + .vt-item { padding-top: calc(var(--space-8) - var(--space-1)); }
+  .vt-side > .vt-item + .vt-item::before { content: ""; left: 50%; top: var(--space-2); width: 0; height: calc(var(--space-6) + var(--space-1)); border-top: 0; border-left: var(--border-w-strong) dashed var(--color-border-strong); transform: translateX(-50%); }
+  .vt-side > .vt-item + .vt-item::after { content: ""; left: 50%; top: calc(var(--space-5) + var(--space-1)); transform: translateX(-50%) rotate(135deg); }
+  .vt-side .vt-sub { width: var(--node-w); max-width: 100%; justify-items: stretch; }
+  .vt-side .vt-sub > .vt-node { width: 100%; }
+  .vt-side .vt-nest { --vt-rail-x: var(--space-4); --vt-indent: var(--space-7); }
+}
+
+/* Motion: completion pop + success flash, connector draw. Reduced motion keeps only the end state. */
+@media (prefers-reduced-motion: no-preference) {
+  .vt-node.is-completing { animation: node-done var(--dur-reveal) var(--ease-out); }
+  .vt-node.is-completing .status-icon { animation: pop var(--dur-slow) var(--ease-spring); }
+  .connector.is-drawing { transform-origin: top; animation: draw-y var(--dur-slow) var(--ease-out); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-icon.is-spinning, .vt-node.is-completing, .connector.is-drawing { animation: none; }
+}
+@keyframes node-done { 0%, 40% { border-color: var(--color-success); box-shadow: 0 0 0 1px var(--color-success-border), 0 0 var(--space-5) var(--color-success-subtle); } }
+@keyframes draw-y { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+
+/* ---------- Failed attempt banner ---------- */
+.variation-failure { flex-wrap: wrap; row-gap: var(--space-3); }
+.variation-failure .banner__title { color: var(--color-danger-text); }
+.variation-failure .banner__reason { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-faint); overflow-wrap: anywhere; }
+.variation-failure .btn { flex: none; margin-left: auto; background: var(--color-surface-1); }
+
+/* ---------- Refine box ---------- */
+.inline-refine { padding: var(--space-5) var(--space-5) var(--space-6); border-top: var(--border-w) solid var(--color-border-subtle); }
+.refine { display: grid; gap: var(--space-4); }
+.refine__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.refine__title { margin: 0; min-width: 0; font-family: var(--font-display); font-size: var(--text-display-s); line-height: var(--lh-display-s); letter-spacing: var(--ls-display-s); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); overflow-wrap: anywhere; }
+.inline-refine #closeRefine { display: none; }
+.refine .textarea { min-height: 64px; font-size: var(--text-body-s); }
+.refine .field-help span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+.refine__off { display: flex; align-items: flex-start; gap: var(--space-3); margin: 0; padding: var(--space-3) var(--space-4); border-radius: var(--radius-m); border: var(--border-w) solid var(--color-info-border); background: var(--color-info-subtle); font-size: var(--text-body-s); color: var(--color-text); }
+.refine__off[hidden] { display: none; }
+.refine__off .icon { margin-top: var(--space-1); color: var(--color-info); }
+.refine-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.refine__scope { margin: calc(-1 * var(--space-2)) 0 0; font-size: var(--text-caption); color: var(--color-text-muted); }
+.refine .field-error { margin: 0; }
+.refine .btn-help { margin: calc(-1 * var(--space-2)) 0 0; font-size: var(--text-body-s); }
+.refine__time:not(:empty)::before { content: " · "; }
+
+/* ---------- Modals: refine, compare, expanded tree ---------- */
+dialog.modal { width: min(560px, calc(100vw - 2 * var(--gutter))); max-width: none; max-height: 90vh; margin: auto; padding: var(--space-6); overflow: auto; color: var(--color-text);
+  background: var(--color-surface-1); border: var(--border-w) solid var(--color-border-subtle); border-radius: var(--radius-xl); box-shadow: var(--shadow-3); }
+dialog.modal::backdrop { background: var(--color-scrim); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+dialog.modal[open] { animation: modal-in var(--dur-slow) var(--ease-out); }
+.modal__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-5); }
+.modal__title { margin: 0; font-family: var(--font-display); font-size: var(--text-display-s); line-height: var(--lh-display-s); letter-spacing: var(--ls-display-s); font-weight: var(--weight-display-strong); font-variation-settings: var(--display-variation); }
+.modal__sub { margin: var(--space-1) 0 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.modal__close { flex: none; margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0 0; }
+dialog.modal--compare { width: min(1100px, calc(100vw - 2 * var(--gutter))); }
+dialog.modal--tree { width: 90vw; height: 90vh; display: none; flex-direction: column; }
+dialog.modal--tree[open] { display: flex; }
+.tree--modal { flex: 1; min-height: 0; overflow: auto; }
+.tree--modal .vtree { max-width: 760px; margin: 0 auto; }
+@keyframes modal-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Compare */
+.compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
+.compare-pane { display: grid; gap: var(--space-3); min-width: 0; align-content: start; }
+.compare-meta { margin: 0; min-height: 2.9em; font-size: var(--text-body-s); color: var(--color-text-muted); overflow-wrap: anywhere; }
+.compare-stage { position: relative; border-radius: var(--radius-l); overflow: hidden; background: var(--stage-bg); border: var(--border-w) solid var(--color-border-subtle); }
+.compare-stage::before { content: ""; position: absolute; inset: 0; background: var(--stage-floor); pointer-events: none; }
+.compare-stage canvas { position: relative; display: block; width: 100%; height: min(55vh, 480px); touch-action: none; }
+.compare-status { margin: var(--space-4) 0 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
+.compare-status:empty { display: none; }
+#compareDialog .field-error { margin-top: var(--space-3); }
+
+/* ---------- Phones: modals become bottom sheets, compare stacks ---------- */
+@media (max-width: 767px) {
+  .side-head { padding: var(--space-5) var(--space-5) var(--space-3); }
+  .side-head .behind-heading { font-size: var(--text-display-s); line-height: var(--lh-display-s); }
+  .behind-tabs.tabs { margin: 0 var(--space-3); }
+  .side-body, .inline-refine { padding-left: var(--space-4); padding-right: var(--space-4); }
+  .tree { padding-left: var(--space-3); padding-right: var(--space-3); }
+  .vt-node { min-height: var(--tap-min); }
+  dialog.modal, dialog.modal--compare, dialog.modal--tree { width: 100vw; max-width: 100vw; max-height: 90svh; margin: auto 0 0; border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding: var(--space-5) var(--space-4); }
+  dialog.modal--tree { height: 90svh; }
+  .compare-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .compare-stage canvas { height: 34svh; }
+  .compare-meta { min-height: 0; }
+}
+@media (prefers-reduced-motion: reduce) { dialog.modal[open] { animation: none; } }

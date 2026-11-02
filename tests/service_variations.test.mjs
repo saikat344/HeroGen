@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { expectedTime, versionAction, versionLabel, versionMetrics, versionRows } from '../herogen/service/static/variations.js';
+import { expectedTime, variationTree, versionAction, versionLabel, versionMetrics, versionRows, versionSide } from '../herogen/service/static/variations.js';
 
 test('version tree preserves parent depth, siblings and children of deleted ancestors', () => {
   const versions = [{id:'root'}, {id:'leaf',parent_job:'child'}, {id:'child',parent_job:'root'},
@@ -31,4 +31,20 @@ test('branch actions use known submissions and never invent historical provenanc
   assert.equal(versionAction({note:'Blue coat'}, {}),'Refine');
   assert.equal(versionAction({note:'Blue coat'}, {note:'Blue coat'}),'Retry / Refine');
   assert.equal(versionAction({}, {}),'Retry / Refine');
+});
+
+test('tree sides put new notes on the Refine side and re-runs on the Retry side', () => {
+  assert.equal(versionSide({note:'Weathered brass'}, {}), 'refine');
+  assert.equal(versionSide({note:'Blue coat'}, {note:'Blue coat'}), 'retry');
+  assert.equal(versionSide({}, {}), 'retry');
+  assert.equal(versionSide({}, {}, 'Refine'), 'refine');
+  const versions = [{id:'root'}, {id:'a',parent_job:'root',note:'Weathered brass'}, {id:'b',parent_job:'root'},
+    {id:'c',parent_job:'root',note:'Moss green'}, {id:'d',parent_job:'a',note:'Weathered brass'}, {id:'orphan',parent_job:'gone'}];
+  const [root, orphan] = variationTree(versions);
+  assert.equal(root.version.id, 'root');
+  assert.deepEqual(root.refine.map(n => n.version.id), ['a', 'c']);
+  assert.deepEqual(root.retry.map(n => n.version.id), ['b']);
+  assert.deepEqual(root.refine[0].retry.map(n => [n.version.id, n.side]), [['d', 'retry']]);
+  assert.equal(orphan.version.id, 'orphan');
+  assert.equal(variationTree([{id:'x',parent_job:'y'},{id:'y',parent_job:'x'}]).length, 1, 'cycles never repeat a version');
 });
