@@ -338,7 +338,7 @@ const CHECK_MEANINGS = {
   hip_height: 'HipHeight puts the feet on the floor', feet_lowest: 'nothing reaches below the feet',
   faces_minus_z: 'character faces forward', not_mirrored: "right arm is on the character's right",
   face_front_on_front: 'face attachment is on the front of the head', accessory_attachments: 'accessory attachments present and inside their parts',
-  avatar_part_scale_type: 'all parts use the Classic scale type', meshes_bound: 'meshes bound (0 until the Studio script runs)',
+  avatar_part_scale_type: 'all parts use the Classic scale type', meshes_bound: 'meshes bound in Studio; 0 until the script runs',
 };
 const CHECK_GROUP = {4: 'body', 6: 'rig'};
 const OPS = {'<': 'under', '<=': 'at most', '==': 'exactly', '>=': 'at least', '>': 'over', '!=': 'not'};
