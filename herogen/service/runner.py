@@ -127,6 +127,7 @@ class StageContext:
     env: dict[str, str] = field(default_factory=dict)
     refine_profile: str = "best"
     refine_cap_usd: float | None = None
+    attempt: int | None = None    # the job attempt running this stage (build-log events carry it)
 
     @property
     def runs_root(self) -> Path:
@@ -345,6 +346,17 @@ def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def events_env(spec: StageSpec, ctx: StageContext) -> dict[str, str]:
+    """Where a stage subprocess writes its build-log events (`herogen.pipeline.events`): the run folder it works
+    in (a local copy on Modal, which the worker's `EventPump` mirrors), with its step and attempt."""
+    from herogen.pipeline import events
+
+    env = {events.ENV_FILE: str(ctx.run_dir / events.FILE), events.ENV_STEP: spec.key}
+    if ctx.attempt:
+        env[events.ENV_ATTEMPT] = str(ctx.attempt)
+    return env
+
+
 class CliRunner:
     """Runs each stage with its own CLI in a subprocess."""
 
@@ -428,7 +440,7 @@ class CliRunner:
         why = self.available(spec)
         if why:
             return Outcome("skipped", message=why, code="not_available")
-        extra = dict(ctx.env)
+        extra = {**events_env(spec, ctx), **ctx.env}
         if (spec.group == "model" or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
