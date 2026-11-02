@@ -8,7 +8,6 @@ body:has(#app.heroes-screen) main, body.gallery-page main { width: 100%; max-wid
 body:has(#app.heroes-screen), body.gallery-page { display: flex; flex-direction: column; }
 body:has(#app.heroes-screen) main, body.gallery-page main { flex: 1 0 auto; }
 #app.heroes-screen { margin-top: 0; padding-top: 0; border: 0; }
-#app.heroes-screen > .workspace-heading { display: none; }
 .icon--xl { width: var(--space-10); height: var(--space-10); stroke-width: 1.5; }
 
 /* ---------- Your heroes ---------- */

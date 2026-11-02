@@ -563,7 +563,8 @@ body:has(.generation-screen) main { width:calc(100% - 48px); max-width:1800px; }
 .top nav { margin-inline:auto; }
 .top>.spacer { display:none; }
 #app.generation-screen { margin-top:0; padding-top:22px; border:0; }
-.generation-screen>.workspace-heading { display:none; }
+/* The old "Back to ideas" and "This workspace" links stay in the DOM for the header to click, but never show. */
+#app > .workspace-heading { display:none; }
 .generation { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(340px,1fr); column-gap:20px; align-items:start; }
 .generation-grid { display:contents; }.result-column { grid-column:1; min-width:0; }
 .variation-actions { text-align:center; padding:14px 12px 0; }.variation-actions p { font-size:10px; color:var(--muted); margin:5px 0 0; }
