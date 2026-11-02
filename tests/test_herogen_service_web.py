@@ -683,7 +683,30 @@ class TestPages(WebCase):
         self.assertNotIn("<script>", r.text)
         self.assertIn("&lt;script&gt;", r.text)
         self.assertIn("default-src 'none'", r.headers["content-security-policy"])
+        self.assertIn("font-src 'self'", r.headers["content-security-policy"])
+        self.assertLess(r.text.index("/assets/tokens.css"), r.text.index("/assets/app.css"))
         self.assertIn("Terms t1.", Browser(self.app).get("/terms").text)
+
+    def test_pages_load_the_design_system_from_this_origin(self):
+        from herogen.service import web
+
+        b = Browser(self.app)
+        pages = {"/": b.get("/").text, "/gallery/x": b.get("/gallery/x").text, "/admin": b.get("/admin").text,
+                 "viewer.html": (web.STATIC_DIR / "viewer.html").read_text()}
+        fonts = ("/assets/fonts/Figtree-Variable.latin.woff2", "/assets/fonts/Fraunces-Variable.latin.woff2")
+        for name, page in pages.items():
+            self.assertLess(page.index('href="/assets/tokens.css"'), page.index('href="/assets/app.css"'), name)
+            self.assertIn('<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">', page, name)
+            for font in fonts:
+                self.assertIn(f'<link rel="preload" href="{font}" as="font" type="font/woff2" crossorigin>', page, name)
+            self.assertNotIn("fonts.googleapis", page, name)
+            self.assertNotIn("style=", page, name)          # the CSP allows no inline styles
+        tokens = b.get("/assets/tokens.css").text
+        for font in re.findall(r'url\("(fonts/[^"]+)"\)', tokens):
+            r = b.get(f"/assets/{font}")
+            self.assertEqual((r.status_code, r.headers["content-type"]), (200, "font/woff2"), font)
+            self.assertEqual(r.content[:4], b"wOF2", font)
+        self.assertEqual(b.get("/assets/icons/favicon.svg").headers["content-type"], "image/svg+xml")
 
     def test_viewer_and_health(self):
         b = Browser(self.app)
