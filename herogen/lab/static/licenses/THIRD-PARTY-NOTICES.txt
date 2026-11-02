@@ -176,3 +176,40 @@ JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors
     sha256 918edad542a1da608fd2ba8daebaff9ac802309103fe760eed465b8b4e47faf1
   OFL-JetBrainsMono.txt (originally OFL.txt)
     sha256 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad
+
+---
+
+Website fonts (herogen/service/static/fonts/), SIL Open Font License 1.1
+Served at /assets/fonts/ by the HeroGen website. The two *.latin.woff2 files are Latin subsets made with
+fontTools 4.68.0 (pyftsubset, all layout features kept, every variation axis kept):
+  pyftsubset <source> --unicodes="U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+2000-206F,U+2074,U+20AC,U+2122,U+2190-2193,U+2212,U+2215" --layout-features='*' --flavor=woff2 --output-file=<name>
+The OFL permits modified versions; the subsets keep their original font names, which the Fraunces, Figtree and
+JetBrains Mono projects do not reserve.
+
+Fraunces, Copyright 2018 The Fraunces Project Authors (https://github.com/undercasetype/Fraunces)
+  source: github.com/google/fonts at commit 4024282d9b0cffcdb8e3024560862746178d741f, ofl/fraunces/
+  https://github.com/google/fonts/blob/4024282d9b0cffcdb8e3024560862746178d741f/ofl/fraunces/Fraunces%5BSOFT,WONK,opsz,wght%5D.ttf
+  Fraunces[SOFT,WONK,opsz,wght].ttf (source, not shipped)
+    sha256 177ff6c0f14e5550a3c624247cd1189611d4eb65d000b14944c63d967958abbb
+  Fraunces-Variable.latin.woff2 (Latin subset of the file above)
+    sha256 9dd81524fb6abaf3713b80588d40b8f19efc1244172ba3d9971f96f8d9a0fa2a
+  OFL-Fraunces.txt (originally OFL.txt, unchanged)
+    sha256 bdf4c22802eaf804f998195871c6b8938aac2ac14b2d78a8bd66a6f1eced833b
+
+Figtree (same source as the Lab copy above)
+  Figtree-Variable.latin.woff2 (Latin subset of herogen/lab/static/fonts/Figtree-Variable.ttf)
+    sha256 559b879e83e183b33f0276fc98b88356c7e9ce838cef6306e0add404c6d1738f
+  OFL-Figtree.txt (copy of the Lab file)
+    sha256 140d37233e7f3ce7313798befa9600893bcceaf41a55fa0fa5ad52f7f657a268
+
+JetBrains Mono (same source as the Lab copy above; files copied unchanged)
+  JetBrainsMono-Regular.woff2
+    sha256 a9cb1cd82332b23a47e3a1239d25d13c86d16c4220695e34b243effa999f45f2
+  JetBrainsMono-SemiBold.woff2
+    sha256 918edad542a1da608fd2ba8daebaff9ac802309103fe760eed465b8b4e47faf1
+  OFL-JetBrainsMono.txt
+    sha256 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad
+
+Website icons (herogen/service/static/icons/sprite.svg)
+The symbols not named hg-* are the Lucide icons listed in the Lucide notice at the top of this file (ISC, with
+the MIT notice for the Feather-derived ones), copied as plain shapes; the website sets their stroke in CSS.
