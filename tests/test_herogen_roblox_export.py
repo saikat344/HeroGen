@@ -13,6 +13,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 from herogen.roblox import (BIND_FILE, MESH_TRIANGLE_LIMIT, OUTPUT_FILES, README_FILE, RECORD_FILE, RIG_FILE,
                             RIG_NAME, RIG_TEST_FILE)
@@ -188,6 +189,105 @@ class ExportErrorTest(unittest.TestCase):
         self.assertIn("FAIL  faces_minus_z", stderr)
         rec = json.loads((self.root / RECORD_FILE).read_text())
         self.assertFalse(rec["ok"])
+
+
+# The 27 checks of a rig built from a complete body, and the one that is informational (not a hard limit).
+RIG_CHECKS = ("xml_well_formed", "one_root_model", "humanoid_r15", "humanoid_scale_values", "root_part",
+              "sections_r15_names", "joints_named_and_linked", "rig_attachment_pairs", "attachments_at_pivots",
+              "attachment_pairs_coincide", "motor_c0_c1_equal_attachments", "rest_pose_position", "rest_pose_rotation",
+              "joints_inside_parts", "joint_chain_reachable", "section_extents_match_glb", "section_centres_match_glb",
+              "rotations_proper", "triangles_per_mesh", "hip_height", "feet_lowest", "faces_minus_z", "not_mirrored",
+              "face_front_on_front", "accessory_attachments", "avatar_part_scale_type", "meshes_bound")
+INFORMATIONAL = {"meshes_bound"}
+
+
+class BuildLogEventsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "run"
+        self.events = Path(self.tmp.name) / "events.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def export(self, **body_kw) -> tuple[dict, list[dict]]:
+        from herogen.roblox.export import run_export
+
+        body = write_body(self.root / "04-body", **body_kw)
+        with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(self.events), "HEROGEN_EVENTS_STEP": "6"}):
+            rec = run_export(body, self.root / "06-roblox")
+        lines = self.events.read_text().splitlines() if self.events.exists() else []
+        return rec, [json.loads(line) for line in lines]
+
+    def test_every_check_is_an_event_with_its_limit_comparison_and_gate(self):
+        from herogen.pipeline import events
+
+        rec, got = self.export()
+        self.assertTrue(rec["ok"])
+        for e in got:
+            self.assertEqual(events.validate(e), e)
+            self.assertEqual((e["step"], e["who"]), ("6", "herogen"))
+        self.assertEqual([e["kind"] for e in got], ["local", "local"] + ["check"] * 27 + ["checks"])
+        write, scripts = got[0], got[1]
+        self.assertEqual(write["what"], "rig_write")
+        self.assertEqual(write["m"], {"parts": 15, "motors": 15, "attachments": 19, "hip_height": 1.7})
+        self.assertEqual((scripts["what"], scripts["m"]), ("studio_scripts", {"files": 3}))
+        checks = got[2:-1]
+        self.assertEqual(tuple(e["name"] for e in checks), RIG_CHECKS)
+        self.assertEqual({e["name"] for e in checks if not e["gate"]}, INFORMATIONAL)
+        self.assertEqual(sum(e["gate"] for e in checks), 26)
+        self.assertTrue(all(e["ok"] for e in checks))
+        by = {e["name"]: e for e in checks}
+        for c in rec["checks"]:
+            e = by[c["name"]]
+            self.assertEqual(e["gate"], c["gate"])
+            self.assertEqual(e.get("op"), c["rule"])
+            self.assertEqual(e.get("m", {}).get("limit"), c["threshold"])
+            # the build log keeps six decimals: a 5e-08 stud residual reads 0.0 against its 0.001 limit
+            self.assertAlmostEqual(e["m"]["value"], c["value"], places=6)
+        self.assertEqual({n: by[n]["op"] for n in ("attachments_at_pivots", "triangles_per_mesh", "hip_height",
+                                                    "joints_inside_parts", "faces_minus_z", "not_mirrored",
+                                                    "face_front_on_front")},
+                         {"attachments_at_pivots": "<=", "triangles_per_mesh": "<=", "hip_height": "<=",
+                          "joints_inside_parts": "==", "faces_minus_z": "<", "not_mirrored": ">",
+                          "face_front_on_front": "<"})
+        self.assertNotIn("op", by["meshes_bound"])
+        summary = got[-1]
+        self.assertEqual((summary["n"], summary["passed"], summary["gated"], summary["failed"], summary["advisory"]),
+                         (27, 27, 26, [], []))
+        self.assertGreaterEqual(summary["s"], 0)
+
+    def test_a_failed_hard_check_is_named_and_the_rig_is_withheld(self):
+        rec, got = self.export(facing_back=True)
+        self.assertFalse(rec["ok"])
+        failed = {e["name"] for e in got if e["kind"] == "check" and not e["ok"]}
+        self.assertIn("faces_minus_z", failed)
+        facing = next(e for e in got if e.get("name") == "faces_minus_z")
+        self.assertEqual((facing["gate"], facing["op"], facing["m"]["limit"]), (True, "<", -0.9))
+        self.assertGreater(facing["m"]["value"], 0.9)
+        self.assertEqual(set(got[-1]["failed"]), failed)
+
+    def test_an_unexportable_body_logs_an_error_without_its_message(self):
+        from herogen.roblox.export import run_export
+
+        body = write_body(self.root / "04-body")
+        (body / "high.glb").unlink()
+        with mock.patch.dict(os.environ, {"HEROGEN_EVENTS_FILE": str(self.events), "HEROGEN_EVENTS_STEP": "6"}):
+            rec = run_export(body, self.root / "06-roblox")
+        self.assertIn("error", rec)
+        got = [json.loads(line) for line in self.events.read_text().splitlines()]
+        self.assertEqual(got, [{**got[0], "kind": "error", "what": "rig_export", "code": "stage_error"}])
+        self.assertNotIn(self.tmp.name, self.events.read_text())
+
+    def test_without_an_events_file_the_export_writes_none(self):
+        from herogen.pipeline import events
+        from herogen.roblox.export import run_export
+
+        body = write_body(self.root / "04-body")
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(events, "_append", side_effect=AssertionError("written")):
+            os.environ.pop("HEROGEN_EVENTS_FILE", None)
+            self.assertTrue(run_export(body, self.root / "06-roblox")["ok"])
 
 
 REPO = Path(__file__).resolve().parents[1]

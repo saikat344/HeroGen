@@ -15,9 +15,10 @@ from pathlib import Path
 
 from . import (BIND_FILE, OUTPUT_FILES, README_FILE, RECORD_FILE, RIG_FILE, RIG_NAME, RIG_TEST_FILE,
                RobloxExportError)
+from ..pipeline import events
 from .check import check_rig
 from .rbxmx import write_rbxmx
-from .record import code_version, file_hash, write_atomic
+from .record import code_version, emit_checks, file_hash, measures, write_atomic
 from .rig import build_rig
 
 STAGE = 6
@@ -79,6 +80,9 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
     try:
         spec = build_rig(body, glb_name)
         write_atomic(out / RIG_FILE, write_rbxmx(spec))
+        events.emit("local", who="herogen", what="rig_write", s=round(time.monotonic() - t0, 3), m=measures({
+            "parts": len(spec["parts"]), "motors": sum(1 for p in spec["parts"] if p.get("parent")),
+            "attachments": len(spec["extra_attachments"]), "hip_height": round(spec["hip_height"], 3)}))
         values = {
             "RIG_NAME": RIG_NAME, "RIG_FILE": RIG_FILE, "BIND_FILE": BIND_FILE,
             "RIG_TEST_FILE": RIG_TEST_FILE, "RECORD_PATH": _rel(rec_path, out),
@@ -87,8 +91,11 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
         }
         for name in TEMPLATE_FILES:
             write_atomic(out / name, render(template(name), values))
+        events.emit("local", who="herogen", what="studio_scripts", m={"files": len(TEMPLATE_FILES)})
         record["outputs"] = [_rel(out / n, base) for n in (RIG_FILE, *TEMPLATE_FILES)]
+        t1 = time.monotonic()
         record["checks"] = check_rig(body, out / RIG_FILE, glb_name)
+        emit_checks(record["checks"], seconds=time.monotonic() - t1)
         record["ok"] = all(c["pass"] for c in record["checks"] if c.get("gate", True))
         record["notes"] = "; ".join(spec["notes"])
         record["rig"] = {
@@ -104,6 +111,8 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
         for name in OUTPUT_FILES:
             (out / name).unlink(missing_ok=True)
         record["error"] = str(exc)
+        # never the exception text in the build log: it can name files
+        events.emit("error", who="herogen", what="rig_export", code="stage_error")
     record["seconds"] = round(time.monotonic() - t0, 2)
     write_atomic(rec_path, json.dumps(record, indent=2) + "\n")
     return record
