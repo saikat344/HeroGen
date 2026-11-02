@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildModel, copyText, orderEvents, rowMeta, stepMeta, typicalFor, buildLog, POLL_MS, IDLE_MS }
+import { buildModel, copyText, orderEvents, rowMeta, stepMeta, typicalFor, buildLog, POLL_MS, IDLE_MS, MAX_MS, PAUSED }
   from '../herogen/service/static/buildlog.js';
 import * as copy from '../herogen/service/static/buildlog-copy.js';
 import { sampleEvents, SAMPLE_STAGES } from './buildlog_fixture.mjs';
@@ -422,4 +422,30 @@ test('a check that missed inside a step that passed is a quiet note, not a red f
   assert.equal(row.state, 'kept');
   assert.equal(row.text, 'Outline p90 px: failed · measured 18, needs at most 16');
   assert.equal(rowsOf(buildModel(job({'3f': 'failed'}), events), '3f')[0].state, 'failed');
+});
+
+test('a busy server or a lost connection pauses the log quietly and backs off, then it resumes at 1.5 s', async () => {
+  const busy = (after) => Object.assign(new Error('Too many requests.'), {status: 429, retryAfter: after});
+  const offline = () => Object.assign(new TypeError('Failed to fetch'), {});
+  const h = harness({responses: [{events: [ev(0, 'step_start', '1')], cursor: 'o:1', done: false},
+    busy('7'), busy(null), offline(), offline(), offline(), {events: [], cursor: 'o:1', done: false}]});
+  h.log.update(job({1: 'running'}));
+  await h.settle();
+  const next = () => h.runNext(t => t.f.name === 'poll');
+  const pollDelay = () => h.pending.find(t => t.f.name === 'poll')?.ms;
+  assert.equal(pollDelay(), POLL_MS);
+  await next();
+  assert.equal(pollDelay(), 7000, 'Retry-After is honoured');
+  assert.equal(h.els['#logStatus'].textContent, PAUSED);
+  await next();
+  assert.equal(pollDelay(), 14000, 'no Retry-After: twice as long');
+  await next();
+  assert.equal(pollDelay(), MAX_MS, 'never more than 15 s');
+  await next(); await next();
+  assert.equal(pollDelay(), MAX_MS);
+  assert.equal(h.els['#logStatus'].textContent, PAUSED);
+  assert.ok(h.els['#stageLog'].find('bl-step').length > 0, 'the rows already shown stay');
+  await next();
+  assert.equal(pollDelay(), POLL_MS, 'back to 1.5 s after a success');
+  assert.equal(h.els['#logStatus'].textContent, 'Following live');
 });
