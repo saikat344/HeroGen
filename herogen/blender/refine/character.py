@@ -43,7 +43,7 @@ def composite(rgba, bg=BG):
     return Image.fromarray((rgb * 255).round().astype(np.uint8)), a[..., 3]
 
 
-def setup(glb, work, client, timeout=900.0, *, save_palette_masks=False):
+def setup(glb, work, client, timeout=900.0, *, save_palette_masks=False, save_head_mask=False):
     work = Path(work)
     info_path = work / "character.json"
     pts = blender_points(glb)
@@ -70,7 +70,7 @@ def setup(glb, work, client, timeout=900.0, *, save_palette_masks=False):
         if ins:
             best = max(ins, key=lambda i: i.confidence or 0)
             boxes[text] = list(best.box)
-            if text == "head":
+            if text == "head" and (save_palette_masks or save_head_mask):
                 Image.fromarray(np.asarray(best.mask, dtype=np.uint8) * 255).save(work / "probe" / "head.png")
     info = {"lo": lo.tolist(), "hi": hi.tolist(), "height": float(H),
             "body_centre": centre.tolist(), "boxes_px": boxes, "head_centre": None, "head_side": None}
