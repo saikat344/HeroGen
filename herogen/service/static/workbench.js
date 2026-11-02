@@ -44,11 +44,14 @@ function describe(call) {
   if (String(call.model).startsWith('muse-spark')) return {label: 'Checked that the image is a drawing, not a photo of a real person'};
   if (purpose === 'texture refine') return {label: 'Repainted a view of the 3D shape', gkey: 'repaint', group: n => `Repainted ${n} views`};
   if (purpose === 'edit') return {label: 'Edited an image', gkey: 'edit', group: n => `Edited ${n} images`};
+  if (purpose === 'repaint') return {label: 'Repainted a view of the 3D shape', gkey: 'repaint', group: n => `Repainted ${n} views`};
   if (PURPOSE[purpose]) return {label: PURPOSE[purpose]};
   let m;
   if ((m = /^repaint (\S+)$/.exec(purpose))) return {label: `Repainted ${regionName(m[1])}`, gkey: 'repaint', group: n => `Repainted ${n} views`};
   if ((m = /^segment (face|hair|head) \(repaint (\S+)\)$/.exec(purpose))) return {
     label: `Checked the ${m[1]} on the repaint of ${regionName(m[2])}`, gkey: `check-${m[1]}`, group: n => `Checked the ${m[1]} on ${n} repaints`};
+  if ((m = /^segment (face|hair|head) \(repaint\)$/.exec(purpose))) return {
+    label: `Checked the ${m[1]} on a repaint`, gkey: `check-${m[1]}`, group: n => `Checked the ${m[1]} on ${n} repaints`};
   if ((m = /^segment (character|creature|person|feet) \(cover art\)$/.exec(purpose))) return {label: `Looked for the ${m[1]} in the sketch`};
   if ((m = /^segment (face|hair|head) \(texture refine\)$/.exec(purpose))) return {
     label: `Found the ${m[1]} on a render`, gkey: `render-${m[1]}`, group: n => `Found the ${m[1]} on ${n} renders`};

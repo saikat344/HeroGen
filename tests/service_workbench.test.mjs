@@ -122,6 +122,21 @@ test('fast texture refine calls fold, and a fold with no durations omits "longes
   assert.equal(folded.meta, '');
 });
 
+test('per-try texture repaints and their SAM checks fold under plain labels', () => {
+  const calls = [...Array(4)].map(() => call({model:'muse-image-1.0',purpose:'repaint'}))
+    .concat([...Array(4)].map(() => call({purpose:'segment face (repaint)'})))
+    .concat([...Array(3)].map(() => call({purpose:'segment hair (repaint)'})));
+  const rows = stageEvents({stages:[{key:'3f',state:'passed'}]}, {stages:[{stage:'3f',started,seconds:9,calls}]});
+  assert.deepEqual(rows.slice(1).map(r => [r.kind, r.who, r.text]), [['group','Muse Image','Repainted 4 views'],
+    ['group','SAM 3.1','Checked the face on 4 repaints'], ['group','SAM 3.1','Checked the hair on 3 repaints']]);
+  assert.deepEqual([...new Set(rows.slice(1).flatMap(r => r.children.map(c => c.text)))],
+    ['Repainted a view of the 3D shape', 'Checked the face on a repaint', 'Checked the hair on a repaint']);
+  // The older region-named purposes keep their own labels.
+  const named = stageEvents({stages:[{key:'3f',state:'passed'}]}, {stages:[{stage:'3f',started,seconds:9,
+    calls:[call({purpose:'segment face (repaint body+0)'})]}]});
+  assert.equal(named[1].text, 'Checked the face on the repaint of the front view');
+});
+
 test('a very large call list neither overflows the stack nor takes quadratic time', () => {
   const calls = Array.from({length: 250000}, (_, i) => call({model:'muse-image-1.0',purpose:'texture refine',started:new Date(time + i).toISOString()}));
   const begun = Date.now();
