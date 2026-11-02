@@ -156,7 +156,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         for width, height, size in [(1586,1000,'desktop'),(375,812,'375px')]:
             t.call('Emulation.setDeviceMetricsOverride',width=width,height=height,deviceScaleFactor=1,mobile=width==375)
             for theme in ['light','dark']:
-                t.eval(f"document.querySelector('#themePreference').value='{theme}';document.querySelector('#themePreference').dispatchEvent(new Event('change'))")
+                t.eval(f"window.herogenTheme.choose('{theme}')")
                 t.eval(f"document.querySelector('#{panel}Tab').click();window.scrollTo(0,0)")
                 t.eval('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
                 self.assert_layout()
@@ -217,7 +217,7 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
         for width, height, size in [(1586,1000,'desktop'),(375,812,'375px')]:
             t.call('Emulation.setDeviceMetricsOverride',width=width,height=height,deviceScaleFactor=1,mobile=width==375)
             for theme in ['light','dark']:
-                t.eval(f"document.querySelector('#themePreference').value='{theme}';document.querySelector('#themePreference').dispatchEvent(new Event('change'));document.querySelector('#compareVersions').click()")
+                t.eval(f"window.herogenTheme.choose('{theme}');document.querySelector('#compareVersions').click()")
                 t.wait("document.querySelector('#compareStatus').textContent === 'Cameras linked' || !document.querySelector('#compareError').hidden")
                 self.assertEqual(t.eval("document.querySelector('#compareStatus').textContent"),'Cameras linked', t.eval("document.querySelector('#compareError').textContent"))
                 self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'))
