@@ -141,27 +141,52 @@ class FaceControl:
         return reference, {**options, 'recipe_name': 'RF6B', 'reference_record': record,
                            'complete_face': job.name in ('head+0', 'body+0')}
 
+    def face_verdict(self, key, work):
+        """Face selection's existing verdict on one frontal view, without recording it.
+
+        Returns the selected beauty attempt (None when the view holds no accepted beauty paint)
+        and its eye comparison (None when the registered face lacks two eyes or a mouth).
+        """
+        record = self.data['views'][key]
+        if not (record['accepted'] and record.get('prompt') in ('RF6B', 'RF17B', 'RF18B')):
+            return None, None
+        selected = next(a for a in record['attempts'] if a.get('accepted'))
+        features = selected.get('checks', {}).get('facial_features', {}).get('repaint', {})
+        if not (features.get('both_eyes') and features.get('mouth')):
+            return selected, None
+        ordinary = self.default_work / key / 'refined.png' if self.default_work is not None else None
+        if ordinary is None or not ordinary.exists():
+            return selected, {'accepted': False, 'reason': 'ordinary face paint unavailable', 'eyes': []}
+        with Image.open(work / key / 'refined.png') as candidate, Image.open(ordinary) as default:
+            return selected, eye_quality(candidate, default, features.get('eye_boxes', []))
+
+    def face_conditional(self, jobs, work):
+        """Return the head pass when face selection rejects its gate-accepted slot 1 and slot 2 failed.
+
+        Face selection's rejection counts as a failed beauty sample, so the head's conditional
+        slot 3 follows the same double-rejection rule, with at most three samples.
+        """
+        head = next((job for job in jobs if job.name == 'head+0'), None)
+        if head is None or head.selected != 0:
+            return None
+        _, quality = self.face_verdict('head+0', work)
+        if quality is not None and quality['accepted']:
+            return None
+        return head if head.conditional_due(overruled=(0,)) else None
+
     def choose(self, jobs, work):
         """Choose by declared view order after all frontal attempts have drained."""
         for key in ('head+0', 'body+0'):
-            record = self.data['views'][key]
-            if record['accepted'] and record.get('prompt') in ('RF6B', 'RF17B', 'RF18B'):
-                selected = next(a for a in record['attempts'] if a.get('accepted'))
-                features = selected.get('checks', {}).get('facial_features', {}).get('repaint', {})
-                if features.get('both_eyes') and features.get('mouth'):
-                    ordinary = self.default_work / key / 'refined.png' if self.default_work is not None else None
-                    if ordinary is None or not ordinary.exists():
-                        quality = {'accepted': False, 'reason': 'ordinary face paint unavailable', 'eyes': []}
-                    else:
-                        with Image.open(work / key / 'refined.png') as candidate, Image.open(ordinary) as default:
-                            quality = eye_quality(candidate, default, features.get('eye_boxes', []))
-                    selected.setdefault('checks', {})['eye_quality'] = quality
-                    if not quality['accepted']:
-                        continue
-                    self.key = key
-                    self.data['face_source'] = {'source': 'beauty', 'view': key,
-                                                'attempt': record['selected_attempt']}
-                    break
+            selected, quality = self.face_verdict(key, work)
+            if quality is None:
+                continue
+            selected.setdefault('checks', {})['eye_quality'] = quality
+            if not quality['accepted']:
+                continue
+            self.key = key
+            self.data['face_source'] = {'source': 'beauty', 'view': key,
+                                        'attempt': self.data['views'][key]['selected_attempt']}
+            break
         head = next((job for job in jobs if job.name == 'head+0'), None)
         # The lowest accepted default slot (2, then conditional 3) is the fallback candidate.
         slot = None

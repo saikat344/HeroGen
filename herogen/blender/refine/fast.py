@@ -165,19 +165,21 @@ class Pass:
         for index in range(attempts):
             launch(index)
 
-    def conditional_due(self):
+    def conditional_due(self, overruled=()):
         """A conditional slot is due only when every submitted slot was judged and rejected by its gates.
 
-        Cancelled, budget-stopped and failed slots never count as rejections.
+        Cancelled, budget-stopped and failed slots never count as rejections. `overruled` lists
+        gate-accepted slots that a later existing selection rejected; they count as rejections.
         """
         if (not self.slots <= len(self.tasks) < self.slots + self.conditional
                 or len(self.completed) != len(self.tasks)):
             return False
-        for future, _, private, _ in self.tasks:
+        for index, (future, _, private, _) in enumerate(self.tasks):
             if not future.done() or future.cancelled() or future.exception() is not None:
                 return False
             reason = private['attempts'][-1]['reason'] if private['attempts'] else 'incomplete'
-            if private['accepted'] or reason == 'incomplete' or reason.startswith('cancelled'):
+            if ((private['accepted'] and index not in overruled) or reason == 'incomplete'
+                    or reason.startswith('cancelled')):
                 return False
         return True
 
@@ -397,6 +399,9 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
             face_control.fold_default(job.key)
         if stopped or not job.conditional_due():
             return None
+        return launch_conditional(job, wave)
+
+    def launch_conditional(job, wave):
         future = job.launch(len(job.tasks))
         remaining[future] = (job, len(job.tasks) - 1, wave)
         return future
@@ -460,6 +465,14 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                             if extra is not None and job.name in ('head+0', 'body+0'):
                                 # The face source is chosen only after a frontal conditional slot resolves.
                                 firsts.add(extra)
+                        if (not firsts and face_control is not None and not stopped
+                                and error is None and face_error is None):
+                            # Face selection rejecting a gate-accepted beauty head counts as a
+                            # failed beauty sample: with slot 2 rejected, the head pays slot 3.
+                            with state_lock:
+                                head = face_control.face_conditional(jobs, work)
+                            if head is not None:
+                                firsts.add(launch_conditional(head, wave_index))
                     if face_control is not None and error is None:
                         try:
                             with state_lock:
