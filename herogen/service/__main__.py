@@ -34,7 +34,7 @@ def _dev_key(data: Path) -> bytes:
 
 def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float = 0.0, echo: bool = True):
     from herogen.service.auth import Signer
-    from herogen.service.config import from_env
+    from herogen.service.config import ENV, from_env
     from herogen.service.emailer import FileSender
     from herogen.service.fakes import FakeRunner
     from herogen.service.runner import CliRunner
@@ -46,7 +46,7 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
 
     data.mkdir(parents=True, exist_ok=True)
     (data / ".gitignore").write_text("*\n")
-    env = {k: v for k, v in os.environ.items() if k.startswith("HEROGEN_SERVICE_") and k not in
+    env = {k: v for k, v in os.environ.items() if k in ENV.values() and k not in
            ("HEROGEN_SERVICE_MODE", "HEROGEN_SERVICE_BASE_URL")}
     settings = from_env(env, mode="dev", base_url=f"http://127.0.0.1:{port}", data_dir=data / "data",
                         meta_path=data / "meta.db", outbox_path=data / "outbox.jsonl", signing_key=_dev_key(data),
