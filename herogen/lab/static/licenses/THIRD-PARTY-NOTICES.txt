@@ -211,5 +211,6 @@ JetBrains Mono (same source as the Lab copy above; files copied unchanged)
     sha256 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad
 
 Website icons (herogen/service/static/icons/sprite.svg)
-The symbols not named hg-* are the Lucide icons listed in the Lucide notice at the top of this file (ISC, with
-the MIT notice for the Feather-derived ones), copied as plain shapes; the website sets their stroke in CSS.
+The symbols not named hg-* are unmodified shapes from lucide-static 1.64.0, under the ISC License at the top
+of this file; for any Lucide marks as derived from Feather, the MIT notice that follows it also applies. The
+website sets their stroke in CSS.
