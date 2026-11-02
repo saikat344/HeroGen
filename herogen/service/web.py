@@ -524,7 +524,18 @@ class App:
         u = await self.require_user(request)
         jobs = await self.call(self.svc.store.jobs_list, u["id"])
         thumbs = await self.call(self._list_thumbnails, u["id"], jobs)
-        return JSONResponse({"jobs": [{**self.job_summary(j), "thumbnail_url": thumbs.get(j["id"])} for j in jobs]})
+        queued = [j["id"] for j in jobs if j["state"] == "queued"]
+        places = await self.call(self.svc.store.queue_positions, queued) if queued else {}
+        return JSONResponse({"jobs": [{**self.job_summary(j), "thumbnail_url": thumbs.get(j["id"]),
+                                       **self.queue_fields(places.get(j["id"]))} for j in jobs]})
+
+    @staticmethod
+    def queue_fields(place: int | None) -> dict[str, int | None]:
+        """`queue_position` (1 = next to start, 0 = a worker is starting it) and `queued_ahead` (waiting jobs
+        before it, in every workspace); both null unless the job is queued. Counts only, never other jobs."""
+        if place is None:
+            return {"queue_position": None, "queued_ahead": None}
+        return {"queue_position": place, "queued_ahead": max(0, place - 1)}
 
     def _thumb_source(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> tuple[str, Path] | None:
         """(source, file) of the image a hero card shows, or None while it has none. A run image counts once its
@@ -728,7 +739,8 @@ class App:
                    "code": job["error_code"], "message": job["error_message"]}
         rid = f"{labapi.ROOT_KEY}/{job_id}"
         thumb = await self.call(self._view_thumbnail, user_id, job, {k: r["state"] for k, r in rows.items()})
-        return {**self.job_summary(job), "thumbnail_url": thumb, "prompt": job["prompt"], "started_at": job["started_at"],
+        place = (await self.call(self.svc.store.queue_positions, [job_id])).get(job_id) if job["state"] == "queued" else None
+        return {**self.job_summary(job), "thumbnail_url": thumb, **self.queue_fields(place), "prompt": job["prompt"], "started_at": job["started_at"],
                 "attempts": job["attempts"], "stages": stages, "error": err, "seconds": job["seconds"],
                 "cost_usd": job["cost_usd"], "cost_is_estimate": True,
                 "model_ready_at": job["model_ready_at"], "export_state": job["export_state"],

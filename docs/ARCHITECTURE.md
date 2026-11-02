@@ -2311,6 +2311,13 @@ counting running and recently dispatched jobs. It retries an unclaimed dispatch 
 Extra heroes remain queued. Local worker completion and the hosted orchestrator dispatch the next jobs;
 the periodic sweep also dispatches. The workbench displays “Waiting for a free worker”.
 
+A queued hero's `GET /api/jobs/<id>`, and its `GET /api/jobs` summary, report where it stands in that same
+line, across every workspace: `queue_position` is 1 for the next job to start, and `queued_ahead` is how many
+waiting jobs come before it (`queue_position - 1`). A job dispatched within the grace period is starting and
+reports `queue_position: 0`, `queued_ahead: 0`; if no worker claims it in time it rejoins the line at its
+creation-order place, as the dispatcher retries it. Running and finished heroes report both as `null`. Only
+counts are returned, never another job's details.
+
 Each POST `/api/jobs` uses an `Idempotency-Key`. The store returns the same owner's existing job for
 the same key and input before checking the guard; different input under the same key conflicts. The
 browser creates one key per click in memory and disables submission while it is pending. There is no
