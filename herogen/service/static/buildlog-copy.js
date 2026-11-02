@@ -33,7 +33,12 @@ export const REASONS = {
   outline_moved: 'outline moved too far',
   second_face: 'a second face appeared',
   hair_mismatch: 'hair no longer matches',
-  lower_try_accepted: 'not needed, the other try passed (already paid for)',
+  lower_try_accepted: 'not needed, the other try passed',
+  outline_not_measurable: 'the outline could not be measured',
+  missing_features: 'parts of the character went missing',
+  spend_cap: 'the spending cap was reached',
+  model_error: 'the model call failed',
+  face_unavailable: 'no face was found to check against',
   head_not_found: 'no head found, skipped the face close-up',
   no_usable_views: 'no usable views could be cut from it',
   fast_lane: 'the fast lane leaves it out',
@@ -79,14 +84,24 @@ export const CALLS = {
     top_view: {start: 'drawing the top view', done: 'top view ready'},
     repaint: {start: (e) => `repainting the ${view(e)}${tryText(e)}`, done: (e) => `repaint ready: ${view(e)}${tryText(e)}`},
   },
-  'sam-3.1': {'*': {start: (e) => `looking for ${target(e)} in ${place(e)}`, done: (e) => `looked for ${target(e)} in ${place(e)}`}},
+  'sam-3.1': {
+    segment: {start: (e) => `finding ${target(e)} on the 3D renders`, done: (e) => `looked for ${target(e)} on the 3D renders`},
+    repaint: {start: (e) => `checking ${target(e)} on the repaint of the ${view(e)}${tryText(e)}`,
+      done: (e) => `checked ${target(e)} on the repaint of the ${view(e)}${tryText(e)}`},
+    '*': {start: (e) => `looking for ${target(e)} in ${place(e)}`, done: (e) => `looked for ${target(e)} in ${place(e)}`},
+  },
   'muse-spark': {
     cover_art: {start: 'checking whether this is a photo of a real person', done: 'photo check done'},
     prompt_sketch: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
     same_character: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
   },
-  'sam-3d-objects': {'3d_shape': {start: 'building a textured 3D mesh from the front view and its outline', done: 'returned a mesh'}},
-  'sam-3d-body': {body_joints: {start: 'finding the body joints from the front view', done: 'returned the body skeleton'}},
+  'sam-3d-objects': {'3d_shape': {start: 'building a textured 3D mesh from the front view and its outline', done: (e) => {
+    const m = e.m || {}, bits = [Number.isFinite(m.vertices) && `${n(m.vertices)} vertices`, Number.isFinite(m.faces) && `${n(m.faces)} faces`,
+      Number.isFinite(m.texture_px) && `${n(m.texture_px)} px texture`].filter(Boolean);
+    return `returned a mesh${bits.length ? ` (${bits.join(', ')})` : ''}`;
+  }}},
+  'sam-3d-body': {body_joints: {start: 'finding the body joints from the front view', done: (e) =>
+    `returned the body skeleton${Number.isFinite(e.m?.people) ? ` (${n(e.m.people)} ${e.m.people === 1 ? 'person' : 'people'})` : ''}`}},
 };
 const STAGE_WHAT = {prompt_sketch: 'p', input: '0', cover_art: '1', turnaround: '2', texture_refine: '3f', game_body: '4',
   roblox_rig: '6', results: '5'};
@@ -109,8 +124,8 @@ export function callState(outcome) {
 export function callDone(e) {
   const entry = entryFor(e);
   switch (e.outcome) {
-    case 'reused': return 'reused a saved result';
-    case 'cancelled': return `${callStart(e)}: not needed, the other try passed (already paid for)`;
+    case 'reused': return `${callStart(e)}: reused a saved result`;
+    case 'cancelled': return `${callStart(e)}: not needed, the other try passed${e.usd > 0 ? ' (already paid for)' : ''}`;
     case 'unknown': return `${callStart(e)}: outcome unknown (may be billed)`;
     case 'ok': {
       let done = entry ? pick(entry.done, e) : 'done';
@@ -165,12 +180,26 @@ const listOf = (v) => Array.isArray(v) ? v.length : 0;
 const LOCAL = {
   input_checked: (m) => `checked the sketch size and line contrast${Number.isFinite(m.min_side_px) ? ` (short side ${n(m.min_side_px)} px${Number.isFinite(m.contrast) ? `, contrast ${n(m.contrast)}` : ''})` : ''}, no model call`,
   sheet_split: (m) => `split the sheet into front, right, back and left${Number.isFinite(m.figures) ? ` (${n(m.figures)} of 4 figures)` : ''}`,
-  mesh_placed: (m) => `placed the mesh in HeroGen's frame and faced it forward${Number.isFinite(m.triangles) ? ` (${n(m.triangles)} triangles)` : ''}`,
-  joints_mapped: (m) => `mapped ${n(m.joints) || 'the'} joints into the front view${Number.isFinite(m.flagged) ? `; ${n(m.flagged)} differ from the outline estimate` : ''}`,
-  views_rendered: (m) => `rendered the 3D shape from ${n(m.cameras ?? m.views) || 'several'} cameras`,
+  facing_search: (m) => `faced the mesh forward${Number.isFinite(m.tested) ? ` (tested ${n(m.tested)} rotations${Number.isFinite(m.facing_deg) ? `, turned ${n(m.facing_deg)}°` : ''})` : ''}${
+    Number.isFinite(m.front_overlap) ? ` and matched its outline to the front view (overlap ${pct(m.front_overlap)})` : ''}`,
+  mesh_placed: (m) => `placed the mesh in HeroGen's frame${[Number.isFinite(m.triangles) && `${n(m.triangles)} triangles`,
+    m.open_edges === 0 ? 'no open edges' : Number.isFinite(m.open_edges) && `${n(m.open_edges)} open edges`,
+    Number.isFinite(m.front_overlap) && `outline overlap ${pct(m.front_overlap)}`].filter(Boolean).join(', ').replace(/^(.+)$/, ' ($1)')}`,
+  joints_mapped: (m) => `mapped ${n(m.joints) || 'the'} joints into the front view${Number.isFinite(m.from_model) && Number.isFinite(m.from_outline)
+    ? `: ${n(m.from_model)} from SAM 3D Body, ${n(m.from_outline)} from the outline` : ''}${Number.isFinite(m.flagged)
+    ? `; ${n(m.flagged)} differ from the outline estimate by more than ${n(m.flag_studs ?? 0.5)} studs` : ''}`,
+  views_rendered: (m) => `rendered the 3D shape from ${n(m.cameras ?? m.views) || 'several'} ${m.cameras === 1 ? 'camera' : 'cameras'}${Number.isFinite(m.wave) ? ` for wave ${n(m.wave)}` : ''}`,
 };
 // Local lines are written without the speaker; the panel shows a HeroGen chip and "Copy log" adds "HeroGen (local): ".
+const jointName = (name) => typeof name === 'string' && /^[a-z_]+$/.test(name) ? name.replaceAll('_', ' ') : 'a joint';
 export function localLine(e) {
+  if (e.what === 'joint_from_model' || e.what === 'joint_from_outline') {
+    const m = e.m || {};
+    return `${jointName(e.name)} from ${e.what === 'joint_from_model' ? 'SAM 3D Body' : 'the outline'}${Number.isFinite(m.off_outline_studs)
+      ? ` · ${m.off_outline_studs.toFixed(2)} studs from the outline estimate` : ''}${m.flagged ? ' (differs by more than 0.5 studs)' : ''}`;
+  }
+  if (e.what === 'head_probe') return `${e.ok === false ? 'no head found on the 3D renders' : 'found the face and head on the 3D renders'}${
+    Number.isFinite(e.s) && e.s >= 0.05 ? ` · ${seconds(e.s)}` : ''}`;
   const make = LOCAL[e.what];
   const said = make ? make(e.m || {}) : 'worked on this step (no model call)';
   return Number.isFinite(e.s) && e.s >= 0.05 ? `${said} · ${seconds(e.s)}` : said;
@@ -181,17 +210,28 @@ export function decisionLine(e) {
   switch (e.what) {
     case 'view_result': {
       const name = `${regionName(e.view)}${tryText(e)}`;
-      if (e.ok) {
-        const bits = [pct(m.overlap) && `outline overlap ${pct(m.overlap)}`, px(m.median_px) && `drift ${px(m.median_px)}`].filter(Boolean);
-        return `${name}: accepted${bits.length ? ` (${bits.join(', ')})` : ''}`;
-      }
-      if (e.why === 'lower_try_accepted') return `${name}: ${reasonText(e.why)}`;
-      const limits = [m.median_px != null && m.median_limit != null && `median ${px(m.median_px)} against ${n(m.median_limit)}`,
-        m.p90_px != null && m.p90_limit != null && `p90 ${px(m.p90_px)} against ${n(m.p90_limit)}`].filter(Boolean);
-      return `${name}: not used (${reasonText(e.why)}${limits.length ? `: ${limits.join(', ')}` : ''})`;
+      // Accepted: the headline measures. Not used: the measures that missed their limit, each with that limit.
+      const fin = Number.isFinite;
+      const checks = [
+        [m.overlap, m.overlap_min, (v, l) => v < l, (v, l) => `outline overlap ${pct(v)}${fin(l) ? ` (needs ${pct(l)})` : ''}`, true],
+        [m.median_px, m.median_limit, (v, l) => v > l, (v, l) => `median drift ${px(v)}${fin(l) ? ` (limit ${n(l)})` : ''}`, true],
+        [m.p90_px, m.p90_limit, (v, l) => v > l, (v, l) => `90th percentile ${px(v)}${fin(l) ? ` (limit ${n(l)})` : ''}`, false],
+        [m.agreement, m.agreement_min, (v, l) => v < l, (v, l) => `hair agreement ${v.toFixed(2)}${fin(l) ? ` (needs ${n(l)})` : ''}`, true],
+        [m.scale_change, m.scale_change_max, (v, l) => v > l, (v, l) => `scale change ${pct(v)}${fin(l) ? ` (at most ${pct(l)})` : ''}`, false],
+      ].filter(([v]) => fin(v));
+      const missed = checks.filter(([v, l, miss]) => fin(l) && miss(v, l));
+      const measures = e.ok ? checks.filter(c => c[4]).map(([v, , , say]) => say(v, null))
+        : (missed.length ? missed : checks).map(([v, l, , say]) => say(v, l));
+      if (e.ok) return `${name}: accepted${measures.length ? ` (${measures.join(', ')})` : ''}`;
+      if (e.why === 'lower_try_accepted') return `${name}: ${reasonText(e.why)}${m.paid === 1 ? ' (already paid for)' : m.paid === 0 ? ' (stopped before it was paid for)' : ''}`;
+      return `${name}: not used (${reasonText(e.why)}${measures.length ? `: ${measures.join(', ')}` : ''})`;
     }
-    case 'view_kept': return `${regionName(e.view)}: neither try passed. Keeping the original paint for this view.`;
-    case 'wave': return `Wave ${n(m.wave) || 1}: asking Muse Image to repaint ${n(m.views) || 'several'} views, ${n(m.tries) || 2} tries each, all at once${Number.isFinite(e.n) ? ` (${n(e.n)} requests)` : ''}`;
+    case 'view_selected': return `${regionName(e.view)}: kept the repaint${Number.isInteger(e.try) ? ` from try ${e.try}` : ''}`;
+    case 'view_kept': return e.why === 'spend_cap' || e.why === 'model_error'
+      ? `${regionName(e.view)}: kept the original paint (${reasonText(e.why)}).`
+      : `${regionName(e.view)}: neither try passed${e.why ? ` (${reasonText(e.why)})` : ''}. Keeping the original paint for this view.`;
+    case 'wave': return `Wave ${n(m.wave) || 1}: asking Muse Image to repaint ${m.views === 1 ? '1 view' : `${n(m.views) || 'several'} views`}${
+      Number.isFinite(m.from_version) ? ` from version ${n(m.from_version)}` : ''}, ${n(m.tries) || 2} tries each, all at once${Number.isFinite(e.n) ? ` (${n(e.n)} requests)` : ''}`;
     case 'recovery_sheet': return `The first sheet had no usable views. Asking Muse Image for one more sheet; the fast lane makes one extra attempt only.`;
     case 'complete_figure': return 'The drawing is cropped at the feet, so Muse Image is asked to complete the figure.';
     default: return null;
@@ -217,18 +257,25 @@ export function checkLine(e) {
 }
 
 export function versionLine(e) {
-  const views = Number.isFinite(e.passed) && Number.isFinite(e.of) ? ` (${n(e.passed)} of ${n(e.of)} views repainted)` : '';
-  return `Your model now shows version ${n(e.n) || 'a new'}${views}.`;
+  const m = e.m || {};
+  const views = Number.isFinite(e.passed) && Number.isFinite(e.of) ? `${n(e.passed)} of ${n(e.of)} views repainted` : '';
+  const pending = Number.isFinite(m.pending) && m.pending > 0 ? `${n(m.pending)} still being judged` : '';
+  const bits = [views, pending].filter(Boolean).join('; ');
+  return `Your model now shows version ${n(e.n) || 'a new'}${bits ? ` (${bits})` : ''}.`;
 }
 
-const SKIPS = {
-  acceptance_judges: 'The fast lane skips the visual acceptance judges; structural checks are informational.',
+const STEP_SKIPS = {
   spend_cap: 'Texture refine reached its spending cap. Showing the best texture so far.',
   rough_shape: 'Texture refine was skipped because the 3D shape is rough.',
   views_rejected: 'Kept the unrefined texture because its views did not pass the checks.',
-  top_view: 'No usable top view: continuing with the four side views.',
 };
-export const skipLine = (e) => SKIPS[e.what] || SKIPS[e.why] || (e.why === 'fast_lane' ? 'The fast lane leaves this part out.' : 'This part was skipped.');
+export function skipLine(e) {
+  if (e.what === 'acceptance_judges') return 'The fast lane skips the visual acceptance judges; structural checks are informational.';
+  if (e.what === 'view') return `${regionName(e.view)}: skipped (${reasonText(e.why)}).`;
+  if (e.what === 'top_view') return 'No usable top view: continuing with the four side views.';
+  if (STEP_SKIPS[e.why]) return STEP_SKIPS[e.why];
+  return e.why === 'fast_lane' ? 'The fast lane leaves this part out.' : 'This part was skipped.';
+}
 
 const RECOVERS = {merged_limb: 'A limb had merged into the body; its part was rebuilt from the nearest bone.'};
 export const recoverLine = (e) => RECOVERS[e.what] || 'HeroGen recovered and carried on.';
