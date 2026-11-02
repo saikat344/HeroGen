@@ -6,18 +6,19 @@ import { recordLog } from './workbench.js';
 
 export const POLL_MS = 1500, IDLE_MS = 3000, MAX_MS = 15000;
 export const PAUSED = 'Log paused, retrying…';
+const FALLBACK_AFTER = 3;
 const GPU_WAIT_NOTE_MS = 20000;
 const CALL_START = new Set(['call_start', 'gpu_wait']), CALL_END = new Set(['call_end', 'gpu_end']);
 const CALL_NOTE = new Set(['call_wait', 'call_retry']);
 const JOB_KINDS = new Set(['job_start', 'queue', 'requeue', 'cancel', 'model_ready', 'truncated', 'job_end']);
 const RUNNING = new Set(['queued', 'running']);
-const STATE_TEXT = {muted: 'Informational, not met', passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
+const STATE_TEXT = {muted: 'Not met', noted: 'Not met; the step still passed', passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   skipped: 'Skipped', unavailable: 'Not available', canceled: 'Cancelled', info: 'Note', kept: 'Not used',
   unknown: 'No finish recorded'};
-const ICON = {muted: 'info', passed: 'circle-check', running: 'loader-circle', pending: 'circle-dashed', failed: 'circle-x',
+const ICON = {muted: 'info', noted: 'info', passed: 'circle-check', running: 'loader-circle', pending: 'circle-dashed', failed: 'circle-x',
   rejected: 'circle-x', skipped: 'info', unavailable: 'ban', canceled: 'x', info: 'info', kept: 'circle-dashed',
   unknown: 'circle-dashed'};
-const GLYPH = {running: '…', passed: '✓', failed: '✗', rejected: '✗', kept: '✗', skipped: '!', info: 'i', unknown: 'i',
+const GLYPH = {muted: 'i', noted: 'i', running: '…', passed: '✓', failed: '✗', rejected: '✗', kept: '✗', skipped: '!', info: 'i', unknown: 'i',
   canceled: '✗'};
 
 // The typical duration of one call, only when enough past calls back it up. SAM 3.1 calls are told apart by what
@@ -31,11 +32,16 @@ export function typicalFor(table, e) {
 
 // File order is append order; `t` is the writer's clock. Sort by time and keep file order for ties.
 export function orderEvents(events) {
+  return orderWithArrival(events).map(x => x.e);
+}
+// Each event with its place in arrival (file) order, which never changes as more events arrive; row keys use it, so a
+// late event with an earlier time cannot shift the key of a row the reader opened.
+function orderWithArrival(events) {
   return events.map((e, i) => ({e, i, t: Number.isFinite(e?.t) ? e.t : Infinity}))
-    .sort((a, b) => a.t - b.t || a.i - b.i).map(x => x.e);
+    .sort((a, b) => a.t - b.t || a.i - b.i);
 }
 
-const STEP_END = {passed: ['✓', 'done'], kept: ['✓', 'reused from the earlier attempt'], skipped: ['!', 'skipped'],
+const STEP_END = {unknown: ['✗', 'ended, outcome unknown'], passed: ['✓', 'done'], kept: ['✓', 'reused from the earlier attempt'], skipped: ['!', 'skipped'],
   rejected: ['✗', 'stopped'], failed: ['✗', 'stopped']};
 const isTerminal = (job) => !!job && !RUNNING.has(job.state) && job.export_state !== 'running';
 const stepTitle = (number, total, key) => `Step ${number} of ${total} · ${copy.stepName(key)}`;
@@ -49,7 +55,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
   const steps = new Map(), lead = {key: 'lead', rows: []}, tail = {key: 'tail', rows: []};
   stages.forEach((s, i) => steps.set(String(s.key), {key: String(s.key), number: i + 1, total: stages.length,
     title: stepTitle(i + 1, stages.length, s.key), stage: s, state: s.state || 'pending', rows: [], usd: 0, calls: 0,
-    started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null}));
+    started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null, attempt: null}));
   const calls = new Map(), lines = [];
   let current = null, total = 0, cut = truncated;
   const stepFor = (e) => {
@@ -57,14 +63,30 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     if (key == null) return null;
     const title = Number.isInteger(e.i) && Number.isInteger(e.of) ? stepTitle(e.i, e.of, key) : copy.stepName(key);
     if (!steps.has(key)) steps.set(key, {key, number: e.i ?? null, total: e.of ?? stages.length, title, stage: null,
-      state: 'pending', rows: [], usd: 0, calls: 0, started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null});
+      state: 'pending', rows: [], usd: 0, calls: 0, started: null, ended: null, endS: null, endUsd: null, attention: false, checkList: [], checkRow: null, attempt: null});
     return steps.get(key);
   };
-  const line = (t, glyph, text) => { if (text) lines.push({t, text: `+${copy.clock(t - origin)}  ${glyph} ${text}`}); };
-  ordered: for (const [index, e] of orderEvents(events).entries()) {
+  function newAttempt(step, attempt) {
+    step.attempt = attempt;
+    step.endOutcome = null; step.ended = null; step.endS = null; step.endUsd = null; step.started = null;
+    for (const row of step.rows) if ((row.call || row.timed) && row.state === 'running') row.stale = true;
+  }
+  const line = (t, glyph, text) => {
+    if (!text) return null;
+    const entry = {t, glyph, text: `+${copy.clock(t - origin)}  ${glyph} ${text}`}; lines.push(entry); return entry;
+  };
+  const accepted = new Map();   // view -> tries the pipeline accepted or kept
+  ordered: for (const {e, i: index} of orderWithArrival(events)) {
     if (!e || typeof e.kind !== 'string') continue;
     const t = Number.isFinite(e.t) ? e.t : origin, step = stepFor(e);
     if (step) current = step;
+    // A requeue, or the first event of a later attempt, starts the step over: the old attempt's end no longer holds,
+    // and its unfinished calls will never finish.
+    if (step && e.kind === 'requeue') newAttempt(step, Number.isInteger(e.next) ? e.next : (step.attempt ?? 1) + 1);
+    else if (step && Number.isInteger(e.a)) {
+      if (step.attempt != null && e.a > step.attempt) newAttempt(step, e.a);
+      step.attempt ??= e.a;
+    }
     const group = step || (e.kind === 'job_end' ? tail : current || lead);
     switch (true) {
       case e.kind === 'step_start': {
@@ -74,12 +96,13 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         break;
       }
       case e.kind === 'step_end': {
-        step.endOutcome = ['passed', 'kept', 'skipped', 'rejected', 'failed'].includes(e.outcome) ? e.outcome : 'passed';
+        // An outcome this page does not know never reads as done.
+        step.endOutcome = ['passed', 'kept', 'skipped', 'rejected', 'failed'].includes(e.outcome) ? e.outcome : 'unknown';
         step.ended = t; step.endS = Number.isFinite(e.s) ? e.s : null; step.endUsd = Number.isFinite(e.usd) ? e.usd : null;
         // The step's own total also counts work that is not a single call; the running total follows it.
         if (step.endUsd != null) total += step.endUsd - step.usd;
-        const cost = step.endUsd ?? step.usd, [glyph, said] = STEP_END[e.outcome] || STEP_END.passed;
-        if (e.outcome === 'failed' || e.outcome === 'rejected') step.attention = true;
+        const cost = step.endUsd ?? step.usd, [glyph, said] = STEP_END[step.endOutcome];
+        if (['failed', 'rejected', 'unknown'].includes(step.endOutcome)) step.attention = true;
         line(t, glyph, metaJoin(`${copy.stepName(step.key)} ${said}`,
           Number.isFinite(step.endS) && `step took ${copy.seconds(step.endS)}`, copy.usd(cost),
           `running total ${copy.usd(total)}`));
@@ -119,10 +142,10 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
           if (Number.isFinite(row.usd)) { (step || current || {usd: 0}).usd += row.usd; total += row.usd; }
           if (step) step.calls += 1;
           if (row.state === 'failed' && step) step.attention = true;
-          const said = copy.callDone(full);
           const numbers = row.outcome === 'reused' ? '$0' : metaJoin(copy.seconds(row.s), copy.usd(row.usd));
           const usual = row.typical && row.outcome === 'ok' ? ` (usually ${copy.aboutCall(row.typical.p50)})` : '';
-          line(t, GLYPH[row.state], `${metaJoin(`${name}: ${said}`, numbers)}${usual}`);
+          row.full = full; row.name = name; row.numbers = numbers;
+          row.line = line(t, GLYPH[row.state], `${metaJoin(`${name}: ${copy.callDone(full)}`, numbers)}${usual}`);
         }
         break;
       }
@@ -155,7 +178,13 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
           continue ordered;
         }
         if (e.kind === 'local') { said = copy.localLine(e); text = copy.upper(said); }
-        else if (e.kind === 'decision') { text = copy.decisionLine(e); state = e.ok === false ? 'kept' : e.ok ? 'passed' : 'info'; }
+        else if (e.kind === 'decision') {
+          text = copy.decisionLine(e); state = e.ok === false ? 'kept' : e.ok ? 'passed' : 'info';
+          // Which tries of each view were accepted ("other" when a try was dropped because another one passed).
+          const tries = e.view && (accepted.get(e.view) || accepted.set(e.view, new Set()).get(e.view));
+          if (tries && ['view_result', 'view_selected'].includes(e.what) && e.ok === true) tries.add(e.try);
+          if (tries && e.what === 'view_result' && e.why === 'lower_try_accepted') tries.add('other');
+        }
         else if (e.kind === 'check') {
           // Each check joins its step's list, shown under the step's check summary.
           const said = copy.checkLine(e), cstate = e.ok ? 'passed' : e.gate === true ? 'failed' : 'muted';
@@ -193,7 +222,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     const s = step.stage;
     // The job record is read every few seconds; until it catches up, the step's own events say where it is.
     if (step.state === 'pending' || (step.state === 'running' && step.endOutcome)) {
-      if (step.endOutcome) step.state = {kept: 'passed', passed: 'passed'}[step.endOutcome] || step.endOutcome;
+      if (step.endOutcome) step.state = {kept: 'passed', passed: 'passed', unknown: 'failed'}[step.endOutcome] || step.endOutcome;
       else if (step.started != null) step.state = 'running';
     }
     step.seconds = Number.isFinite(s?.seconds) && step.state !== 'running' ? s.seconds : step.endS;
@@ -225,10 +254,18 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
     if (step.checkRow) {
       const row = step.checkRow, gateFailed = step.checkList.some(c => c.state === 'failed') || copy.listOf(row.summary?.failed) > 0;
       row.text = copy.upper(copy.checksLine(row.summary, step.checkList, step.key) || 'Checks recorded');
-      row.state = gateFailed ? (step.state === 'passed' ? 'kept' : 'failed') : 'passed';
+      row.state = gateFailed ? (step.state === 'passed' ? 'noted' : 'failed') : 'passed';
       if (row.state === 'failed') step.attention = true;
     }
-    for (const row of step.rows) if ((row.call || row.timed) && row.state === 'running' && !step.running && step.state !== 'pending') row.state = 'unknown';
+    for (const row of step.rows) if ((row.call || row.timed) && row.state === 'running' && (row.stale || (!step.running && step.state !== 'pending'))) row.state = 'unknown';
+  }
+  // A cancelled try was "not needed" only when another try of its view was accepted; otherwise the step stopped it.
+  for (const row of calls.values()) if (row.outcome === 'cancelled' && row.full) {
+    const tries = accepted.get(row.full.view);
+    const sibling = !!tries && [...tries].some(x => x === 'other' || x !== row.full.try);
+    const said = copy.callDone({...row.full, sibling});
+    row.text = copy.upper(said);
+    if (row.line) row.line.text = `+${copy.clock(row.ended - origin)}  ${row.line.glyph} ${metaJoin(`${row.name}: ${said}`, row.numbers)}`;
   }
   for (const row of calls.values()) if (row.state === 'running') {
     row.elapsed = row.started != null ? now - row.started : null;
@@ -302,7 +339,7 @@ function sync(parent, nodes) {
 export function buildLog($, api, {typical = null, timers = globalThis, now = () => Date.now(), motion = null} = {}) {
   let job = null, events = [], cursor = null, done = false, truncated = false, mode = 'waiting', request = 0;
   let timer = null, tick = null, empties = 0, delay = POLL_MS, offset = 0, model = null, busy = false;
-  let serverClock = false, answered = false, paused = false;
+  let serverClock = false, answered = false, paused = false, failures = 0, retryAt = 0;
   let text = '', announced = new Map();
   const rows = new Map(), sections = new Map(), userOpen = new Map();
   // Runs without events show their stage records the way the page always has.
@@ -473,6 +510,8 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
     timer = null;
     if (!job || busy) return;
     if (hidden()) { schedule(POLL_MS); return; }
+    // Never earlier than a busy server asked, or than the back-off allows (also when the tab comes back).
+    if (now() < retryAt) { schedule(retryAt - now()); return; }
     const id = job.id, token = request;
     busy = true;
     try {
@@ -488,7 +527,7 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
       delay = res?.more === true ? 0 : empties >= 2 ? IDLE_MS : POLL_MS;
       // The server says when the record is complete; only a reply without that answer falls back to the job state.
       done = typeof res?.done === 'boolean' ? res.done : !fresh.length && isTerminal(job);
-      answered = true;
+      answered = true; failures = 0; retryAt = 0;
       if (paused) { paused = false; status(done || isTerminal(job) ? 'Recorded build log' : 'Following live'); }
       if (!events.length && done) mode = 'fallback';
     } catch (e) {
@@ -499,9 +538,16 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
         // Busy server or no connection: wait (as long as the server asks, else twice as long, up to 15 s) and
         // say so quietly. The page never raises an error banner for the log.
         const asked = typeof e.retryAfter === 'string' && e.retryAfter.trim() ? Number(e.retryAfter) : NaN;
-        delay = e.status === 429 && Number.isFinite(asked) && asked >= 0 ? Math.min(asked * 1000, 60000)
+        delay = e.status === 429 && Number.isFinite(asked) && asked >= 0 ? Math.min(Math.max(asked * 1000, POLL_MS), 60000)
           : Math.min(Math.max(delay * 2, POLL_MS * 2), MAX_MS);
+        retryAt = now() + delay; failures += 1;
         paused = true; status(PAUSED);
+        // The route keeps failing and nothing has arrived: show the stage records, and stop asking for a run
+        // that has already ended.
+        if (failures >= FALLBACK_AFTER && !events.length) {
+          answered = true;
+          if (isTerminal(job)) { mode = 'fallback'; done = true; paused = false; }
+        }
       }
     } finally { if (token === request) busy = false; }
     if (token !== request) return;
@@ -513,7 +559,7 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
     ++request; records.reset(); timers.clearTimeout(timer); timers.clearTimeout(tick); timer = tick = null;
     job = null; events = []; cursor = null; done = false; truncated = false; mode = 'waiting'; empties = 0;
     delay = POLL_MS; offset = 0; model = null; text = ''; busy = false;
-    serverClock = false; answered = false; paused = false;
+    serverClock = false; answered = false; paused = false; failures = 0; retryAt = 0;
     rows.clear(); sections.clear(); userOpen.clear(); announced = new Map();
     const ol = list(); ol.classList?.remove('is-records'); ol.replaceChildren();
   }
