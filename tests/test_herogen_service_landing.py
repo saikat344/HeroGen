@@ -142,7 +142,7 @@ class TestLandingModels(ServiceBrowserCase):
         from test_herogen_service_support import png
         self.gallery_tmp = TemporaryDirectory()
         root = Path(self.gallery_tmp.name)
-        items = []
+        items, self.artwork_sha = [], {}
         for name in ['woodland-scout', 'second-model']:
             folder = root / name
             folder.mkdir()
@@ -151,6 +151,8 @@ class TestLandingModels(ServiceBrowserCase):
                 path = f'{name}/{kind}.{suffix}'
                 (root / path).write_bytes(data)
                 assets[kind] = {'file': path, 'sha256': hashlib.sha256(data).hexdigest()}
+                if kind == 'artwork':
+                    self.artwork_sha[name] = assets[kind]['sha256']
             items.append({'id': name, 'title': name, 'description': 'Synthetic fixture.', 'code_commit': 'a' * 40, 'assets': assets})
         (root / 'catalog.json').write_text(json.dumps({'version': 1, 'items': items}))
         self.service_settings = {'public_demo': True, 'code_commit': 'a' * 40, 'gallery_dir': root}
@@ -164,7 +166,8 @@ class TestLandingModels(ServiceBrowserCase):
         t.wait("document.querySelectorAll('.g-card__model[src]').length === 2")
         # Picker thumbnails are the real artwork (the small thumbnail when the catalog offers one), loaded lazily.
         thumbs = t.eval("[...document.querySelectorAll('#modelPicker img')].map(i => [i.getAttribute('src'), i.loading])")
-        self.assertEqual(thumbs, [['/gallery-assets/woodland-scout/artwork', 'lazy'], ['/gallery-assets/second-model/artwork', 'lazy']])
+        self.assertEqual(thumbs, [[f'/gallery-assets/{name}/artwork-thumb?v={self.artwork_sha[name][:16]}', 'lazy']
+                                  for name in ['woodland-scout', 'second-model']])
         self.assertEqual(t.eval("document.querySelectorAll('.step__art img').length"), 4)
         for mode in ['clay', 'wire', 'textured']:
             t.eval(f"document.querySelector('[data-shade={mode}]').click()")
