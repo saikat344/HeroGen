@@ -2560,8 +2560,8 @@ An initial beauty version is exported even if every beauty view was rejected. `f
 source, view, attempt and painted texel count. `face_source.atlas_sha256` identifies the ordinary atlas
 used for comparison or restoration; `face_fallback` retains the independent default result,
 and each progressive version records its source. Empty exposed-face masks do not prevent whole-head
-restoration. All candidates retain the normal outline, face-containment and hair gates, with at most
-two slots per pass. Notes reach beauty and default samples through the existing quoted prompt slot.
+restoration. All candidates retain the normal outline, face-containment and hair gates, with two
+slots per pass plus one conditional slot described below. Notes reach beauty and default samples through the existing quoted prompt slot.
 Submitted attempts always drain and every result is collected before a model error is raised.
 The fallback never converts a model transport or replay error into an accepted result.
 Face-source selection and metadata updates share the API checkpoint writer's lock, so concurrent saves
@@ -2579,21 +2579,35 @@ between, beauty reference last). SideBeautyPass adds no turnaround reference to 
 frontal recipe checks remain active.
 The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
 proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
-With fast beauty enabled, a nested cover-only ordinary run submits only attempt zero for each view,
-never ordinary attempt one. Its atlas uses those accepted first paints and the original base wherever
-they fail. This single-attempt atlas supplies the default-head fallback and eye-detail comparison.
+With fast beauty enabled, a nested cover-only ordinary run first submits only attempt zero for each view.
+Its atlas uses the accepted ordinary paints and the original base wherever they fail. This atlas
+supplies the default-head fallback and eye-detail comparison.
 Every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
 exact ordinary-fast first request for that pass: original cover, ordinary recipe, sample index zero and
-ordinary wave's frozen render. Slot 2 replays the actual nested ordinary attempt zero from cache; it makes no new paid edit.
-Thus an uncached run pays at most two image-edit samples per view in total: one ordinary and one
-enhanced, including when SideBeautyPass and region palette are also on.
-Slot 2 receives neither turnaround images nor beauty references. The
-lowest passing slot wins; higher body/hair slots are cancelled when the lower slot wins. Head candidates
-both drain because eye-detail selection requires the ordinary paint. A flat ordinary eye crop is
+ordinary wave's frozen render. Slots 1 and 2 are submitted together. Slot 2 replays the actual nested
+ordinary attempt zero from cache; it makes no new paid edit. Slot 2 receives neither turnaround images
+nor beauty references.
+Only when the existing gates reject both slot 1 and slot 2 does the pass launch conditional slot 3,
+inside the same frozen wave: the exact ordinary-fast attempt-one request (original cover, ordinary
+recipe, sample index one, the ordinary wave's frozen render, no turnaround or beauty reference).
+A cancelled, budget-stopped or failed slot is not a rejection and never launches slot 3. Slot 3's
+worker first runs ordinary attempt one through the nested run's own pass, which pays that sample once
+and publishes its cache family to the root cache, and then submits the identical main request, which
+replays it. The nested run adds that attempt to its record, as ordinary fast selects it, and rebuilds
+its atlas from every accepted record before later publications use it. The nested run therefore pays
+attempt one only when attempt zero and the enhanced sample were both rejected.
+Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes, and three
+(one enhanced, two ordinary) only when both are rejected, never more, including when SideBeautyPass
+and region palette are also on.
+The lowest passing slot wins (1, then 2, then 3); higher body/hair slots are cancelled when a lower slot
+wins. Head candidates drain because eye-detail selection requires the ordinary paint; the lowest
+accepted default slot (2, then 3) is the head's default candidate. Wave 1 chooses the face source only
+after any frontal slot 3 resolves. A flat ordinary eye crop is
 ineligible for that comparison and records that ordinary eye detail is unavailable. `selected_attempt` is zero-based;
 `winning_slot` records the one-based winner. Missing side orientation keeps slot 1 on its usual beauty
-reference and preserves the same ordinary slot 2. This contains rejected enhancements without a third
-enhanced sample or a weakened paint gate.
+reference and preserves the same ordinary slots 2 and 3. This contains rejected enhancements without a
+second enhanced sample or a weakened paint gate. A beauty paint that passes the gates keeps its slot,
+so a view whose ordinary attempt zero failed then has no ordinary attempt one in the nested atlas.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast

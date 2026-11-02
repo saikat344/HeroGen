@@ -61,8 +61,8 @@ def isolated_client(parent, key, persistence_lock=None):
     return child
 
 
-def publish(parent, child):
-    """Publish after all workers drain, with image/mask families before their entry files."""
+def publish_files(parent, child):
+    """Copy a child's cache families to the parent, with image/mask families before their entry files."""
     for source in sorted(child.cache_dir.iterdir(), key=lambda p: p.suffix == '.json'):
         if source.is_file() and source.name != 'calls-ledger.jsonl':
             target = parent.cache_dir / source.name
@@ -75,6 +75,11 @@ def publish(parent, child):
                 os.replace(temporary, target)
             finally:
                 temporary.unlink(missing_ok=True)
+
+
+def publish(parent, child):
+    """Publish after all workers drain: cache families first, then the call slice and network count."""
+    publish_files(parent, child)
     parent.log.calls.extend(child.log.calls)
     # Instrumented clients may count network posts separately from their billable call log.
     if hasattr(parent, 'network_attempts'):
@@ -101,20 +106,17 @@ class Pass:
         self.tasks = []
         self.completed = {}
         self.selected = None
+        self.slots, self.conditional = 0, 0
+        self.prepare = self.launch = None
 
     def submit(self, pool, client, prep, frozen, tex, cam, rendered, timeout, cover, head_found,
                body_cam, recipe, persistence_lock, user_note="", view_options=None, art=(), art_masks=None, art_framing=None,
-               attempts=ATTEMPTS):
+               attempts=ATTEMPTS, conditional=0):
+        """Submit `attempts` slots now; `conditional` further slots are launched only by `launch`."""
         from . import _attempt_cancelled, _view
 
-        def attempt(*args, **kwargs):
-            token = _attempt_cancelled.set(self.cancelled)
-            try:
-                return _view(*args, **kwargs)
-            finally:
-                _attempt_cancelled.reset(token)
-
-        for index in range(attempts):
+        def prepare(index):
+            # Build one slot's isolated client, record and task without submitting it.
             view_cover, options = (cover, {}) if view_options is None else view_options(self, index, cover)
             standard_side = bool(art and index == 1 and options.get('recipe_name') == 'RF6B')
             if standard_side:
@@ -127,6 +129,7 @@ class Pass:
             attempt_render = options.pop('rendered', rendered)
             attempt_art = options.pop('art', art)
             attempt_masks = options.pop('art_masks', art_masks)
+            before = options.pop('before', None)
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
@@ -136,12 +139,47 @@ class Pass:
             if art_framing:
                 private['art_framing'] = copy.deepcopy(art_framing)
             folder = self.folder / f'attempt-{index}'
-            future = pool.submit(attempt, child, prep, frozen, tex, cam, self.hair, folder, private,
+
+            def run():
+                token = _attempt_cancelled.set(self.cancelled)
+                try:
+                    if before is not None:
+                        before()
+                    return _view(child, prep, frozen, tex, cam, self.hair, folder, private,
                                  timeout, view_cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=attempt_render, apply=lambda *args: 0,
-                                 attempts=1, attempt_start=attempt_index, cancelled=self.cancelled, user_note=user_note,
-                                 art=attempt_art, art_masks=attempt_masks, **options)
+                                 attempts=1, attempt_start=attempt_index, cancelled=self.cancelled,
+                                 user_note=user_note, art=attempt_art, art_masks=attempt_masks, **options)
+                finally:
+                    _attempt_cancelled.reset(token)
+            return run, child, private, folder
+
+        def launch(index):
+            run, child, private, folder = prepare(index)
+            future = pool.submit(run)
             self.tasks.append((future, child, private, folder))
+            return future
+
+        self.prepare, self.launch = prepare, launch
+        self.slots, self.conditional = attempts, conditional
+        for index in range(attempts):
+            launch(index)
+
+    def conditional_due(self):
+        """A conditional slot is due only when every submitted slot was judged and rejected by its gates.
+
+        Cancelled, budget-stopped and failed slots never count as rejections.
+        """
+        if (not self.slots <= len(self.tasks) < self.slots + self.conditional
+                or len(self.completed) != len(self.tasks)):
+            return False
+        for future, _, private, _ in self.tasks:
+            if not future.done() or future.cancelled() or future.exception() is not None:
+                return False
+            reason = private['attempts'][-1]['reason'] if private['attempts'] else 'incomplete'
+            if private['accepted'] or reason == 'incomplete' or reason.startswith('cancelled'):
+                return False
+        return True
 
     def collect(self, index):
         future, _, private, folder = self.tasks[index]
@@ -284,7 +322,9 @@ class Publisher:
 
 
 def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock,
-          user_note="", beauty_context=None, art_context=None, palette_manifest=None, attempts=ATTEMPTS):
+          user_note="", beauty_context=None, art_context=None, palette_manifest=None, attempts=ATTEMPTS,
+          passes=None):
+    """Run the frozen waves. `passes`, when given, receives every submitted Pass for later extension."""
     from .backend import blender
 
     stopped, error, face_error = False, None, None
@@ -294,6 +334,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
     if beauty_context is not None:
         from .fast_beauty import FaceControl
         face_control = FaceControl(*beauty_context, data=data, state_lock=state_lock)
+        face_control.root_client, face_control.persistence_lock = client, persistence_lock
         face_client = isolated_client(client, 'face-source', persistence_lock)
         if hasattr(face_client, 'network_attempts'):
             face_client._initial_network_attempts = face_client.network_attempts
@@ -317,7 +358,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
     publisher = Publisher(work.parent.parent, prep, tex, work, data, cams["body+0"], timeout,
                           face_control=face_control, palette_manifest=palette_manifest)
 
-    def collect(job, index):
+    def collect(job, index, wave):
+        """Collect one slot; return a newly launched conditional slot's future, if one became due."""
         nonlocal stopped, error
         try:
             # Never wait while holding the budget lock: HTTP authorization needs that same lock.
@@ -348,6 +390,16 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 job.record['tries'] = len(job.record['attempts'])
             if error is None:
                 error = exc
+        if face_control is None or error is not None or face_error is not None:
+            return None
+        if index >= job.slots:
+            # The default-head run paid this view's ordinary attempt 1 for the conditional slot.
+            face_control.fold_default(job.key)
+        if stopped or not job.conditional_due():
+            return None
+        future = job.launch(len(job.tasks))
+        remaining[future] = (job, len(job.tasks) - 1, wave)
+        return future
 
     try:
         # Every attempt can run, while the inherited client limiter still bounds HTTP concurrency/RPM.
@@ -387,7 +439,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                     job.submit(pool, client, prep, current, tex, cams[job.name], folder, timeout, cover,
                                head_found, cams['body+0'], recipe, persistence_lock, user_note=user_note,
                                art=art, art_masks=masks, art_framing=framing, attempts=attempts,
-                               **({"view_options": face_control.options} if face_control is not None else {}))
+                               **({"view_options": face_control.options, "conditional": 1}
+                                  if face_control is not None else {}))
                     all_passes.append(job)
                     for index, (future, *_) in enumerate(job.tasks):
                         remaining[future] = (job, index, wave_index)
@@ -402,8 +455,11 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         completed, _ = wait(firsts, return_when=FIRST_COMPLETED)
                         for future in sorted(completed, key=lambda f: all_passes.index(remaining[f][0])):
                             job, index, _ = remaining.pop(future)
-                            collect(job, index)
+                            extra = collect(job, index, wave_index)
                             firsts.remove(future)
+                            if extra is not None and job.name in ('head+0', 'body+0'):
+                                # The face source is chosen only after a frontal conditional slot resolves.
+                                firsts.add(extra)
                     if face_control is not None and error is None:
                         try:
                             with state_lock:
@@ -436,7 +492,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                             job, index, wave = remaining.pop(future)
                             firsts.discard(future)
                             before = job.selected
-                            collect(job, index)
+                            collect(job, index, wave)
                             if (wave < wave_index and error is None and face_error is None
                                     and before is None and job.selected is not None):
                                 publisher.publish(wave)
@@ -452,11 +508,13 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 for future in sorted(completed, key=lambda f: (all_passes.index(remaining[f][0]), remaining[f][1])):
                     job, index, wave = remaining.pop(future)
                     before = job.selected
-                    collect(job, index)
+                    collect(job, index, wave)
                     if error is None and face_error is None and before is None and job.selected is not None:
                         publisher.publish(wave)
                 save(ok=False, status='running')
     finally:
+        if passes is not None:
+            passes.extend(all_passes)
         for job in all_passes:
             for _, child, *_ in job.tasks:
                 publish(client, child)

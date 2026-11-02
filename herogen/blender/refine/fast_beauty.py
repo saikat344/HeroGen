@@ -53,7 +53,10 @@ def eye_quality(candidate, default, boxes):
 
 
 class FacePass(Pass):
-    """The head's two slots are independent beauty and default samples, never retries."""
+    """The head's beauty and default slots are independent samples, never retries.
+
+    A conditional third slot, launched only after both are rejected, is another default candidate.
+    """
 
     def collect(self, index):
         future, _, private, folder = self.tasks[index]
@@ -91,6 +94,11 @@ class FaceControl:
         self.default_head_weight = None
         self.default_work = None
         self.default_stopped = False
+        # The default-head run's texture, records, passes and arguments, kept for conditional slots.
+        self.default_tex = self.default_data = self.default_context = None
+        self.default_passes = []
+        self.extensions = {}
+        self.root_client = self.persistence_lock = None
 
     def render_default(self, prep, cam, folder, timeout):
         """Render the same frozen geometry with default fast's original, ungraded atlas."""
@@ -106,14 +114,18 @@ class FaceControl:
         return FacePass if name == 'head+0' else Pass
 
     def options(self, job, index, cover):
-        # The RF2R candidate uses the original frozen base and artwork. Its
-        # sample index matches default fast's first head attempt for exact cache reuse.
+        # The RF2R candidates use the original frozen base and artwork. Slot 2's sample index
+        # matches default fast's attempt 0, and conditional slot 3's its attempt 1, for exact cache reuse.
         options = {'face_keep': True, 'save_face': True}
-        if index == 1:
+        if index in (1, 2):
             rendered = (self.default_work / ('wave-2' if job.hair else 'wave-1')
                         if self.default_work is not None else self.default_render)
-            return cover, {**options, 'attempt_start': 0, 'rendered': rendered,
-                           'art': (), 'art_masks': None}
+            options = {**options, 'attempt_start': index - 1, 'rendered': rendered,
+                       'art': (), 'art_masks': None}
+            if index == 2:
+                # The default-head run pays ordinary attempt 1 first; this slot replays its cache entry.
+                options['before'] = lambda: self.extend_default(job.key)
+            return cover, options
         angle = {'head+0': 0, 'body+0': 0, 'body+90': 90, 'body-90': -90,
                  'body+180': 180, 'upper+180': 180}[job.name]
         if beauty.selected_yaw(self.references, angle) is None:
@@ -151,7 +163,12 @@ class FaceControl:
                                                 'attempt': record['selected_attempt']}
                     break
         head = next((job for job in jobs if job.name == 'head+0'), None)
-        fallback = head.tasks[1][2] if head is not None else None
+        # The lowest accepted default slot (2, then conditional 3) is the fallback candidate.
+        slot = None
+        if head is not None:
+            slot = next((i for i in range(1, len(head.tasks)) if head.tasks[i][2]['accepted']),
+                        len(head.tasks) - 1)
+        fallback = head.tasks[slot][2] if head is not None else None
         self.data['face_fallback'] = fallback or {'accepted': False, 'reason': 'head_not_found'}
         if self.key is None and fallback is not None and fallback['accepted']:
             # The default candidate remains an audit of the frontal sample. Composition
@@ -160,22 +177,26 @@ class FaceControl:
             self.data['beauty_head_candidate'] = dict(self.data['views'][self.key])
             target = work / self.key
             target.mkdir(parents=True, exist_ok=True)
-            for source in head.tasks[1][3].iterdir():
+            for source in head.tasks[slot][3].iterdir():
                 if source.is_file():
                     shutil.copy2(source, target / source.name)
             with Image.open(target / 'face.png') as face:
                 Image.new('L', face.size, 0).save(target / 'weight.png')
-            self.data['views'][self.key] = {**fallback, 'head_only': True, 'selected_attempt': 1,
-                                           'winning_slot': 2,
+            self.data['views'][self.key] = {**fallback, 'head_only': True, 'selected_attempt': slot,
+                                           'winning_slot': slot + 1,
                                            'attempts': head.record['attempts'], 'tries': head.record['tries']}
-            self.data['face_source'] = {'source': 'default', 'view': self.key, 'attempt': 0}
+            self.data['face_source'] = {'source': 'default', 'view': self.key, 'attempt': slot - 1}
         if self.key is None:
             self.data['face_source'] = {'source': 'default-fast-fallback',
                                         'reason': 'no accepted frontal face repaint'}
             self.key = 'head+0' if head is not None else 'body+0'
 
     def default_fast(self, client, prep, tex, cams, work, timeout, cover, head_found, recipe, save, user_note):
-        """Resolve the cover-only atlas from ordinary attempt zero per view and base residuals."""
+        """Resolve the cover-only atlas from ordinary attempt zero per view and base residuals.
+
+        Ordinary attempt 1 is paid later, per view, only by `extend_default` when the main
+        beauty and default slots were both rejected.
+        """
         from .fast import waves
 
         if self.default_work is not None:
@@ -201,9 +222,11 @@ class FaceControl:
                 self.data['default_fast_fallback'] = copy.deepcopy(data)
                 return save(**kwargs)
 
+        self.default_tex, self.default_data = default, data
+        self.default_context = {'client': client, 'cams': cams}
         _, stopped = waves(client, prep, self.default_base, default, cams, folder, data,
                            timeout, cover, head_found, recipe, checkpoint, self.state_lock,
-                           user_note=user_note, attempts=1)
+                           user_note=user_note, attempts=1, passes=self.default_passes)
         checkpoint(ok=False, status='running')
         # Match the exported default atlas, including its quantization and gutter extension.
         default.save(folder / 'texture.png')
@@ -216,6 +239,69 @@ class FaceControl:
             self.data.setdefault('face_source', {}).update(atlas_sha256=hashlib.sha256(
                 (folder / 'texture.png').read_bytes()).hexdigest(), cap_reached=stopped)
         return stopped
+
+    def extend_default(self, key):
+        """Pay ordinary attempt 1 for one view through the default-head run's own Pass.
+
+        It runs on the main conditional slot's worker before that slot's identical request,
+        which then replays this cache entry. Both runs therefore pay one shared sample.
+        """
+        from .fast import publish, publish_files
+
+        job = next(p for p in self.default_passes if p.key == key)
+        with self.state_lock:
+            record = self.default_data['views'][key]
+            if record['accepted'] or record['tries'] != 1:
+                raise ValueError(f'Default attempt 1 for {key} needs one rejected attempt 0')
+        run, child, private, folder = job.prepare(1)
+        try:
+            run()
+        finally:
+            # Publish this family before the main slot's request reads the root cache.
+            with self.persistence_lock:
+                publish(self.default_context['client'], child)
+                publish_files(self.root_client, child)
+        with self.state_lock:
+            self.extensions[key] = (private, folder)
+
+    def fold_default(self, key):
+        """Add a paid ordinary attempt 1 to the default-head run, as ordinary fast selects it.
+
+        The default atlas is rebuilt from every accepted record, so it matches ordinary fast
+        wherever this run holds the same accepted attempts.
+        """
+        from .fast import reproject
+
+        with self.state_lock:
+            if key not in self.extensions:
+                return
+            private, folder = self.extensions.pop(key)
+            record = self.default_data['views'][key]
+            record['attempts'] = record['attempts'] + private['attempts']
+            record['tries'] = len(record['attempts'])
+            if not private['accepted']:
+                record['reason'] = private['reason']
+                self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
+                return
+            record.update({k: v for k, v in private.items() if k not in ('attempts', 'tries')})
+            record['selected_attempt'], record['winning_slot'] = 1, 2
+            target = self.default_work / key
+            target.mkdir(parents=True, exist_ok=True)
+            for source in folder.iterdir():
+                if source.is_file():
+                    shutil.copy2(source, target / source.name)
+            records = copy.deepcopy(self.default_data['views'])
+        default = self.default_tex
+        reproject(default, self.default_work, records, self.default_context['cams']['body+0'])
+        default.save(self.default_work / 'texture.png')
+        with Image.open(self.default_work / 'texture.png') as image:
+            fallback = np.asarray(image.convert('RGB'), dtype=np.float32) / 255
+        self.prepare_hair_views(self.default_context['client'], self.default_work, records, default.height)
+        self.fallback_texture = fallback
+        with self.state_lock:
+            self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
+            self.data['face_source']['atlas_sha256'] = hashlib.sha256(
+                (self.default_work / 'texture.png').read_bytes()).hexdigest()
 
     def prepare_hair_views(self, client, work, records, height):
         """Read the hair masks already required by accepted fast paints, with no API fallback."""
