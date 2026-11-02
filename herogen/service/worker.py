@@ -99,40 +99,54 @@ class EventPump:
     the stage runs: `with EventPump(src, dst, volume, still_current):`. Every `every_s`, when the file changed,
     it checks that this attempt is still the job's live one (else it stops for good, so a stale, canceled or
     deleted attempt never writes), copies the file next to its target and renames it into place, then commits.
-    It never creates the run folder. The copy back after the stage still copies everything, so a missed beat
-    loses nothing."""
+    It never creates the run folder. With `still_wanted`, a write whose job or account was deleted while it ran is
+    removed again after its commit, as `CopyWorkdir` does for a copy back (up to `stop`, not including it). The
+    copy back after the stage still copies everything, so a missed beat loses nothing. Leaving the block waits
+    for a write in progress, so nothing is written after it."""
 
     def __init__(self, src: Path, dst: Path, volume, still_current: Callable[[], bool],
-                 every_s: float | None = None) -> None:
+                 every_s: float | None = None, still_wanted: Callable[[], bool] | None = None,
+                 stop: Path | None = None) -> None:
         self.src, self.dst, self.volume, self.still_current = Path(src), Path(dst), volume, still_current
+        self.still_wanted, self.stop = still_wanted, Path(stop) if stop is not None else self.dst.parent
         self.every_s = PUMP_EVERY_S if every_s is None else every_s
         self.last: tuple[int, int] | None = None
         self.stopped = False
+        self._lock = threading.Lock()     # held for a whole write: copy, rename, commit, settle
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._beat, name="event-pump", daemon=True)
 
     def pump(self) -> bool:
         """One beat: True when the file was copied and committed."""
-        if self.stopped:
-            return False
-        try:
-            st = self.src.stat()
-        except FileNotFoundError:
-            return False
-        stamp = (st.st_size, st.st_mtime_ns)
-        if stamp == self.last:
-            return False
-        if not self.still_current():
-            self.stopped = True
-            return False
-        if not self.dst.parent.is_dir():
-            return False
-        part = self.dst.with_name(self.dst.name + ".part")
-        shutil.copy2(self.src, part)
-        os.replace(part, self.dst)
-        self.volume.commit()
-        self.last = stamp
-        return True
+        with self._lock:
+            if self.stopped:
+                return False
+            try:
+                st = self.src.stat()
+            except FileNotFoundError:
+                return False
+            stamp = (st.st_size, st.st_mtime_ns)
+            if stamp == self.last:
+                return False
+            if not self.still_current():
+                self.stopped = True
+                return False
+            if not self.dst.parent.is_dir():
+                return False
+            part = self.dst.with_name(self.dst.name + ".part")
+            shutil.copy2(self.src, part)
+            os.replace(part, self.dst)
+            self.volume.commit()
+            self.last = stamp
+            if self.still_wanted is not None and not self.still_wanted():
+                # Deleted while this write ran: take it back out, so a deleted hero's log never reappears.
+                self.stopped = True
+                self.volume.reload()
+                _undo([self.dst], self.stop)
+                self.volume.commit()
+                event("event_pump_undone", file=self.dst.name)
+                return False
+            return True
 
     def _beat(self) -> None:
         while not self._stop.wait(self.every_s) and not self.stopped:
@@ -148,6 +162,8 @@ class EventPump:
     def __exit__(self, *exc: object) -> None:
         self._stop.set()
         self._thread.join(timeout=60)
+        with self._lock:    # a write still in progress (a slow commit) finishes before the copy back starts
+            self.stopped = True
 
 
 def event(name: str, **fields: Any) -> None:
@@ -317,7 +333,7 @@ class CopyWorkdir:
     def event_pump(self) -> EventPump:
         assert self.local is not None
         return EventPump(self.local.run_dir / events.FILE, self.remote.run_dir / events.FILE, self.volume,
-                         self.still_current)
+                         self.still_current, still_wanted=self.still_wanted, stop=self.remote.run_dir.parents[2])
 
 
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any], *, spend_limits_enabled=False) -> StageContext:
@@ -464,7 +480,9 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             state = "skipped" if degraded else out.state
             if spec.key == "4" and out.state == "rejected":
                 state = "rejected"
-            step_event("step_end", spec, outcome=state, code=out.code or None if state != "passed" else None,
+            # A runner's code is an identifier today; one that is not still ends the step, as "other".
+            step_event("step_end", spec, outcome=state,
+                       code=events.slug(out.code) if out.code and state != "passed" else None,
                        s=out.seconds, usd=round(out.cost_usd + compute, 6))
             workdir.sync()
             store.job_stage_set(jid, attempt, spec.key, state, seconds=out.seconds,

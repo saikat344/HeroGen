@@ -89,6 +89,21 @@ class TestServiceEvents(BuildLogCase):
         self.assertEqual((end["outcome"], end["code"]), ("rejected", "rejected"))
         self.assertEqual((got[-1]["kind"], got[-1]["state"]), ("job_end", "rejected"))
 
+    def test_a_code_that_is_not_an_identifier_still_ends_the_step(self):
+        from herogen.service.runner import Outcome
+
+        class Odd(FakeRunner):
+            def run(self, spec, ctx):
+                if spec.key == "1":
+                    return Outcome("failed", 0.1, 0.0, "Stopped.", "Odd Code!", False)
+                return super().run(spec, ctx)
+
+        self.runner = Odd()
+        job = self.new_job()
+        self.assertEqual(self.go(job), "failed")
+        end = next(e for e in self.log(job) if e["kind"] == "step_end" and e["step"] == "1")
+        self.assertEqual((end["outcome"], end["code"]), ("failed", "odd_code"))
+
     def test_a_deleted_hero_gets_no_folder_back(self):
         job = self.new_job()
         run = self.storage.run_dir(self.user["id"], job["id"])
@@ -120,6 +135,48 @@ class TestEventPump(BuildLogCase):
         self.assertEqual(len(dst.read_text().splitlines()), 1)
         self.assertEqual(vol.commits, 1)
         self.assertFalse(any(p.name.endswith(".part") for p in dst.parent.iterdir()))
+
+    def test_a_write_that_raced_a_delete_is_taken_back(self):
+        root = self.tmp / "users"
+        src, dst = self.tmp / "local" / events.FILE, root / "u" / "runs" / "j" / events.FILE
+        src.parent.mkdir()
+        dst.parent.mkdir(parents=True)
+        events.emit("local", file=src, step="4", what="part_split")
+        vol = CountingVolume()
+        pump = EventPump(src, dst, vol, lambda: True, still_wanted=lambda: False, stop=root)
+        self.assertFalse(pump.pump())
+        self.assertFalse(dst.exists())
+        self.assertFalse((root / "u").exists(), "the folders the write left empty go too")
+        self.assertEqual(vol.commits, 2)
+        self.assertTrue(pump.stopped)
+
+    def test_leaving_waits_for_a_write_in_progress(self):
+        import threading
+        src, dst = self.tmp / "local" / events.FILE, self.tmp / "remote" / events.FILE
+        src.parent.mkdir()
+        dst.parent.mkdir()
+        events.emit("local", file=src, step="4", what="part_split")
+        entered, release, order = threading.Event(), threading.Event(), []
+
+        class SlowVolume(CountingVolume):
+            def commit(self):
+                entered.set()
+                release.wait(5)
+                order.append("commit")
+
+        pump = EventPump(src, dst, SlowVolume(), lambda: True, every_s=60)
+        writer = threading.Thread(target=pump.pump)
+        writer.start()
+        self.assertTrue(entered.wait(5))
+        threading.Timer(0.3, release.set).start()
+        with pump:
+            pass
+        order.append("left")
+        writer.join(5)
+        self.assertEqual(order, ["commit", "left"])
+        events.emit("local", file=src, step="4", what="late")
+        self.assertFalse(pump.pump(), "nothing is written after the block")
+        self.assertNotIn(b"late", dst.read_bytes())
 
     def test_never_creates_a_missing_run_folder(self):
         src, dst = self.tmp / "local" / events.FILE, self.tmp / "gone" / events.FILE
