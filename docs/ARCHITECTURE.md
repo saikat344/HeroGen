@@ -2519,7 +2519,9 @@ selection. Body and hair use selected beauty references where available, with th
 recipe for unavailable rear references. Fast beauty `body+0` uses `RF17B`: its reference is uniformly
 height-fitted and clipped to the rendered silhouette, extending nearest foreground colours to uncovered
 render pixels. This changes only the conditioning reference. Generated samples and acceptance masks are
-never reshaped. The prompt requests surface details while preserving the first render's geometry.
+never reshaped. The prompt requests surface details and the reference's cloth and leather colours while
+preserving the first render's geometry, and forbids straps, belts, buckles or ornaments the reference
+does not show.
 Before publishing the first version, every frontal candidate resolves. An accepted beauty `head+0`, then
 `body+0`, can own the face only when its registered face contains separate eye regions on both sides and a
 mouth. The largest connected eye region in each face half also supplies a detail comparison with the
