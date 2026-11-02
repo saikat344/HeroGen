@@ -138,8 +138,11 @@ class FakeRunner:
             return Outcome("skipped", message=why, code="not_available")
         mode = self.fail.get(spec.key)
         flog = FakeLog(ctx, spec.key, self.delay_s)
-        if mode == "transient" and spec.group == "model":
-            call = flog.start(MUSE, "cover_art" if spec.key == "1" else "turnaround")
+        t0 = time.monotonic()
+        what = {"p": "sketch_design", "1": "cover_art", "2": "turnaround"}.get(spec.key)
+        if mode == "transient" and what:
+            ctx.run_dir.mkdir(parents=True, exist_ok=True)
+            call = flog.start(MUSE, what)
             flog.wait(1.0)
             flog.end(call, outcome="failed", code="http_5xx")
         elif mode not in ("error", "transient", "raise"):
@@ -172,7 +175,7 @@ class FakeRunner:
             write_record(run, rec)
         from herogen.service.runner import CliRunner
 
-        return CliRunner.outcome(spec, ctx, 0.01, code, "", "", False)
+        return CliRunner.outcome(spec, ctx, round(max(0.01, time.monotonic() - t0), 2), code, "", "", False)
 
     # ---- build-log scripts (one per stage; shares of delay_s add up to about 1) ----------------------------
 
