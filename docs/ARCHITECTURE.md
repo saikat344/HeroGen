@@ -761,7 +761,9 @@ or export thresholds.
 schedule. Omit `--refine-profile` for the existing sequential `best` schedule. The target profile
 (`--profile best`, `roblox-ingame` or `roblox-avatar`) remains independent of the repaint schedule.
 The service selects the schedule through `HEROGEN_SERVICE_REFINE_PROFILE=fast`, passed explicitly to
-the stage subprocess; its default is `best`. Direct stage callers can pass `refine_profile="fast"`.
+the stage subprocess; its default is `best`. With `HEROGEN_FAST_LANE=1` (the product lane) a default
+`best` setting becomes `fast`; a configured `fast` stays `fast`. A job with a texture note passes it as
+`--refine-note`. Direct stage callers can pass `refine_profile="fast"`.
 For batch runners, `HEROGEN_REFINE_PROFILE=fast` supplies the stage's fallback when no argument is given.
 Both schedules default to `RF2R` for normal passes and `RF3H` for hair. Fast uses the same close-up
 frame feather; exposure solving remains off by default. The `RF2W` wear recipe stays opt-in.
