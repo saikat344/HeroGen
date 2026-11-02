@@ -716,6 +716,17 @@ class TestPages(WebCase):
         self.assertEqual(css.count(marker), 1)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css[:css.index(marker)]), [])
 
+    def test_workspace_stage_styles_are_served_and_use_only_tokens(self):
+        from herogen.service import web
+
+        b = Browser(self.app)
+        self.assertIn('href="/assets/styles/workspace-stage.css"', b.get("/").text)
+        r = b.get("/assets/styles/workspace-stage.css")
+        self.assertEqual(r.status_code, 200)
+        css = (web.STATIC_DIR / "styles" / "workspace-stage.css").read_text()
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css), [])
+        self.assertEqual(re.findall(r"\b\d+(?:\.\d+)?m?s\b", css), [])   # durations come from tokens
+
     def test_viewer_and_health(self):
         b = Browser(self.app)
         r = b.get("/viewer")

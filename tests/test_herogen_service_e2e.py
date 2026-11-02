@@ -383,6 +383,7 @@ class TestServicePage(ServiceBrowserCase):
             self.assertEqual(t.eval('window.__polls'), 0)
             t.eval("delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))")
             t.wait('window.__polls > 0')
+            t.eval("document.querySelector('#orbitToggle').click()")  # the idle orbit would move the camera
             camera = t.eval("import('/assets/preview.js').then(p=>p.view())")
             t.eval("document.querySelector('#updateModel').click()")
             t.wait("document.querySelector('#artifactLabel').textContent === 'Refined version 2' && !document.querySelector('#orbitHint').hidden")

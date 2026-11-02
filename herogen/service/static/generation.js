@@ -1,6 +1,7 @@
 // Presentation follows reported model and export stage states.
 import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
+import { thumbButton, viewerDock } from './viewer-dock.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
   0: ['Prepare input', 'Preparing your image', 'Check the input before creating the character artwork.'],
@@ -83,8 +84,12 @@ function progressLabel(job, steps, passed, current, exporting) {
   if (!notes.length && passed === total) return { lead: '', strong: `${passed} of ${total} stages complete` };
   return { lead: `${passed} of ${total} complete${notes.length ? ' · ' : ''}`, strong: notes.join(' · ') };
 }
+// Pipeline order; the stage-2 front, left and back views lead the views.
 const IMAGES = [['sketch', 'Starting image'], ['cover', 'Artwork'], ['turnaround', 'Character views'],
-  ['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']];
+  ['front', 'Front'], ['left', 'Left'], ['back', 'Back'], ['right', 'Right'], ['top', 'Top']];
+const DOCK_LABEL = {sketch: 'Sketch', turnaround: 'All views'};
+// The image the stage shows by default: the front view once it exists, otherwise the newest image.
+const defaultImage = (job, available) => (job?.images?.front ? 'front' : available.at(-1)?.[0]) || null;
 const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
   ...Object.keys(job?.images || {}).filter(k => !IMAGES.some(([known]) => known === k)).map(k => [k, k.replaceAll('_', ' ')])];
 export function stageTiming(s) {
@@ -116,13 +121,14 @@ const SEGMENT = { passed: 'seg--done', running: 'seg--run', skipped: 'seg--skip'
 // Messages the service sends for a step that did not simply pass. They are always shown, never hidden behind a click.
 const NOTED = new Set(['skipped', 'unavailable', 'failed', 'rejected']);
 export function generationView($, select3D) {
+  const dock = viewerDock($);
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
-  let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null;
+  let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null, lastImage = null;
   const models = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
   const latestModel = () => models().at(-1);
   function modelCopy() {
     const first = chosenModel?.n === 0;
-    text($('#modelTab'), first ? 'First 3D shape' : '3D preview');
+    text($('#modelTabText'), first ? 'First 3D shape' : '3D preview');
     if (model) text($('#artifactLabel'), first ? 'First 3D shape' : chosenModel?.n ? `Refined version ${chosenModel.n}` : '3D preview');
     $('#modelNote').hidden = !model || !first;
     text($('#modelNote'), first ? 'The texture is still being refined.' : '');
@@ -157,10 +163,10 @@ export function generationView($, select3D) {
     chosenModel = latest; modelCopy(); loadModel(true);
   });
   function pick(key, chosen = false, retry = false) {
-    selected = key; manual = chosen; model = key === 'model';
+    selected = key; manual = chosen; model = key === 'model'; if (key && !model && chosen) lastImage = key;
     $('#previewWrap').hidden = !model;
-    if ($('#workbenchShading')) $('#workbenchShading').hidden = !model;
-    $('#previewLighting').hidden = !model;
+    $('#viewer').dataset.mode = model ? 'model' : key ? 'image' : 'empty';
+    dock.mode(model);
     $('#artboardImage').hidden = model || !key;
     $('#artboardEmpty').hidden = model || !!key;
     $('#modelTab').setAttribute('aria-pressed', String(model));
@@ -173,7 +179,10 @@ export function generationView($, select3D) {
       const image = imageChoices(job).find(([k]) => k === key);
       if (image) {
         const url = job.images[key];
-        if (retry || $('#artboardImage').getAttribute('src') !== url) { $('#imageError').hidden = true; $('#artboardImage').src = url; }
+        if (retry || $('#artboardImage').getAttribute('src') !== url) {
+          $('#imageError').hidden = true; $('#artboardImage').src = url;
+          $('#artboardImage').classList.remove('reveal'); void $('#artboardImage').offsetWidth; $('#artboardImage').classList.add('reveal');
+        }
         if (!$('#imageError').hidden) $('#artboardImage').hidden = true;
         $('#artboardImage').alt = `${image[1]} for ${job.name || 'your hero'}`;
         text($('#artifactLabel'), image[1]);
@@ -185,7 +194,7 @@ export function generationView($, select3D) {
   }
   $('#artTab').addEventListener('click', () => {
     const available = imageChoices(job);
-    pick(available.at(-1)?.[0] || null, true);
+    pick(available.some(([k]) => k === lastImage) ? lastImage : defaultImage(job, available), true);
   });
   $('#modelTab').addEventListener('click', () => { if (latestModel()) pick('model', true); });
   $('#artboardImage').addEventListener('error', () => {
@@ -249,7 +258,7 @@ export function generationView($, select3D) {
   return {
     update(next) {
       const changed = jobId !== next.id;
-      if (changed) { $('#imageError').hidden = true; selected = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
+      if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest; }
       job = next;
       const latest3D = latestModel();
@@ -290,20 +299,23 @@ export function generationView($, select3D) {
       const nextSignature = JSON.stringify(available.map(([k]) => [k, job.images[k]]));
       if (signature !== nextSignature) {
         signature = nextSignature;
-        $('#images').replaceChildren(...available.map(([key, label]) => {
-          const b = node('button'); b.type = 'button'; b.dataset.image = key; b.setAttribute('aria-label', `View ${label.toLowerCase()}`);
-          const image = node('img'); image.src = job.images[key]; image.alt = ''; image.loading = 'lazy';
-          b.dataset.view = ['front','right','back'].includes(key) ? 'primary' : 'extra';
-          b.append(image, node('span', key === 'right' ? 'Side' : label)); b.addEventListener('click', () => pick(key, true, !$('#imageError').hidden)); return b;
+        dock.images(available.map(([key, label]) => {
+          const b = thumbButton(DOCK_LABEL[key] || label, job.images[key], {image: key});
+          b.addEventListener('click', () => pick(key, true, !$('#imageError').hidden)); return b;
         }));
       }
-      $('#modelTab').hidden = !job.downloads?.glb?.available;
-      const latest = available.at(-1)?.[0] || null;
+      dock.cameras(job.images);
+      $('#modelTab').hidden = !job.downloads?.glb?.available; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
+      const latest = defaultImage(job, available);
       if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !job.downloads?.glb?.available)) {
         pick(job.downloads?.glb?.available ? 'model' : latest);
       } else pick(selected, true);
       if (changed) $('#imageError').hidden = true;
-      text($('#artboardEmptyText'), state.terminal ? 'No images were saved for this job.' : 'Your first image will appear here when it is ready.');
+      text($('#artboardEmptyText'), state.terminal ? 'No images were saved for this job.' :
+        job.state === 'queued' ? 'Starts when a worker is free.' : 'Your first image appears here in about a minute.');
+      const idea = !state.terminal && job.kind === 'prompt' && job.prompt ? `“${job.prompt}”` : '';
+      text($('#artboardIdea'), idea); $('#artboardIdea').hidden = !idea;
+      $('#modelPending').hidden = state.terminal || !!job.downloads?.glb?.available || model || state.focus?.key !== '3' || !available.length;
       return state;
     },
     reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null); }
