@@ -10,11 +10,16 @@ import numpy as np
 from PIL import Image
 
 from herogen.blender import refine as stage
-from herogen.blender.refine import fast, fast_beauty, region_palette
+try:
+    from herogen.blender.refine import fast, fast_beauty, region_palette
+    HAVE_REFINE = True
+except ImportError:
+    HAVE_REFINE = False
 from tests.test_herogen_blender_fast_beauty import FastBeautyStageTests
 from tests import test_herogen_blender_refine as fixture
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class OrientationTests(unittest.TestCase):
     def test_absent_uncertain_swapped_and_corrected_records_use_default_references(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -42,6 +47,7 @@ class OrientationTests(unittest.TestCase):
             self.assertTrue(stage.side_orientation(run)['enabled'])
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class CompositionTests(unittest.TestCase):
     setUp = FastBeautyStageTests.setUp
     identity = staticmethod(FastBeautyStageTests.identity)
@@ -162,6 +168,7 @@ class CompositionTests(unittest.TestCase):
         self.assertNotIn('budget', rec)
 
 
+@unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class PaletteProtectionTests(unittest.TestCase):
     def test_default_head_is_byte_exact_while_unprotected_clothing_is_graded(self):
         with tempfile.TemporaryDirectory() as tmp:
