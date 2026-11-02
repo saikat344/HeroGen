@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {defaultName, finishedNote, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, summaryLine, thumbnailOf}
   from '../herogen/service/static/heroes.js';
 
-const job = (id, extra = {}) => ({id, kind: 'prompt', name: id, state: 'succeeded', created_at: 100, finished_at: 160, parent_job: null, ...extra});
+const job = (id, extra = {}) => ({id, kind: 'prompt', name: id, state: 'succeeded', created_at: 100, started_at: 100, finished_at: 160, parent_job: null, ...extra});
 
 test('only root heroes are listed, newest first, with variations counted at the root', () => {
   const jobs = [job('a', {created_at: 10}), job('b', {created_at: 30}), job('a1', {parent_job: 'a', created_at: 40}),
@@ -33,6 +33,19 @@ test('the finish note waits for the Roblox steps before giving the full time', (
   assert.equal(finishedNote(ready, secs), 'Finished in 528 s');
   assert.equal(heroStatus(job('a'), {export_state: 'running'}).note, 'Model ready in 60 s · Roblox files in progress');
   assert.equal(heroStatus(job('a'), {export_state: 'ready', export_seconds: 60, roblox_state: 'ready'}).note, 'Finished in 2 min');
+});
+
+test('run time counts from the start, never from when the hero was queued', () => {
+  const secs = (v) => `${Math.round(v)} s`;
+  // queued for 300 s, then ran for 60 s
+  const waited = job('a', {created_at: 100, started_at: 400, finished_at: 460});
+  assert.equal(heroStatus(waited, null).note, 'Finished in 60 s');
+  assert.equal(heroStatus(job('a', {created_at: 100, started_at: undefined, finished_at: 460}), {started_at: 400}).note, 'Finished in 60 s');
+  assert.equal(finishedNote({state: 'succeeded', created_at: 100, finished_at: 460}, secs), '', 'no start, no run time');
+  assert.equal(heroStatus(job('a', {created_at: 100, started_at: null, finished_at: 460}), null).note, '');
+  // a queued hero says it is queued and gives no run time
+  const queued = heroStatus(job('a', {state: 'queued', started_at: null, finished_at: null}), null);
+  assert.deepEqual([queued.label, queued.note], ['Waiting', 'Starts when a worker is free']);
 });
 
 test('queued and running heroes explain where they are', () => {

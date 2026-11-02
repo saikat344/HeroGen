@@ -629,10 +629,42 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.tab.wait("document.querySelector('#generationTitle').textContent === 'Waiting for a free worker'")
         self.assertEqual([j['state'] for j in self.store.jobs_admin_list()], ['queued','running'])
         self.assertIsNone(self.tab.eval("document.querySelector('#qualityReview')"))
+        self.assertRegex(self.tab.eval("document.querySelector('#elapsed').textContent"), r'^Queued · ',
+                         'a queued hero shows its wait, not a run time')
         self.screenshot('queued-workbench.png')
         self.runner.gate.set()
         self.tab.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
         self.assertEqual([j['state'] for j in self.store.jobs_admin_list()], ['succeeded','succeeded'])
+        self.assertEqual(self.tab.errors, [])
+
+    def test_hero_cards_say_queued_then_time_the_run_from_its_start(self):
+        self.store.generation_update(actor='fixture', max_running=1)
+        self.runner.delay_s = 0.3
+        self.signin()
+        self.make_hero('First hero')
+        self.assertTrue(self.runner.waiting.wait(10))
+        self.tab.eval("document.querySelector('#backToIdeas').click()")
+        self.make_hero('Queued hero')
+        self.tab.eval("document.querySelector('#backToIdeas').click()")
+        self.tab.goto(self.url + '/')
+        card = ("([...document.querySelectorAll('.hero-card')].find((c) => c.querySelector('.hero-card__name').textContent === %s)"
+                "?.querySelector('.hero-card__note')?.textContent || '')")
+        self.tab.wait(card % json.dumps('Queued hero'))
+        queued = self.tab.eval(card % json.dumps('Queued hero'))
+        self.assertNotRegex(queued, r'Finished in|Model ready in', 'a queued hero has no run time')
+        time.sleep(2)   # the second hero waits in the queue; that wait is not its run time
+        self.runner.gate.set()
+        self.backend.wait(60)
+        self.tab.goto(self.url + '/')
+        for job in self.store.jobs_admin_list():
+            ran = job['finished_at'] - job['started_at']
+            waited = job['finished_at'] - job['created_at']
+            self.tab.wait(card % json.dumps(job['name']) + ".match(/^Finished in \\d+ s$/)", timeout=30)
+            shown = int(re.search(r'\d+', self.tab.eval(card % json.dumps(job['name']))).group())
+            self.assertLessEqual(shown, round(ran + (job['export_seconds'] or 0)), job['name'])
+            self.assertGreaterEqual(shown, round(ran), job['name'])
+            if job['name'] == 'Queued hero':
+                self.assertLess(round(ran + (job['export_seconds'] or 0)), round(waited), 'the test must have a queue wait')
         self.assertEqual(self.tab.errors, [])
 
     def test_same_click_network_retry_uses_one_key_and_creates_one_hero(self):
