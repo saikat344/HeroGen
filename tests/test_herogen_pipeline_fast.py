@@ -266,10 +266,13 @@ class FastPipelineTests(unittest.TestCase):
     def test_stage5_failure_is_recorded_and_refined_model_survives(self):
         from herogen.blender.__main__ import main as blender_main
         (self.root / "03-refined.glb").write_bytes(b"refined")
+        out = io.StringIO()
         with mock.patch("herogen.pipeline.results.stage5_results", side_effect=OSError("no space")) as s5, \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             code = blender_main(["run", "--run", str(self.root), "--stages", "5", "--fast"])
         self.assertEqual(code, 0)
+        summary = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(summary["failed_stages"], ["5"], "the summary names this call's failures")
         s5.assert_called_once()
         rec = json.loads((self.root / "stage-5.json").read_text())
         self.assertEqual(rec["stage"], 5)
