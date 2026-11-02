@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultName, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, summaryLine, thumbnailOf}
+import {defaultName, finishedNote, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, summaryLine, thumbnailOf}
   from '../herogen/service/static/heroes.js';
 
 const job = (id, extra = {}) => ({id, kind: 'prompt', name: id, state: 'succeeded', created_at: 100, finished_at: 160, parent_job: null, ...extra});
@@ -22,6 +22,17 @@ test('the status pill never claims Roblox ready without the detail saying so', (
   assert.equal(heroStatus(job('a', {state: 'failed'}), null).label, 'Needs attention');
   assert.equal(heroStatus(job('a', {state: 'rejected'}), null).tone, 'fail');
   assert.equal(heroStatus(job('a', {state: 'canceled'}), null).label, 'Cancelled');
+});
+
+test('the finish note waits for the Roblox steps before giving the full time', () => {
+  const secs = (v) => `${Math.round(v)} s`;
+  const ready = {state: 'succeeded', created_at: 100, started_at: 100, finished_at: 628};
+  assert.equal(finishedNote({...ready, export_state: 'running'}, secs), 'Model ready in 528 s · Roblox files in progress');
+  assert.equal(finishedNote({...ready, export_state: 'ready', export_seconds: 709}, secs), 'Finished in 1237 s');
+  assert.equal(finishedNote({...ready, export_state: 'unavailable', export_seconds: 12}, secs), 'Finished in 540 s');
+  assert.equal(finishedNote(ready, secs), 'Finished in 528 s');
+  assert.equal(heroStatus(job('a'), {export_state: 'running'}).note, 'Model ready in 60 s · Roblox files in progress');
+  assert.equal(heroStatus(job('a'), {export_state: 'ready', export_seconds: 60, roblox_state: 'ready'}).note, 'Finished in 2 min');
 });
 
 test('queued and running heroes explain where they are', () => {

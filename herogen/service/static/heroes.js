@@ -72,6 +72,15 @@ export function stageProgress(detail) {
 }
 
 // The status pill. Colour is never the only signal: every state also has an icon and a label.
+// A succeeded job's model is ready at `finished_at`; the Roblox steps then run on for `export_seconds`. While they
+// run, the note gives the model time and says the Roblox files are still coming; afterwards it gives the full time.
+export function finishedNote(job, format, start = job.started_at || job.created_at) {
+  const model = format(job.finished_at - start);
+  if (job.export_state === 'running') return model ? `Model ready in ${model} · Roblox files in progress` : 'Roblox files in progress';
+  const total = format(job.finished_at + (Number.isFinite(job.export_seconds) ? job.export_seconds : 0) - start);
+  return total ? `Finished in ${total}` : '';
+}
+
 // "Roblox ready" appears only when the detail says the Roblox steps passed.
 export function heroStatus(job, detail) {
   const progress = stageProgress(detail);
@@ -88,7 +97,7 @@ export function heroStatus(job, detail) {
       return { tone: 'run', icon: 'loader-circle', label: 'Running', note, now: label, progress, active: true };
     }
     case 'succeeded': {
-      const took = span(job.finished_at - job.created_at), note = took ? `Finished in ${took}` : '';
+      const note = finishedNote({ ...job, export_state: detail?.export_state, export_seconds: detail?.export_seconds }, span, job.created_at);
       if (detail?.roblox_state === 'ready') return { tone: 'ok', icon: 'person-standing', label: 'Roblox ready', note, progress, active: false };
       return { tone: 'ok', icon: 'circle-check', label: 'Ready', note, progress, active: false };
     }
