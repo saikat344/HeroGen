@@ -851,7 +851,8 @@ class FastStageTests(unittest.TestCase):
         for view in self.VIEWS:
             self.assertTrue(results[view, 1]['ok'])
             cancelled = results[view, 2]
-            self.assertEqual((cancelled['ok'], cancelled['why'], cancelled['m']), (False, 'lower_try_accepted', {'paid': 0}))
+            self.assertEqual((cancelled['ok'], cancelled['why'], cancelled['m']),
+                             (False, 'lower_try_accepted', {'paid': 0, 'paid_usd': 0}))
             self.assertEqual(rec['views'][view]['selected_attempt'], 0)
         ends = [e for e in log if e['kind'] == 'call_end' and e['try'] == 2]
         self.assertEqual(len(ends), 6)
@@ -923,8 +924,37 @@ class BuildLogTests(unittest.TestCase):
             first, second = (json.loads(line) for line in log.read_text().splitlines())
         self.assertEqual((first['view'], first['try'], first['why'], first['m']),
                          ('body-90', 2, 'lower_try_accepted',
-                          {'overlap': 0.79, 'median_px': 10.0, 'median_limit': 6.0, 'paid': 1}))
-        self.assertEqual((second['try'], second['m']), (2, {'paid': 0}))
+                          {'overlap': 0.79, 'median_px': 10.0, 'median_limit': 6.0, 'paid': 1, 'paid_usd': 0.01}))
+        self.assertEqual((second['try'], second['m']), (2, {'paid': 0, 'paid_usd': 0}))
+
+    def test_a_full_lane_client_logs_no_call_costs_but_its_cancelled_try_is_still_paid(self):
+        from herogen.blender.refine import buildlog
+        from herogen.pipeline import events
+        from herogen.pipeline.client import CallLog, call_cost
+        log = CallLog()   # a client outside the fast lane records live calls without their own cost
+        log.add(IMAGE_MODEL, 'edit', 'k', cached=False)
+        log.add(SAM_MODEL, 'segment', 'k2', cached=False, outcome='unknown')   # a timeout that may be billed
+        log.add(SAM_MODEL, 'segment', 'k3', cached=True)
+        self.assertNotIn('cost_usd', log.calls[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'events.jsonl'
+            with mock.patch.dict('os.environ', {events.ENV_FILE: str(out)}):
+                buildlog.try_cancelled('body+0', 2, {'attempts': []}, log.calls)
+            event = json.loads(out.read_text())
+        self.assertEqual(event['m'], {'paid': 1, 'paid_usd': round(call_cost(log.calls[0]) + call_cost(log.calls[1]), 6)})
+        self.assertEqual(event['m']['paid_usd'], PRICE_PER_IMAGE_USD[IMAGE_MODEL] + PRICE_PER_IMAGE_USD[SAM_MODEL])
+
+    def test_a_line_that_cannot_be_worked_out_never_stops_the_stage(self):
+        from herogen.blender.refine import buildlog
+        from herogen.pipeline import events
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'events.jsonl'
+            buildlog.try_result('body+0', {'checks': object()}, False, 'outline moved')   # log off: nothing
+            self.assertFalse(out.exists())
+            with mock.patch.dict('os.environ', {events.ENV_FILE: str(out)}):
+                buildlog.try_result('body+0', {'checks': object()}, False, 'outline moved')
+            event = json.loads(out.read_text())
+        self.assertEqual((event['kind'], event['what'], event['why']), ('skip', 'build_log_detail', 'unreadable'))
 
     def test_record_reasons_become_fixed_identifiers(self):
         from herogen.blender.refine import buildlog
