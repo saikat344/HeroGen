@@ -19,6 +19,7 @@ from PIL import Image
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(_HERE), _HERE]
 
+from herogen.pipeline import events
 from herogen.pipeline import retry
 from herogen.pipeline import ledger
 from fake_model_server import FakeModelServer, error_body, no_wait_policy
@@ -375,6 +376,74 @@ class CompareThroughServerTest(unittest.TestCase):
                 self.assertRaisesRegex(ClientError, "unknown outcome"):
             c._post("responses", {}, model=client_mod.TEXT_MODEL, kind="compare", key="k")
         self.assertFalse((self.cache / client_mod.LEDGER).exists())  # refused before any attempt
+
+
+def _png_b64() -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class BuildLogEventsTest(unittest.TestCase):
+    """A fake transport drives the real request path; the build log's event sequence is asserted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.events = Path(self.tmp.name) / events.FILE
+        self.limiter = retry.SharedLimiter(Path(self.tmp.name) / "limiter", "k")
+        self.image = (200, {}, {"data": [{"b64_json": _png_b64()}]})
+
+    def _generate(self, fast, *answers, stage=None):
+        queue = list(answers)
+        server = FakeModelServer(lambda e, b: queue.pop(0) if len(queue) > 1 else queue[0], DUMMY_KEY)
+        c = ModelClient(Path(self.tmp.name) / "cache", mode="live", policy=no_wait_policy(), limiter=self.limiter,
+                        fast=fast)
+        c.purpose = "turnaround"
+        env = {"MODEL_API_KEY": DUMMY_KEY, events.ENV_FILE: str(self.events), events.ENV_STEP: "2",
+               events.ENV_ATTEMPT: "1"}
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, env), \
+                self.assertLogs("herogen.pipeline.client", "WARNING") if not fast else contextlib.nullcontext():
+            try:
+                c.generate_image("a sheet")
+            except ApiError:
+                pass
+        return [json.loads(x) for x in self.events.read_text().splitlines()], c
+
+    def test_full_lane_429_then_200_logs_the_retry_inside_one_call(self):
+        got, _ = self._generate(False, (429, {}, error_body(429)), self.image)
+        self.assertEqual([e["kind"] for e in got], ["call_start", "call_retry", "call_end"])
+        self.assertEqual(len({e["id"] for e in got}), 1)
+        start, retried, end = got
+        self.assertEqual((start["who"], start["what"], start["step"], start["a"]), ("muse-image", "turnaround", "2", 1))
+        self.assertEqual((retried["attempt"], retried["of"], retried["code"]), (1, retry.RetryPolicy().max_attempts,
+                                                                              "http_429"))
+        self.assertEqual((end["outcome"], end["usd"]), ("ok", 0.01))
+        self.assertNotIn("code", end)
+        self.assertNotIn("a sheet", self.events.read_text())   # the prompt never reaches the log
+
+    def test_fast_lane_single_failure_ends_the_call_failed_with_its_class(self):
+        got, c = self._generate(True, (503, {}, error_body(503)))
+        self.assertEqual([(e["kind"], e.get("outcome"), e.get("code")) for e in got],
+                         [("call_start", None, None), ("call_end", "failed", "http_5xx")])
+        self.assertEqual(got[1]["usd"], 0)
+        self.assertEqual(c.log.calls[-1]["outcome"], "ApiError")   # the stage record is unchanged
+
+    def test_a_cache_hit_is_reused_at_no_cost(self):
+        self._generate(True, self.image)
+        self.events.unlink()
+        got, _ = self._generate(True, self.image)
+        self.assertEqual([(e["kind"], e.get("outcome"), e.get("usd")) for e in got],
+                         [("call_start", None, None), ("call_end", "reused", 0)])
+        self.assertNotIn("s", got[1])
+
+    def test_without_the_variable_nothing_is_written(self):
+        server = FakeModelServer(lambda e, b: self.image, DUMMY_KEY)
+        c = ModelClient(Path(self.tmp.name) / "cache", mode="live", policy=no_wait_policy(), limiter=self.limiter)
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, {"MODEL_API_KEY": DUMMY_KEY}):
+            os.environ.pop(events.ENV_FILE, None)
+            c.generate_image("a sheet")
+        self.assertFalse(self.events.exists())
 
 
 class SchemaErrorsTest(unittest.TestCase):

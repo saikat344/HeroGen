@@ -278,15 +278,13 @@ def _stagep(
         step = "design"
         try:
             if d_sample not in designs:
-                if st.fast:
-                    client.purpose = "sketch design"
+                client.purpose = "sketch design"   # names the call in records (fast lane) and the build log
                 designs[d_sample] = client.generate_image(
                     text, size=version.step("design")["params"]["size"], attempt=d_sample)
             design = designs[d_sample]
             st.save_image(f"{ATTEMPTS_DIR}/{k}-design.png", design)
             step = "full-body edit"
-            if st.fast:
-                client.purpose = "full-body sketch"
+            client.purpose = "full-body sketch"
             full = client.edit_image(full_text, [design], size=version.step("full_body")["params"]["size"],
                                      attempt=f_sample)
             st.save_image(f"{ATTEMPTS_DIR}/{k}-full-body.png", full)
@@ -296,12 +294,14 @@ def _stagep(
                 chosen = (k, design, full)
                 break
             step = "figure checks (SAM 3.1)"
+            client.purpose = "sketch checks"
             checks, fig, mask = figure_checks(client, full)
             rec["figure"] = fig
             if mask is not None:
                 st.save_image(f"{ATTEMPTS_DIR}/{k}-figure-mask.png", imaging.to_mask_image(mask))
             if C.gate_ok(checks):
                 step = "identity check"
+                client.purpose = "same character"
                 id_checks, ident = identity_checks(client, same_version, design, full)
                 checks += id_checks
                 rec["identity"] = ident

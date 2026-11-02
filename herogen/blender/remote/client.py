@@ -30,11 +30,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from herogen.pipeline import ledger
+from herogen.pipeline import events, ledger
 from herogen.pipeline.fast import enabled, tracked
 
 HERE = Path(__file__).resolve().parent
@@ -179,6 +180,20 @@ def body_summary(image: Path, bbox: list, box_source: str, detector: str | None 
             "bbox": [float(x) for x in bbox], "box_source": box_source, "detector": detector}
 
 
+STILL_WAITING_S = 20.0   # a "still waiting for the GPU" build-log line after this long
+
+
+def _gpu_timings(run_log: dict) -> dict:
+    """Model load and inference seconds a runner reported (load > 0 means the model was loaded: a cold start)."""
+    load, total = run_log.get("load_seconds"), run_log.get("total_seconds")
+    out = {}
+    if type(load) in (int, float) and load >= 0:
+        out["load_s"] = round(float(load), 1)
+        if type(total) in (int, float) and total >= load:
+            out["infer_s"] = round(float(total) - float(load), 1)
+    return out
+
+
 class RemoteClient:
     def __init__(self, cache_dir: Path | str, mode: str = "replay", timeout: float = DEFAULT_TIMEOUT,
                  log: CallLog | None = None, body_gpu: str = DEFAULT_BODY_GPU,
@@ -252,6 +267,7 @@ class RemoteClient:
         if entry_path.exists():
             entry = json.loads(entry_path.read_text())
             self.log.add(summary["runner"], key, True, 0.0)
+            events.mark_reused()
             return RemoteResult(d, entry, cached=True)
         if self.mode == "replay":
             # the cache folder's name only: this text ends up in stage records, which must hold no local paths
@@ -281,6 +297,14 @@ class RemoteClient:
             receipt = ledger.sent(self.cache_dir, model=summary["runner"], endpoint="modal/infer", key=key,
                                   timeout=function_timeout, price_usd=None if price is None else function_timeout * price,
                                   timeout_s=function_timeout, price_per_second=price)
+            # The bridge blocks until the GPU answers, so a cold start cannot be seen while it happens: the build
+            # log only says the call is still waiting once it has taken longer than a warm call usually does.
+            call = events.current_call()
+            still = threading.Timer(STILL_WAITING_S, lambda: call.emit("gpu_wait", what=call.what,
+                                                                       s=STILL_WAITING_S))
+            still.daemon = True
+            if call is not None and call.active:
+                still.start()
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout,
                                       env={**os.environ, **env})
@@ -288,11 +312,19 @@ class RemoteClient:
                 if self.fast:
                     self.log.add(summary["runner"], key, False,
                                  None if price is None else round(max(function_timeout, time.monotonic() - t0) * price, 4))
+                if call is not None:
+                    call.code = "timeout"
+                    if price is not None:
+                        call.add_cost(max(function_timeout, time.monotonic() - t0) * price)
                 raise RemoteError(f"{runner} timed out after {self.timeout:.0f} s") from exc
             except OSError as exc:              # modal found but not runnable (permissions, broken install)
                 raise RemoteError(f"{runner}: could not start modal ({type(exc).__name__}: {exc.strerror or exc})"
                                   ) from exc
+            finally:
+                still.cancel()
             wall = time.monotonic() - t0
+            if call is not None and price is not None:
+                call.add_cost(wall * price)
             if self.fast:
                 self.log.add(summary["runner"], key, False, None if price is None else round(wall * price, 4))
             ledger.complete(self.cache_dir, receipt, outcome="ok" if proc.returncode == 0 else "unknown",
@@ -308,6 +340,9 @@ class RemoteClient:
                 shutil.copy2(f, d / f.name)
             run_log = json.loads((out / "run.json").read_text()) if (out / "run.json").exists() else {}
             (d / "modal.log").write_text(logtext)
+            if call is not None:
+                call.m.update(_gpu_timings(run_log))
+                call.extra["gpu"] = events.slug(run_log.get("gpu_type") or gpu, "other").replace("_", "-")
         price = PRICE_PER_SECOND.get(gpu)
         cost = None if price is None else round(wall * price, 4)
         entry = {"request": summary, "gpu": gpu, "wall_seconds": round(wall, 1), "run": run_log,

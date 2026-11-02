@@ -115,6 +115,46 @@ class FastPipelineTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["report", str(run.path)]), 0)
 
+    def test_build_log_events_pair_every_call_and_leak_nothing(self):
+        from herogen.pipeline import events
+        api = ConcurrentAPI()
+        original = api.post
+        def post(client, endpoint, body, **kw):
+            if endpoint == "images/edits" and not body["prompt"].startswith(
+                    (stages.COVER_PROMPT, stages.TURNAROUND_PROMPT, stages.TOP_PROMPT)):
+                img = flow.paint(flow.place(flow.figure_mask(200, "front"), (300, 280), (50, 40)))
+                return {"data": [{"b64_json": flow._b64png(img)}]}
+            return original(client, endpoint, body)
+        log = self.root / "events.jsonl"
+        env = {"MODEL_API_KEY": flow.DUMMY_KEY, events.ENV_FILE: str(log)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ModelClient, "_post", post), \
+                mock.patch.object(client_module, "decode_sam_output", api.decode), \
+                contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop(events.ENV_STEP, None)
+            self.assertEqual(run_pipeline(None, "hero", [0, 1, 2], runs=str(self.root), prompt="a blue knight",
+                                          mode="live", fast=True), 0)
+        text = log.read_text()
+        got = [events.validate(json.loads(x)) for x in text.splitlines()]
+        for needle in ("a blue knight", flow.DUMMY_KEY, str(self.root), "/Users/", "Traceback",
+                       stages.COVER_PROMPT[:40]):
+            self.assertNotIn(needle, text)
+        starts = {e["id"]: e for e in got if e["kind"] == "call_start"}
+        ends = {e["id"]: e for e in got if e["kind"] == "call_end"}
+        self.assertEqual(starts.keys(), ends.keys())
+        self.assertEqual([(e["kind"], e["step"]) for e in got if e["kind"].startswith("step_")],
+                         [(k, s) for s in ("p", "0", "1", "2") for k in ("step_start", "step_end")])
+        muse = [(e["step"], e["what"]) for e in starts.values() if e["who"] == "muse-image"]
+        self.assertCountEqual(muse, [("p", "sketch_design"), ("p", "full_body_sketch"), ("1", "cover_art"),
+                                     ("2", "turnaround"), ("2", "top_view")])
+        self.assertTrue({"character", "feet"} <= {e.get("target") for e in starts.values()
+                                                  if e["who"] == "sam-3.1" and e["step"] == "1"})
+        self.assertTrue(all(e["outcome"] in ("ok", "reused") for e in ends.values()))
+        self.assertAlmostEqual(sum(e["usd"] for e in ends.values()),
+                               sum(RunFolder(self.root, "hero").read_stage(n)["cost_usd"] for n in ("p", 1, 2)))
+        self.assertTrue({"design", "full_body", "sketch", "cover", "turnaround", "front", "top"}
+                        <= {e["what"] for e in got if e["kind"] == "image"})
+        self.assertEqual({e["step"] for e in got if e["kind"] == "checks"}, {"0", "1", "2"})
+
     def test_cli_flag_and_environment_select_fast_execution(self):
         from herogen.pipeline import __main__ as pipeline_cli
         from herogen.blender.__main__ import main as blender_main
