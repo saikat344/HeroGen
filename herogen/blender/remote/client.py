@@ -223,6 +223,20 @@ def _gpu_result(run_log) -> dict:
     return out
 
 
+def _gpu_detail(call, run_log, gpu: str) -> None:
+    """Add the runner's timings, result size and GPU type to the build-log end event. A run log that cannot be
+    read this way never fails the paid call: its detail is left out and the log says so."""
+    try:
+        detail = {**_gpu_timings(run_log), **_gpu_result(run_log)}
+        gpu_type = run_log.get("gpu_type") if isinstance(run_log, dict) else None
+        kind = events.slug(gpu_type or gpu, "other").replace("_", "-")
+    except Exception:  # noqa: BLE001 - logging must never stop a stage after the GPU was paid for
+        events.emit("skip", step=call.step, what="gpu_detail", why="unreadable")
+        return
+    call.m.update(detail)
+    call.extra["gpu"] = kind
+
+
 class RemoteClient:
     def __init__(self, cache_dir: Path | str, mode: str = "replay", timeout: float = DEFAULT_TIMEOUT,
                  log: CallLog | None = None, body_gpu: str = DEFAULT_BODY_GPU,
@@ -370,10 +384,7 @@ class RemoteClient:
             run_log = json.loads((out / "run.json").read_text()) if (out / "run.json").exists() else {}
             (d / "modal.log").write_text(logtext)
             if call is not None and call.active:
-                call.m.update(_gpu_timings(run_log))
-                call.m.update(_gpu_result(run_log))
-                gpu_type = run_log.get("gpu_type") if isinstance(run_log, dict) else None
-                call.extra["gpu"] = events.slug(gpu_type or gpu, "other").replace("_", "-")
+                _gpu_detail(call, run_log, gpu)
         price = PRICE_PER_SECOND.get(gpu)
         cost = None if price is None else round(wall * price, 4)
         entry = {"request": summary, "gpu": gpu, "wall_seconds": round(wall, 1), "run": run_log,
