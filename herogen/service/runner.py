@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from herogen.service.config import FAST_LANE_ENV
+
 log = logging.getLogger("herogen.service")
 
 
@@ -331,11 +333,8 @@ def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """The environment every stage subprocess gets: no secrets, only what Python and Blender need."""
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "HEROGEN_BLENDER", "HEROGEN_MODAL", "SYSTEMROOT", "TMPDIR",
             "HEROGEN_REMOTE_FUNCTION_TIMEOUT",
-            "HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION",
-            "HEROGEN_FAST_LANE", "HEROGEN_MAX_IN_FLIGHT")
+            "HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION", *FAST_LANE_ENV)
     env = {k: os.environ[k] for k in keep if k in os.environ}
-    # Per-model request budgets for the fast lane pass through by prefix.
-    env.update({k: v for k, v in os.environ.items() if k.startswith("HEROGEN_RPM_")})
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = root
     env["PYTHONDONTWRITEBYTECODE"] = "1"

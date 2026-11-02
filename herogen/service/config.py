@@ -257,10 +257,18 @@ def validate(s: Settings, require_key: bool = True) -> None:
             raise ConfigError(f"{ENV['email_from']} must use your own sending domain in production")
 
 
+# The fast lane's process settings, by exact name: the switch, the shared in-flight ceiling and the per-model
+# request budgets (`herogen.pipeline.retry.SharedRPMLimiter` reads HEROGEN_RPM_<MODEL>). Never a prefix match.
+FAST_LANE_ENV = ("HEROGEN_FAST_LANE", "HEROGEN_MAX_IN_FLIGHT", "HEROGEN_RPM_MUSE_IMAGE_1_0",
+                 "HEROGEN_RPM_SAM_3_1", "HEROGEN_RPM_MUSE_SPARK_1_3")
+
+
 def env_for_deploy(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Non-secret service settings and pipeline prompt selectors to bake into the Modal image at deploy time."""
+    """Non-secret service settings, pipeline prompt selectors and fast-lane settings to bake into the Modal image
+    at deploy time, so worker containers run the same lane as the deploy that built them."""
     env = os.environ if env is None else env
     secret_vars = {ENV[f] for f in SECRET_FIELDS}
-    selectors = {"HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION", "HEROGEN_TEXTURE_NOTES"}
+    selectors = {"HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION", "HEROGEN_TEXTURE_NOTES",
+                 *FAST_LANE_ENV}
     return {k: v for k, v in env.items() if (k.startswith("HEROGEN_SERVICE_") or k in selectors)
             and k not in secret_vars}
