@@ -7,6 +7,71 @@ from . import PARENT
 from .meshindex import MeshIndex
 
 
+def sleeve_support(verts, faces, a, b):
+    """Locate a closed sleeve cross section near a bone's midpoint, including hollow cuffs.
+
+    A winding test at the bone centre rejects a hollow sleeve even when its enclosing surface exists.
+    Intersect the source triangles with the transverse plane instead. Only a closed local contour fits:
+    both its centre's displacement and its radius must fit within half this segment's length. A remote
+    torso, robe hem or prop cannot supply an arbitrarily distant substitute for an absent arm.
+    """
+    direction = b - a
+    length = float(np.linalg.norm(direction))
+    if length <= 1e-12:
+        return None
+    direction /= length
+    midpoint = (a + b) / 2
+    distance = (verts - midpoint) @ direction
+    signed = distance[faces]
+    crossing = (signed.min(1) < 0) & (signed.max(1) > 0)
+    triangles, signed = verts[faces[crossing]], signed[crossing]
+    points, ids, adjacency = [], {}, {}
+    # Quantisation only joins the two evaluations of an edge shared by source triangles.
+    tolerance = max(float(np.ptp(verts, axis=0).max()) * 1e-8, 1e-12)
+    for triangle, distances in zip(triangles, signed):
+        pair = []
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            if distances[i] * distances[j] >= 0:
+                continue
+            point = triangle[i] + distances[i] / (distances[i] - distances[j]) * (triangle[j] - triangle[i])
+            key = tuple(np.rint(point / tolerance).astype(np.int64))
+            if key not in ids:
+                ids[key] = len(points)
+                points.append(point)
+            pair.append(ids[key])
+        if len(pair) == 2:
+            i, j = pair
+            adjacency.setdefault(i, set()).add(j)
+            adjacency.setdefault(j, set()).add(i)
+    points = np.asarray(points)
+    remaining, candidates = set(adjacency), []
+    while remaining:
+        component = {remaining.pop()}
+        pending = list(component)
+        while pending:
+            i = pending.pop()
+            for j in adjacency[i] - component:
+                component.add(j)
+                remaining.discard(j)
+                pending.append(j)
+        if len(component) < 3 or any(len(adjacency[i]) != 2 for i in component):
+            continue
+        edges = [(i, j) for i in component for j in adjacency[i] if i < j]
+        start, end = points[np.asarray(edges).T]
+        weights = np.linalg.norm(end - start, axis=1)
+        if weights.sum() <= tolerance:
+            continue
+        centre = np.average((start + end) / 2, axis=0, weights=weights)
+        offset = float(np.linalg.norm(centre - midpoint))
+        radius = float(np.linalg.norm(points[list(component)] - centre, axis=1).max())
+        if offset <= length / 2 and tolerance < radius <= length / 2:
+            candidates.append((offset, centre, radius))
+    if not candidates:
+        return None
+    offset, centre, radius = min(candidates, key=lambda item: item[0])
+    return {"centre": centre.tolist(), "radius_studs": radius, "offset_studs": offset}
+
+
 def _mask_radius(front, point, direction):
     """Half width of the occupied front-mask interval across a bone, nearest its centre."""
     d = np.asarray(direction, float)[[0, 2]]

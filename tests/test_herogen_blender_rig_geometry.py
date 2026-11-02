@@ -101,6 +101,48 @@ def box(name, lo, hi, pivot):
     return split.Section(name, verts, faces, np.array(pivot, float), [], 0)
 
 
+class SleeveSupportTests(unittest.TestCase):
+    def support(self, sections, a=(0, 0, 0), b=(1, 0, 0)):
+        verts = np.concatenate([s.verts for s in sections])
+        offsets = np.cumsum([0] + [len(s.verts) for s in sections[:-1]])
+        faces = np.concatenate([s.faces + offset for s, offset in zip(sections, offsets)])
+        before = verts.copy(), faces.copy()
+        result = rig_geometry.sleeve_support(verts, faces, np.array(a, float), np.array(b, float))
+        np.testing.assert_array_equal(verts, before[0])
+        np.testing.assert_array_equal(faces, before[1])
+        return result
+
+    def test_hollow_sleeve_supports_a_bone_in_its_empty_centre(self):
+        outer = box("outer", [0, -.2, -.2], [1, .2, .2], [0, 0, 0])
+        inner = box("inner", [0, -.15, -.15], [1, .15, .15], [0, 0, 0])
+        inner.faces = inner.faces[:, ::-1]
+        result = self.support([outer, inner])
+        self.assertIsNotNone(result)
+        np.testing.assert_allclose(result["centre"], [.5, 0, 0], atol=1e-12)
+
+    def test_displaced_sleeve_has_local_support(self):
+        sleeve = box("sleeve", [0, .1, -.1], [1, .3, .1], [0, 0, 0])
+        result = self.support([sleeve])
+        np.testing.assert_allclose(result["centre"], [.5, .2, 0], atol=1e-12)
+
+    def test_a_remote_prop_is_not_a_missing_arm(self):
+        prop = box("prop", [0, 2, -.1], [1, 2.2, .1], [0, 0, 0])
+        self.assertIsNone(self.support([prop]))
+
+    def test_a_large_torso_is_not_local_sleeve_support(self):
+        torso = box("torso", [0, -1, -1], [1, 1, 1], [0, 0, 0])
+        self.assertIsNone(self.support([torso]))
+
+    def test_an_open_surface_is_not_a_closed_sleeve(self):
+        sleeve = box("sleeve", [0, -.2, -.2], [1, .2, .2], [0, 0, 0])
+        sleeve.faces = sleeve.faces[:-2]
+        self.assertIsNone(self.support([sleeve]))
+
+    def test_zero_length_segment_cannot_supply_support(self):
+        sleeve = box("sleeve", [0, -.2, -.2], [1, .2, .2], [0, 0, 0])
+        self.assertIsNone(self.support([sleeve], b=(0, 0, 0)))
+
+
 class PivotTests(unittest.TestCase):
     def test_existing_valid_pivots_are_exactly_preserved(self):
         section = box("LowerTorso", [0, 0, 0], [1, 1, 1], [.5, .5, .5])

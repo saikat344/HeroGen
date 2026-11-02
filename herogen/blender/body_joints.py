@@ -223,7 +223,8 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | No
     Silhouette limb roots can disagree with the model's distal joints. Try the recorded anatomical roots,
     changing the fewest roots that give every part vertices, including the actual decimation candidates.
     If radius weighting still loses a merged limb, partition its existing surface by nearest bone distance.
-    That requires the recorded proximal and distal limb segments to be inside the mesh; absent limbs fail.
+    That requires source support at both segment interiors. Hollow sleeves use a closed local transverse
+    contour instead of requiring solid material at the arm centre; absent limbs still fail.
     All other joints, radii and ends stay selected. No pose-gap measurement selects this fallback.
     """
     from copy import deepcopy
@@ -301,8 +302,17 @@ def nonempty_limb_roots(sk, rec: dict, verts: np.ndarray, faces: np.ndarray | No
             for section in segments:
                 a, b, _ = rig.bones[section]
                 if not mesh.inside(((a + b) / 2)[None])[0]:
+                    if kind == "Arm":
+                        from .rig_geometry import sleeve_support
+
+                        support = sleeve_support(verts, faces, a, b)
+                        if support is not None:
+                            candidate.notes.append(f"{section} supported by a closed source sleeve cross section "
+                                                   f"({support['offset_studs']:.4f} studs from bone midpoint)")
+                            continue
+                    detail = "no local closed sleeve cross section supports it; " if kind == "Arm" else ""
                     raise ValueError(f"stage 4 cannot recover {chain}: no mesh around the recorded {section} "
-                                     "segment midpoint; limb surface is absent or joints lie outside the mesh")
+                                     f"segment midpoint; {detail}limb surface is absent or joints lie outside the mesh")
         candidate.surface_chains = tuple(sorted(set(candidate.surface_chains) | chains))
         remaining = empty(candidate)
         if not remaining:
