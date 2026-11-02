@@ -215,8 +215,16 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   If four views cannot be extracted, stage 2 requests exactly one recovery sheet with the same prompt and
   a different sample index. Both attempts are recorded in `stage-2.json`. Quality scores never trigger
   recovery. If neither sheet can be extracted, it stops with a plain message asking the user to try again
-  or use a clearer full-body drawing; no separate single-view fallback exists. The top view remains its
-  own request after successful sheet extraction. Model errors stop immediately without recovery.
+  or use a clearer full-body drawing; no separate single-view fallback exists. The top image request runs
+  independently in parallel with sheet extraction (including its one possible recovery). It is never
+  regenerated. A usable top keeps the front-width scale unless that would clip it; fast mode then scales
+  the whole crop down to fit the canvas. If no usable top mask exists, stage 2 succeeds with the four side
+  views, their metadata and part masks. It saves the raw top in `02-top-drawn.png`, records
+  `details.top_method: "missing"`, `details.missing_views: ["top"]`, the mask method and a plain reason/note.
+  `views/meta.json` lists only saved views and records `missing_views`; stale top image and mask files are
+  removed. Stage 3 records `missing views skipped: top`. Stage 3f uses the cover and mesh renders, while
+  stage 4 constructs cameras and colour projections only for available views; neither requires a top.
+  Model errors stop immediately without recovery, including errors on the optional top request.
 - Stage 2's front face and head mask requests run concurrently after the front image is ready. Both
   requests finish before the stage writes its record; a failure propagates in face/head prompt order,
   and every failed request retains its receipt. Stage p's design and full-body image requests remain sequential.
@@ -1404,7 +1412,8 @@ cropping; other stages keep their existing SAM masks. An empty segmentation neve
   error "no character found in the sketch" and `sketch_characters_found` 0 (see Input checks). Nothing found in a generated image fails that image's gate: the
   cover's `cover_mask_area_frac`, a turnaround sheet's `figures_found` (it is generated again), a held-out
   generation's `figure_mask_sam_coverage` (rejected, measured no further, generated again). Nothing found in
-  the drawn top view means it is not used, so the top view is the visual hull.
+  the drawn top view means it is not used: the full lane saves the visual hull, while the fast lane records
+  the top as missing and continues with the side views.
 - SAM's columns must first give four figures; otherwise `figures_found` fails, except for the fast-only
   instance fallback described above. On the column path, before crop bounds are
   computed, `imaging.complete_attached_foreground` unions the SAM mask with foreground components that

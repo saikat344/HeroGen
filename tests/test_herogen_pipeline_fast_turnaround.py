@@ -1,10 +1,12 @@
 """Fast turnaround recovery with synthetic sheets and a fake model transport."""
 
+from contextlib import nullcontext
 import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -32,7 +34,7 @@ class FastTurnaroundTests(unittest.TestCase):
         self.bad = flow.sheet(order=("front", "right", "front"))[0]
         self.client = ModelClient(self.root / "cache", mode="live", fast=True)
 
-    def execute(self, sheets, *, attempts=9, instances=None):
+    def execute(self, sheets, *, attempts=9, instances=None, top=None, barrier=None, inspect_edits=True):
         self.api = flow.SheetsAPI(sheets)
         def decode(text, size):
             if instances is not None and size == sheets[0].size and self.api.last_sam_text == "character":
@@ -41,11 +43,23 @@ class FastTurnaroundTests(unittest.TestCase):
         def parts(*_):
             self.run.write_json("masks/parts.json", {})
             return {}
+        def post(client, endpoint, body, **_):
+            if endpoint == "images/edits" and body["prompt"] in (stages.TOP_PROMPT, stages.TURNAROUND_PROMPT):
+                if barrier is not None and body["prompt"] == stages.TOP_PROMPT:
+                    barrier.wait(timeout=5)
+                elif barrier is not None and self.api.n == 0:
+                    barrier.wait(timeout=5)
+                if top is not None and body["prompt"] == stages.TOP_PROMPT:
+                    self.api.calls.append(endpoint)
+                    self.api.prompts.append(body["prompt"])
+                    return {"data": [{"b64_json": flow._b64png(top)}]}
+            return self.api.post(client, endpoint, body)
         with mock.patch.dict(os.environ, {"MODEL_API_KEY": flow.DUMMY_KEY}), \
-                mock.patch.object(ModelClient, "_post", lambda c, e, b, **_: self.api.post(c, e, b)), \
+                mock.patch.object(ModelClient, "_post", post), \
                 mock.patch.object(client_module, "decode_sam_output", decode), \
                 mock.patch("herogen.pipeline.parts.write_part_masks", side_effect=parts), \
-                mock.patch.object(self.client, "edit_image", wraps=self.client.edit_image) as edits:
+                (mock.patch.object(self.client, "edit_image", wraps=self.client.edit_image)
+                 if inspect_edits else nullcontext()) as edits:
             self.edits = edits
             return stages.stage2_turnaround(self.run, self.client, attempts=attempts)
 
@@ -154,7 +168,7 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertEqual([c.kwargs["attempt"] for c in calls], [0, 1])
         self.assertEqual(calls[0].args, calls[1].args)
         self.assertEqual(calls[0].kwargs["size"], calls[1].kwargs["size"])
-        self.assertEqual(self.api.prompts, [stages.TURNAROUND_PROMPT] * 2 + [stages.TOP_PROMPT])
+        self.assertCountEqual(self.api.prompts, [stages.TURNAROUND_PROMPT] * 2 + [stages.TOP_PROMPT])
         details = self.run.read_stage(2)["details"]
         self.assertEqual([a["extracted"] for a in details["attempts"]], [False, True])
         self.assertEqual(details["kept_attempt"], 1)
@@ -171,7 +185,7 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertEqual((record["ok"], record["status"], record["error"]), (False, "error", MESSAGE))
         self.assertEqual([a["extracted"] for a in record["details"]["attempts"]], [False, False])
         self.assertEqual([a["checks"][0]["value"] for a in record["details"]["attempts"]], [0, 3])
-        self.assertEqual(self.api.prompts, [stages.TURNAROUND_PROMPT] * 2)
+        self.assertCountEqual(self.api.prompts, [stages.TURNAROUND_PROMPT] * 2 + [stages.TOP_PROMPT])
         self.assertFalse(self.run.exists("views/meta.json"))
 
     def test_usable_sheet_is_requested_once_even_when_quality_fails(self):
@@ -181,7 +195,7 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertTrue(record["ok"])
         self.assertEqual(len(self.sheet_calls()), 1)
         self.assertEqual(len(record["details"]["attempts"]), 1)
-        self.assertEqual(self.api.prompts, [stages.TURNAROUND_PROMPT, stages.TOP_PROMPT])
+        self.assertCountEqual(self.api.prompts, [stages.TURNAROUND_PROMPT, stages.TOP_PROMPT])
         self.assertTrue(any(not c["pass"] for c in record["checks"]))
         self.assertTrue(all(not c["gate"] for c in record["checks"]))
 
@@ -228,7 +242,7 @@ class FastTurnaroundTests(unittest.TestCase):
                         mock.patch.object(self.client, operation, side_effect=error) as calls:
                     with self.assertRaises(type(error)):
                         self.execute([self.good])
-                    calls.assert_called_once()
+                    self.assertEqual(calls.call_count, 2 if operation == "edit_image" else 1)
                     self.assertEqual(len(self.sheet_calls()), 1)
                     self.assertIn(str(error), self.run.read_stage(2)["error"])
 
@@ -245,6 +259,101 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertEqual([a["attempt"] for a in record["details"]["attempts"]], [0, 1])
         self.assertFalse(record["details"]["attempts"][0]["extracted"])
         self.assertIn("the model client failed: missing recovery sample", record["error"])
+
+    def test_top_request_overlaps_sheet_and_is_not_repeated_for_recovery(self):
+        record = self.execute([self.bad, self.good], barrier=threading.Barrier(2), inspect_edits=False)
+        self.assertTrue(record["ok"])
+        self.assertEqual(self.api.prompts.count(stages.TOP_PROMPT), 1)
+        self.assertEqual(self.api.prompts.count(stages.TURNAROUND_PROMPT), 2)
+        images = [c for c in record["calls"] if c["kind"] == "edit"]
+        self.assertCountEqual([c["purpose"] for c in images], ["top view", "turnaround", "turnaround"])
+
+    def test_empty_top_saves_four_views_metadata_parts_and_skips_top_in_stage3(self):
+        from herogen.blender import stage3, stage4, texture, joints
+        from herogen.blender.views import load_views
+        # A previous successful top must not leak into an explicit Retry.
+        for rel in ("views/top.png", "masks/top.png"):
+            Image.new("L", (32, 32), 255).save(self.run.file(rel))
+        blank = Image.new("RGB", (300, 280), "white")
+        record = self.execute([self.good], top=blank)
+        self.assertTrue(record["ok"])
+        self.assertEqual(self.api.prompts.count(stages.TOP_PROMPT), 1)
+        self.assertEqual(len(self.sheet_calls()), 1)
+        self.assertEqual(record["details"]["top_method"], "missing")
+        self.assertEqual(record["details"]["missing_views"], ["top"])
+        self.assertEqual(record["details"]["top_drawn_mask_method"], stages.SAM_NOTHING_FOUND)
+        self.assertIn("No usable character mask", record["details"]["top_method_detail"])
+        self.assertIn("Continuing with the four side views", record["notes"])
+        self.assertTrue(self.run.exists("02-top-drawn.png"))
+        self.assertTrue(self.run.exists("masks/parts.json"))
+        self.assertFalse(self.run.exists("views/top.png"))
+        self.assertFalse(self.run.exists("masks/top.png"))
+        meta = self.run.read_json("views/meta.json")
+        self.assertEqual(meta["views"], list(stages.SIDE_VIEWS))
+        self.assertEqual(meta["missing_views"], ["top"])
+        self.assertEqual(set(meta["mask_method"]), set(stages.SIDE_VIEWS))
+        def render(job, *_, **kwargs):
+            for camera in job["tasks"][0]["cameras"]:
+                name = camera["view"]
+                self.assertNotEqual(name, "top")
+                Image.new("L", (meta["image_size"],) * 2).save(
+                    self.run.path / "03-renders" / f"{name}.png")
+            return {"blender": "synthetic"}
+        mesh = (np.array([[0, 0, 0], [1, 0, 1], [0, 1, 1]], float), np.array([[0, 1, 2]]))
+        info = {"detached_side_prior_voxels": 0, "arm_depth_prior_columns": 0}
+        with mock.patch.object(stage3.carve, "build_mesh", return_value=(*mesh, info)), \
+                mock.patch.object(stage3.bl, "run_job", side_effect=render):
+            s3 = stage3.run_stage3(self.run.path, mesh_source="carve", joints_source="silhouette", fast=True)
+        self.assertTrue(s3["ok"])
+        self.assertIn("missing views skipped: top", s3["notes"])
+        # Stage 4's provenance, joints, colour inputs and cameras use only the available views.
+        vs = load_views(self.run.path, stages.HEIGHT_UNITS)
+        source, shape_views, check = stage4._shape_views(self.run.path, vs)
+        self.assertEqual(source, "carve")
+        self.assertEqual(shape_views, set(stages.SIDE_VIEWS))
+        self.assertTrue(check["pass"])
+        self.assertIsNotNone(joints.estimate(vs, stages.HEIGHT_UNITS))
+        self.assertEqual(set(texture.observed_colour_views(vs, self.run.path)), set(stages.SIDE_VIEWS))
+        self.assertEqual({v.camera()["view"] for v in vs.views.values()}, set(stages.SIDE_VIEWS))
+
+    def test_top_model_errors_stay_loud_without_recovery(self):
+        original = self.client.edit_image
+        for error in (ApiError("top failed"), ReplayMiss("top missing")):
+            def edit(prompt, *args, **kwargs):
+                if prompt == stages.TOP_PROMPT:
+                    raise error
+                return original(prompt, *args, **kwargs)
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(self.client, "edit_image", side_effect=edit):
+                with self.assertRaises(type(error)):
+                    self.execute([self.good])
+                self.assertEqual(len(self.sheet_calls()), 1)
+                self.assertIn(str(error), self.run.read_stage(2)["error"])
+
+    def test_top_fit_keeps_usable_pixels_and_scales_down_only_when_needed(self):
+        for width, height in ((60, 40), (20, 180)):
+            with self.subTest(width=width, height=height):
+                mask = np.zeros((200, 200), bool)
+                mask[10:10+height, 10:10+width] = True
+                raw = flow.paint(mask)
+                front = np.zeros((100, 100), bool)
+                front[10:90, 10:90] = True
+                sq = {"front": {"mask": front}}
+                inst = [SamInstance(mask, flow.imaging.bbox(mask), .9)]
+                with mock.patch.object(self.client, "segment", return_value=inst):
+                    top = stages.model_top_view(self.client, raw, sq, 100, (255, 255, 255), raw=raw)
+                expected_scale = min(80 / width, 100 / height)
+                self.assertEqual(top["scale"], round(expected_scale, 4))
+                self.assertEqual(flow.imaging.box_size(flow.imaging.bbox(top["mask"])),
+                                 (round(width * expected_scale), round(height * expected_scale)))
+                if height == 40:
+                    self.client.fast = False
+                    with mock.patch.object(self.client, "edit_image", return_value=raw), \
+                            mock.patch.object(self.client, "segment", return_value=inst):
+                        full = stages.model_top_view(self.client, raw, sq, 100, (255, 255, 255))
+                    np.testing.assert_array_equal(top["mask"], full["mask"])
+                    np.testing.assert_array_equal(top["image"], full["image"])
+                    self.client.fast = True
 
     def test_non_fast_recorded_call_sequence_and_outputs_unchanged(self):
         self.client = ModelClient(self.root / "cache", mode="live", fast=False)
