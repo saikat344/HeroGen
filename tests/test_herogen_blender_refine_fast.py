@@ -908,6 +908,34 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(list(self.run.rglob('events.jsonl')), [])
 
 
+class BuildLogTests(unittest.TestCase):
+    def test_a_cancelled_try_says_whether_its_repaint_was_already_paid(self):
+        from herogen.blender.refine import buildlog
+        from herogen.pipeline import events
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'events.jsonl'
+            private = {'attempts': [{'try': 2, 'checks': {'iou': 0.79, 'median_px': 10.0, 'median_limit': 6.0}}]}
+            with mock.patch.dict('os.environ', {events.ENV_FILE: str(log)}):
+                buildlog.try_cancelled('body-90', 2, private, [{'model': IMAGE_MODEL, 'cached': False,
+                                                                'cost_usd': 0.01}])
+                buildlog.try_cancelled('body-90', 2, {'attempts': []}, [{'model': IMAGE_MODEL, 'cached': True,
+                                                                         'cost_usd': 0.0}])
+            first, second = (json.loads(line) for line in log.read_text().splitlines())
+        self.assertEqual((first['view'], first['try'], first['why'], first['m']),
+                         ('body-90', 2, 'lower_try_accepted',
+                          {'overlap': 0.79, 'median_px': 10.0, 'median_limit': 6.0, 'paid': 1}))
+        self.assertEqual((second['try'], second['m']), (2, {'paid': 0}))
+
+    def test_record_reasons_become_fixed_identifiers(self):
+        from herogen.blender.refine import buildlog
+        self.assertEqual([buildlog.why(r) for r in (
+            'outline moved', 'new face outside the render face', 'hair outline, scale or colour agreement',
+            'cancelled: lower attempt accepted', 'API cap: projected $0.0100 exceeds $0.0000',
+            'missing facial features: mouth', 'ApiError')],
+            ['outline_moved', 'second_face', 'hair_mismatch', 'lower_try_accepted', 'spend_cap',
+             'missing_features', 'model_error'])
+
+
 @unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
 class ReprojectionTests(unittest.TestCase):
     def test_reprojection_resets_base_and_reproduces_atlas_hash(self):
