@@ -2490,8 +2490,8 @@ projection and never release the oblique guard. Full refinement may continue wit
 limit. A reference with no detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
 it does not measure sharpness, identity or expression, and does not apply when beauty is disabled.
 In the fast profile, beauty remains opt-in through the same `beauty_dir` parameter. Ordinary fast waves
-first resolve from the original ungraded base, using the same cover, gates, two attempts per pass and user
-note. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
+first resolve from the original ungraded base, using the same cover, gates and user note, but only
+attempt zero per pass. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
 back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
 recorded in `default_fast_fallback`, including when a beauty face is retained.
 The head pass's two independent slots run one beauty sample and the ordinary recipe's first sample
@@ -2506,7 +2506,8 @@ Before publishing the first version, every frontal candidate resolves. An accept
 mouth. The largest connected eye region in each face half also supplies a detail comparison with the
 corresponding accepted ordinary-fast paint. Each eye box gains a 15% horizontal-size context margin,
 then both greyscale crops resize to 64 by 48. Both eyes must retain at least the ordinary paint's interior
-Laplacian variance and edge density (Sobel gradient above 0.04). Missing boxes or ordinary paint reject
+Laplacian variance and edge density (Sobel gradient above 0.04), both strictly positive for the ordinary
+crop. Missing boxes, ordinary paint or ordinary eye detail reject
 the beauty face. `eye_quality` records both measurements and their ratios; this uses existing eye masks,
 without another model call. Otherwise the source is `default` when the independent ordinary head sample
 passed, or `default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM
@@ -2558,11 +2559,18 @@ between, beauty reference last). SideBeautyPass adds no turnaround reference to 
 frontal recipe checks remain active.
 The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
 proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
-With fast beauty enabled, every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
+With fast beauty enabled, a nested cover-only ordinary run submits only attempt zero for each view,
+never ordinary attempt one. Its atlas uses those accepted first paints and the original base wherever
+they fail. This single-attempt atlas supplies the default-head fallback and eye-detail comparison.
+Every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
 exact ordinary-fast first request for that pass: original cover, ordinary recipe, sample index zero and
-ordinary wave's frozen render. Slot 2 receives neither turnaround images nor beauty references. The
+ordinary wave's frozen render. Slot 2 replays the actual nested ordinary attempt zero from cache; it makes no new paid edit.
+Thus an uncached run pays at most two image-edit samples per view in total: one ordinary and one
+enhanced, including when SideBeautyPass and region palette are also on.
+Slot 2 receives neither turnaround images nor beauty references. The
 lowest passing slot wins; higher body/hair slots are cancelled when the lower slot wins. Head candidates
-both drain because eye-detail selection requires the ordinary paint. `selected_attempt` is zero-based;
+both drain because eye-detail selection requires the ordinary paint. A flat ordinary eye crop is
+ineligible for that comparison and records that ordinary eye detail is unavailable. `selected_attempt` is zero-based;
 `winning_slot` records the one-based winner. Missing side orientation keeps slot 1 on its usual beauty
 reference and preserves the same ordinary slot 2. This contains rejected enhancements without a third
 enhanced sample or a weakened paint gate.

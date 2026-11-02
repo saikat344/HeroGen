@@ -732,6 +732,28 @@ class FastStageTests(unittest.TestCase):
                 stage.run_stage3f(self.run, self.client, **kw)
             self.assertEqual(final.read_bytes(), b'keep')
 
+    def test_default_fast_and_best_keep_the_frozen_request_sequences(self):
+        from collections import Counter
+        from herogen.blender.refine import prompts
+        self.client.reject = True  # Exercise every sample, without cancellation after a pass.
+        expected = {
+            'fast': [('RF2R', angle, 2) for angle in (0, 0, 90, -90, 180)] + [('RF3H', 180, 2)],
+            'best': [('RF2R', angle, 3) for angle in (0, 40, -40, 90, -90, 180, 0, 45, -45, 90, -90, 180)]
+                    + [('RF3H', angle, 2) for angle in (90, 135, 180, -135, -90, 135, 180, -135)],
+        }
+        for profile, passes in expected.items():
+            with self.subTest(profile=profile), \
+                 mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+                self.client.inputs.clear()
+                stage.run_stage3f(self.run, self.client, refine_profile=profile, cap_usd=None)
+                actual = [(text, options['attempt']) for text, _, options in self.client.inputs]
+                frozen = [(prompts.prompt(recipe, angle), attempt)
+                          for recipe, angle, attempts in passes for attempt in range(attempts)]
+                if profile == 'fast':
+                    self.assertEqual(Counter(actual), Counter(frozen))
+                else:
+                    self.assertEqual(actual, frozen)
+
     def test_default_omits_fast_metadata(self):
         rec = stage.run_stage3f(self.run, self.client)
         self.assertNotIn('refine_profile', rec)
