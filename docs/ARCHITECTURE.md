@@ -178,21 +178,40 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   `details.completed_figure: true` and `details.upload_failed_checks` in `stage-1.json`; the latter lists
   failed upload full-body measurements and their aggregate check. Failed covers keep their image and
   diagnostics for explicit Retry.
-  A prompt sketch retains its input character, feet and frame-gap checks. It skips the photo judge only
-  when passing stage-p and stage-0 provenance records exist and its pixels match `p-full-body.png`;
-  its cover edit runs concurrently with its `character` and `feet` calls. A rejection discards the
-  speculative edit and removes any stale cover. All submitted calls finish before recording or raising
-  an error. Necessary check failures write `input_rejected` with plain messages and measured checks,
-  without a retry. `sketch_characters_found` records the substantial character count on the cover for
-  uploads and on the input for prompt sketches. `sketch_feet_on_figure` records the conjunction of the
-  frame-gap checks on upload covers, including the feet measurement only for prompt sketches.
-  Raw counts and gaps retain their original thresholds as diagnostic checks, prefixed `cover_` on
-  upload covers. These existing rejection names preserve the service's plain character and full-body
-  messages.
+  A prompt sketch skips the photo judge only when passing stage-p and stage-0 provenance records
+  exist and its pixels match `p-full-body.png`. Its `character` and `feet` calls run concurrently and
+  finish before the cover edit, so a cropped sketch can select the completion prompt without a second
+  edit. Only two or more substantial input characters refuse; zero detections select completion.
+  Visible feet are optional: `feet_in_lower_half` is informational for peg legs, dresses, robes and
+  tails. The full-body predicate uses only the existing top/bottom frame-gap tolerance. A cropped
+  generated sketch selects the same completion prompt as an upload, retaining the colour brief,
+  cover reference and bounded appearance note. Its input diagnostics use `generated_` names and
+  `details.generated_failed_checks`; its completed cover receives the same necessary character and
+  frame-gap checks as an upload's cover. A successful completion records `details.completed_figure`.
+  An in-frame generated sketch retains its normal cover prompt and input frame-gap check, with no
+  model-based cover checks. Every stage-1 invocation removes any stale cover before checking input.
+  All submitted calls finish before recording or raising an error. Necessary check failures write
+  `input_rejected` with plain messages and measured checks, without a retry.
+  `sketch_characters_found` records the substantial character count on the cover for uploads and
+  completed prompt sketches, and on the input for other prompt sketches. `sketch_feet_on_figure`
+  records the conjunction of the frame-gap checks, with feet counts always informational on generated
+  art. Raw counts and gaps retain their original thresholds as diagnostic checks, prefixed `cover_`
+  on checked covers. These existing rejection names preserve the service's plain character and
+  full-body messages.
   Other input and cover quality checks remain skipped or informational.
   Stage 2 requests one sheet and one top view, retaining local
   diagnostics without gating, ranking alternatives or selecting a replacement top on quality. Required
   figure masks still use segmentation, with one concept request rather than a second concept fallback.
+  The existing column split runs first. When it finds fewer than four figures, fast mode may instead
+  use the four largest non-empty SAM instances. Their height agreement must meet the existing
+  `checks.HEIGHT_AGREE_MIN` (0.95), each area must be at least 20% of the largest (the existing figure
+  union floor), and their box-centre x coordinates must be distinct. The instances are sorted by centre
+  x and assigned front, right, back, left in sheet order. Crops share one row range and pixel scale;
+  each crop's image and mask contain only that instance's pixels, with the rest filled with the sheet
+  background. Attached-foreground completion is skipped for these crops to avoid joining neighbours.
+  The attempt records `split_source: "sam-3.1:instances"`, the original `column_runs` and
+  `instance_split` boxes, height agreement and minimum area fraction. Fewer than four instances or
+  implausible parts remain unusable. The full lane retains its column-only split and assignment.
   If four views cannot be extracted, stage 2 requests exactly one recovery sheet with the same prompt and
   a different sample index. Both attempts are recorded in `stage-2.json`. Quality scores never trigger
   recovery. If neither sheet can be extracted, it stops with a plain message asking the user to try again
@@ -1386,7 +1405,8 @@ cropping; other stages keep their existing SAM masks. An empty segmentation neve
   cover's `cover_mask_area_frac`, a turnaround sheet's `figures_found` (it is generated again), a held-out
   generation's `figure_mask_sam_coverage` (rejected, measured no further, generated again). Nothing found in
   the drawn top view means it is not used, so the top view is the visual hull.
-- SAM's columns must first give four figures; otherwise `figures_found` fails. Before crop bounds are
+- SAM's columns must first give four figures; otherwise `figures_found` fails, except for the fast-only
+  instance fallback described above. On the column path, before crop bounds are
   computed, `imaging.complete_attached_foreground` unions the SAM mask with foreground components that
   overlap or touch it within one pixel (8 neighbours). Foreground contains pixels with any RGB channel
   below 215, with components smaller than 16 pixels removed. Enclosed near-white regions stay empty unless

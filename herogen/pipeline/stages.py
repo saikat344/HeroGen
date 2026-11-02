@@ -436,7 +436,7 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
 
 def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.Image, prompt: str
                 ) -> dict[str, Any]:
-    """Complete cropped uploads and check the cover; generated sketches keep their input gates."""
+    """Complete cropped sketches and check the cover; visible feet are optional on generated art."""
     source = run.read_stage(0) or {}
     origin = (source.get("details") or {}).get("origin") or {}
     generated = (source.get("ok") is True and origin.get("stage") == "p"
@@ -452,32 +452,30 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         characters = {text: pool.submit(client.segment, sam_image, text) for text in figure_texts}
         feet = pool.submit(client.segment, sam_image, "feet")
         photo = None if generated else pool.submit(inputs.judge_photo, client, sketch)
-        cover = (pool.submit(client.edit_image, prompt, [reference], size=f"{sketch.width}x{sketch.height}")
-                 if generated else None)
     # All submitted work is drained before a record is written or an error propagates.
     if photo is not None:
         check, details = inputs.photo_check(photo.result())
         st.checks.append(check)
         st.details["input"]["photo"] = details
     figures, candidate_details = inputs.fast_figure_candidate({text: call.result() for text, call in characters.items()})
-    checks, details = inputs.fast_figure_checks(figures, feet.result(), sketch.height, allow_missing=not generated)
+    checks, details = inputs.fast_figure_checks(
+        figures, feet.result(), sketch.height, allow_missing=True, require_feet=not generated)
     details.update(candidate_details, sam_prompts=[*figure_texts, "feet"], contrast_normalised=not generated)
-    incomplete = not generated and (not figures or any(
-        c["name"] == "sketch_feet_on_figure" and not c["pass"] for c in checks))
-    if not generated:
-        st.details["upload_failed_checks"] = [c["name"] for c in checks[1:] if not c["pass"]]
-        # Keep upload measurements distinct from the necessary checks on the generated cover.
+    incomplete = not figures or any(
+        c["name"] == "sketch_feet_on_figure" and not c["pass"] for c in checks)
+    if not generated or incomplete:
+        source_name = "generated" if generated else "upload"
+        st.details[source_name + "_failed_checks"] = [c["name"] for c in checks[1:] if not c["pass"]]
+        # Keep source measurements distinct from the necessary checks on the completed cover.
         character_check = checks[0].copy()
         for check in checks:
-            check["name"] = "upload_" + check["name"].removeprefix("sketch_")
+            check["name"] = source_name + "_" + check["name"].removeprefix("sketch_")
         if not character_check["pass"]:
             checks.append(character_check)
     st.checks += checks
-    st.necessary_checks.update(c["name"] for c in st.checks if generated or c["name"] in {
-        "sketch_characters_found", "upload_real_person_photo_probability"})
+    st.necessary_checks.update(c["name"] for c in st.checks if c["name"] in {
+        "sketch_characters_found", "sketch_feet_on_figure", "upload_real_person_photo_probability"})
     st.details["input"].update(details)
-    # Read the speculative result even on rejection, so a model failure is never swallowed.
-    image = cover.result() if cover is not None else None
     _finish_input_checks(st)
     if incomplete:
         version = prompt_registry.selected("cover_complete_figure")
@@ -485,10 +483,9 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         prompt = version.step("cover")["prompt"] + prompt.removeprefix(COVER_PROMPT)
         st.details.update(prompt=prompt, prompt_version=version.ref(),
                           prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest())
-    if image is None:
-        image = client.edit_image(prompt, [reference], size=f"{sketch.width}x{sketch.height}")
+    image = client.edit_image(prompt, [reference], size=f"{sketch.width}x{sketch.height}")
     st.save_image("01-cover.png", image)
-    if not generated:
+    if not generated or incomplete:
         with ThreadPoolExecutor(max_workers=len(inputs.FAST_FIGURE_TEXTS) + 1) as pool:
             cover_characters = {text: pool.submit(client.segment, image, text) for text in inputs.FAST_FIGURE_TEXTS}
             cover_feet = pool.submit(client.segment, image, "feet")
@@ -506,7 +503,7 @@ def _fast_cover(st: _Stage, run: RunFolder, client: ModelClient, sketch: Image.I
         _finish_input_checks(st)
         if incomplete:
             st.details["completed_figure"] = True
-        st.notes.append("Fast lane: necessary upload and cover full-body checks enforced.")
+        st.notes.append("Fast lane: necessary source and cover full-body checks enforced.")
     else:
         st.notes.append("Fast lane: necessary input checks enforced; model-based cover checks skipped.")
     return st.finish()
@@ -557,6 +554,46 @@ def split_sheet(sheet: Image.Image, fig_mask: np.ndarray, thr_mask: np.ndarray, 
             "mask_completion": {**completion, "added_pixels": int((fig_mask[:, x0:x1] & ~sam[:, x0:x1]).sum())},
             "sheet_box": [x0, y0, x1, y1],
         }
+    return out
+
+
+def _fast_instance_split(sheet: Image.Image, instances: list[SamInstance], thr_mask: np.ndarray,
+                         columns: dict[str, Any]) -> dict[str, Any]:
+    """Recover overlapping columns from four comparable full-height SAM instances only."""
+    figures = inputs.by_area(instances)[:len(SIDE_VIEWS)]
+    if len(figures) != len(SIDE_VIEWS):
+        return columns
+    boxes = [imaging.bbox(i.mask) for i in figures]
+    heights = [imaging.box_size(b)[1] for b in boxes]
+    areas = [int(i.mask.sum()) for i in figures]
+    # Reuse the sheet height agreement and the figure union's existing area floor.
+    if C.agreement(heights) < C.HEIGHT_AGREE_MIN or min(areas) < 0.2 * max(areas):
+        return columns
+    ordered = sorted(zip(figures, boxes, strict=True), key=lambda pair: pair[1][0] + pair[1][2])
+    centres = [(b[0] + b[2]) / 2 for _, b in ordered]
+    if any(a >= b for a, b in zip(centres, centres[1:])):
+        return columns
+    y0, y1 = min(b[1] for b in boxes), max(b[3] for b in boxes)
+    method = f"{SAM_MODEL}:instances"
+    out = {"runs": [], "views": {}, "split_source": method, "sam_coverage": {},
+           "column_runs": columns["runs"],
+           "instance_split": {"boxes": [list(b) for _, b in ordered],
+                              "height_agreement": C.agreement(heights),
+                              "min_area_fraction": min(areas) / max(areas)}}
+    bg = tuple(int(c) for c in imaging.background_colour(np.asarray(sheet)))
+    for index, (figure, box) in enumerate(ordered):
+        x0, _, x1, _ = box
+        name = f"panel{index}"
+        mask = figure.mask[y0:y1, x0:x1].copy()
+        # A rectangular crop alone would retain a neighbour's tail or claws. Only this instance's
+        # pixels enter the image; no attached-foreground expansion can join neighbouring figures.
+        image = Image.composite(sheet.crop((x0, y0, x1, y1)),
+                                Image.new("RGB", (x1 - x0, y1 - y0), bg), imaging.to_mask_image(mask))
+        out["runs"].append((x0, x1))
+        out["sam_coverage"][name] = round(sam_coverage(mask, thr_mask[y0:y1, x0:x1]), 4)
+        out["views"][name] = {"image": image, "mask": mask, "mask_method": method,
+                              "mask_completion": {"method": "none", "reason": "isolated instance mask"},
+                              "sheet_box": [x0, y0, x1, y1]}
     return out
 
 
@@ -911,18 +948,28 @@ def _fast_sheet_views(st: _Stage, client: ModelClient, cover: Image.Image, promp
         sheet = client.edit_image(prompt, [cover], size=size_param, attempt=attempt)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
-        fig, fig_method, n_inst = sam_figure_mask(client, sheet)
+        instances, text = sam_instances(client, sheet)
+        n_inst = len(instances)
+        fig_method = f"{SAM_MODEL}:{text}" if instances else SAM_NOTHING_FOUND
+        fig = _figure_mask(instances, (sheet.height, sheet.width))
         split = {"runs": [], "views": {}, "split_source": fig_method, "sam_coverage": {}}
         sq: dict[str, Any] = {}
         size = 0
         assignment: dict[str, Any] = {}
         try:
             split = split_sheet(sheet, fig, thr, fig_method)
+            if len(split["runs"]) < len(SIDE_VIEWS):
+                split = _fast_instance_split(sheet, instances, thr, split)
             if len(split["runs"]) != len(SIDE_VIEWS) or len(split["views"]) != len(SIDE_VIEWS):
                 raise ValueError("Could not split the sheet into four figures.")
             if any(not v["mask"].any() for v in split["views"].values()):
                 raise ValueError("A sheet panel has no figure mask.")
-            named, assignment = assign_views(split["views"])
+            if split["split_source"] == f"{SAM_MODEL}:instances":
+                names = dict(zip(SIDE_VIEWS, sorted(split["views"]), strict=True))
+                named = {view: split["views"][panel] for view, panel in names.items()}
+                assignment = {"panel_for_view": names, "requested_order_kept": True}
+            else:
+                named, assignment = assign_views(split["views"])
             size, sq = square_views(named, bg)
             if size <= 0 or any(n not in sq or not sq[n]["mask"].any() for n in SIDE_VIEWS):
                 raise ValueError("Could not extract all four character views.")
@@ -933,11 +980,13 @@ def _fast_sheet_views(st: _Stage, client: ModelClient, cover: Image.Image, promp
             "sam_instances": n_inst,
             "split_source": split["split_source"],
             "sam_coverage": split["sam_coverage"],
-            "column_runs": [list(r) for r in split["runs"]],
+            "column_runs": [list(r) for r in split.get("column_runs", split["runs"])],
             "assignment": assignment,
             "checks": [C.check("figures_found", len(split["runs"]), len(SIDE_VIEWS), op="==")],
             "extracted": bool(sq),
         })
+        if "instance_split" in split:
+            entry["instance_split"] = split["instance_split"]
         if sq:
             break
     return attempt, sheet, bg, split, n_inst, size, sq, assignment
@@ -999,6 +1048,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             "checks": side_checks,
         }
         if st.fast:
+            if "column_runs" in split:
+                attempt_details["column_runs"] = [list(r) for r in split["column_runs"]]
             tried[-1].update(attempt_details)
         else:
             tried.append(attempt_details)
