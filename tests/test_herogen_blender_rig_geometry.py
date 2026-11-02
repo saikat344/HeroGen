@@ -134,11 +134,15 @@ class PivotTests(unittest.TestCase):
         rig_geometry.fit_pivots(reflected)
         np.testing.assert_allclose(reflected["LeftFoot"].pivot, child.pivot * [1, -1, 1])
 
-    def test_disconnected_parts_are_not_hidden_by_an_arbitrary_clamp(self):
+    def test_disconnected_parts_preserve_and_record_the_section_pivot(self):
         parent = box("UpperTorso", [-2, 0, 0], [-1, 1, 1], [-1.5, .5, .5])
         child = box("LeftUpperArm", [0, 0, 0], [1, 1, 1], [-.5, .5, 0])
-        with self.assertRaisesRegex(ValueError, "no shared cut edge"):
-            rig_geometry.fit_pivots({"UpperTorso": parent, "LeftUpperArm": child})
+        before = child.pivot.copy()
+        changes = rig_geometry.fit_pivots({"UpperTorso": parent, "LeftUpperArm": child})
+        np.testing.assert_array_equal(child.pivot, before)
+        self.assertEqual(changes["LeftUpperArm"], {
+            "source": "section pivot", "distance_studs": 0.0,
+            "pivot_fallback": "no shared cut edge with UpperTorso; retained section pivot"})
 
     def test_root_falls_on_its_own_section_surface(self):
         section = box("LowerTorso", [0, 0, 0], [1, 1, 1], [-.5, .5, .5])
