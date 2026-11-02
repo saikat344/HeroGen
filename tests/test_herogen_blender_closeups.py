@@ -21,6 +21,46 @@ def info():
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class CloseupCameraTests(unittest.TestCase):
+    def test_reference_alignment_keeps_mesh_outline_and_design_stripes(self):
+        source = np.zeros((80, 100), np.uint8)
+        source[10:70, 30:70] = 255
+        image = np.full((80, 100, 3), 230, np.uint8)
+        image[10:70, 30:50] = (180, 30, 20)
+        image[10:70, 50:70] = (20, 40, 190)
+        yy, xx = np.indices(source.shape)
+        target = ((xx - 50) / 40) ** 2 + ((yy - 40) / 35) ** 2 < 1
+        result = np.asarray(U.silhouette_reference(Image.fromarray(image), Image.fromarray(source), target))
+        np.testing.assert_array_equal(result[~target], np.full((int((~target).sum()), 3), 115))
+        self.assertGreater(result[40, 30, 0], result[40, 30, 2])
+        self.assertGreater(result[40, 70, 2], result[40, 70, 0])
+        measured = I.figure_mask(result / 255., render_figure=target)
+        self.assertTrue(I.outline_gate(target, measured)[0])
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            U.silhouette_reference(Image.fromarray(image), Image.fromarray(source * 0), target)
+        with self.assertRaisesRegex(ValueError, "matching"):
+            U.silhouette_reference(Image.fromarray(image), Image.fromarray(source), target[:20])
+
+    def test_extension_seeds_exclude_pale_mask_boundary_halos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "masks").mkdir()
+            mask = np.zeros((80, 100), np.uint8)
+            mask[7:73, 27:73] = 255  # three pale backdrop pixels included by segmentation
+            Image.fromarray(mask).save(run / "masks/front.png")
+            framing = {"size": [100, 80], "output_to_artwork_px": [1, 0, 0, 0, 1, 0],
+                       "mask_edge_inset_px": 3}
+            seeds = U.framed_mask(run, "front", framing)
+            art = np.full((80, 100, 3), 230, np.uint8)
+            art[10:70, 30:70] = (150, 60, 20)
+            yy, xx = np.indices(mask.shape)
+            target = ((xx - 50) / 40) ** 2 + ((yy - 40) / 35) ** 2 < 1
+            result = np.asarray(U.silhouette_reference(Image.fromarray(art), seeds, target))
+            self.assertFalse((result[target] > 210).all(axis=1).any())
+            mask[:] = 0
+            Image.fromarray(mask).save(run / "masks/front.png")
+            with self.assertRaisesRegex(ValueError, "nonempty inset"):
+                U.framed_mask(run, "front", framing)
+
     def test_four_bands_four_yaws_and_threefold_density(self):
         cams = U.cameras_for(info())
         self.assertEqual(len(cams), 16)

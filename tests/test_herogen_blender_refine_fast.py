@@ -71,9 +71,87 @@ class ConcurrentBudgetTests(unittest.TestCase):
             self.assertEqual(parent._load('n'), {'image': 'n.png'})
             self.assertEqual(len(parent.log.calls), 1)
 
+    def test_nested_cache_keeps_images_and_new_entries_with_their_client(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = ModelClient(tmp)
+            parent._save_png('k.png', Image.new('RGB', (4, 4), 'blue'))
+            parent._save_entry('k', {'image': 'k.png'})
+            outer = fast.isolated_client(parent, 'outer')
+            nested = fast.isolated_client(outer, 'nested')
+            self.assertEqual(nested._load('k'), {'image': 'k.png'})
+            self.assertEqual(Image.open(nested.cache_dir / 'k.png').getpixel((0, 0)), (0, 0, 255))
+            nested._save_png('n.png', Image.new('RGB', (4, 4), 'red'))
+            nested._save_entry('n', {'image': 'n.png'})
+            self.assertTrue((nested.cache_dir / 'n.json').is_file())
+            self.assertFalse((outer.cache_dir / 'n.json').exists())
+            fast.publish(outer, nested)
+            fast.publish(parent, outer)
+            self.assertEqual(parent._load('n'), {'image': 'n.png'})
+
 
 @unittest.skipUnless(HAVE_REFINE, 'texture-refine dependencies are required')
 class FastStageTests(unittest.TestCase):
+    def test_auto_palette_is_built_from_this_invocations_preparation(self):
+        with mock.patch('herogen.blender.refine.region_palette.prepare_manifest', return_value='built.json') as build, \
+                mock.patch('herogen.blender.refine.region_palette.export_texture',
+                           side_effect=lambda manifest, prep, texture, *a, **kw: (texture, {})) as grade, \
+                mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast', region_palette=True)
+        self.assertEqual(build.call_args.args[0], self.run.resolve())
+        self.assertTrue(all(c.args[0] == 'built.json' for c in grade.call_args_list))
+
+    def test_palette_flag_off_never_calls_calibration(self):
+        import os
+        with mock.patch.dict(os.environ, {'HEROGEN_REFINE_REGION_PALETTE': ''}), \
+                mock.patch('herogen.blender.refine.region_palette.export_texture') as grade, \
+                mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        grade.assert_not_called()
+        self.assertNotIn('region_palette', rec)
+
+    def test_palette_flag_grades_each_published_version_without_model_calls(self):
+        import os
+        def graded(manifest, prep, texture, camera, folder, **kwargs):
+            return texture, {'skin': {'cap_lab': 2}}
+        with mock.patch.dict(os.environ, {'HEROGEN_REFINE_REGION_PALETTE': 'manifest.json'}), \
+                mock.patch('herogen.blender.refine.region_palette.export_texture', side_effect=graded) as grade, \
+                mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertEqual(grade.call_count, len(progress['versions']))
+        self.assertEqual(rec['region_palette']['skin']['cap_lab'], 2)
+
+    def test_palette_export_does_not_feed_the_next_wave(self):
+        exports = []
+        def grade(manifest, prep, texture, camera, folder, **kwargs):
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / 'graded.png'
+            target.write_bytes(texture.read_bytes())
+            return target, {}
+        def blender(mode, args, log, **kwargs):
+            if mode == 'export':
+                exports.append(args['texture'])
+            return self.render_many(mode, args, log, **kwargs)
+        with mock.patch('herogen.blender.refine.region_palette.prepare_manifest', return_value='auto.json'), \
+                mock.patch('herogen.blender.refine.region_palette.export_texture', side_effect=grade), \
+                mock.patch('herogen.blender.refine.backend.blender', side_effect=blender):
+            record = stage.run_stage3f(self.run, self.client, refine_profile='fast', region_palette=True)
+        self.assertTrue(exports)
+        self.assertTrue(all(path.endswith('graded.png') for path in exports))
+        self.assertTrue(self.renders[5].endswith('texture-v1.png'))
+        self.assertEqual(record['waves'][1]['frozen_atlas'], 'texture-v1.png')
+
+    def test_palette_failure_keeps_fast_progress_unpublished(self):
+        import os
+        with mock.patch.dict(os.environ, {'HEROGEN_REFINE_REGION_PALETTE': 'bad.json'}), \
+                mock.patch('herogen.blender.refine.region_palette.export_texture', side_effect=ValueError('wrong palette layout')), \
+                mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            with self.assertRaisesRegex(ValueError, 'wrong palette layout'):
+                stage.run_stage3f(self.run, self.client, refine_profile='fast')
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertEqual(progress['versions'], [])
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
     def setUp(self):
         fixture.StageTests.setUp(self)
         def save(path):
@@ -321,6 +399,79 @@ class FastStageTests(unittest.TestCase):
         self.assertCountEqual(seen, [0, 1])
         self.assertEqual(rec['views']['head+0']['selected_attempt'], 1)
         self.assertEqual(rec['views']['head+0']['attempts'][0]['reason'], 'outline moved')
+
+    def test_side_beauty_conditions_side_and_back_attempts_and_keeps_notes_and_versions(self):
+        from herogen.blender.refine import prompts
+        fixture.StageTests.closeup_artwork(self)
+        captured = []
+        original = FakeClient.edit_image
+
+        def edit(child, text, images, **kwargs):
+            captured.append((child.cache_dir.parts, text, images, kwargs['attempt']))
+            return original(child, text, images, **kwargs)
+
+        note = 'Keep the leather brown.'
+        with mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many), \
+             mock.patch.object(FakeClient, 'edit_image', edit):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast', side_beauty=True,
+                                    user_note=note)
+        expected = {'head+0': None, 'body+0': None, 'body+90': 'right',
+                    'body-90': 'left', 'body+180': 'back', 'hair-upper+180': 'back'}
+        self.assertTrue(rec['side_beauty'])
+        for key, view in rec['views'].items():
+            if expected[key] is None:
+                self.assertNotIn('art_views', view)
+                self.assertNotIn('art_framing', view)
+            else:
+                self.assertEqual(view['art_views'], [expected[key]])
+            self.assertLessEqual(view['tries'], 2)
+            if key == 'hair-upper+180':
+                self.assertIn('silhouette_alignment', view['art_framing'][expected[key]])
+        for parts, text, images, attempt in captured:
+            key = next(k for k in expected if k in parts)
+            recipe = 'RF13H' if key.startswith('hair-') else 'RF12R' if expected[key] else 'RF2R'
+            self.assertEqual(text, prompts.prompt(recipe, rec['views'][key]['camera']['angle'], note))
+            self.assertEqual(len(images), 3 if expected[key] else 2)
+            self.assertEqual(images[-1].getpixel((0, 0)), (0, 0, 255))
+            self.assertIn(attempt, (0, 1))
+            if expected[key]:
+                self.assertIn('number and material', text)
+        progress = json.loads((self.run / 'stage-3f-progress.json').read_text())
+        self.assertTrue(progress['done'])
+        self.assertEqual(progress['final_n'], len(progress['versions']))
+        self.assertEqual((self.run / '03-refined.glb').read_bytes(),
+                         (self.run / progress['versions'][-1]['glb']).read_bytes())
+
+    def test_side_beauty_off_ignores_existing_art_and_environment_can_opt_in(self):
+        import os
+        fixture.StageTests.closeup_artwork(self)
+        with mock.patch.dict(os.environ, {'HEROGEN_SIDE_BEAUTY': '1'}), \
+             mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast', side_beauty=False)
+        self.assertNotIn('side_beauty', rec)
+        self.assertEqual(set(rec['prompt_sha256']), {'RF2R', 'RF2W', 'RF3H', 'RF4U', 'RF5U'})
+        self.assertTrue(all(len(images) == 2 for _, images, _ in self.client.inputs))
+        self.client.inputs.clear()
+        with mock.patch.dict(os.environ, {'HEROGEN_SIDE_BEAUTY': '1'}), \
+             mock.patch('herogen.blender.refine.backend.blender', side_effect=self.render_many):
+            rec = stage.run_stage3f(self.run, self.client, refine_profile='fast', cap_usd=5)
+        self.assertTrue(rec['side_beauty'])
+        self.assertEqual({len(images) for _, images, _ in self.client.inputs}, {2, 3})
+
+    def test_cli_side_beauty_flag_reaches_stage(self):
+        from herogen.blender.__main__ import main
+        with mock.patch.object(stage, 'run_stage3f', return_value={'ok': True}) as run:
+            self.assertEqual(main(['run', '--run', str(self.run), '--stages', '3f',
+                                   '--refine-profile', 'fast', '--side-beauty']), 0)
+        self.assertTrue(run.call_args.kwargs['side_beauty'])
+
+    def test_side_beauty_missing_art_stays_loud_before_model_calls(self):
+        fixture.StageTests.closeup_artwork(self)
+        (self.run / 'views/back.png').unlink()
+        with self.assertRaises(FileNotFoundError):
+            stage.run_stage3f(self.run, self.client, refine_profile='fast', side_beauty=True)
+        self.assertEqual(self.client.log.calls, [])
+        self.assertEqual(json.loads((self.run / 'stage-3f.json').read_text())['status'], 'error')
 
     def test_default_recipe_and_feather_reach_ordered_projection(self):
         from herogen.blender.refine import imaging

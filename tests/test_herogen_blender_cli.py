@@ -33,6 +33,25 @@ class UpstreamGateTest(unittest.TestCase):
             code = main(["run", "--run", str(self.run), *args])
         return code, err.getvalue()
 
+    def test_beauty_cli_directory_is_independent_of_other_refine_options(self):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch("herogen.blender.refine.run_stage3f", return_value={"ok": True}) as refine:
+            code, _ = self._main("--stages", "3f", "--refine-beauty-dir", "beauty")
+        self.assertEqual(code, 0)
+        self.assertEqual(refine.call_args.kwargs["beauty_dir"], Path("beauty"))
+        self.assertFalse(refine.call_args.kwargs.get("side_beauty"))
+        self.assertNotIn("region_palette", refine.call_args.kwargs)
+
+    def test_region_palette_cli_is_opt_in_and_reaches_stage_entry(self):
+        (self.run / "stage-3.json").write_text(json.dumps({"stage": 3, "ok": True}))
+        for flags, expected in (([], False), (["--refine-region-palette"], True)):
+            with self.subTest(enabled=expected), contextlib.redirect_stdout(io.StringIO()), \
+                    patch("herogen.blender.refine.run_stage3f", return_value={"ok": True}) as refine:
+                code, _ = self._main("--stages", "3f", *flags)
+                self.assertEqual(code, 0)
+                self.assertEqual(refine.call_args.kwargs.get("region_palette", False), expected)
+
     def test_missing_stage2_record_stops_stage3(self):
         code, err = self._main("--stages", "3")
         self.assertEqual(code, 2)
