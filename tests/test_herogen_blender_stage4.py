@@ -573,6 +573,11 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertEqual(checks["sections_non_empty"]["value"], 15)
         body = json.loads((run / "04-body" / "sections.json").read_text())
         self.assertEqual(body["checks"], recorded["checks"])
+        self.assertEqual(body["pivot_repairs"], recorded["pivot_repairs"])
+        for lod in recorded["pivot_repairs"]:
+            reason = recorded["pivot_repairs"][lod]["Head"]["pivot_fallback"]
+            self.assertIn("no shared cut edge with UpperTorso", reason)
+            self.assertIn(f"{lod} Head pivot fallback: {reason}", recorded["notes"])
         self.assertTrue(all(s["triangles_high"] > 0 for s in body["sections"]))
         meshes = glb.load_glb(run / "04-body" / "high.glb").meshes
         self.assertEqual({m.name for m in meshes}, set(SECTIONS))
