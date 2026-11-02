@@ -59,7 +59,7 @@ class EventsTest(unittest.TestCase):
         bad = [
             dict(kind="local", what="has spaces"),            # identifiers only, never text
             dict(kind="local", what="Users/me/run"),          # never a path
-            dict(kind="call_start", who="gpt-4"),             # closed model vocabulary
+            dict(kind="call_start", who="other-model"),       # closed model vocabulary
             dict(kind="local", prompt="draw a fox"),          # no such field
             dict(kind="local", m={"x": float("nan")}),        # finite numbers only
             dict(kind="local", m={"x": "1"}),

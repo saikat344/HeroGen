@@ -255,6 +255,8 @@ class Live(Base):
         self.assertEqual(rc._gpu_timings({"load_seconds": 60.4, "total_seconds": 156.5}),
                          {"load_s": 60.4, "infer_s": 96.1})
         self.assertEqual(rc._gpu_timings({}), {})
+        for odd in ([], "x", None, {"load_seconds": float("nan")}, {"load_seconds": "60"}):
+            self.assertEqual(rc._gpu_timings(odd), {})
 
     def test_body_needs_a_person_box(self):
         c = rc.RemoteClient(self.cache, mode="live", timeout=60)
