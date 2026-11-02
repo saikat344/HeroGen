@@ -863,7 +863,10 @@ existing source-texture fallback applies. Errors leave progress unfinished and r
 
 Every attempt has its own call log and cache directory beneath `cache/fast/<pass>/attempt-<index>`.
 It copies matching root cache families on demand; after draining, complete families and call logs are
-published in pass/attempt order. Copies retain the parent's shared HTTP limiter and hooks, including
+published in pass/attempt order. Family lookup and copying share the persistence lock, so nested siblings
+wait for a complete parent copy before reading its entry. Publication retains identical target files
+and replaces changed files with images/masks before entries. Copies retain the parent's shared HTTP
+limiter and hooks, including
 per-model RPM limits when configured. Transport retry reservations share a lock, while active tokens
 are local to each thread. The lock spans local budget updates and stage-record persistence
 before an HTTP attempt is authorized. An unresolved request stays
@@ -2483,27 +2486,41 @@ SAM face mask, grown like the hair views', keeps its base paint, so a rejected f
 half-repainted face.
 An exposed frontal face also requires every feature type detected in its reference (eyes, eyebrows and
 mouth) to be detected inside the registered repaint's face. Missing features reject the attempt before
-projection, retry within the existing limit and never release the oblique guard. A reference with no
-detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
+projection and never release the oblique guard. Full refinement may continue within its existing attempt
+limit. A reference with no detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
 it does not measure sharpness, identity or expression, and does not apply when beauty is disabled.
-In the fast profile, beauty remains opt-in through the same `beauty_dir` parameter. The head pass's two
-independent slots run one beauty sample and one `RF2R` sample with the original cover. Both render the same
-frozen geometry; RF2R uses the original ungraded base atlas. The default sample cannot be cancelled by beauty
-acceptance. Body and hair use the selected beauty
-references where available, with the existing standard-recipe fallback for unavailable rear references.
+In the fast profile, beauty remains opt-in through the same `beauty_dir` parameter. Ordinary fast waves
+first resolve from the original ungraded base, using the same cover, gates, two attempts per pass and user
+note. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
+back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
+recorded in `default_fast_fallback`, including when a beauty face is retained.
+The head pass's two independent slots run one beauty sample and the ordinary recipe's first sample
+(`RF2R` or `RF2W`) with the original cover and ungraded render. Both frontal samples drain before face
+selection. Body and hair use selected beauty references where available, with the existing standard
+recipe for unavailable rear references. Fast beauty `body+0` uses `RF17B`: its reference is uniformly
+height-fitted and clipped to the rendered silhouette, extending nearest foreground colours to uncovered
+render pixels. This changes only the conditioning reference. Generated samples and acceptance masks are
+never reshaped. The prompt requests surface details while preserving the first render's geometry.
 Before publishing the first version, every frontal candidate resolves. An accepted beauty `head+0`, then
 `body+0`, can own the face only when its registered face contains separate eye regions on both sides and a
-mouth. Otherwise the source is `default` when the independent RF2R head sample passed, or
-`default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM face masks.
-Both default sources resolve a separate ordinary fast atlas from the original ungraded base, with the
-same cover, gates, two attempts per pass and user note. Accepted body/side/head/hair paint and unpainted
-base residuals all contribute. The ordinary fast views remain recorded in `default_fast_fallback`.
-Every progressive version restores the whole head from that quantized atlas after rebaking beauty paint.
+mouth. The largest connected eye region in each face half also supplies a detail comparison with the
+corresponding accepted ordinary-fast paint. Each eye box gains a 15% horizontal-size context margin,
+then both greyscale crops resize to 64 by 48. Both eyes must retain at least the ordinary paint's interior
+Laplacian variance and edge density (Sobel gradient above 0.04). Missing boxes or ordinary paint reject
+the beauty face. `eye_quality` records both measurements and their ratios; this uses existing eye masks,
+without another model call. Otherwise the source is `default` when the independent ordinary head sample
+passed, or `default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM
+face masks. Accepted ordinary body/side/head/hair paint and unpainted base residuals all contribute to
+the default atlas. Every default-sourced progressive version restores the whole head from that atlas
+after rebaking beauty paint.
 
 Setup saves its existing highest-confidence SAM head mask as `probe/head.png` without another model call.
 Composition closes three-pixel gaps and closes the upper head volume through the face box's chin using
-the head bounds, padded laterally by 10% for ears and rear-head silhouette differences. Sampling this
-front-plane volume at the mesh's atlas positions includes every depth and facing direction, so scalp,
+the head bounds, padded laterally by 10% for ears and rear-head silhouette differences. The existing
+front probe's alpha silhouette is cut at the chin; the connected component with greatest overlap with
+the closed head bounds extends that volume to connected hats and helmets. Filling its holes closes
+hidden head surfaces; separate raised props do not join that component. This uses no new segmentation.
+Sampling this front-plane volume at the mesh's atlas positions includes every depth and facing direction, so scalp,
 ears, hair and the back of the head have no internal face-mask seam. Long hair below the chin keeps its
 segmented silhouette using the input hair masks already required by accepted ordinary-fast paints.
 Those exact input queries are read in replay mode, with no API fallback; a missing/corrupt result stays
@@ -2515,10 +2532,12 @@ height into the neck/collar. The closed head
 interior is exactly default fast: no beauty grade, local colour correction or feathered beauty residual.
 Older preparations without the saved head mask use the closed cranial bounds; missing both head and face
 bounds records zero transferred texels and keeps an exportable result. `face_source.head_region` records
-mask availability, the chin and transition width, transferred texels and all-depth ownership.
+mask availability, the chin and transition width, transferred texels, connected headgear pixels and
+all-depth ownership.
 
 An initial beauty version is exported even if every beauty view was rejected. `face_source` records the
-source, view, attempt and painted texel count; `face_fallback` retains the independent default result,
+source, view, attempt and painted texel count. `face_source.atlas_sha256` identifies the ordinary atlas
+used for comparison or restoration; `face_fallback` retains the independent default result,
 and each progressive version records its source. Empty exposed-face masks do not prevent whole-head
 restoration. All candidates retain the normal outline, face-containment and hair gates, with at most
 two slots per pass. Notes reach beauty and default samples through the existing quoted prompt slot.
@@ -2535,15 +2554,18 @@ toward the surrounding rebaked atlas only within that band. This query changes t
 view acceptance, retries or numeric gate thresholds. Default heads do not make this skin query.
 The three options compose independently in this order. SideBeautyPass first supplies matching turnaround
 references to side/back repaint requests, including beauty requests (`RF16B`, render first, turnaround in
-between, beauty reference last). Front beauty/default candidates keep their original references and gates.
+between, beauty reference last). SideBeautyPass adds no turnaround reference to front candidates; their
+frontal recipe checks remain active.
 The combined recipe retains SideBeautyPass's explicit surface-only rule: the turnaround's different pose,
 proportions and framing must not replace the first render's geometry or crop. `RF15B` remains frozen.
-In fast refinement, a side/back pass with verified turnaround references uses its first independent slot
-for beauty (`RF16B`) and its second for the ordinary SideBeautyPass recipe (`RF12R`/`RF12W`, or `RF13H`
-for hair) with the original cover last. The existing index-order selection prefers beauty when it passes;
-otherwise the ordinary artwork repaint can win. This contains beauty references that change the camera
-or pose without adding a third sample, retry or gate. Missing orientation keeps both slots on the
-original beauty behavior. Front slots and the complete default-head fallback are unchanged.
+With fast beauty enabled, every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
+exact ordinary-fast first request for that pass: original cover, ordinary recipe, sample index zero and
+ordinary wave's frozen render. Slot 2 receives neither turnaround images nor beauty references. The
+lowest passing slot wins; higher body/hair slots are cancelled when the lower slot wins. Head candidates
+both drain because eye-detail selection requires the ordinary paint. `selected_attempt` is zero-based;
+`winning_slot` records the one-based winner. Missing side orientation keeps slot 1 on its usual beauty
+reference and preserves the same ordinary slot 2. This contains rejected enhancements without a third
+enhanced sample or a weakened paint gate.
 Beauty then decides frontal face ownership or restores the complete ordinary-fast head. Region palette
 grades the composed export last; a restored default head's exact interior is excluded, and its outward
 collar transition attenuates palette weights by the same smooth ownership ramp. The nested ordinary-fast
@@ -2558,8 +2580,8 @@ adding model checks or changing stage-2 behavior. All four artwork files are req
 orientation evidence permits their use.
 
 Cover-only hair passes use `RF3H`; face and hair gates are recipe-independent.
-With SideBeautyPass off, every call supplies the current mesh render first and the cover second, including
-hair mode. Opt-in SideBeautyPass (`--side-beauty` or `HEROGEN_SIDE_BEAUTY=1`) requires all four `views/`
+With beauty and SideBeautyPass off, every call supplies the current mesh render first and the cover
+second, including hair mode. Opt-in SideBeautyPass (`--side-beauty` or `HEROGEN_SIDE_BEAUTY=1`) requires all four `views/`
 drawings. It conditions only cameras at yaw 90 through 270 degrees (inclusive, modulo 360), including
 rear-quarter head and upper-body hair passes. Near-front cameras keep their original recipes and references:
 `RF2R` or `RF2W` for ordinary passes, and the existing crop plus cover with `RF5U` for upscale close-ups.
