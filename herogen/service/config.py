@@ -64,6 +64,11 @@ class Settings:
     rate_link_ip: tuple[int, int] = (60, 3600)
     rate_jobs_user: tuple[int, int] = (20, 3600)
     rate_api_ip: tuple[int, int] = (600, 60)
+    # The build-log poll (`GET /api/jobs/<id>/events`, every 1.5 s, about 40 a minute per open log) has its own
+    # budgets instead of the API's: per address, room for about 8 viewers behind one network address; per signed-in
+    # user, about twice one viewer's rate.
+    rate_events_ip: tuple[int, int] = (320, 60)
+    rate_events_user: tuple[int, int] = (80, 60)
     # Retention (days); recorded in the privacy policy
     retention_days: int = 30
     audit_retention_days: int = 365
@@ -154,6 +159,8 @@ ENV = {
     "rate_link_ip": "HEROGEN_SERVICE_RATE_LINK_IP",
     "rate_jobs_user": "HEROGEN_SERVICE_RATE_JOBS_USER",
     "rate_api_ip": "HEROGEN_SERVICE_RATE_API_IP",
+    "rate_events_ip": "HEROGEN_SERVICE_RATE_EVENTS_IP",
+    "rate_events_user": "HEROGEN_SERVICE_RATE_EVENTS_USER",
     "retention_days": "HEROGEN_SERVICE_RETENTION_DAYS",
     "audit_retention_days": "HEROGEN_SERVICE_AUDIT_RETENTION_DAYS",
     "analytics_retention_days": "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS",

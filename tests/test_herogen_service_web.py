@@ -1040,8 +1040,8 @@ class TestBuildLog(WebCase):
         self.assertEqual(bob.get(f"/api/jobs/{jid}/events").status_code, 404)
         self.assertEqual(Browser(self.app).get(f"/api/jobs/{jid}/events").status_code, 401)
         self.assertEqual(alice.get("/api/jobs/j_notanid/events").status_code, 404)
-        for params in ({"after": "12"}, {"after": "-1.1"}, {"after": "x.y"}, {"limit": "0"}, {"limit": "1001"},
-                       {"limit": "many"}):
+        for params in ({"after": "12"}, {"after": "-1.1"}, {"after": "x.y"}, {"after": "1.1\n"},
+                       {"after": "\u0661.1"}, {"limit": "0"}, {"limit": "1001"}, {"limit": "many"}):
             self.assertEqual(alice.get(f"/api/jobs/{jid}/events", params=params).status_code, 400, params)
         self.assertEqual(alice.send("DELETE", f"/api/jobs/{jid}", json={}).status_code, 200)
         self.assertEqual(alice.get(f"/api/jobs/{jid}/events").status_code, 404)
@@ -1054,13 +1054,39 @@ class TestBuildLog(WebCase):
         b.post(f"/api/jobs/{job['id']}/cancel", json={})
         self.assertTrue(self.events(b, job["id"])["done"])
 
-    def test_the_poll_is_exempt_from_the_per_address_limit(self):
+    def test_the_poll_has_its_own_address_budget_and_a_per_user_limit(self):
         self.store.close()
-        self.build(admin_emails=("alice@example.com",), rate_api_ip=(40, 60))
+        self.build(admin_emails=("alice@example.com",), rate_api_ip=(40, 60), rate_events_ip=(70, 60),
+                   rate_events_user=(50, 60))
         b = self.signin()
         jid, _ = self.finished_prompt_job(b)
-        for _ in range(60):
-            self.assertEqual(b.get(f"/api/jobs/{jid}/events").status_code, 200)
-        statuses = [b.get(f"/api/jobs/{jid}").status_code for _ in range(60)]
-        self.assertIn(429, statuses)
-        self.assertEqual(b.get(f"/api/jobs/{jid}/events").status_code, 200)
+        statuses = [b.get(f"/api/jobs/{jid}/events").status_code for _ in range(60)]
+        self.assertEqual(statuses[:50], [200] * 50, "past the API's 40 a minute: the poll has its own budget")
+        self.assertEqual(set(statuses[50:]), {429}, "but one user is held to rate_events_user")
+        self.assertEqual(b.get(f"/api/jobs/{jid}").status_code, 200, "the poll does not use the API budget")
+        # Viewers behind one address share rate_events_ip (70 a minute; the 60 polls above used 60 of it).
+        carol = self.signin("carol@example.com")
+        seen = [carol.get(f"/api/jobs/{jid}/events").status_code for _ in range(20)]
+        self.assertEqual(seen, [404] * 10 + [429] * 10)
+
+    def test_a_flood_of_made_up_cookies_stops_before_the_store(self):
+        self.store.close()
+        self.build(admin_emails=("alice@example.com",), rate_api_ip=(40, 60))
+        calls = {"n": 0}
+        real = self.store.session_get
+
+        def counted(*a, **k):
+            calls["n"] += 1
+            return real(*a, **k)
+
+        self.store.session_get = counted
+        for cookie in ("A" * 43, None):
+            with self.subTest(cookie=cookie):
+                calls["n"] = 0
+                b = Browser(self.app)
+                if cookie:
+                    b.c.cookies.set("hg_session", cookie)
+                got = [b.get("/api/jobs/j" + "a" * 26 + "/events").status_code for _ in range(200)]
+                self.assertEqual(got.count(401), 40)
+                self.assertEqual(got.count(429), 160)
+                self.assertLessEqual(calls["n"], 40)
