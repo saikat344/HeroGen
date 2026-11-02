@@ -125,7 +125,8 @@ export function callDone(e) {
   const entry = entryFor(e);
   switch (e.outcome) {
     case 'reused': return `${callStart(e)}: reused a saved result`;
-    case 'cancelled': return `${callStart(e)}: not needed, the other try passed${e.usd > 0 ? ' (already paid for)' : ''}`;
+    case 'cancelled': return e.sibling ? `${callStart(e)}: not needed, the other try passed${e.usd > 0 ? ' (already paid for)' : ''}`
+      : `${callStart(e)}: cancelled (step stopped)${e.usd > 0 ? ' (already paid for)' : ''}`;
     case 'unknown': return `${callStart(e)}: outcome unknown (may be billed)`;
     case 'ok': {
       let done = entry ? pick(entry.done, e) : 'done';
