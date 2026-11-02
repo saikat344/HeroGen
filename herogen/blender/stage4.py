@@ -343,10 +343,13 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
         sk = joints.estimate(vs, height)
     except joints.JointEstimationError as exc:
         reason = (f"stage 4 cannot construct R15 sections: {exc}. "
-                  "SAM 3D Body joint positions alone do not supply the silhouette radii, hand/toe endpoints "
+                  "SAM 3D Body joint positions alone do not supply the silhouette radii, hand and toe endpoints "
                   "and crotch height needed for sectioning")
         rec.note(reason)
-        rec.finish({"ok": False, "status": "error", "error": reason})
+        # The record's error is the sentence the service shows; the note above keeps the measurements.
+        shown = ("The game body could not find this character's waist or limbs in its outline, "
+                 "for example under a long robe or with a very short torso, so the Roblox parts could not be cut.")
+        rec.finish({"ok": False, "status": "error", "error": shown})
         raise joints.JointEstimationError(reason) from exc
     silhouette_joints = sk.as_json()
     jrec = body_joints.load_joints(run / "03-joints.json")
