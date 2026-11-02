@@ -107,10 +107,12 @@ class RedoModelErrorsTest(JobCase):
 
     def test_redo_policy_refusal_accounts_for_an_unused_speculative_top(self):
         self.error = ApiError(f"refused prompt: {self.note}", http_status=400, error_code="content_policy_violation")
+        before = self.store.generation_get()
         child, saved = self.run_failure(2, "rejected", "rejected")
-        self.assertEqual(saved["counts_quota"], 1)
-        self.assertIsNone(saved["refunded_at"])
+        after = self.store.generation_get()
+        self.assertEqual(after["running_usd"], before["running_usd"])
         self.assertGreaterEqual(saved["cost_usd"], 0)
+        self.assertAlmostEqual(after["spent_usd"], before["spent_usd"] + saved["cost_usd"], places=6)
         record = RunFolder(self.storage.runs_root(self.uid), child["id"]).read_stage(2)
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["cost_usd"], saved["cost_usd"])
