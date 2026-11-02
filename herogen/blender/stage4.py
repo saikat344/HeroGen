@@ -396,7 +396,9 @@ def _record_fast_outputs(rec: StageRecord, lods) -> None:
     from ..roblox import MESH_TRIANGLE_LIMIT
     from .glb import load_glb
 
-    quality_names = {"pivots_in_joint_region", "texture_transfer_views", "joint_error_max_synthetic"}
+    quality_names = {"pivots_in_joint_region", "texture_transfer_views", "joint_error_max_synthetic",
+                     "triangles_high", "triangles_low", "watertight_parts"}
+    profile_quality = {"triangles_high", "triangles_low", "watertight_parts"}
     quality_prefixes = ("max_joint_gap_", "rest_iou_with_covers_", "texture_colour_error_", "texture_ssim_",
                         "texture_turnaround_")
     quality_failed = False
@@ -404,6 +406,9 @@ def _record_fast_outputs(rec: StageRecord, lods) -> None:
         if c["name"] in quality_names or c["name"].startswith(quality_prefixes):
             quality_failed |= c["gate"] and not c["pass"] and not c["name"].startswith("max_joint_gap_")
             c["gate"] = False
+            if c["name"] in profile_quality:
+                note = "fast lane: profile budget and watertight-part measurements are informational"
+                c["note"] = (c.get("note", "") + "; " if c.get("note") else "") + note
 
     missing = [p for p in rec.data["outputs"] if not (rec.run / p).is_file() or (rec.run / p).stat().st_size == 0]
     rec.add(check("output_files", len(missing), 0, passed=not missing, rule="==", missing_or_empty=missing))
