@@ -135,6 +135,9 @@
   --ls-button: 0.005em;
   --text-mono: 0.8125rem;     /* 13 px */
   --lh-mono: 1.55;
+  --text-brand: 1.625rem;     /* 26 px, "HeroGen" wordmark (Fraunces 720) */
+  --text-brand-mark: 1.75rem; /* 28 px, "HG" monogram (Fraunces 800) */
+  --weight-display-mark: 800;
 
   /* ---------- Spacing (4 px base) ---------- */
   --space-0: 0;
@@ -221,6 +224,12 @@
   --stage-glass: rgba(11, 14, 18, 0.58);
   --stage-glass-border: rgba(255, 255, 255, 0.10);
   --stage-glass-hover: rgba(30, 36, 45, 0.78);
+  --stage-glass-border-hover: rgba(255, 255, 255, 0.22);
+  --stage-thumb-bg: rgba(255, 255, 255, 0.04);
+  --stage-tool-bg: rgba(255, 255, 255, 0.05);
+  --stage-shimmer: rgba(255, 255, 255, 0.08);
+  --stage-figure-shadow: rgba(0, 0, 0, 0.55);
+  --stage-accent-text: var(--ember-300);  /* pressed tool icons on the stage (the stage is dark in both themes) */
   /* Three.js clear colour should match --stage-lo; the gradient is a CSS layer behind a transparent canvas. */
 
   /* Film grain for the stage and the landing hero, 3% opacity. */
