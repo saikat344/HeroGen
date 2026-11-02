@@ -447,7 +447,7 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
                             "views_missing": vs.missing, "iou": ious,
                             "frame": "studs, +Z up, feet at z=0, faces -Y, " + (
                                 "x/y centred on the figure's bounding box" if used_source == "carve" else
-                                "x centred on the mesh's bounding box (its front outline conformed to the front mask), "
+                                "x in the registered front-view frame (preserved through remeshing), "
                                 "y registered on the observed depth views"),
                             "method": method}
         from .body_acceptance import assess

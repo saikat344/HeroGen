@@ -148,6 +148,28 @@ class TestSourceMesh(HybridBase):
         self.assertEqual(src.corner_uv.shape, (len(self.faces), 3, 2))
         self.assertEqual(src.texture.shape, (16, 16, 3))
 
+    def test_remeshing_preserves_the_registered_horizontal_frame(self):
+        shift = np.array([.31, -.27, 0.0])
+        v0, f0, _ = sam3d_mesh.remesh(self.verts, self.faces, 5.5, nz=64)
+        v1, f1, info = sam3d_mesh.remesh(self.verts + shift, self.faces, 5.5, nz=64)
+        np.testing.assert_array_equal(f1, f0)
+        np.testing.assert_allclose(v1, v0 + shift, atol=1e-9)
+        self.assertEqual(info["frame"], "source X/Y centre preserved; height restored uniformly")
+        self.assertAlmostEqual(v1[:, 2].min(), 0.0)
+        self.assertAlmostEqual(v1[:, 2].max(), 5.5)
+
+    def test_losing_a_small_island_cannot_recentre_the_body_away_from_its_joints(self):
+        island = np.array([[0, 0, 0], [.02, 0, 0], [0, .02, 0], [0, 0, .02]]) + [-4, 0, 2.5]
+        island_faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]) + len(self.verts)
+        source = sam3d_mesh.normalise(np.concatenate([self.verts, island]), 5.5)
+        faces = np.concatenate([self.faces, island_faces])
+        body = source[:len(self.verts)]
+        joint_x = (body[:, 0].min() + body[:, 0].max()) / 2
+        self.assertGreater(joint_x, .5)
+        rebuilt, _, _ = sam3d_mesh.remesh(source, faces, 5.5, nz=64)
+        centre_x = (rebuilt[:, 0].min() + rebuilt[:, 0].max()) / 2
+        self.assertAlmostEqual(centre_x, joint_x, delta=2 * 5.5 / 64)
+
     def test_orient_recovers_facing_and_frame_from_the_front_view(self):
         p = self.tmp / "src.glb"
         self.source_glb(p)
@@ -846,17 +868,23 @@ class TestStage3SourcesWithoutBlender(HybridBase):
         vs = views.load_views(run, 5.5)
         remote = rclient.RemoteClient(cache)
         rec = StageRecord(run, 3, "base mesh")
-        verts, faces, info, res = stage3._objects_mesh(run, vs, 5.5, remote, rec)
+        from unittest.mock import patch
+
+        with patch.object(sam3d_mesh, "register_depth", wraps=sam3d_mesh.register_depth) as register:
+            verts, faces, info, res = stage3._objects_mesh(run, vs, 5.5, remote, rec)
+        unshifted = register.call_args.args[0]
         self.assertTrue(res.path("mesh.glb").exists())
         self.assertFalse((run / "03-source.glb").exists())          # kept by run_stage3 once the source is used
         self.assertTrue((stage3.work_dir(run) / "03-source-uv.npz").exists())
         self.assertEqual(info["facing_deg"], 0.0)
         # step 7: registered on every observed depth view (the synthetic top view is drawn, not derived), and the
-        # source mesh the texture fallback reads moved with the mesh (both were centred on their Y extent)
+        # source mesh and remeshed body receive exactly the same registered translation
         reg = info["depth_register"]
         self.assertEqual(reg["views"], ["left", "right", "top"])
         dy = reg["offset_px"] / vs.pps
-        self.assertAlmostEqual((verts[:, 1].min() + verts[:, 1].max()) / 2, dy, places=6)
+        # Smoothing or losing an island may change the body's bounds. Verify the translation itself,
+        # rather than centring those new bounds (which would move it away from the source and joints).
+        np.testing.assert_allclose(verts, unshifted + [0, dy, 0], atol=1e-9)
         src_v = np.load(stage3.work_dir(run) / "03-source-uv.npz")["verts"]
         self.assertAlmostEqual((src_v[:, 1].min() + src_v[:, 1].max()) / 2, dy, places=6)
         for n in reg["views"]:
