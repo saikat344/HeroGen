@@ -632,12 +632,16 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             drain()
             rec.data["beauty_generation"] = {k: generated.get(k) for k in (
                 "angles", "attempts_per_angle", "fallback", "selected", "status", "cost_usd", "seconds",
-                "contained_errors")}
-            # Model errors on reference requests are contained: those yaws have no reference.
-            contained = generated.get("contained_errors") or []
+                "contained_errors", "retries")}
+            # Transient reference errors were resent once; errors that remain are contained (no reference).
+            contained, resent = generated.get("contained_errors") or [], generated.get("retries") or []
             with state_lock:
+                rec.data["retries"] = [{"reference_yaw": e["yaw"], **{k: v for k, v in e.items() if k != "yaw"}}
+                                       for e in resent]
                 rec.data["contained_errors"] = [{"reference_yaw": e["yaw"], **{k: v for k, v in e.items()
                                                                               if k != "yaw"}} for e in contained]
+            for entry in resent:
+                buildlog.retried(entry, yaw=entry["yaw"])
             for error in contained:
                 buildlog.reference_contained(error["yaw"], error)
             beauty_selection = beauty_refs = beauty.load(beauty_dir)
@@ -682,8 +686,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         if refine_profile == "fast":
             from .fast import waves
             if beauty_refs is not None or generate_beauty or artwork:
-                # Beauty-only model errors (beauty references, SideBeautyPass) are contained and listed here.
+                # Beauty-only model errors (beauty references, SideBeautyPass) are resent once when transient,
+                # then contained, and listed here.
                 with state_lock:
+                    rec.data.setdefault("retries", [])
                     rec.data.setdefault("contained_errors", [])
             current, stopped = waves(client, prep, current, tex, cams, work, rec.data, timeout,
                                      cover, head_found, recipe, save, state_lock, user_note=user_note,

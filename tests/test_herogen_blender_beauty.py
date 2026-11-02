@@ -273,12 +273,19 @@ class FastClient:
     """A cache-backed client shape that `isolated_client` can copy; each yaw draws its own image."""
 
     def __init__(self, cache_dir, mask, *, unusable=(), headless=(), failing=(), failing_sam=(), barrier=None,
-                 error=None):
+                 error=None, once=False):
         self.cache_dir, self.mask, self.log = Path(cache_dir), mask, CallLog()
         self.unusable, self.headless, self.failing, self.barrier = unusable, headless, failing, barrier
         self.failing_sam, self.error = failing_sam, error or ApiError("edit failed")
+        self.once, self.failed = once, set()   # once: each failing request fails only on its first send
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.edits, self.segments = [], []
+
+    def fails(self, request):
+        if self.once and request in self.failed:
+            return False
+        self.failed.add(request)
+        return True
 
     def _load(self, key):
         return None
@@ -296,7 +303,7 @@ class FastClient:
         self.log.add(IMAGE_MODEL, "edit", f"edit{yaw}", False)
         if self.barrier is not None:
             self.barrier.wait()  # every yaw must be in flight at once
-        if yaw in self.failing:
+        if yaw in self.failing and self.fails(("edit", yaw)):
             raise self.error
         return Image.new("RGB", images[0].size, (100 + yaw // 2, 50, 50))
 
@@ -304,7 +311,7 @@ class FastClient:
         yaw = (image.getpixel((0, 0))[0] - 100) * 2
         self.segments.append((yaw, text))
         self.log.add(SAM_MODEL, "segment", f"{text}{yaw}", False)
-        if (yaw, text) in self.failing_sam:
+        if (yaw, text) in self.failing_sam and self.fails((text, yaw)):
             raise self.error
         if text == "character" and yaw in self.unusable:
             return []
@@ -366,38 +373,72 @@ class FastGenerationTests(unittest.TestCase):
         self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 180))
 
     # The three model errors seen in held-out runs: a read timeout, an HTTP 500 and a content-policy 400.
-    ERRORS = (ApiError("images/edits failed after 1 attempts: TimeoutError: The read operation timed out"),
-              ApiError("images/edits failed after 1 attempts: HTTP 500: internal server error", http_status=500),
-              ApiError("images/edits failed: HTTP 400: filtered (not retried)", http_status=400,
-                       error_code="content_policy_violation"))
+    TIMEOUT = ApiError("images/edits failed after 1 attempts: TimeoutError: The read operation timed out",
+                       network_error="TimeoutError")
+    SERVER = ApiError("images/edits failed after 1 attempts: HTTP 500: internal server error", http_status=500)
+    POLICY = ApiError("images/edits failed: HTTP 400: filtered (not retried)", http_status=400,
+                      error_code="content_policy_violation")
+    ERRORS = (TIMEOUT, SERVER, POLICY)
+
+    @staticmethod
+    def fields(error):
+        return {"error": "ApiError", "http_status": error.http_status, "error_code": error.error_code,
+                "network_error": error.network_error, "message": str(error)}
 
     def test_model_error_on_a_yaw_leaves_it_without_a_reference(self):
         for error in self.ERRORS:
             with self.subTest(error=str(error)):
                 rec, client = self.fast(failing=(-90,), error=error)
-                self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+                resent = error is not self.POLICY   # a transient error is resent once; a 4xx never
+                self.assertEqual(sorted(client.edits), sorted([(a, 0) for a in beauty.FAST_ANGLES]
+                                                              + [(-90, 0)] * resent))
                 self.assertNotIn(-90, [yaw for yaw, _ in client.segments])
                 saved = json.loads((self.out / "references.json").read_text())
-                expected = {"request": "BT1 image edit", "error": "ApiError", "http_status": error.http_status,
-                            "error_code": error.error_code, "message": str(error), "fallback": "standard recipe"}
+                expected = {"request": "BT1 image edit", **self.fields(error),
+                            **({"retried": True} if resent else {}), "fallback": "standard recipe"}
                 self.assertEqual(saved["views"]["-90"]["error"], expected)
                 self.assertEqual(saved["views"]["-90"]["attempts"], [])
                 self.assertEqual(saved["contained_errors"], [{"yaw": -90, **expected}])
+                retries = [{"yaw": -90, "request": "image edit", **self.fields(error), "retry": self.fields(error)}]
+                self.assertEqual(saved["retries"], retries if resent else [])
+                self.assertEqual(saved["views"]["-90"].get("retries"),
+                                 [{k: v for k, v in retries[0].items() if k != "yaw"}] if resent else None)
                 self.assertEqual((saved["status"], saved["selected"]["-90"]), ("rejected", False))
                 self.assertNotIn("error_type", saved)
                 loaded = beauty.load(self.out)
                 self.assertIsNone(beauty.selected_yaw(loaded, -90))
                 self.assertEqual([beauty.selected_yaw(loaded, a) for a in (0, 90, 180)], [0, 90, 180])
-                # No retry or substitute sample: one image per yaw, as without the error.
-                self.assertEqual(sum(c["kind"] == "edit" for c in client.log.calls), 4)
+                # No substitute sample: one image per yaw, plus the single resend of a transient error.
+                self.assertEqual(sum(c["kind"] == "edit" for c in client.log.calls), 4 + resent)
                 self.assertEqual(rec["cost_usd"], client.log.cost_usd())
 
+    def test_transient_error_then_success_keeps_the_reference(self):
+        for error in (self.TIMEOUT, self.SERVER):
+            with self.subTest(error=str(error)):
+                rec, client = self.fast(failing=(90,), failing_sam=((180, "head"),), error=error, once=True)
+                self.assertEqual(sorted(client.edits), sorted([(a, 0) for a in beauty.FAST_ANGLES] + [(90, 0)]))
+                self.assertEqual(rec["selected"], {str(a): True for a in beauty.FAST_ANGLES})
+                self.assertEqual(rec["contained_errors"], [])
+                self.assertEqual([(e["yaw"], e["request"], e.get("concept"), e["retry"]) for e in rec["retries"]],
+                                 [(90, "image edit", None, "ok"), (180, "SAM query", "head", "ok")])
+                self.assertEqual(rec["views"]["90"]["retries"][0]["http_status"], error.http_status)
+                self.assertEqual([beauty.selected_yaw(beauty.load(self.out), a) for a in beauty.FAST_ANGLES],
+                                 list(beauty.FAST_ANGLES))
+                # Both sends of each resent request are on the caller's ledger: five images, nine SAM queries.
+                self.assertAlmostEqual(client.log.cost_usd(), 5 * .01 + 9 * .0025)
+
+    def test_content_policy_error_is_never_resent(self):
+        rec, client = self.fast(failing=(90,), error=self.POLICY, once=True)
+        self.assertEqual(sorted(client.edits), sorted((a, 0) for a in beauty.FAST_ANGLES))
+        self.assertEqual(rec["retries"], [])
+        self.assertEqual([e["yaw"] for e in rec["contained_errors"]], [90])
+
     def test_sam_errors_on_a_yaw_leave_it_without_a_reference(self):
-        rec, client = self.fast(failing_sam=((90, "character"), (180, "head")), error=self.ERRORS[1])
+        rec, client = self.fast(failing_sam=((90, "character"), (180, "head")), error=self.SERVER)
         saved = json.loads((self.out / "references.json").read_text())
-        self.assertEqual([(e["yaw"], e["request"], e["image"]) for e in saved["contained_errors"]],
-                         [(90, "SAM character outline", "beauty+90-try1.png"),
-                          (180, "SAM head crop", "beauty+180-try1.png")])
+        self.assertEqual([(e["yaw"], e["request"], e["image"], e["retried"]) for e in saved["contained_errors"]],
+                         [(90, "SAM character outline", "beauty+90-try1.png", True),
+                          (180, "SAM head crop", "beauty+180-try1.png", True)])
         for yaw in ("90", "180"):
             self.assertEqual(saved["views"][yaw]["attempts"], [])
             self.assertNotIn("image", saved["views"][yaw])
@@ -406,7 +447,7 @@ class FastGenerationTests(unittest.TestCase):
         self.assertEqual(rec["selected"], {"0": True, "90": False, "-90": True, "180": False})
 
     def test_front_model_error_turns_the_beauty_arm_off(self):
-        rec, _ = self.fast(failing=(0,), error=self.ERRORS[2])
+        rec, _ = self.fast(failing=(0,), error=self.POLICY)
         self.assertEqual([(e["yaw"], e["fallback"], e["error_code"]) for e in rec["contained_errors"]],
                          [(0, "beauty off", "content_policy_violation")])
         self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 0))

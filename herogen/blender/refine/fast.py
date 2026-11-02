@@ -25,15 +25,60 @@ ATTEMPTS = 2
 MESSAGE_MAX = 160   # characters of a contained model error's message kept in the stage record
 
 
-def contained_error(exc, fallback, **where):
+def error_fields(exc):
+    """A model error as recorded in stage-3f.json: class, answer status and code, transport failure, message."""
+    message = " ".join(str(exc).split())
+    return {'error': type(exc).__name__, 'http_status': getattr(exc, 'http_status', None),
+            'error_code': getattr(exc, 'error_code', None), 'network_error': getattr(exc, 'network_error', None),
+            'message': message[:MESSAGE_MAX]}
+
+
+def contained_error(exc, fallback, retried=False, **where):
     """A beauty-only model error (beauty or SideBeautyPass request) that the fast lane contains, as recorded.
 
     ``where`` names the request (view and slot, or reference yaw); ``fallback`` names what was used instead.
+    ``retried`` is true when the error came from the one resend of a transient failure.
     """
-    message = " ".join(str(exc).split())
-    return {**where, 'error': type(exc).__name__, 'http_status': getattr(exc, 'http_status', None),
-            'error_code': getattr(exc, 'error_code', None), 'message': message[:MESSAGE_MAX],
-            'fallback': fallback}
+    return {**where, **error_fields(exc), **({'retried': True} if retried else {}), 'fallback': fallback}
+
+
+def transient(exc):
+    """A timeout, a dropped connection or an HTTP 5xx, from status and transport state only (never the message).
+
+    Any 4xx, including a content-policy refusal, is not transient."""
+    status = getattr(exc, 'http_status', None)
+    if type(status) is int:
+        return 500 <= status <= 599
+    return getattr(exc, 'network_error', None) is not None
+
+
+def retry_once(client, retries):
+    """Make a beauty-only client resend a request once, identically, after a transient model error.
+
+    Each resend is recorded in ``retries`` with the first error and the resend's outcome (``'ok'`` or its error).
+    It goes through the client's own budget, reservation and limiter hooks, so a budget stop or cancellation
+    there propagates unchanged, as does a failed resend's ApiError (then the last entry's ``retry`` is an error).
+    Plain-equivalent requests never use this.
+    """
+    for name, request in (('edit_image', 'image edit'), ('segment', 'SAM query')):
+        def call(*args, _method=getattr(client, name), _request=request, **kwargs):
+            try:
+                return _method(*args, **kwargs)
+            except ApiError as exc:
+                if not transient(exc):
+                    raise
+                entry = {'request': _request, **({'concept': str(args[1])} if _request == 'SAM query'
+                                                  and len(args) > 1 else {}), **error_fields(exc)}
+            try:
+                result = _method(*args, **kwargs)
+            except BaseException as again:
+                entry['retry'] = error_fields(again)
+                retries.append(entry)
+                raise
+            entry['retry'] = 'ok'
+            retries.append(entry)
+            return result
+        setattr(client, name, call)
 
 
 def isolated_client(parent, key, persistence_lock=None):
@@ -128,6 +173,7 @@ class Pass:
         self.reported = False
         # Slots whose model errors are contained (an enhanced slot 1), those errors by slot, and what decides instead.
         self.contained, self.errors, self.fallback = (), {}, 'ordinary slots'
+        self.retries = {}   # per contained slot: its resent transient errors (`retry_once`)
         # Requests paid on this view's behalf outside its own tries' clients, by slot index (build log).
         self.shared_calls = lambda index: ()
 
@@ -158,6 +204,9 @@ class Pass:
             # Every request of this try (the repaint and its SAM 3.1 checks) is logged with its view and try.
             child.purpose = 'repaint'
             child.event_fields = {'view': self.key, **({} if buildlog.is_muted() else {'try_': index + 1})}
+            if index in self.contained:
+                # Beauty-only requests resend once after a transient error; plain-equivalent slots never do.
+                retry_once(child, self.retries.setdefault(index, []))
             private = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
             if standard_side:
                 private['reference_style'] = 'turnaround artwork and original cover'
@@ -272,7 +321,9 @@ class Pass:
             return False
         private = self.tasks[index][2]
         trial = private['attempts'][-1] if private['attempts'] else None
-        error = contained_error(exc, self.fallback, slot=index + 1, prompt=private.get('prompt'),
+        resent = self.retries.get(index)
+        error = contained_error(exc, self.fallback, retried=bool(resent) and resent[-1]['retry'] != 'ok',
+                                slot=index + 1, prompt=private.get('prompt'),
                                 request='SAM check' if trial is not None and 'checks' in trial else 'image edit')
         private.update(accepted=False, reason=type(exc).__name__)
         if trial is not None:
@@ -455,6 +506,17 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
     def collect(job, index, wave):
         """Collect one slot; return a newly launched conditional slot's future, if one became due."""
         nonlocal stopped, error
+        if job.retries.get(index):
+            # Both attempts of every resent beauty-only request: on the view, its attempt, the run and the log.
+            with state_lock:
+                private = job.tasks[index][2]
+                if private['attempts']:
+                    private['attempts'][-1]['retries'] = list(job.retries[index])
+                for entry in job.retries[index]:
+                    job.record.setdefault('retries', []).append({'slot': index + 1, **entry})
+                    data.setdefault('retries', []).append({'view': job.key, 'slot': index + 1, **entry})
+            for entry in job.retries[index]:
+                buildlog.retried(entry, view=job.key, number=job.tries[index])
         try:
             # Never wait while holding the budget lock: HTTP authorization needs that same lock.
             try:
