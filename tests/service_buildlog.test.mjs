@@ -91,7 +91,7 @@ test('texture views, reasons and speakers read as plain text', () => {
   const model = buildModel(job({'3f': 'running'}), events);
   assert.deepEqual(rowsOf(model, '3f').map(r => [r.state, r.text]), [
     ['info', 'Wave 1: asking Muse Image to repaint 5 views, 2 tries each, all at once (10 requests)'],
-    ['kept', 'Repainting the side view −90°, try 2: not needed, the other try passed (already paid for)'],
+    ['kept', 'Repainting the side view −90°, try 2: cancelled (step stopped) (already paid for)'],
     ['kept', 'Front, try 1: not used (outline moved too far: 90th percentile 18.0 px (limit 16))'],
     ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, median drift 3.6 px)'],
     ['kept', 'Face close-up: no try passed. Keeping the original paint for this view.'],
@@ -226,7 +226,8 @@ class El {
   all() { return this.children.flatMap(c => [c, ...c.all()]); }
   find(cls) { return this.all().filter(c => c.className.split(' ').includes(cls)); }
 }
-globalThis.document = {createElement: t => new El(t), createElementNS: (_, t) => new El(t), hidden: false};
+globalThis.document = {createElement: t => new El(t), createElementNS: (_, t) => new El(t), hidden: false, listeners: {},
+  addEventListener(k, f) { (this.listeners[k] ||= []).push(f); }, fire(k) { for (const f of this.listeners[k] || []) f(); }};
 
 function harness({responses, motion = false}) {
   const els = Object.fromEntries(['#stageLog', '#followLive', '#copyLog', '#logStatus', '#livePanel'].map(k => [k, new El(k)]));
@@ -247,7 +248,7 @@ function harness({responses, motion = false}) {
   const log = buildLog((s) => els[s], api, {typical: TYPICAL, timers, now: () => clock, motion: {matches: motion}});
   const settle = () => new Promise(r => setImmediate(r));
   return {els, calls, pending, log, settle, advance(ms) { clock += ms; },
-    async runNext(match = () => true) { const i = pending.findIndex(t => match(t)); const [t] = pending.splice(i, 1); t.f(); await settle(); return t; }};
+    async runNext(match = () => true) { const i = pending.findIndex(t => match(t)); const [t] = pending.splice(i, 1); clock += t.ms || 0; t.f(); await settle(); return t; }};
 }
 const notFound = () => Object.assign(new Error('Not found.'), {status: 404});
 
@@ -451,7 +452,7 @@ test('the replayed fox-samurai run (3D shape to Roblox rig) renders end to end i
 test('a check that missed inside a step that passed is a quiet note, not a red failure', () => {
   const events = [ev(0, 'step_start', '3f'), ev(1, 'check', '3f', {name: 'outline_p90_px', ok: false, gate: true, op: '<=', m: {value: 18, limit: 16}})];
   const [row] = rowsOf(buildModel(job({'3f': 'passed'}), events), '3f');
-  assert.equal(row.state, 'kept');
+  assert.equal(row.state, 'noted');
   assert.equal(row.text, '1 of 1 required checks failed');
   assert.deepEqual(row.checks.map(c => c.text), ['outline_p90_px: failed · measured 18, needs at most 16']);
   assert.equal(rowsOf(buildModel(job({'3f': 'failed'}), events), '3f')[0].state, 'failed');
@@ -513,4 +514,110 @@ test('a long local sub-step runs as one row until it ends, and a check list keep
   await h.runNext(t => t.f.name === 'poll');
   assert.equal(h.els['#stageLog'].find('bl-check-sum')[0], fold);
   assert.equal(details.open, true, 'still open after the next update');
+});
+
+// ---------- Review fixes ----------
+test('a step end with an outcome this page does not know reads as unknown, never as done', () => {
+  const events = [ev(0, 'step_start', '2'), ev(5, 'step_end', '2', {outcome: 'unknown', s: 5, usd: 0.01})];
+  const model = buildModel(job({2: 'pending'}), events);
+  const step = model.steps.find(s => s.key === '2');
+  assert.equal(step.state, 'failed');
+  assert.ok(step.defaultOpen);
+  const last = copyText(model).split('\n').at(-1);
+  assert.match(last, /✗ Character views ended, outcome unknown/);
+  assert.ok(!copyText(model).includes('Character views done'));
+});
+
+test('a requeue or a later attempt starts the step over', () => {
+  const first = [ev(0, 'step_start', '3', {a: 1}), ev(1, 'gpu_wait', '3', {a: 1, id: 'g1', who: 'sam-3d-objects', what: '3d_shape'}),
+    ev(60, 'step_end', '3', {a: 1, outcome: 'failed', s: 60, usd: 0})];
+  for (const restart of [[ev(61, 'requeue', '3', {a: 1, next: 2, of: 2, code: 'gpu_unavailable'})], []]) {
+    const events = [...first, ...restart, ev(70, 'step_start', '3', {a: 2}),
+      ev(71, 'gpu_wait', '3', {a: 2, id: 'g2', who: 'sam-3d-objects', what: '3d_shape'})];
+    const model = buildModel(job({3: 'running'}), events, {now: START + 80000, typical: TYPICAL});
+    const step = model.steps.find(s => s.key === '3');
+    assert.equal(step.state, 'running');
+    const rows = step.rows.filter(r => r.call);
+    assert.deepEqual(rows.map(r => [r.key, r.state]), [['c:g1', 'unknown'], ['c:g2', 'running']]);
+    assert.equal(rowMeta(rows[1]), '9 s · usually 175 s');
+    // Its record still lagging at "pending" makes no difference.
+    assert.equal(buildModel(job({3: 'pending'}), events).steps.find(s => s.key === '3').state, 'running');
+  }
+});
+
+test('a cancelled try is "not needed" only when another try of its view was accepted', () => {
+  const repaint = (id, view, n) => [ev(0, 'call_start', '3f', {id, who: 'muse-image', what: 'repaint', view, try: n}),
+    ev(5, 'call_end', '3f', {id, who: 'muse-image', what: 'repaint', view, try: n, outcome: 'cancelled', s: 5, usd: 0})];
+  const events = [ev(0, 'step_start', '3f'), ...repaint('a', 'body+0', 2), ...repaint('b', 'body+180', 2),
+    ev(6, 'decision', '3f', {what: 'view_result', view: 'body+0', try: 1, ok: true, m: {overlap: 0.95}})];
+  const model = buildModel(job({'3f': 'failed'}), events);
+  const [a, b] = rowsOf(model, '3f').filter(r => r.call);
+  assert.equal(a.text, 'Repainting the front, try 2: not needed, the other try passed');
+  assert.equal(b.text, 'Repainting the back, try 2: cancelled (step stopped)');
+  assert.match(copyText(model), /✗ Muse Image: repainting the back, try 2: cancelled \(step stopped\) · 5\.0 s · \$0$/m);
+  assert.match(copyText(model), /Muse Image: repainting the front, try 2: not needed, the other try passed · 5\.0 s · \$0$/m);
+});
+
+test('coming back to the tab waits out the back-off, and Retry-After: 0 still waits 1.5 s', async () => {
+  const busy = (after) => Object.assign(new Error('Too many requests.'), {status: 429, retryAfter: after});
+  const h = harness({responses: [{events: [ev(0, 'step_start', '1')], cursor: 'o:1', done: false}, busy('10'), busy('0'),
+    {events: [], cursor: 'o:1', done: false}]});
+  h.log.update(job({1: 'running'}));
+  await h.settle();
+  await h.runNext(t => t.f.name === 'poll');
+  assert.equal(h.calls.length, 2);
+  h.advance(2000);
+  document.fire('visibilitychange');
+  await h.settle();
+  assert.equal(h.calls.length, 2, 'no read before Retry-After has passed');
+  const wait = h.pending.find(t => t.f.name === 'poll');
+  assert.equal(wait.ms, 8000);
+  await h.runNext(t => t === wait);
+  assert.equal(h.calls.length, 3);
+  assert.equal(h.pending.find(t => t.f.name === 'poll').ms, POLL_MS, 'Retry-After: 0 is floored to 1.5 s');
+});
+
+test('when the route keeps failing, an ended run shows its stage records and stops asking', async () => {
+  const broken = () => Object.assign(new Error('Server error.'), {status: 500});
+  const record = () => ({started: '2026-11-02T02:55:10Z', seconds: 1});
+  const h = harness({responses: [broken(), broken(), broken(), record]});
+  h.log.update(job({p: 'passed'}, {state: 'succeeded'}));
+  await h.settle();
+  await h.runNext(t => t.f.name === 'poll');
+  await h.runNext(t => t.f.name === 'poll');
+  await h.settle();
+  assert.equal(h.log.mode, 'fallback');
+  assert.ok(h.calls.includes('/runs/r1/j_1/stage-p.json'));
+  assert.equal(h.pending.filter(t => t.f.name === 'poll').length, 0, 'no more reads for an ended run');
+  assert.notEqual(h.els['#logStatus'].textContent, PAUSED);
+  // A running job keeps trying, but shows the stage records meanwhile instead of "Loading".
+  const g = harness({responses: [broken(), broken(), broken(), record]});
+  g.log.update(job({p: 'running'}));
+  await g.settle();
+  await g.runNext(t => t.f.name === 'poll');
+  await g.runNext(t => t.f.name === 'poll');
+  await g.settle();
+  assert.ok(g.els['#stageLog'].classList.contains('is-records'));
+  assert.equal(g.pending.filter(t => t.f.name === 'poll').length, 1);
+});
+
+test('a missed required check in a step that passed is described as not met, not "not used"', async () => {
+  const events = [ev(0, 'step_start', '3f'), ev(1, 'check', '3f', {name: 'outline_p90_px', ok: false, gate: true, op: '<=', m: {value: 18, limit: 16}})];
+  const h = harness({responses: [{events, cursor: 'o:1', done: false}]});
+  h.log.update(job({'3f': 'passed'}));
+  await h.settle();
+  const [fold] = h.els['#stageLog'].find('bl-check-sum');
+  assert.match(fold.className, /st-noted/);
+  assert.equal(fold.find('sr')[0].textContent, 'Not met; the step still passed');
+});
+
+test('row keys follow arrival, so a late event with an earlier time does not rename a row', () => {
+  const events = [ev(0, 'step_start', '2'), ev(5, 'local', '2', {what: 'sheet_split', m: {figures: 4}}),
+    ev(6, 'checks', '2', {n: 13, passed: 10, gated: 4, failed: [], advisory: ['a', 'b', 'c']})];
+  const keys = (list) => rowsOf(buildModel(job({2: 'running'}), list), '2').map(r => r.key);
+  const before = keys(events);
+  const after = keys([...events, ev(1, 'local', '2', {what: 'sheet_split', m: {figures: 3}})]);
+  assert.deepEqual(after.filter(k => before.includes(k)), before);
+  assert.equal(after.length, before.length + 1);
+  assert.equal(after[0], 'e:3', 'the late row sorts first by time but keeps its own key');
 });
