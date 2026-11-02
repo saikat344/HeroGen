@@ -342,7 +342,7 @@ class FaceControl:
             records = copy.deepcopy(self.default_data['views'])
             previous = self.default_data.get('face_recovery')
         # Attempt one can change frontal ownership or add an outline-only head sample.
-        recovery = self.default_recovery(key, records, previous)
+        recovery, stop = self.default_recovery(key, records, previous)
         with self.state_lock:
             if recovery is None:
                 self.default_data.pop('face_recovery', None)
@@ -351,6 +351,8 @@ class FaceControl:
             unchanged = (lambda r: r['attempt'] if r and r.get('applied') else None)
             if not private['accepted'] and unchanged(recovery) == unchanged(previous):
                 self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
+                if stop is not None:
+                    raise stop
                 return
         default = self.default_tex
         reproject(default, self.default_work, records, self.default_context['cams']['body+0'], recovery)
@@ -363,25 +365,36 @@ class FaceControl:
             self.data['default_fast_fallback'] = copy.deepcopy(self.default_data)
             self.data['face_source']['atlas_sha256'] = hashlib.sha256(
                 (self.default_work / 'texture.png').read_bytes()).hexdigest()
+        if stop is not None:
+            raise stop
 
     def default_recovery(self, key, records, previous):
-        """Re-resolve the default-head run's face recovery after a frontal attempt one is folded in."""
+        """Re-resolve the default-head run's face recovery after a frontal attempt one is folded in.
+
+        Returns the record and any budget stop. A stop is recorded in the default-head run, as its
+        own waves record one, and is raised by the caller once the record is stored, so the main
+        run records `stop_reason` and stops as for every other budget stop.
+        """
         from . import face_recovery
         from .fast import isolated_client, publish
 
         if key not in face_recovery.FRONTAL:
-            return previous
+            return previous, None
         if not face_recovery.due(records):
-            return None
+            return None, None
         client = self.default_context['client']
         child = isolated_client(client, 'head+0/face-recovery-fold', self.persistence_lock)
         if hasattr(child, 'network_attempts'):
             child._initial_network_attempts = child.network_attempts
         try:
             return face_recovery.resolve(child, self.default_work, records, self.default_context['cams']['head+0'],
-                                         self.default_context['cams']['body+0'], previous)
+                                         self.default_context['cams']['body+0'], previous), None
         except BudgetStop as exc:
-            return {'applied': False, 'view': 'head+0', 'reason': str(exc)}
+            with self.state_lock:
+                self.default_data['stop_reason'] = str(exc)
+                self.default_stopped = True
+                self.data['face_source']['cap_reached'] = True
+            return {'applied': False, 'view': 'head+0', 'reason': str(exc)}, exc
         finally:
             with self.persistence_lock:
                 publish(client, child)
