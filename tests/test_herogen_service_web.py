@@ -243,18 +243,12 @@ class TestHeaders(WebCase):
             page = b.get("/")
             self.assertEqual(page.status_code, 200)
             self.assertNotIn("/static/", page.text)
-            srcs = re.findall(r'<button[^>]+data-shade="[^"]+"[^>]*><img src="([^"]+)"', page.text)
-            self.assertEqual(
-                srcs,
-                [
-                    "/assets/icons/hg-shade-textured.svg",
-                    "/assets/icons/hg-shade-clay.svg",
-                    "/assets/icons/hg-shade-wire.svg",
-                ],
-            )
-            for src in srcs:
-                r = b.get(src)
-                self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/svg+xml"), src)
+            hrefs = re.findall(r'<button[^>]+data-shade="[^"]+"[^>]*><svg[^>]*><use href="([^"]+)"', page.text)
+            self.assertEqual(hrefs, [f"/assets/icons/sprite.svg#i-hg-shade-{m}" for m in ("textured", "clay", "wire")])
+            r = b.get("/assets/icons/sprite.svg")
+            self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/svg+xml"))
+            for m in ("textured", "clay", "wire"):
+                self.assertIn(f'id="i-hg-shade-{m}"', r.text)
             self.assertEqual(b.get("/static/icons/hg-shade-textured.svg").status_code, 404)
 
 

@@ -16,7 +16,7 @@ function release(model) {
   });
   textures.forEach(v => v.dispose()); materials.forEach(v => v.dispose()); geometries.forEach(v => v.dispose());
 }
-export function createPreview({damping = true} = {}) {
+export function createPreview({damping = true, floor = true} = {}) {
   let state = null, request = 0, mode = 'textured', paused = false, viewListener = null, syncing = false;
   function render() { if (state) { state.controls.update(); state.renderer.render(state.scene, state.camera); } }
   function loop() { state?.renderer.setAnimationLoop(paused ? null : render); }
@@ -93,7 +93,7 @@ export function createPreview({damping = true} = {}) {
       if (token !== request || !state || keepModel && !canReplace()) { release(gltf.scene); resolve(false); return; }
       restore();
       if (state.model) { state.scene.remove(state.model); release(state.model); }
-      state.model = gltf.scene; state.url = url; state.grid.visible = true; state.scene.add(gltf.scene);
+      state.model = gltf.scene; state.url = url; state.grid.visible = floor; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
       const radius = Math.max(size.x, size.y, size.z, 0.01);
