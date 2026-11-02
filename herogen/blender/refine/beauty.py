@@ -210,14 +210,18 @@ def generate_fast(run, client, out):
     from the same SAM head query generate uses; a sample with no detected head is recorded as
     unusable. A yaw without a usable sample has no reference (``fallback: "none"``), so its views
     keep the standard recipe instead of borrowing another yaw. The folder is rebuilt on every call;
-    an unchanged request replays the model cache. Every submitted yaw drains before a model error
-    propagates.
+    an unchanged request replays the model cache.
+
+    These calls are beauty-only, so an ApiError on a yaw's image or SAM query leaves that yaw without
+    a reference, exactly like a rejected sample, and is recorded on the yaw (``error``) and in
+    ``contained_errors``. Every submitted yaw drains before any other error propagates.
     """
     import shutil
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor, wait
-    from .fast import isolated_client, publish
+    from herogen.pipeline.client import ApiError
+    from .fast import contained_error, isolated_client, publish
 
     run, out = Path(run), Path(out)
     t0 = time.monotonic()
@@ -250,6 +254,17 @@ def generate_fast(run, client, out):
                 trial["head_detected"] = box is not None
                 if box is not None:
                     boxes[trial["image"]] = box
+        except ApiError as exc:
+            # No reference at this yaw, as for a rejected sample. Without the front, beauty is off for the run.
+            view = private["views"].setdefault(str(angle), {"accepted": False, "attempts": []})
+            trial = view["attempts"][0] if view["attempts"] else None
+            request = ("BT1 image edit" if trial is None else "SAM character outline" if "iou" not in trial
+                       else "SAM head crop")
+            for key in ("image", "mask"):
+                view.pop(key, None)
+            view.update(accepted=False, attempts=[], error=contained_error(
+                exc, "standard recipe" if angle else "beauty off", request=request,
+                **({"image": trial["image"]} if trial is not None else {})))
         finally:
             with lock:
                 rec["views"].update(private["views"])
@@ -269,6 +284,8 @@ def generate_fast(run, client, out):
         children = {}
         for future in futures:
             future.result()
+        rec["contained_errors"] = [{"yaw": angle, **rec["views"][str(angle)]["error"]} for angle in FAST_ANGLES
+                                   if "error" in rec["views"].get(str(angle), {})]
         selected = load(out)
         rec["selected"] = {str(a): bool(selected["views"][str(a)].get("accepted")) for a in FAST_ANGLES}
         rec["status"] = "complete" if all(rec["selected"].values()) else "rejected"

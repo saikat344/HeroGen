@@ -123,6 +123,32 @@ def try_failed(view: str, number: int) -> None:
     events.emit("decision", step=STEP, what="view_result", view=view, try_=number, ok=False, why="model_error")
 
 
+def _contained(error: dict) -> dict:
+    """The failure class and measures of a contained model error: ``m.fallback`` is 1, with the answer's
+    ``http_status`` when one came back (none for a timeout or a dropped connection)."""
+    status = error.get("http_status")
+    known = type(status) is int
+    return {"code": events.code_for_status(status) if known else None,
+            "m": {"fallback": 1, **({"http_status": status} if known else {})}}
+
+
+@_quiet
+def try_contained(view: str, number: int, error: dict) -> None:
+    """The enhanced (beauty) try's model request failed. The stage goes on: the view's ordinary tries decide,
+    as if this try had been rejected."""
+    events.emit("decision", step=STEP, what="view_result", view=view, try_=number, ok=False, why="model_error",
+                **_contained(error))
+
+
+@_quiet
+def reference_contained(yaw: int, error: dict) -> None:
+    """A beauty reference's model request failed. The stage goes on without a reference at that yaw (``m.yaw``):
+    its views use the standard recipe, and without the front reference the beauty arm is off for the run."""
+    fields = _contained(error)
+    events.emit("decision", step=STEP, what="beauty_reference", ok=False, why="model_error", code=fields["code"],
+                m={"yaw": yaw, **fields["m"]})
+
+
 @_quiet
 def face_source(source, view=None, number=None) -> None:
     """Where the face paint comes from, once the frontal tries are known: a beauty repaint, an ordinary
