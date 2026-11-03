@@ -429,11 +429,38 @@ def reference(folder, rec, angle, *, head=False):
                    "image_sha256": v["image_sha256"], "head_box": v.get("head_box") if head else None}
 
 
+FACIAL_FEATURES = ("eyes", "eyebrows", "mouth")
+# SAM 3.1 concepts that establish a mouth, in query order. "lips" is asked only when "mouth" finds
+# nothing inside the face: SAM's "mouth" concept can miss puckered or protruding lips it still
+# segments as "lips", while an ordinary mouth answers "mouth" and makes no second query.
+MOUTH_CONCEPTS = ("mouth", "lips")
+
+
+def mouth_concept(client, crop, inside):
+    """The first of MOUTH_CONCEPTS that SAM finds inside the face, or None when neither is found.
+
+    Each later concept is queried only after every earlier one found nothing inside the face.
+    Segmentation errors propagate to the caller.
+    """
+    for concept in MOUTH_CONCEPTS:
+        if (union(client, crop, concept) & inside).any():
+            return concept
+    return None
+
+
+def _mouth(client, crop, inside):
+    """Mouth presence for a features dict: ``mouth``, plus ``mouth_concept`` when a fallback concept answered."""
+    concept = mouth_concept(client, crop, inside)
+    return {"mouth": concept is not None,
+            **({"mouth_concept": concept} if concept not in (None, MOUTH_CONCEPTS[0]) else {})}
+
+
 def facial_features(client, image, face=None):
     """Detect feature presence inside a face crop, excluding ornaments and costume marks.
 
     Presence is semantic, with no sharpness or pixel-similarity threshold. Occluded features
-    absent from the reference are not required. Segmentation errors propagate to the caller.
+    absent from the reference are not required. The mouth is found by `mouth_concept`; when a
+    fallback concept answered, ``mouth_concept`` records it. Segmentation errors propagate to the caller.
     """
     if face is None:
         face = np.zeros(image.size[::-1], bool)
@@ -441,16 +468,16 @@ def facial_features(client, image, face=None):
             face |= inst.mask
     y, x = np.nonzero(face)
     if not len(x):
-        return {name: False for name in ("eyes", "eyebrows", "mouth")}
+        return {name: False for name in FACIAL_FEATURES}
     box = (int(x.min()), int(y.min()), int(x.max()) + 1, int(y.max()) + 1)
     crop = image.crop(box)
     inside = face[box[1]:box[3], box[0]:box[2]]
-    return {name: any((inst.mask & inside).any() for inst in client.segment(crop, name))
-            for name in ("eyes", "eyebrows", "mouth")}
+    return {**{name: bool((union(client, crop, name) & inside).any()) for name in ("eyes", "eyebrows")},
+            **_mouth(client, crop, inside)}
 
 
 def frontal_features(client, image, face):
-    """Require two separate eye regions and a mouth inside the frontal face.
+    """Require two separate eye regions and a mouth (`mouth_concept`) inside the frontal face.
 
     SAM can return both eyes in one instance. Count connected regions in their union rather
     than instances; one connected eye mark cannot establish that both eyes are present.
@@ -476,5 +503,4 @@ def frontal_features(client, image, face):
             boxes.append([int(ex.min()) + box[0], int(ey.min()) + box[1],
                           int(ex.max()) + 1 + box[0], int(ey.max()) + 1 + box[1]])
     return {"both_eyes": bool(both), "eye_regions": int(count),
-            "eye_boxes": boxes,
-            "mouth": bool((union(client, crop, "mouth") & inside).any())}
+            "eye_boxes": boxes, **_mouth(client, crop, inside)}

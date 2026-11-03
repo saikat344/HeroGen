@@ -72,7 +72,8 @@ def why(reason) -> str:
 
 def measures(trial: dict, limits: dict | None = None) -> dict:
     """A try's gate numbers as a flat map: outline overlap and drift with their limits, hair agreement and scale
-    change, and the share of the repaint's face outside the render's face."""
+    change, the share of the repaint's face outside the render's face, and ``mouth_lips`` 1 when the facial
+    features check found the repaint's mouth only as SAM's "lips" concept."""
     checks = trial.get("checks") or {}
     m = {}
     for key, value in checks.items():
@@ -89,6 +90,9 @@ def measures(trial: dict, limits: dict | None = None) -> dict:
         m["face_outside"] = face["outside"]
         from .imaging import PART_EXTRA_MAX
         m["face_outside_max"] = PART_EXTRA_MAX
+    repaint = (checks.get("facial_features") or {}).get("repaint") or {}
+    if repaint.get("mouth_concept") == "lips":
+        m["mouth_lips"] = 1
     return dict(list(m.items())[:events.MAX_M])
 
 

@@ -2696,7 +2696,12 @@ the face region once a frontal camera (`head+0` or `body+0`) has an accepted rep
 SAM face mask, grown like the hair views', keeps its base paint, so a rejected frontal view can never leave a
 half-repainted face.
 An exposed frontal face also requires every feature type detected in its reference (eyes, eyebrows and
-mouth) to be detected inside the registered repaint's face. Missing features reject the attempt before
+mouth) to be detected inside the registered repaint's face. A mouth is present when SAM's "mouth" concept
+finds one inside the face or, only when "mouth" finds nothing there, when its "lips" concept does
+(`beauty.mouth_concept`): "mouth" can return nothing on puckered or protruding lips that "lips" still
+segments. The reference, the repaint and the frontal check below all use this rule. A face whose "mouth" is
+found makes exactly the earlier queries; when "lips" answered, the features record `mouth_concept: "lips"`
+and the try's build-log `view_result` carries `m.mouth_lips` 1. Missing features reject the attempt before
 projection and never release the oblique guard. Full refinement may continue within its existing attempt
 limit. A reference with no detected features cannot anchor an exposed face. This presence check uses the existing SAM 3.1 client;
 it does not measure sharpness, identity or expression, and does not apply when beauty is disabled.
@@ -2736,7 +2741,7 @@ preserving the first render's geometry, and forbids straps, belts, buckles or or
 does not show.
 Before publishing the first version, every frontal candidate resolves. An accepted beauty `head+0`, then
 `body+0`, can own the face only when its registered face contains separate eye regions on both sides and a
-mouth. The largest connected eye region in each face half also supplies a detail comparison with the
+mouth ("mouth", else the "lips" fallback, as above). The largest connected eye region in each face half also supplies a detail comparison with the
 corresponding accepted ordinary-fast paint. Each eye box gains a 15% horizontal-size context margin,
 then both greyscale crops resize to 64 by 48. Both eyes must retain at least the ordinary paint's interior
 Laplacian variance and edge density (Sobel gradient above 0.04), both strictly positive for the ordinary
