@@ -14,7 +14,9 @@ Content-policy refusals (fast lane only, as in `herogen.service.runner.reword_an
 refuses the step once, the fake rewrite succeeds and the retry passes; "policy_twice" refuses the retry too;
 "policy_reword_fails" makes the rewrite fail. Without ``fail``, a description holding a marker word picks the same
 scenario on stage p, so the website can be checked with no spend: ``fakerefuse``, ``fakerefusetwice``,
-``fakerewordfail``, and ``fakerefusecover`` (stage 1 refuses once; the sketch is redrawn before the retry).
+``fakerewordfail``, and ``fakerefusecover`` (stage 1 refuses once; the sketch is redrawn before the retry). On the
+fast lane every described hero's brief is also checked up front (`_precheck`): ``fakebrand`` is found and reworded
+before stage p, ``fakeprecheckfail`` makes the check fail.
 """
 
 from __future__ import annotations
@@ -151,19 +153,48 @@ class FakeRunner:
         if why:
             return Outcome("skipped", message=why, code="not_available")
         mode = self.fail.get(spec.key) or self._marker(spec, ctx)
-        if mode not in POLICY_MODES:
+        if spec.key not in ("p", "1", "2"):
             return self._run(spec, ctx, mode)
-        from herogen.service.runner import reword_and_retry, reword_due
+        from herogen.service.runner import redraw_sketch, run_with_rewording
 
-        first = self._refuse(spec, ctx)
-        if not reword_due(spec, ctx, first, 4):
-            return first
+        policy = mode in POLICY_MODES
+        first = (lambda: (self._refuse(spec, ctx), 4)) if policy else (lambda: (self._run(spec, ctx, mode), 0))
         retry = ((lambda: (self._refuse(spec, ctx), 4)) if mode == "policy_twice"
                  else (lambda: (self._run(spec, ctx, None), 0)))
-        from herogen.service.runner import redraw_sketch
+        return run_with_rewording(spec, ctx, first, retry,
+                                  lambda: self._reword(spec, ctx, mode != "policy_reword_fails"),
+                                  lambda: redraw_sketch(lambda s: self._step_again(s, ctx)),
+                                  lambda: self._precheck(spec, ctx))
 
-        return reword_and_retry(spec, ctx, first, lambda: self._reword(spec, ctx, mode != "policy_reword_fails"),
-                                retry, lambda: redraw_sketch(lambda s: self._step_again(s, ctx)))
+    def _precheck(self, spec: StageSpec, ctx: StageContext) -> None:
+        """The fake up-front check, as `pipestage precheck` writes it: ``fakebrand`` in a description is the brand
+        it finds (reworded to `FAKE_REWORD`), ``fakeprecheckfail`` makes the check fail, anything else is clean."""
+        from herogen import prompts
+        from herogen.pipeline import reword
+
+        words = set(re.findall(r"[a-z]+", (ctx.prompt or "").casefold()))
+        flog = FakeLog(ctx, spec.key, self.delay_s)
+        call = flog.start("muse-spark", "precheck_brief")
+        flog.wait(0.2)
+        if "fakeprecheckfail" in words:
+            flog.end(call, outcome="failed", code="http_5xx")
+            reword.write(ctx.run_dir, {"status": "failed", "error": "ApiError", "http_status": 503,
+                                       "cost_usd": 0.0}, reword.PRECHECK_FILE)
+            return
+        flog.end(call, 0.0011)
+        names = ["fakebrand"] if "fakebrand" in words else []
+        rec = {"status": "found" if names else "clean", "names_found": names, "model": "muse-spark-1.3",
+               "prompt_version": prompts.selected("brief_precheck").ref(), "cost_usd": 0.0011}
+        if names:
+            call = flog.start("muse-spark", "reword_brief")
+            flog.wait(0.2)
+            flog.end(call, 0.0012)
+            reword.write(ctx.run_dir, {"status": reword.USED, "reason": reword.PRECHECK, "original": ctx.prompt,
+                                       "reworded": FAKE_REWORD, "removed_names": names, "names_found": names,
+                                       "model": "muse-spark-1.3", "cost_usd": 0.0012,
+                                       "prompt_version": prompts.selected("brief_reword").ref()})
+            rec["rewrite"] = {"status": reword.USED, "cost_usd": 0.0012}
+        reword.write(ctx.run_dir, rec, reword.PRECHECK_FILE)
 
     def _step_again(self, spec: StageSpec, ctx: StageContext) -> tuple[Outcome, int]:
         """An earlier step run again inside a retry (the sketch redrawn from a reworded brief)."""
