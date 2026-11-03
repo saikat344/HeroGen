@@ -222,6 +222,16 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertNotIn(BRIEF, "\n".join(logs.output))
         self.assertNotIn(REWORDED, "\n".join(logs.output))
 
+    def test_rewrite_call_events_keep_the_refused_step_after_earlier_work_left_a_step(self):
+        # Stages run in process here, as they would after any earlier work in the same thread: a step left in the
+        # context must not relabel the rewrite's call, which belongs to the refused step the runner names.
+        self.addCleanup(events.reset_step, events.set_step("3f"))
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO"):
+            self.assertEqual(self.go(job), "succeeded")
+        spark = [(e["kind"], e.get("step")) for e in read_events(self.run_dir(job)) if e.get("who") == "muse-spark"]
+        self.assertEqual(spark, [("call_start", "p"), ("call_end", "p")])
+
     def test_second_refusal_stops_with_the_clearer_message_and_keeps_the_rewrite_for_editing(self):
         self.refusals = {"images/generations": 2}
         job = self.prompt_job()
