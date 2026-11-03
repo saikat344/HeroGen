@@ -676,6 +676,12 @@ test('a reworded description is named in the Build log, quoting the rewrite from
     ev(5.1, 'decision', 'p', {what: 'brief_reworded', ok: true}),
     ev(5.2, 'call_start', 'p', {id: 'c', who: 'muse-image', what: 'sketch_design'}),
     ev(9, 'call_end', 'p', {id: 'c', who: 'muse-image', what: 'sketch_design', outcome: 'ok', s: 3.8, usd: 0.01})];
+  // A reworded retry summarises its checks again; only the newest summary row stays.
+  const cover = [ev(1, 'step_start', '1'), ev(2, 'checks', '1', {n: 5, passed: 5, gated: 2, failed: [], advisory: []}),
+    ev(3, 'decision', '1', {what: 'brief_reworded', ok: true}), ev(4, 'checks', '1', {n: 5, passed: 5, gated: 2, failed: [], advisory: []})];
+  const coverRows = rowsOf(buildModel(withText, cover, {now: START + 5000}), '1');
+  assert.deepEqual(coverRows.map(r => r.key), ['e:2', 'e:3']);
+  assert.equal(coverRows[1].summary.t, START + 4000);
   const rows = rowsOf(buildModel(withText, events, {now: START + 10000}), 'p');
   assert.deepEqual(rows.map(r => [r.state, r.text]), [
     ['failed', 'Drawing a character design from your idea failed: the model service refused the request'],

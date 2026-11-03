@@ -194,6 +194,8 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         } else if (e.kind === 'checks') {
           if (!step) continue ordered;
           const row = {key: `e:${index}`, call: false, who: 'herogen', state: 'passed', at: t, summary: e, checks: step.checkList};
+          // A step run again (a reworded retry) summarises its checks again: the newest summary stands for the step.
+          if (step.checkRow) step.rows.splice(step.rows.indexOf(step.checkRow), 1);
           step.checkRow = row; step.rows.push(row);
           line(t, 'i', `HeroGen (local): ${copy.checksLine(e, step.checkList, step.key)}`);
           continue ordered;
