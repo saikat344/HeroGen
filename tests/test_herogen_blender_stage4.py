@@ -622,6 +622,58 @@ class TestSections(SyntheticBase):
             for j in geo[p]:
                 self.assertLessEqual(vis[p][j], geo[p][j] + 1e-9)
 
+    def test_stray_surface_sees_a_torso_owned_shoulder_pad_the_rim_test_cannot(self):
+        """A torso-owned pad shaped from the upper arm hides the shoulder rim, so the visible gap can only fall,
+        while the stray-surface measure fails it; the clean cut body has no stray surface."""
+        from herogen.blender import covers
+
+        secs, _ = split.build_sections(self.verts, self.faces, self.sk, rings=1, ring_points=8)
+        bare = pose.stray_surface(secs)
+        self.assertEqual(set(bare), set(pose.STRAY_JOINTS))
+        self.assertTrue(all(v["area"] <= pose.STRAY_AREA_GATE for v in bare.values()), bare)
+        padded, info = covers.add_covers(secs, self.verts, self.faces, owner="UpperTorso", radius=2.5, outset=0.06)
+        self.assertEqual(len(info), 2)
+        stray = pose.stray_surface(padded)
+        for side in ("Left", "Right"):
+            self.assertGreater(stray[side + "Shoulder"]["parent_area"], pose.STRAY_AREA_GATE, stray)
+            self.assertGreater(stray[side + "Shoulder"]["reach"], pose.STRAY_BAND)
+        poses = pose.pose_library(pose.bone_directions(self.sk))
+        pick = {"reach_up_L": poses["reach_up_L"]}
+        with_pad = pose.joint_gaps(padded, pick, visible=True)["reach_up_L"]
+        without = pose.joint_gaps(secs, pick, visible=True)["reach_up_L"]
+        self.assertLessEqual(with_pad["LeftShoulder"], without["LeftShoulder"] + 1e-9)
+
+    def test_stray_surface_leaves_out_a_joint_without_a_shared_rim(self):
+        secs, _ = split.build_sections(self.verts, self.faces, self.sk, rings=1, ring_points=8)
+        from dataclasses import replace
+        secs = dict(secs, LeftHand=replace(secs["LeftHand"], rims=[]))
+        self.assertNotIn("LeftWrist", pose.stray_surface(secs))
+
+    def test_cap_surface_outside_counts_a_cap_standing_out_of_the_body(self):
+        from dataclasses import replace
+
+        secs, _ = split.build_sections(self.verts, self.faces, self.sk, rings=1, ring_points=8)
+        self.assertEqual(sum(pose.cap_surface_outside(secs).values()), 0.0)
+        hand = secs["LeftHand"]
+        # a flat triangle, marked as cap, held one stud out from the hand: shown at rest
+        tip = hand.verts.max(axis=0) + np.array([1.0, 0.0, 0.0])
+        extra = np.array([tip, tip + [0.2, 0, 0], tip + [0, 0, 0.2]])
+        shard = replace(hand, verts=np.concatenate([hand.verts, extra]),
+                        faces=np.concatenate([hand.faces, [[len(hand.verts), len(hand.verts) + 1, len(hand.verts) + 2]]]),
+                        colour_exterior=np.concatenate([hand.colour_exterior, [False]]))
+        got = pose.cap_surface_outside(dict(secs, LeftHand=shard))
+        self.assertAlmostEqual(got["LeftHand"], 0.02, places=4)
+
+    def test_stage4_builds_no_shoulder_pads(self):
+        from herogen.blender import covers, stage4
+
+        self.assertIsNone(stage4.COVER_OWNER)
+        secs, _ = split.build_sections(self.verts, self.faces, self.sk, rings=1, ring_points=8)
+        same, info = covers.add_covers(secs, self.verts, self.faces, owner=None)
+        self.assertEqual(info, {})
+        for name in SECTIONS:
+            self.assertIs(same[name], secs[name])
+
     def test_ray_hits(self):
         tri = np.array([[[0, 0, 1.0], [1, 0, 1.0], [0, 1, 1.0]]])
         o = np.array([[0.2, 0.2, 0.0], [0.9, 0.9, 0.0], [0.2, 0.2, 2.0]])
@@ -638,6 +690,63 @@ class TestSections(SyntheticBase):
         expected = r @ (p - pivots["LeftUpperLeg"]) + pivots["LeftUpperLeg"]
         self.assertTrue(np.allclose(child[:3, :3] @ p + child[:3, 3], expected))
         self.assertTrue(np.allclose(m["Head"], np.eye(4)))
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy and Pillow are required")
+class CapFillTests(unittest.TestCase):
+    @staticmethod
+    def crescent(n=24, r_out=1.0, r_in=0.7, z=0.0):
+        """A C-shaped loop on the plane z, opening towards +X, as a cut through a cloak or robe makes."""
+        t = np.linspace(np.radians(40), np.radians(320), n)
+        outer = np.stack([r_out * np.cos(t), r_out * np.sin(t), np.full(n, z)], axis=1)
+        inner = np.stack([r_in * np.cos(t[::-1]), r_in * np.sin(t[::-1]), np.full(n, z)], axis=1)
+        return np.concatenate([outer, inner])
+
+    @staticmethod
+    def area(tri):
+        return 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+
+    def test_a_crescent_opening_is_filled_exactly_and_wound_like_the_fan(self):
+        v = self.crescent()
+        ids = np.arange(len(v))
+        tris = split.fill_polygon(ids, v)
+        self.assertEqual(len(tris), len(v) - 2)
+        x, y = v[:, 0], v[:, 1]
+        shoelace = 0.5 * abs(float((x * np.roll(y, -1) - np.roll(x, -1) * y).sum()))
+        self.assertAlmostEqual(float(self.area(v[tris]).sum()), shoelace, places=9)
+        # the centroid fan used before spans the empty middle of the C
+        fan = np.stack([np.roll(ids, -1), ids, np.full(len(ids), len(v))], axis=1)
+        fv = np.concatenate([v, v.mean(axis=0)[None]])
+        self.assertGreater(float(self.area(fv[fan]).sum()), 1.5 * shoelace)
+        fan_normal = np.cross(fv[fan][:, 1] - fv[fan][:, 0], fv[fan][:, 2] - fv[fan][:, 0]).sum(axis=0)
+        normals = np.cross(v[tris][:, 1] - v[tris][:, 0], v[tris][:, 2] - v[tris][:, 0])
+        self.assertTrue(np.all(normals @ fan_normal > 0))
+
+    def test_a_self_crossing_opening_falls_back_to_the_fan(self):
+        v = np.array([[0, 0, 0], [1, 1, 0], [1, 0, 0], [0, 1, 0]], float)    # a bow tie
+        self.assertIsNone(split.fill_polygon(np.arange(4), v))
+        cv, cf = split.close_section(v, np.zeros((0, 3), np.int64), [[0, 1, 2, 3]], [None])
+        self.assertEqual(len(cv), 5)
+        self.assertEqual(len(cf), 4)
+
+    def test_a_dome_over_an_opening_away_from_the_pivot_shows_and_a_round_one_does_not(self):
+        from herogen.blender.meshindex import MeshIndex
+        from herogen.blender.score import mesh_sanity
+
+        # neighbour: a closed box above z = 0 that the cap bulges into
+        bv = np.array([[x, y, z] for x in (-2, 2) for y in (-2, 2) for z in (0, 0.6)], float)
+        bf = np.array([[0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5], [0, 4, 5], [0, 5, 1], [2, 3, 7], [2, 7, 6],
+                       [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3]])
+        self.assertTrue(mesh_sanity(bv, bf, 1e-9)["watertight"])
+        box = MeshIndex(bv, bf)
+        t = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+        ring = np.stack([0.5 * np.cos(t), 0.5 * np.sin(t), np.zeros_like(t)], axis=1)
+        cp = {"centre": np.zeros(3), "dir": np.array([0, 0, 1.0]), "depth": 0.5, "rings": 2, "ring_points": 12}
+        self.assertEqual(split.dome_outside_area(ring, cp, box), 0.0)
+        # a crescent 1.5 studs out from the pivot: its dome swings back over the pivot, far above the 0.6 box
+        far = self.crescent(r_out=1.9, r_in=1.6)
+        cp_far = dict(cp, depth=2.0)
+        self.assertGreater(split.dome_outside_area(far, cp_far, box), split.DOME_SHOW_AREA)
 
 
 @unittest.skipUnless(HAVE_DEPS and bl.find_blender() is not None, "Blender not installed")
@@ -963,7 +1072,13 @@ class TestEndToEndBlender(SyntheticBase):
         self.assertEqual(body["texture"]["transfer_metrics"], {})
         for lod in ("high", "low"):
             self.assertTrue((self.rundir / "04-body" / f"atlas-head-{lod}.png").exists(), lod)
-        self.assertEqual(len(body["covers"]["pieces_high"]), 2)
+        self.assertEqual(body["covers"]["owner"], None)
+        self.assertEqual(body["covers"]["pieces_high"], {})
+        for lod in ("high", "low"):
+            stray = checks[f"stray_surface_{lod}"]
+            self.assertTrue(stray["gate"])
+            self.assertTrue(stray["pass"], stray)
+            self.assertEqual(set(stray["by_joint"]), set(pose.STRAY_JOINTS))
         # the cuts were placed once, on the reference body, and the record says where and why
         cuts_rec = body["cuts"]
         self.assertEqual(set(cuts_rec["chosen_fraction"]), {k for ks in cuts.GROUPS.values() for k in ks})

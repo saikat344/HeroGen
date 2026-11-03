@@ -65,7 +65,15 @@ DOME = {"high": (2, 12), "low": (1, 8)}
 #   outset), so each pad vertex is pushed out only while it stays inside every observed mask grown by 3 px.
 #   Pencil sketch, worst visible gap high/low and worst observed rest IoU: 0 px tolerance 0.148/0.157, 0.904;
 #   3 px 0.125/0.140, 0.901; 6 px 0.125/0.140, 0.894 (fails the 0.90 IoU gate).
-COVER_OWNER = "UpperTorso"
+# Not built (owner None). The pad is the body surface within COVER_RADIUS cut radii of the shoulder pivot; on a slim
+#   arm that sphere holds the whole upper arm. On a slim blue suit hero (development site, in-game high) each
+#   pad ran from 0.21 studs inside the shoulder joint to 0.59 along the arm, past the elbow (upper arm 0.47-0.51
+#   long), and was owned by the UpperTorso: in Wave it stayed in its A-pose place beside the raised arm as a flap,
+#   and at rest it lay 0.001-0.06 studs over the arm, so the two surfaces showed through each other up to its
+#   ragged edge at the elbow. The pose test follows only cut rims and the pad hid them, so no gap measured it; the
+#   stray-surface check (`pose.stray_surface`) now does. Without pads each joint is closed by its spherical caps
+#   alone: the child's cap turns on the same sphere about the pivot and fills the opening.
+COVER_OWNER = None
 COVER_RADIUS = 2.5
 COVER_OUTSET = 0.06
 COVER_MASK_TOLERANCE_PX = 3
@@ -400,6 +408,21 @@ def _gap_check(name: str, value: float | None, gate: bool = True, **extra) -> di
     return check(name, round(value, 4), GAP_GATE, passed=value <= GAP_GATE, gate=gate, rule="<=", **extra)
 
 
+def _stray_check(lod: str, stray: dict) -> dict:
+    """The worst arm joint's stray surface (`pose.stray_surface`) against its gate; no measured joint is
+    informational."""
+    name = f"stray_surface_{lod}"
+    note = ("outer surface one part carries along its neighbour away from their cut (square studs): it stays "
+            "behind or leaves as a flap when the joint turns")
+    if not stray:
+        return check(name, None, pose.STRAY_AREA_GATE, passed=False, gate=False, rule="<=",
+                     note="no measurable arm joints; see unverified_joints")
+    joint, worst = max(stray.items(), key=lambda kv: (kv[1]["area"], kv[0]))
+    return check(name, worst["area"], pose.STRAY_AREA_GATE, passed=worst["area"] <= pose.STRAY_AREA_GATE,
+                 rule="<=", joint=joint, reach_studs=worst["reach"], distance_studs=pose.STRAY_DISTANCE,
+                 band_studs=pose.STRAY_BAND, by_joint=stray, note=note)
+
+
 def _record_unverified(rec: StageRecord, reasons: dict[str, str]) -> None:
     """Expose the fast lane's unknown seams without turning them into passed measurements."""
     rows = []
@@ -423,7 +446,7 @@ def _record_fast_outputs(rec: StageRecord, lods) -> None:
                      "triangles_high", "triangles_low", "watertight_parts"}
     profile_quality = {"triangles_high", "triangles_low", "watertight_parts"}
     quality_prefixes = ("max_joint_gap_", "rest_iou_with_covers_", "texture_colour_error_", "texture_ssim_",
-                        "texture_turnaround_")
+                        "texture_turnaround_", "stray_surface_")
     quality_failed = False
     for c in rec.data["checks"]:
         if c["name"] in quality_names or c["name"].startswith(quality_prefixes):
@@ -700,6 +723,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     # coarse bodies the shoulder covers are shaped from (high LOD covers, low LOD covers; the high ones also for
     # the cut search), and the reference body the cuts are placed on
     for key, n_tri in (("coverhigh", 2700), ("coverlow", 1200), ("cutsearch", cuts.REFERENCE_TRIANGLES)):
+        if key.startswith("cover") and COVER_OWNER is None:
+            continue
         if key != "coverlow" or any(b["cover"] == "low" for b in builds.values()):
             targets[key] = n_tri
             outs[key] = str((work / f"04-dec-{key}.npz").resolve())
@@ -763,7 +788,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     poses = pose.pose_library(bone_dirs)
     heldout = pose.heldout_poses(bone_dirs)
     gate_poses = {k: v for k, v in poses.items() if k not in UNGATED_POSES}
-    ref, cover_ref = np.load(outs["cutsearch"]), np.load(outs["coverhigh"])
+    ref = np.load(outs["cutsearch"])
+    cover_ref = np.load(outs["coverhigh"]) if COVER_OWNER is not None else {"verts": np.zeros((0, 3)),
+                                                                            "faces": np.zeros((0, 3), np.int64)}
     cover_kw = {"owner": COVER_OWNER, "radius": COVER_RADIUS, "outset": COVER_OUTSET, "inside": in_masks}
     with _quiet('cut_search_start'):
         if cut_search:
@@ -820,7 +847,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     for lod, build in builds.items():
         _emit("local", f"split_{lod}_start")
         t0 = time.monotonic()
-        cover_src = np.load(outs["cover" + build["cover"]])
+        cover_src = cover_ref if COVER_OWNER is None else np.load(outs["cover" + build["cover"]])
         rings, ring_points = DOME[build["dome"]]
 
         def candidate(key):
@@ -858,8 +885,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                        "shared_cut_edge" if repair["source"] == "shared cut edge" else "root_surface")
                 _emit("recover", f"pivot_{ident(name)}_{lod}", why=why,
                       m={"distance_studs": round(float(repair["distance_studs"]), 4)})
-        owner = cands[pick[COVER_OWNER]]
-        cover_info[lod] = owner["covers"]
+        cover_info[lod] = cands[pick[COVER_OWNER]]["covers"] if COVER_OWNER is not None else {}
         groups = _section_groups(build, profile)
         chosen[lod] = (cands[pick[SECTIONS[0]]]["key"] if len(groups) == 1
                        else {g: cands[pick[secs[0]]]["key"] for g, secs in groups.items()})
@@ -910,6 +936,8 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                                                    cut_offsets=cut_offsets)
     flat_secs = {n: flat_by_key[picks["high"][n]][n] for n in SECTIONS}
     gaps_flat = pose.joint_gaps(flat_secs, poses, **gap_kw.get("high", {}))
+    strays = {lod: pose.stray_surface(lod_secs[lod]) for lod in lod_secs}
+    cap_shows = {lod: pose.cap_surface_outside(lod_secs[lod]) for lod in lod_secs}
     with _quiet('pose_test'):
         pose_m = {"poses": len(poses), "extra_poses": len(heldout), "limit": GAP_GATE}
         for lod, g in gaps.items():
@@ -1168,6 +1196,11 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
     for name, g in (("visible_no_covers", gaps_nocover_visible), ("geometric_no_covers", gaps_nocover_geometric)):
         val = _max_gap((v for p, row in g.items() if p not in UNGATED_POSES for v in row.values()), fast)
         rec.add(_gap_check(f"max_joint_gap_high_{name}", val, gate=False, note="comparison only"))
+    for lod in builds:
+        rec.add(_stray_check(lod, strays[lod]))
+        rec.add(check(f"cap_surface_outside_{lod}", round(sum(cap_shows[lod].values()), 4), None, gate=False,
+                      by_section=cap_shows[lod], note="cap area (square studs) outside every other part at rest, "
+                      "shown as shards; recorded, not gated"))
     rest_iou, rest_checks = _rest_iou_checks(vs, shape_views, mesh_source, bres["rest_silhouettes"],
                                            stage3_silhouettes)
     for c in rest_checks:
@@ -1228,6 +1261,7 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
             "triangles_high": int(len(hi[n].faces)), "triangles_low": int(len(lo[n].faces)) if lo else None,
             "cap_triangles_high": hi[n].cap_triangles, "cap_triangles_low": lo[n].cap_triangles if lo else None,
             "cap_points_outside_high": hi[n].cap_points_outside,
+            "flat_fills_high": hi[n].flat_fills, "flat_fills_low": lo[n].flat_fills if lo else None,
             "bounds_min": [round(float(c), 4) for c in hi[n].verts.min(axis=0)] if len(hi[n].verts) else None,
             "bounds_max": [round(float(c), 4) for c in hi[n].verts.max(axis=0)] if len(hi[n].verts) else None,
             "pivot_check": pivot_rows[n],
@@ -1250,7 +1284,9 @@ def run_stage4(run: Path, height: float = HEIGHT_STUDS, timeout: float = 900.0,
                       "gaps_high": gaps["high"], "gaps_low": gaps.get("low"),
                       "gaps_high_heldout": gaps_heldout["high"], "gaps_low_heldout": gaps_heldout.get("low"),
                       "gaps_high_visible_no_covers": gaps_nocover_visible,
-                      "gaps_high_geometric_no_covers": gaps_nocover_geometric, "gaps_high_flat_caps": gaps_flat},
+                      "gaps_high_geometric_no_covers": gaps_nocover_geometric, "gaps_high_flat_caps": gaps_flat,
+                      "stray_surface_method": pose.stray_surface.__doc__.strip(), "stray_surface": strays,
+                      "cap_surface_outside": cap_shows},
         "covers": {"method": covers.__doc__.strip(), "owner": COVER_OWNER, "radius_cut_radii": COVER_RADIUS,
                    "outset_studs": COVER_OUTSET, "pieces_high": cover_info["high"],
                    "pieces_low": cover_info.get("low"),

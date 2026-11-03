@@ -14,7 +14,9 @@ triangles are split. Both sides get the same cut vertices, so the rest pose is c
 
 Closing: each cut opening becomes a spherical cap centred on the joint pivot and bulging into the neighbour.
 Rotating a section about its pivot keeps its cap on the same sphere, so a round joint stays covered in any pose
-(measured in pose.py); `cap="flat"` gives plain fans for comparison. Shoulders are cut one arm radius out from
+(measured in pose.py). A dome whose own triangles would stand outside the neighbour at rest (an opening that is not
+round about the pivot, such as a cloak cut through) is replaced by a flat fill of the opening's polygon
+(`fill_polygon`); `cap="flat"` fills every opening so, for comparison. Shoulders are cut one arm radius out from
 the joint, where the arm is rounder; every pivot is the centre (area centroid) of its cut, as in R15. Any cut can
 be moved along its normal (`cut_offsets`; stage 4 chooses them, see `cuts`).
 """
@@ -28,6 +30,7 @@ import numpy as np
 from . import PARENT, PIVOT_JOINT, SECTIONS
 from .carve import winding_inside
 from .joints import Skeleton
+from .meshindex import MeshIndex
 
 SID = {n: i for i, n in enumerate(SECTIONS)}
 SHOULDER_CUT_OFFSET = 1.0     # in arm radii, along the upper arm (see build_rig)
@@ -35,6 +38,16 @@ SHOULDER_CUT_OFFSET = 1.0     # in arm radii, along the upper arm (see build_rig
 # tolerance (1e-6 of the height), a few hundredths of a pixel at the views' scale.
 CUT_MIN_STUDS = 1e-4
 HIP_CUT_OFFSET = 0.75         # in thigh radii, along the thigh (see build_rig)
+# A dome whose own triangles stand outside its neighbour at rest is replaced by a flat fill of its opening. The
+# squash only tests ring points and the apex; a rim that is not round about the pivot (a cloak or robe cut through,
+# a crescent far from the joint) slerps into long shards between them. Measured on a hooded elf archer's in-game high
+# body (development site): 29.7 square studs of cap surface more than DOME_SHOW_STUDS outside every
+# other part at rest (`pose.cap_surface_outside`), against 0 on the blue suit hero. A triangle counts when its centre is outside the neighbour by more than
+# DOME_SHOW_STUDS (about 2 px at the views' scale; a dome's rim triangles sit on the neighbour's surface), and the
+# dome is lowered (to a half, a quarter, a tenth of its height) while such triangles add up to more than
+# DOME_SHOW_AREA (about 5 px square), and filled flat when even the lowest still shows.
+DOME_SHOW_STUDS = 0.01
+DOME_SHOW_AREA = 0.001
 
 
 def _unit(v):
@@ -425,9 +438,70 @@ def cap_geometry(rim: np.ndarray, cp: dict):
     return sample, t_rim, t_ring, ring_pts, apex
 
 
+def fill_polygon(ids: np.ndarray, verts: np.ndarray) -> np.ndarray:
+    """Triangles filling a boundary loop as a flat polygon, wound like the fan (b, a, centre) over its edges a->b.
+
+    The loop is projected on its own best plane (Newell normal) and ear-clipped, so the fill covers exactly the
+    loop's polygon: a fan from the centroid of a crescent or C-shaped opening (a cloak or robe cut through) spans
+    the empty middle as a flat sheet outside the body. A loop whose projection is not a simple polygon (no ear
+    left) is filled with the centroid fan instead, returned as None.
+    """
+    rev = np.asarray(ids)[::-1]
+    p = verts[rev]
+    m = len(rev)
+    nrm = np.zeros(3)
+    for k in range(m):                                  # Newell normal of the reversed loop
+        a, b = p[k], p[(k + 1) % m]
+        nrm += np.array([(a[1] - b[1]) * (a[2] + b[2]), (a[2] - b[2]) * (a[0] + b[0]), (a[0] - b[0]) * (a[1] + b[1])])
+    if np.linalg.norm(nrm) < 1e-15:
+        return None
+    nrm /= np.linalg.norm(nrm)
+    u = np.cross(nrm, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 1e-6:
+        u = np.cross(nrm, [0.0, 1.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(nrm, u)
+    q = np.stack([(p - p.mean(axis=0)) @ u, (p - p.mean(axis=0)) @ v], axis=1)   # counter-clockwise about nrm
+    scale = max(float(np.abs(q).max()), 1e-12)
+    eps = 1e-12 * scale * scale
+    idx = list(range(m))
+    tris = []
+    guard = 0
+    while len(idx) > 3:
+        guard += 1
+        if guard > 4 * m * m:
+            return None
+        n = len(idx)
+        arr = np.array(idx)
+        prev, nxt = np.roll(arr, 1), np.roll(arr, -1)
+        a, b, c = q[prev], q[arr], q[nxt]
+        cross = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+        clipped = False
+        for k in np.argsort(-cross):                    # the fattest convex corners first
+            if cross[k] <= eps:
+                break
+            ta, tb, tc = a[k], b[k], c[k]
+            others = np.delete(arr, [(k - 1) % n, k, (k + 1) % n])
+            r = q[others]
+
+            def side(p0, p1):
+                return (p1[0] - p0[0]) * (r[:, 1] - p0[1]) - (p1[1] - p0[1]) * (r[:, 0] - p0[0])
+            inside = (side(ta, tb) >= -eps) & (side(tb, tc) >= -eps) & (side(tc, ta) >= -eps)
+            if inside.any():
+                continue
+            tris.append((rev[prev[k]], rev[arr[k]], rev[nxt[k]]))
+            del idx[k]
+            clipped = True
+            break
+        if not clipped:
+            return None
+    tris.append(tuple(rev[i] for i in idx))
+    return np.array(tris, dtype=np.int64)
+
+
 def close_section(verts: np.ndarray, faces: np.ndarray, loops: list[list[int]], caps: list[dict]):
     """Append cap geometry for each loop. `caps[i]` = {"centre", "dir", "depth", "rings", "ring_points",
-    "squash"}, or None for a flat fan.
+    "squash"}, or None for a flat fill (`fill_polygon`, or a centroid fan where the loop is not a simple polygon).
 
     A dome's first ring has `ring_points` vertices sampled evenly along the rim (by arc length) and is zipped
     to the full-resolution rim, so a dome costs about rim + ring_points * (2 * rings) triangles instead of
@@ -440,6 +514,10 @@ def close_section(verts: np.ndarray, faces: np.ndarray, loops: list[list[int]], 
         ids = np.array(loop)
         rim = verts[ids]
         if cp is None or cp["rings"] < 1:
+            tris = fill_polygon(ids, verts)
+            if tris is not None:
+                f.append(tris)
+                continue
             c = rim.mean(axis=0)
             v.append(c[None])
             f.append(np.stack([np.roll(ids, -1), ids, np.full(len(ids), n)], axis=1))
@@ -478,6 +556,22 @@ def close_section(verts: np.ndarray, faces: np.ndarray, loops: list[list[int]], 
     return np.concatenate(v), np.concatenate(f)
 
 
+def dome_outside_area(rim_pts: np.ndarray, cp: dict, neighbour: MeshIndex) -> float:
+    """Area (square studs) of a dome's triangles whose centres lie outside the neighbour's closed surface by more than
+    DOME_SHOW_STUDS: the part of the cap that shows at rest."""
+    m = len(rim_pts)
+    cv, cf = close_section(rim_pts, np.zeros((0, 3), np.int64), [list(range(m))], [cp])
+    tri = cv[cf]
+    centre = tri.mean(axis=1)
+    out = ~neighbour.inside(centre)
+    if not out.any():
+        return 0.0
+    far = np.zeros(len(centre), dtype=bool)
+    far[out] = neighbour.distance(centre[out]) > DOME_SHOW_STUDS
+    area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    return float(area[far].sum())
+
+
 @dataclass
 class Section:
     name: str
@@ -488,6 +582,7 @@ class Section:
     cap_triangles: int
     cap_points_outside: int = 0   # cap samples still outside the neighbour after squashing (poke-through)
     colour_exterior: np.ndarray | None = None  # per face; caps and cover interiors are False
+    flat_fills: int = 0           # joint openings whose dome showed at rest, filled flat instead
 
 
 def _neighbour_of(g: int, name: str, pair_of: dict) -> str | None:
@@ -632,6 +727,12 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
                 c = c - ((c - p) @ nrm) * nrm      # onto the cut plane (R15: the pivot is the cut's centre)
                 joint_centre[jn] = (c, area)
     flat_cache: dict[str, tuple] = {}
+    index_cache: dict[str, MeshIndex] = {}
+
+    def dome_shows(rim_pts: np.ndarray, cp: dict, nb: str) -> bool:
+        if nb not in index_cache:
+            index_cache[nb] = MeshIndex(*closed_flat(nb))
+        return dome_outside_area(rim_pts, cp, index_cache[nb]) > DOME_SHOW_AREA
 
     def closed_flat(name: str):
         """The section closed with flat fans: the volume a neighbour's cap must stay inside."""
@@ -665,6 +766,7 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
         remap[used] = np.arange(len(used))
         lv, lf = pos[used], remap[fs]
         loops, caps, rims = [], [], []
+        flat_fills = 0
         sec_centroid = pos[np.unique(fs)].mean(axis=0)
         for info in infos:
             loops.append([int(remap[g]) for g in info["loop"]])
@@ -704,10 +806,23 @@ def build_sections(verts, faces, sk: Skeleton, cap: str = "dome", rings: int = 2
                     if out_a:
                         cp["squash_apex"] = min(cp["squash_apex"], level)
                 cp["outside"] = int(out_r.sum() + out_a)
+                # lower the whole dome before giving it up: a dome only a little proud (the synthetic body's ankle
+                # domes, up to 0.035 studs out of the shin) keeps its curvature, and the pivot stays inside
+                for level in (1.0, 0.5, 0.25, 0.1, None):
+                    if level is None:
+                        break
+                    trial = dict(cp, squash=col * level, squash_apex=cp["squash_apex"] * level)
+                    if not dome_shows(rim_pts, trial, nb):
+                        cp = trial
+                        break
+                if level is None:
+                    caps.append(None)
+                    flat_fills += 1
+                    continue
             caps.append(cp)
         n_before = len(lf)
         cv, cf = close_section(lv, lf, loops, caps)
         poke = int(sum(cp.get("outside", 0) for cp in caps if cp is not None))
         out[name] = Section(name, cv, cf, pivot, rims, int(len(cf) - n_before), poke,
-                            np.arange(len(cf)) < n_before)
+                            np.arange(len(cf)) < n_before, flat_fills)
     return out, rig
