@@ -118,6 +118,17 @@ class ApiError(ClientError):
         self.network_error = network_error
 
 
+CONTENT_POLICY = "content_policy_violation"
+
+
+def content_refusal(exc: BaseException) -> bool:
+    """Whether ``exc`` is the image model refusing a request under its content policy: an `ApiError` with
+    HTTP 400 and the answer's error code ``content_policy_violation``. Read from the parsed answer
+    (``http_status``, ``error_code``), never from message text. Every other error, including other 400s,
+    is not a refusal."""
+    return isinstance(exc, ApiError) and exc.http_status == 400 and exc.error_code == CONTENT_POLICY
+
+
 # Told of the first failure when a fast Muse Image call is resent (`observe_resend`), within one thread's call.
 _resend_observer: contextvars.ContextVar[Callable[[ApiError], None] | None] = contextvars.ContextVar(
     "herogen_resend_observer", default=None)
@@ -254,6 +265,9 @@ class ModelClient:
 
     # Set on the per-request copy while a fast Muse Image call is resent: the first attempt's failure class.
     _resent_after: str | None = None
+    # Optional {request key: refusal}, shared by a client and its copies. A content-policy refusal of an image
+    # request is remembered here, and the same request from a copy raises it again without a second send.
+    refusals: dict[str, ApiError] | None = None
 
     def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
                  policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None,
@@ -455,10 +469,23 @@ class ModelClient:
         if entry is not None:
             self.log.add(IMAGE_MODEL, kind, key, cached=True)
             return Image.open(self.cache_dir / entry["image"]).convert("RGB")
+        refusals = self.refusals
+        if refusals is not None and key in refusals:
+            # The identical request was already refused: reuse that answer at no cost, never send it again.
+            first = refusals[key]
+            self.log.add(IMAGE_MODEL, kind, key, cached=True, outcome="refused")
+            again = ApiError(str(first), http_status=first.http_status, error_code=first.error_code)
+            again.request_key, again.reused = key, True
+            raise again
         if self.mode == "replay":
             raise ReplayMiss(f"no cached {endpoint} response for key {key}")
         started = time.monotonic()
-        resp = self._answered_post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
+        try:
+            resp = self._answered_post(endpoint, body, model=IMAGE_MODEL, kind=kind, key=key)
+        except ApiError as exc:
+            if refusals is not None and content_refusal(exc):
+                refusals[key] = exc
+            raise
         require_completed(endpoint, resp, required=False)
         data = resp.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
@@ -489,12 +516,16 @@ class ModelClient:
         start = len(self.log.calls)
         resent = False
         try:
-            resp = self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
-        except ApiError as first:
-            if not (self.resends_transient(model) and retry.transient(first)):
-                raise
-            start, resent = len(self.log.calls), True   # only the resend's own rows can count its answer
-            resp = self._resend(first, endpoint, body, model=model, kind=kind, key=key, **kwargs)
+            try:
+                resp = self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
+            except ApiError as first:
+                if not (self.resends_transient(model) and retry.transient(first)):
+                    raise
+                start, resent = len(self.log.calls), True   # only the resend's own rows can count its answer
+                resp = self._resend(first, endpoint, body, model=model, kind=kind, key=key, **kwargs)
+        except ApiError as exc:
+            exc.request_key = key   # which request failed, for the caller's record
+            raise
         if not any(c["key"] == key and not c["cached"] and c.get("outcome") != "unknown"
                    for c in self.log.calls[start:]):
             usage_cost = kwargs.get("usage_cost_usd")

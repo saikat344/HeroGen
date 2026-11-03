@@ -42,6 +42,7 @@ WHY = {
     "not attempted: API cap": "spend_cap",
     "not attempted: model error": "model_error",
     "not attempted: face unavailable": "face_unavailable",
+    "image model refused (content filter)": "content_refused",
 }
 
 

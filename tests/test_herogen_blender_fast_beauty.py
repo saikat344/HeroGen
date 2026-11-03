@@ -1334,6 +1334,8 @@ class FastBeautyStageTests(unittest.TestCase):
     SERVER = ApiError('images/edits failed after 1 attempts: HTTP 500: internal server error', http_status=500)
     POLICY = ApiError('images/edits failed: HTTP 400: filtered (not retried)', http_status=400,
                       error_code='content_policy_violation')
+    BAD_REQUEST = ApiError('images/edits failed: HTTP 400: invalid size (not retried)', http_status=400,
+                           error_code='invalid_request_error')
 
     @staticmethod
     def enhanced(error, *views, once=False):
@@ -1439,12 +1441,33 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual([(e['slot'], e['http_status']) for e in head['retries']], [(1, 500)])
         self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
 
-    def test_enhanced_front_content_policy_error_falls_back_to_slot_two(self):
+    def assert_refused(self, record, lines, view, *, slot, prompt, reused=False):
+        """One refused image edit on `view`'s `slot`: a rejected sample on its try, in the run's
+        contained errors and as a rejected try in the build log."""
+        found = [e for e in record['contained_errors'] if e['view'] == view and e.get('slot') == slot]
+        self.assertEqual(len(found), 1)
+        entry = found[0]
+        self.assertTrue(entry['key'])
+        self.assertEqual({k: v for k, v in entry.items() if k != 'key'},
+                         {'view': view, 'slot': slot, 'try': entry['try'], 'prompt': prompt,
+                          'request': 'image edit', **self.fields(self.POLICY), 'fallback': 'rejected sample',
+                          **({'reused': True} if reused else {})})
+        trials = [a for a in record['views'][view]['attempts'] if a.get('refused')]
+        self.assertTrue(trials)
+        self.assertEqual({(a['accepted'], a['reason']) for a in trials},
+                         {(False, stage.REFUSED)})
+        results = [e for e in lines if e['kind'] == 'decision' and e['what'] == 'view_result'
+                   and e['view'] == view and e['try'] == slot]
+        self.assertEqual([(e['ok'], e['why']) for e in results], [(False, 'content_refused')])
+        return entry
+
+    def test_enhanced_front_content_refusal_is_a_rejected_sample(self):
         record, sent, errored, _, lines = self.contained_run(self.enhanced(self.POLICY, 'body+0'))
         self.assertEqual(sent, Counter({view: 2 for view in self.expected_views}))
-        self.assert_contained(record, lines, 'body+0', self.POLICY, slot_after=2, prompts=('RF18B',))
-        self.assertEqual(record['views']['body+0']['prompt'], 'RF2R')
-        self.assertEqual(errored, Counter({'body+0': 1}))   # a 4xx is never resent
+        self.assert_refused(record, lines, 'body+0', slot=1, prompt='RF18B')
+        self.assertEqual((record['views']['body+0']['winning_slot'], record['views']['body+0']['prompt']),
+                         (2, 'RF2R'))
+        self.assertEqual(errored, Counter({'body+0': 1}))   # a refusal is never resent
         self.assertEqual(record['retries'], [])
 
     def test_enhanced_error_with_rejected_slot_two_pays_the_conditional_third(self):
@@ -1498,16 +1521,12 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(errored, Counter({'body+180': 1}))
         self.assertEqual(paid + errored, Counter({view: 2 for view in self.expected_views}))
         self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+        # A refusal of the art-conditioned slot 1 rejects that sample; slot 2 decides.
         error, = record['contained_errors']
-        self.assertEqual(error, {'view': 'body+180', 'slot': 1, 'prompt': 'RF12R', 'request': 'image edit',
-                                 'error': 'ApiError', 'http_status': 400, 'error_code': 'content_policy_violation',
-                                 'network_error': None, 'message': str(self.POLICY), 'fallback': 'slot 2'})
+        self.assert_refused(record, lines, 'body+180', slot=1, prompt='RF12R')
         rear = record['views']['body+180']
         self.assertEqual((rear['winning_slot'], rear['prompt']), (2, 'RF12R'))
-        self.assertEqual(rear['contained_errors'], [{k: v for k, v in error.items() if k != 'view'}])
-        results = [(e['try'], e['ok'], e['why'], e.get('code'), e['m']) for e in lines if e['kind'] == 'decision'
-                   and e['what'] == 'view_result' and e['view'] == 'body+180' and not e['ok']]
-        self.assertEqual(results, [(1, False, 'model_error', 'http_4xx', {'fallback': 1, 'http_status': 400})])
+        self.assertNotIn('contained_errors', rear)
         self.assertEqual(self.outcomes(lines)['body+180'], [('view_selected', 2, 2)])
 
     def test_side_art_run_front_error_stays_loud(self):
@@ -1539,8 +1558,57 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assert_loud(lambda view, slot, nested: self.SERVER if nested and view == 'body+90' else None)
 
     def test_ordinary_attempt_one_error_for_slot_three_stays_loud(self):
-        self.assert_loud(lambda view, slot, nested: self.POLICY if nested and slot == 'attempt-1' else None,
-                         self.POLICY, reject=lambda view, kind: view == 'body+90' and kind in ('beauty', 0))
+        # Any 400 other than a content-policy refusal stays loud.
+        self.assert_loud(lambda view, slot, nested: self.BAD_REQUEST if nested and slot == 'attempt-1' else None,
+                         self.BAD_REQUEST, reject=lambda view, kind: view == 'body+90' and kind in ('beauty', 0))
+
+    def test_front_non_policy_bad_request_stays_loud(self):
+        self.assert_loud(lambda view, slot, nested: self.BAD_REQUEST if view == 'head+0' and slot == 'attempt-0'
+                         else None, self.BAD_REQUEST, beauty=False)
+
+    def test_content_refusal_reads_the_answer_code_only(self):
+        from herogen.pipeline.client import content_refusal
+        self.assertTrue(content_refusal(self.POLICY))
+        for error in (self.BAD_REQUEST, self.SERVER, self.TIMEOUT, ReplayMiss('content_policy_violation'),
+                      BudgetStop('API cap'), ValueError('content_policy_violation'),
+                      ApiError('HTTP 400: {"code":"content_policy_violation"}', http_status=400),
+                      ApiError('refused', http_status=500, error_code='content_policy_violation')):
+            with self.subTest(error=repr(error)):
+                self.assertFalse(content_refusal(error))
+
+    def test_refused_view_is_rejected_and_the_others_are_accepted(self):
+        errored = Counter()
+        (record, paid, _, _), lines = self.logged(lambda: self.paid_run(
+            beauty=False, errored=errored,
+            fail=lambda view, slot, nested: self.POLICY if view == 'body-90' else None))
+        self.assertEqual(record['status'], 'complete')
+        self.assertTrue((self.run / '03-refined.glb').is_file())
+        side = record['views']['body-90']
+        self.assertEqual((side['accepted'], side['reason']), (False, stage.REFUSED))
+        self.assertEqual(errored, Counter({'body-90': 2}))   # both plain slots, each sent once
+        self.assertTrue(all(v['accepted'] for k, v in record['views'].items() if k != 'body-90'))
+        for slot in (1, 2):
+            self.assert_refused(record, lines, 'body-90', slot=slot, prompt='RF2R')
+        self.assertEqual(self.outcomes(lines)['body-90'], [('view_kept', None, 2)])
+
+    def test_default_head_refusal_is_reused_by_slot_two_and_never_resent(self):
+        # The default-head run's attempt 0 for one side view is refused (as on a site run): slot 2 reuses
+        # that refusal, slot 1 decides, and the stage completes with every other view.
+        errored = Counter()
+        (record, paid, ordinary, edits), lines = self.logged(lambda: self.paid_run(
+            errored=errored, fail=lambda view, slot, nested: self.POLICY if nested and view == 'body-90'
+            and slot == 'attempt-0' else None))
+        self.assertEqual(record['status'], 'complete')
+        self.assertEqual(errored, Counter({'body-90': 1}))
+        nested = record['default_fast_fallback']['views']['body-90']
+        self.assertEqual((nested['accepted'], nested['reason']), (False, stage.REFUSED))
+        self.assertTrue(nested['attempts'][0]['refused'])
+        entry = self.assert_refused(record, lines, 'body-90', slot=2, prompt='RF2R', reused=True)
+        first, = record['default_fast_fallback']['contained_errors']
+        self.assertEqual(first['key'], entry['key'])
+        self.assertEqual(record['views']['body-90']['winning_slot'], 1)
+        self.assertEqual(paid['body-90'], 1)   # only the beauty sample was answered
+        self.assertTrue(all(v['accepted'] for v in record['views'].values()))
 
     def test_ordinary_attempt_one_transient_error_is_never_resent(self):
         self.assert_loud(lambda view, slot, nested: self.SERVER if nested and slot == 'attempt-1' else None,

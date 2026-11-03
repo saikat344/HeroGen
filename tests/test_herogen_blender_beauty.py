@@ -453,8 +453,9 @@ class FastGenerationTests(unittest.TestCase):
                                                               + [(-90, 0)] * resent))
                 self.assertNotIn(-90, [yaw for yaw, _ in client.segments])
                 saved = json.loads((self.out / "references.json").read_text())
+                refused = {"refused": True, "key": None} if error is self.POLICY else {}
                 expected = {"request": "BT1 image edit", **self.fields(error),
-                            **({"retried": True} if resent else {}), "fallback": "standard recipe"}
+                            **({"retried": True} if resent else {}), **refused, "fallback": "standard recipe"}
                 self.assertEqual(saved["views"]["-90"]["error"], expected)
                 self.assertEqual(saved["views"]["-90"]["attempts"], [])
                 self.assertEqual(saved["contained_errors"], [{"yaw": -90, **expected}])
@@ -504,6 +505,14 @@ class FastGenerationTests(unittest.TestCase):
         loaded = beauty.load(self.out)
         self.assertEqual([beauty.selected_yaw(loaded, a) for a in beauty.FAST_ANGLES], [0, None, -90, None])
         self.assertEqual(rec["selected"], {"0": True, "90": False, "-90": True, "180": False})
+
+    def test_refused_yaw_is_recorded_and_not_selected(self):
+        rec, client = self.fast(failing=(90,), error=self.POLICY)
+        error, = rec["contained_errors"]
+        self.assertEqual((error["yaw"], error["refused"], error["error_code"]), (90, True, "content_policy_violation"))
+        self.assertFalse(rec["selected"]["90"])
+        self.assertIsNone(beauty.selected_yaw(beauty.load(self.out), 90))
+        self.assertEqual([beauty.selected_yaw(beauty.load(self.out), a) for a in (0, -90, 180)], [0, -90, 180])
 
     def test_front_model_error_turns_the_beauty_arm_off(self):
         rec, _ = self.fast(failing=(0,), error=self.POLICY)
