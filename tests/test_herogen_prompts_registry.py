@@ -39,6 +39,7 @@ print("versions found:", ", ".join(names))
 FROZEN = {
     "hero-sketch-v1": "ca48ac85c697a97b61865c45cf5886adaffa88f9e71851d0649923e568620624",
     "hero-sketch-v2": "baea6e678b205dc10dccefa48c1c19d5da394f01870fd1bd9dac8d075b27294c",
+    "hero-sketch-v3": "b61bc667ac32bba71979bcb65475a47e35db2dbe5229491e44150b784bd55f45",
     "same-character-v1": "1842a33a49508ef5fc037a717da20b48c887fb03cde836d19929f556dc821cc9",
     "same-character-v2": "8f9332dedcf4a674d592dca9f59804eddae9239414ba94045995276ad1865aef",
     "turnaround-v1": "e91c9ed957eadec81d24a0bee2c3bbd0c94eaac97dd1afd09b36ec54d6b3f7d1",
@@ -111,6 +112,26 @@ class FrozenVersions(unittest.TestCase):
             after[key] = before[key]
         v2["name"], v2["sha256"] = v1["name"], v1["sha256"]
         self.assertEqual(v2, v1)
+
+    def test_hero_sketch_v3_is_an_experiment_that_only_asks_for_empty_hands(self):
+        """Not a default (`test_defaults`): hero-sketch-v2 with empty hands and no pets, for an experiment only."""
+        v2 = json.loads(json.dumps(prompts.load("hero-sketch-v2").data))
+        v3 = json.loads(json.dumps(prompts.load("hero-sketch-v3").data))
+        swaps = {"design": [("what they look like, wear and carry,", "what they look like and wear,"),
+                            ("Constraints: no halo,", "Constraints: both hands empty, holding nothing (no weapon, "
+                             "staff, wand, tool, cup or other object in either hand), no pet, animal or companion; "
+                             "no halo,")],
+                 "full_body": [("hands open; any weapon or prop the character held is worn on the back or belt "
+                                "instead.", "hands open and empty, holding nothing, and no pet, animal or companion.")]}
+        for step in v2["steps"]:
+            key = "template" if "template" in step else "prompt"
+            for old, new in swaps[step["name"]]:
+                self.assertEqual(step[key].count(old), 1)
+                step[key] = step[key].replace(old, new)
+        for k in ("name", "summary", "sha256"):
+            v2[k] = v3[k]
+        self.assertEqual(v3, v2)
+        self.assertIn("Experimental, not a default", v3["summary"])
 
     def test_turnaround_preserves_legacy_and_only_adds_gear_continuity(self):
         from herogen.pipeline.stages import SHEET_SIZE, TURNAROUND_V1_PROMPT
