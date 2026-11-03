@@ -13,7 +13,7 @@ const COPY = {
   6: ['Roblox rig', 'Preparing the Roblox rig', 'Prepare the Roblox rig when this export is available.'],
   5: ['Results', 'Collecting your results', 'Prepare the results and available downloads.'],
 };
-const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled', 'stopped']);
+export const TERMINAL = new Set(['succeeded', 'failed', 'rejected', 'canceled', 'stopped']);
 const INTERRUPTED = new Set(['failed', 'rejected', 'canceled']);
 const STATE = { passed: 'Passed', running: 'Running', pending: 'Waiting', failed: 'Failed', rejected: 'Needs attention',
   canceled: 'Cancelled', skipped: 'Skipped', unavailable: 'Unavailable' };
