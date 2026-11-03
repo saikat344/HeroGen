@@ -92,9 +92,9 @@ test('texture views, reasons and speakers read as plain text', () => {
   assert.deepEqual(rowsOf(model, '3f').map(r => [r.state, r.text]), [
     ['info', 'Wave 1: asking Muse Image to repaint 5 views, 2 tries each, all at once (10 requests)'],
     ['kept', 'Repainting the side view −90°, try 2: cancelled (step stopped) (already paid for)'],
-    ['kept', 'Front, try 1: not used (outline moved too far: 90th percentile 18.0 px (limit 16))'],
-    ['passed', 'Side view +90°, try 1: accepted (outline overlap 93 %, median drift 3.6 px)'],
-    ['kept', 'Face close-up: no try passed. Keeping the original paint for this view.'],
+    ['kept', "Front, try 1: not used, the repaint drifted off the model's outline (90th percentile 18.0 px (limit 16))"],
+    ['passed', "Side view +90°, try 1: accepted, the repaint matches the model's outline (outline overlap 93 %, median drift 3.6 px)"],
+    ['kept', 'Face close-up: keeping the original paint; no try passed.'],
     ['info', 'Front: the earlier tries were not used, so Muse Image gets one more try (try 3).'],
     ['info', 'Rendered the 3D shape from 5 cameras'],
     ['passed', 'Your model now shows version 1 (3 of 6 views repainted).'],
@@ -125,7 +125,7 @@ test('unknown codes, model messages and stray fields never reach the page or the
   const shown = JSON.stringify([model.lead, model.tail, model.steps.map(s => s.rows.map(r => r.text))]) + copyText(model);
   for (const text of raw) assert.ok(!shown.includes(text), text);
   assert.deepEqual(rowsOf(model, '1').map(r => r.text), ['Working on artwork failed: it stopped before finishing',
-    'One view: not used (it did not pass the checks)', 'This part was skipped.', '1 of 2 required checks failed',
+    'One view: not used, it did not pass its checks', 'This part was skipped.', '1 of 2 required checks failed',
     'This step stopped. Technical details are kept in the server logs.']);
   const sum = rowsOf(model, '1').find(r => r.checks);
   assert.equal(sum.state, 'failed');
@@ -414,11 +414,11 @@ test('the replayed fox-samurai run (3D shape to Roblox rig) renders end to end i
   assert.equal(joints3.text, '16 joints · 12 from SAM 3D Body, 4 from the outline; 7 differ from the outline estimate by more than 0.5 studs');
   assert.ok(joints3.checks.some(c => c.text === 'Left shoulder from the outline · 0.66 studs from the outline estimate (differs by more than 0.5 studs)'));
   // Texture refine: every try and view decision in words.
-  for (const want of ['Face close-up, try 1: not used (outline moved too far: median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))',
-    'Side view +90°: kept the repaint from try 1', 'Front: no try passed (outline moved too far). Keeping the original paint for this view.',
+  for (const want of ["Face close-up, try 1: not used, the repaint drifted off the model's outline (median drift 11.0 px (limit 10), 90th percentile 36.1 px (limit 24))",
+    'Side view +90°: using the repaint from try 1.', "Front: keeping the original paint; neither try was used (the repaint drifted off the model's outline).",
     'Side view −90°, try 2: not needed, the other try passed (stopped before it was paid for)',
     'Your model now shows version 1 (3 of 6 views repainted; 3 still being judged).']) assert.ok(texts(refine).includes(want), want);
-  assert.ok(texts(refine).some(t => t.startsWith('Upper hair, back, try 1: accepted (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)')));
+  assert.ok(texts(refine).some(t => t.startsWith("Upper hair, back, try 1: accepted, the repaint matches the model's outline and hair (outline overlap 99 %, median drift 1.0 px, hair agreement 1.00)")));
   // Game body: long sub-steps finished in place, names in words, parts folded with their total, 49 checks folded.
   assert.ok(!body.some(r => r.state === 'running' || r.state === 'unknown'));
   for (const want of ['Crotch height clamped from 0.328 H to 0.380 H', 'Moved the neck cut −0.50 radius (−0.24 studs)',
@@ -629,5 +629,27 @@ test('the face line says where the face paint comes from', () => {
   assert.equal(line('default_fast_fallback'), 'Face: no face repaint was accepted, so the face keeps the paint from the ordinary texture.');
   assert.equal(line('something_else'), null);
   assert.equal(copy.decisionLine({kind: 'decision', what: 'view_result', view: 'body+0', try: 1, ok: false, why: 'model_error'}),
-    'Front, try 1: not used (the model call failed)');
+    'Front, try 1: not used, the model call failed, so there was no repaint to check');
+});
+
+test('a view decision leads with a plain verdict, keeps its numbers and says which try the view uses', () => {
+  const line = (e) => copy.decisionLine({kind: 'decision', view: 'body+0', ...e});
+  const result = (why, m) => line({what: 'view_result', try: 2, ok: false, why, m});
+  assert.equal(result('outline_moved', {overlap: 0.87, overlap_min: 0.9, median_px: 8, median_limit: 6, p90_px: 22.7, p90_limit: 16}),
+    "Front, try 2: not used, the repaint drifted off the model's outline (outline overlap 87 % (needs 90 %), median drift 8.0 px (limit 6), 90th percentile 22.7 px (limit 16))");
+  assert.equal(result('second_face', {overlap: 0.95, overlap_min: 0.9, face_outside: 0.31, face_outside_max: 0.25}),
+    "Front, try 2: not used, the repainted face spills outside the model's face (face outside the model's face 31 % (at most 25 %))");
+  assert.equal(result('hair_mismatch', {agreement: 0.62, agreement_min: 0.8}),
+    "Front, try 2: not used, the repainted hair no longer matches the model's hair shape, size or colour (hair agreement 0.62 (needs 0.8))");
+  assert.equal(result('outline_not_measurable'), 'Front, try 2: not used, the outline could not be measured, so the repaint could not be checked');
+  assert.equal(result('missing_features'), "Front, try 2: not used, the face's eyes, eyebrows or mouth could not be confirmed in the repaint");
+  assert.equal(result('face_unavailable'), 'Front, try 2: not used, no face was found to check the repaint against');
+  assert.equal(result('spend_cap'), 'Front, try 2: not used, the spending cap was reached');
+  assert.equal(line({what: 'view_result', try: 1, ok: true, m: {}}), 'Front, try 1: accepted, the repaint passed its checks');
+  assert.equal(line({what: 'view_selected', try: 1, ok: true, m: {tries: 2}}), 'Front: using the repaint from try 1.');
+  assert.equal(line({what: 'view_selected', try: 2, ok: true, m: {tries: 2}}), 'Front: using the repaint from try 2; try 1 was not used.');
+  assert.equal(line({what: 'view_selected', try: 3, ok: true, m: {tries: 3}}), 'Front: using the repaint from try 3; tries 1 and 2 were not used.');
+  assert.equal(line({what: 'view_kept', ok: false, why: 'hair_mismatch', m: {tries: 3}}),
+    "Front: keeping the original paint; none of its 3 tries was used (the repainted hair no longer matches the model's hair shape, size or colour).");
+  assert.equal(line({what: 'view_kept', ok: false, why: 'spend_cap'}), 'Front: keeping the original paint (the spending cap was reached).');
 });

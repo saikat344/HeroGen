@@ -45,6 +45,18 @@ export const REASONS = {
   slot: 'waiting for a free slot',
 };
 export const reasonText = (why) => REASONS[why] || 'it did not pass the checks';
+// Why a repainted view was not used, in words a non-specialist follows. The numbers follow in brackets.
+const VERDICTS = {
+  outline_moved: "the repaint drifted off the model's outline",
+  second_face: "the repainted face spills outside the model's face",
+  hair_mismatch: "the repainted hair no longer matches the model's hair shape, size or colour",
+  outline_not_measurable: 'the outline could not be measured, so the repaint could not be checked',
+  missing_features: "the face's eyes, eyebrows or mouth could not be confirmed in the repaint",
+  spend_cap: 'the spending cap was reached',
+  model_error: 'the model call failed, so there was no repaint to check',
+  face_unavailable: 'no face was found to check the repaint against',
+};
+const verdictText = (why) => VERDICTS[why] || REASONS[why] || 'it did not pass its checks';
 
 // Failure codes (`code`) on calls, errors, requeues and step ends.
 export const CODES = {
@@ -296,7 +308,8 @@ export function decisionLine(e) {
   switch (e.what) {
     case 'view_result': {
       const name = `${regionName(e.view)}${tryText(e)}`;
-      // Accepted: the headline measures. Not used: the measures that missed their limit, each with that limit.
+      // A plain verdict first, then the numbers behind it. Accepted: the headline measures. Not used: the
+      // measures that missed their limit, each with that limit.
       const fin = Number.isFinite;
       const checks = [
         [m.overlap, m.overlap_min, (v, l) => v < l, (v, l) => `outline overlap ${pct(v)}${fin(l) ? ` (needs ${pct(l)})` : ''}`, true],
@@ -304,18 +317,32 @@ export function decisionLine(e) {
         [m.p90_px, m.p90_limit, (v, l) => v > l, (v, l) => `90th percentile ${px(v)}${fin(l) ? ` (limit ${n(l)})` : ''}`, false],
         [m.agreement, m.agreement_min, (v, l) => v < l, (v, l) => `hair agreement ${v.toFixed(2)}${fin(l) ? ` (needs ${n(l)})` : ''}`, true],
         [m.scale_change, m.scale_change_max, (v, l) => v > l, (v, l) => `scale change ${pct(v)}${fin(l) ? ` (at most ${pct(l)})` : ''}`, false],
+        [m.face_outside, m.face_outside_max, (v, l) => v > l, (v, l) => `face outside the model's face ${pct(v)}${fin(l) ? ` (at most ${pct(l)})` : ''}`, false],
       ].filter(([v]) => fin(v));
       const missed = checks.filter(([v, l, miss]) => fin(l) && miss(v, l));
       const measures = e.ok ? checks.filter(c => c[4]).map(([v, , , say]) => say(v, null))
         : (missed.length ? missed : checks).map(([v, l, , say]) => say(v, l));
-      if (e.ok) return `${name}: accepted${measures.length ? ` (${measures.join(', ')})` : ''}`;
+      const numbers = measures.length ? ` (${measures.join(', ')})` : '';
+      if (e.ok) {
+        const matches = fin(m.overlap) || fin(m.median_px) ? `matches the model's outline${fin(m.agreement) ? ' and hair' : ''}` : 'passed its checks';
+        return `${name}: accepted, the repaint ${matches}${numbers}`;
+      }
       if (e.why === 'lower_try_accepted') return `${name}: ${reasonText(e.why)}${m.paid === 1 ? ' (already paid for)' : m.paid === 0 ? ' (stopped before it was paid for)' : ''}`;
-      return `${name}: not used (${reasonText(e.why)}${measures.length ? `: ${measures.join(', ')}` : ''})`;
+      return `${name}: not used, ${verdictText(e.why)}${numbers}`;
     }
-    case 'view_selected': return `${regionName(e.view)}: kept the repaint${Number.isInteger(e.try) ? ` from try ${e.try}` : ''}`;
-    case 'view_kept': return e.why === 'spend_cap' || e.why === 'model_error'
-      ? `${regionName(e.view)}: kept the original paint (${reasonText(e.why)}).`
-      : `${regionName(e.view)}: no try passed${e.why ? ` (${reasonText(e.why)})` : ''}. Keeping the original paint for this view.`;
+    // What the view uses once its tries are known. The lowest accepted try wins, so every lower try was not used.
+    case 'view_selected': {
+      if (!Number.isInteger(e.try)) return `${regionName(e.view)}: using a repaint that passed its checks.`;
+      const before = e.try === 2 ? 'try 1 was not used' : e.try === 3 ? 'tries 1 and 2 were not used'
+        : e.try > 3 ? `tries 1 to ${e.try - 1} were not used` : '';
+      return `${regionName(e.view)}: using the repaint from try ${e.try}${before ? `; ${before}` : ''}.`;
+    }
+    case 'view_kept': {
+      const tries = m.tries === 1 ? 'its one try was not used' : m.tries === 2 ? 'neither try was used'
+        : Number.isInteger(m.tries) && m.tries > 2 ? `none of its ${n(m.tries)} tries was used` : 'no try passed';
+      if (e.why === 'spend_cap' || e.why === 'model_error') return `${regionName(e.view)}: keeping the original paint (${reasonText(e.why)}).`;
+      return `${regionName(e.view)}: keeping the original paint; ${tries}${e.why ? ` (${verdictText(e.why)})` : ''}.`;
+    }
     case 'face_source': {
       const from = Number.isInteger(e.try) ? `, try ${e.try}` : '';
       if (e.why === 'beauty') return `Face: using the beauty repaint (${regionName(e.view)}${from}).`;
