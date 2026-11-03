@@ -6,5 +6,6 @@
   "cover_redo": {"version": "cover-redo-v1", "env": "HEROGEN_COVER_REDO_VERSION"},
   "turnaround_redo": {"version": "turnaround-redo-v2", "env": "HEROGEN_TURNAROUND_REDO_VERSION"},
   "brief_reword": {"version": "brief-reword-v1", "env": "HEROGEN_BRIEF_REWORD_VERSION"},
-  "brief_precheck": {"version": "brief-precheck-v1", "env": "HEROGEN_BRIEF_PRECHECK_VERSION"}
+  "brief_precheck": {"version": "brief-precheck-v1", "env": "HEROGEN_BRIEF_PRECHECK_VERSION"},
+  "refine_suggest": {"version": "refine-suggest-v1", "env": "HEROGEN_REFINE_SUGGEST_VERSION"}
 }

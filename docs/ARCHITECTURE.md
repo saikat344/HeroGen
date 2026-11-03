@@ -3085,6 +3085,67 @@ use synthetic images and mocked model clients; a Blender integration test verifi
 frame preservation and render passes, skipping when Blender is unavailable or cannot start in the environment.
 No live quality score is inferred from these unit tests; held-out mesh scoring remains a separate measurement.
 
+### Refine suggestions: `refine-suggestions.json`
+
+`python -m herogen.pipeline.suggest <run folder> [--cache DIR] [--replay]` (`herogen/pipeline/suggest.py`) runs
+right after stage 3f, in the background and in parallel with stage 4 on the same run folder. It writes
+`<run>/refine-suggestions.json`, which the website reads to set the Refine box's placeholder for the chosen step:
+`texture` (Texture only, same shape) or `turnaround` (From the views).
+
+1. **Front render.** The refine `render` job (`herogen.blender.refine.backend.blender`) opens
+   `blender-work/texture-refine/prep/work.blend` with the final atlas `blender-work/texture-refine/texture.png` and
+   renders the `body+0` camera recorded in `stage-3f.json` (`views["body+0"].camera`). When that view was not
+   accepted and so has no camera, the camera is rebuilt from `texture-refine/character.json` exactly as 3f builds
+   it. When the work.blend render fails (not a timeout), the refine `probe` job renders `03-refined.glb` through
+   the same orthographic front camera. work.blend is opened and never saved. The flat render, composited on
+   light grey and cropped to the figure, is `blender-work/suggest/front.png`.
+2. **One Muse Spark question** (`muse-spark-1.3`, `ModelClient.compare_images`, fast lane: one attempt) with the
+   cover `01-cover.png`, the front render, the description (the used rewrite in `reword.json`, else stage p's
+   `details.user_text`, quoted between « and » as data) and what each step can and cannot change. The prompt is
+   the frozen version `refine-suggest-v1` (kind `refine_suggest`; minimal reasoning, 800 output tokens, images
+   at most 768 px). The strict JSON answer is `{"texture": {"text", "basis"}, "turnaround": {"text", "basis"}}`,
+   basis `mismatch` (the most visible cover-versus-render difference the step can deliver) or `variation` (only
+   when nothing is visibly off). The call goes through the record/replay cache, so a rerun replays at no cost.
+   `--cache` defaults to the user's `cache` folder in the service layout (`users/<id>/runs/<job>` beside
+   `users/<id>/cache`), else `_cache-model` beside the run.
+3. **Checks per step.** The text must be non-empty, at most 100 characters and one sentence, without the step's
+   blocked words (`suggest.BLOCKED`, whole words and plain inflections). Texture refuses add, remove, longer,
+   shorter, taller, lengthen, shorten, pose, hold, held, expression, smile and face shape. Turnaround refuses pose,
+   hold, held, hand, in-hand, wind, wind-blown, windswept, flowing, billowing, camera, background and view. A step
+   that fails gets its static text with basis `static`: texture "Make the jacket deep red leather with brass
+   buttons.", turnaround "Add a hooded cloak and make the boots dark brown."
+4. **Atomic write** (a temporary file in the run folder, then a rename):
+
+```json
+{"version": 1, "source": "spark", "texture": {"text": "...", "basis": "mismatch"},
+ "turnaround": {"text": "...", "basis": "variation"}, "model": "muse-spark-1.3",
+ "prompt": "refine-suggest-v1", "prompt_sha256": "...", "cost_usd": 0.0048, "calls": [],
+ "error": null, "created": "2026-11-03T16:52:10Z"}
+```
+
+`source` is `spark` or `static`; `model` is null when no call was made; `cost_usd` and `calls` are the client's
+estimate and call records (token usage, with an unreported count at its bound). A Spark call cut off by its
+time limit is added as one record of outcome `unknown`, priced at its output-token cap. `error` is null or
+`"<type>: <message>"`. `blender-work/suggest/check.json` keeps the raw answer, the reason any step was refused and
+how the front was rendered.
+
+CLI contract:
+
+- **Exit 0**: the file was written with source `spark`. An individual step may still be `static` after failing
+  its check.
+- **Exit 3**: a model error, timeout or unparseable reply (or the render timed out). The static file is still
+  written, with `error` filled in, and one line goes to stderr. It is never silently swallowed.
+- **Exit 1**: no file was written, because of missing inputs (run folder, cover, final texture, work.blend or a
+  front camera) or an internal error. The reason goes to stderr. A partial file is never written.
+- **Exit 2**: usage error.
+
+Cost lands only in the file's `cost_usd` and `calls`; the website's runner adds it to the job. The module never
+touches the service database. It is safe alongside stage 4: it reads only 3f outputs (`blender-work/texture-refine/`,
+`stage-3f.json`, `03-refined.glb`), the cover, `stage-p.json` and `reword.json`, and writes only
+`blender-work/suggest/` and `refine-suggestions.json`, neither of which stage 4 reads or writes. The whole run is
+bounded: the Blender render has 120 s in total (the glb render included) and the Spark question a 60 s time limit;
+either running out gives exit 3 with the static file.
+
 
 ### Service entry page and workbench
 
