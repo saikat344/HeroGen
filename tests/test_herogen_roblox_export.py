@@ -155,6 +155,14 @@ class ExportTest(unittest.TestCase):
                      "character.Parent = StarterPlayer", "LoadCharacterAppearance = false", "src:Destroy()",
                      'print("Starter place: press Play to walk around as your hero.")'):
             self.assertIn(want, tail)
+        # the Workspace rig is anchored as a statue only in the starter place, after the unanchored copy is made
+        self.assertEqual(code_before.count("Anchored"), 0)
+        self.assertEqual(bind.count("d.Anchored = true"), 1)
+        anchor = tail.index("d.Anchored = true")
+        self.assertLess(tail.index("rig:Clone()"), anchor)
+        self.assertLess(tail.index("character.Parent = StarterPlayer"), anchor)
+        self.assertIn("for _, d in rig:GetDescendants() do", tail[:anchor])
+        self.assertIn('d:IsA("BasePart")', tail[:anchor])
         # the bind and its gates come first: nothing is installed unless every mesh was bound
         self.assertLess(bind.index("bestErr < 0.01"), guard)
         self.assertLess(bind.index("part:ApplyMesh(from)"), guard)
