@@ -28,6 +28,11 @@ def window_slope(facing, k):
     return I.VIS_WINDOW / 2 * np.sqrt(2) * np.sqrt(1 - cos * cos) / cos / k
 
 
+# A beauty head's residual default fill reaches texels facing away from the front camera:
+# zero at a side-on normal, full once the normal points 0.3 (about 17 degrees) rearward.
+REAR_FILL_FACING, REAR_FILL_RAMP = 0., .3
+
+
 def unit_normals(normals):
     """Texel normals at unit length.
 
@@ -450,7 +455,7 @@ class FaceControl:
         with self.state_lock:
             self.data['face_source']['cached_hair_views'] = [v['key'] for v in self.hair_views]
 
-    def paint_default_head(self, tex, work):
+    def paint_default_head(self, tex, work, residual=False):
         """Copy a closed head volume through every depth, then fade outside it at the collar.
 
         Setup's head segmentation can be a hair ring or contain missing face/scalp pixels.
@@ -459,6 +464,9 @@ class FaceControl:
         edges receive the same ungraded default atlas. Hanging hair below the chin uses
         the existing accepted paints' cached hair masks and mesh depths. With no
         accepted paint, a front mesh-depth band contains the setup silhouette.
+
+        With `residual`, the volume's rear half takes the default atlas only in the base share no
+        accepted main-run paint covered, so a beauty face source keeps every main-run paint.
         """
         from . import character as C
         from .cameras import camera
@@ -555,8 +563,23 @@ class FaceControl:
                 support = t * t * (3 - 2 * t)
                 alpha[hair_core] = np.maximum(alpha[hair_core], support[hair_core])
         alpha[~inside] = 0
-        core = alpha == 1
         rows, cols = np.divmod(tex.idx, tex.T.shape[1])
+        if residual:
+            # Only the rear half: front-visible residuals keep the main run's composition around
+            # the face, where the default atlas's ordinary paint would ring it.
+            _, _, forward = axes(probe)
+            t = np.clip((unit_normals(tex.N) @ forward - REAR_FILL_FACING) / REAR_FILL_RAMP, 0, 1)
+            # Each texel is U * base + (1 - U) * paint here; only the base share is replaced.
+            alpha = (alpha * tex.U * t * t * (3 - 2 * t)).astype(np.float32)
+            selected = alpha > 1e-3
+            r, c = rows[selected], cols[selected]
+            a = alpha[selected, None]
+            tex.T[r, c] += a * (self.fallback_texture[r, c] - tex.base_cov[selected])
+            with self.state_lock:
+                self.data['face_source']['head_residual'] = {
+                    'texels': int(selected.sum()), 'weight': float(alpha[selected].sum())}
+            return
+        core = alpha == 1
         selected = alpha > 0
         self.default_head_weight = np.zeros(tex.T.shape[:2], np.float32)
         self.default_head_weight[rows, cols] = alpha
@@ -621,7 +644,8 @@ class FaceControl:
         """Preserve the chosen face interior and soften the surrounding head-skin boundary.
 
         A default source owns the complete head volume, including unpainted residuals.
-        Beauty sources retain the accepted frontal skin composition.
+        Beauty sources retain the accepted frontal skin composition and every main-run paint;
+        the default atlas fills only the unpainted residuals of the head volume's rear half.
         """
         if self.key is None:
             raise ValueError('Beauty face source must be resolved before publishing')
@@ -630,6 +654,8 @@ class FaceControl:
                 raise ValueError('Default head atlas must be resolved before publishing')
             self.paint_default_head(tex, work)
             return
+        if self.fallback_texture is not None:
+            self.paint_default_head(tex, work, residual=True)
         view, = I.load_accepted_views(work, {self.key: records[self.key]}, tex.height)
         folder = work / self.key
         with Image.open(folder / 'face.png') as image:
