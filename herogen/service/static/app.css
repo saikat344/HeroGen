@@ -90,6 +90,10 @@ a:hover { text-decoration-thickness: 2px; }
 .btn--primary:active:not(:disabled) { background: var(--color-accent-press); }
 .btn--secondary { background: transparent; color: var(--color-text); border-color: var(--color-border-strong); }
 .btn--secondary:hover:not(:disabled) { background: var(--color-surface-3); border-color: var(--color-text-muted); }
+/* A faded accent still reads as a live call to action: disabled filled and outlined buttons turn neutral. A busy
+   button keeps its colour behind the spinner. */
+.btn--primary:disabled:not([aria-busy="true"]), .btn--primary[aria-disabled="true"] { opacity: 1; background: var(--color-surface-2); color: var(--color-text-faint); border-color: var(--color-border); }
+.btn--secondary:disabled:not([aria-busy="true"]), .btn--secondary[aria-disabled="true"] { opacity: 1; background: transparent; color: var(--color-text-faint); border-color: var(--color-border-subtle); }
 .btn--ghost { background: transparent; color: var(--color-text-muted); padding: 0 var(--space-4); }
 .btn--ghost:hover:not(:disabled) { color: var(--color-text); background: var(--color-surface-3); border-color: transparent; }
 .btn--danger { background: transparent; color: var(--color-danger); border-color: var(--color-danger-border); }
