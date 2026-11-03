@@ -48,6 +48,7 @@ FROZEN = {
     "cover-redo-v1": "75a790168a42d41ec46216be0193efb3af6f60966a0a87381484d378264be570",
     "turnaround-redo-v1": "b9f6a99f4ea46a88e7e1957beebb538c9305a28ae2bb09bd4fe5a643744c6ebd",
     "turnaround-redo-v2": "206e3774dc4535016939d49e97cd28ca722011b7c88b5fc83d4dc18746bbd4dc",
+    "brief-reword-v1": "9c4c3f92c726afbbac6b4c0008f8fa4d6771e000db35c159d7a1f11096366bac",
 }
 
 

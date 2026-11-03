@@ -81,6 +81,9 @@ def fork_run(root: Path, run_id: str, parent: Path, from_stage: int | str, note:
     lineage = {"parent_run": parent.name, "from_stage": from_stage, "note": note}
     files = {rel for rec in records for rel in rec.get("outputs", [])}
     files.add("00-sketch.png")
+    from herogen.pipeline import reword
+    if reword.brief(parent):
+        files.add(reword.FILE)   # a reworded brief stays the brief of every version made from this one
     if from_stage in (2, "3f"):
         files.add("01-cover.png")
     elif (parent / "stage-1.json").exists():

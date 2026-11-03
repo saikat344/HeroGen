@@ -9,11 +9,18 @@ It also writes the build log a real fast-lane run writes (`herogen.pipeline.even
 GPU call with its cost estimate, parallel calls, a recovery sheet in the turnaround, a texture view whose repaints
 fail their outline gate, a hedged repaint try cancelled because the other try passed, and the step's checks,
 paced over ``delay_s`` per stage so the website shows it arriving live. The numbers are illustrative.
+
+Content-policy refusals (fast lane only, as in `herogen.service.runner.reword_and_retry`): ``fail`` mode "policy"
+refuses the step once, the fake rewrite succeeds and the retry passes; "policy_twice" refuses the retry too;
+"policy_reword_fails" makes the rewrite fail. Without ``fail``, a description holding a marker word picks the same
+scenario on stage p, so the website can be checked with no spend: ``fakerefuse``, ``fakerefusetwice``,
+``fakerewordfail``, and ``fakerefusecover`` (stage 1 refuses once).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import struct
 import time
 from pathlib import Path
@@ -115,6 +122,12 @@ class FakeLog:
         return started
 
 
+POLICY_MODES = ("policy", "policy_twice", "policy_reword_fails")
+# Marker words in a description (dev mode, whole words): (word, stage, mode).
+POLICY_MARKERS = (("fakerefusetwice", "p", "policy_twice"), ("fakerewordfail", "p", "policy_reword_fails"),
+                  ("fakerefusecover", "1", "policy"), ("fakerefuse", "p", "policy"))
+FAKE_REWORD = ("An original armoured robot hero in red and gold plating, with a plain glowing chest light "
+               "(a fake-runner rewrite)")
 SAM, MUSE = "sam-3.1", "muse-image"
 SAM_USD, MUSE_USD = 0.0025, 0.01
 REPAINT_VIEWS = ("head+0", "body+0", "body+90", "body-90", "body+180")
@@ -137,7 +150,61 @@ class FakeRunner:
         why = self.available(spec)
         if why:
             return Outcome("skipped", message=why, code="not_available")
-        mode = self.fail.get(spec.key)
+        mode = self.fail.get(spec.key) or self._marker(spec, ctx)
+        if mode not in POLICY_MODES:
+            return self._run(spec, ctx, mode)
+        from herogen.service.runner import reword_and_retry, reword_due
+
+        first = self._refuse(spec, ctx)
+        if not reword_due(spec, ctx, first, 4):
+            return first
+        retry = ((lambda: (self._refuse(spec, ctx), 4)) if mode == "policy_twice"
+                 else (lambda: (self._run(spec, ctx, None), 0)))
+        return reword_and_retry(spec, ctx, first, lambda: self._reword(spec, ctx, mode != "policy_reword_fails"),
+                                retry)
+
+    @staticmethod
+    def _marker(spec: StageSpec, ctx: StageContext) -> str | None:
+        words = set(re.findall(r"[a-z]+", (ctx.prompt or "").casefold())) if ctx.kind == "prompt" else set()
+        return next((mode for word, stage, mode in POLICY_MARKERS if word in words and stage == spec.key), None)
+
+    def _refuse(self, spec: StageSpec, ctx: StageContext) -> Outcome:
+        """The image model refuses the step's request under its content policy (exit code 4)."""
+        from herogen.service.runner import CliRunner
+
+        run = ctx.run_dir
+        run.mkdir(parents=True, exist_ok=True)
+        flog = FakeLog(ctx, spec.key, self.delay_s)
+        what = {"p": "sketch_design", "1": "cover_art", "2": "turnaround"}[spec.key]
+        call = flog.start(MUSE, what)
+        flog.wait(0.3)
+        flog.end(call, outcome="failed", code="http_4xx")
+        rec = _record(spec.key if spec.key == "p" else int(spec.key), spec.label, [], ok=False,
+                      details={"brief_slot_used": spec.key == "1"})
+        rec.update(status="error", error="refused by the Model API's content policy (fake runner)")
+        write_record(run, rec)
+        return CliRunner.outcome(spec, ctx, 0.01, 4, "", "", False)
+
+    def _reword(self, spec: StageSpec, ctx: StageContext, ok: bool) -> None:
+        """The fake rewrite: one Muse Spark call in the build log and reword.json, as `pipestage reword` writes."""
+        from herogen import prompts
+        from herogen.pipeline import reword
+
+        flog = FakeLog(ctx, spec.key, self.delay_s)
+        call = flog.start("muse-spark", "reword_brief")
+        flog.wait(0.3)
+        if ok:
+            flog.end(call, 0.0012)
+            reword.write(ctx.run_dir, {"status": reword.USED, "reason": reword.REASON, "original": ctx.prompt,
+                                       "reworded": FAKE_REWORD, "removed_names": ["fake brand"],
+                                       "model": "muse-spark-1.3",
+                                       "prompt_version": prompts.selected("brief_reword").ref(), "cost_usd": 0.0012})
+        else:
+            flog.end(call, outcome="failed", code="http_5xx")
+            reword.write(ctx.run_dir, {"status": reword.FAILED, "reason": reword.REASON, "original": ctx.prompt,
+                                       "error": "ApiError", "cost_usd": 0.0})
+
+    def _run(self, spec: StageSpec, ctx: StageContext, mode: str | None) -> Outcome:
         flog = FakeLog(ctx, spec.key, self.delay_s)
         t0 = time.monotonic()
         what = {"p": "sketch_design", "1": "cover_art", "2": "turnaround"}.get(spec.key)
@@ -312,8 +379,10 @@ class FakeRunner:
 
         for rel in (DESIGN, SKETCH):
             _figure(512, (60, 60, 60)).save(run / rel, format="PNG")
+        from herogen.pipeline import reword
+
         write_record(run, _record("p", "prompt_sketch", [DESIGN, SKETCH], cost=0.01,
-                                  details={"user_text": ctx.prompt,
+                                  details={"user_text": reword.brief(run) or ctx.prompt,
                                            "prompt_version": prompts.selected("prompt_sketch").ref()}))
 
     def _stage_0(self, ctx: StageContext, run: Path) -> None:

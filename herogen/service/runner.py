@@ -10,6 +10,9 @@ of description jobs exclude raw output from logs because it can echo private tex
 of a stage CLI have (`--profile`, `--remote-cache`)
 are passed only when that CLI's `--help` lists them, so the service follows whichever pipeline it is deployed with.
 
+On the fast lane, a content-policy refusal of a step that sent the user's brief is followed once per job by a
+rewrite of the brief and one more run of that step (`reword_and_retry`, `herogen.pipeline.reword`).
+
 The Roblox rig (stage 6) runs only when the deployed code has a `herogen.roblox` command; until then the stage is
 skipped with that reason and the job still delivers its GLB.
 """
@@ -382,7 +385,9 @@ class CliRunner:
         pipe = [py, "-m", "herogen.pipeline", "run"]
         common = ["--run-id", ctx.job_id, "--runs", str(ctx.runs_root), "--cache", str(ctx.cache_dir)]
         if spec.key == "p":
-            return [py, "-m", "herogen.service.pipestage", "p", *common], ctx.prompt
+            from herogen.pipeline import reword
+
+            return [py, "-m", "herogen.service.pipestage", "p", *common], reword.brief(ctx.run_dir) or ctx.prompt
         if spec.key == "0":
             if ctx.kind == "prompt":
                 return pipe + common + ["--stages", "0", "--live", "--label", INPUT_LABELS[ctx.kind]], None
@@ -440,6 +445,13 @@ class CliRunner:
         why = self.available(spec)
         if why:
             return Outcome("skipped", message=why, code="not_available")
+        first, code = self.attempt(spec, ctx)
+        if not reword_due(spec, ctx, first, code):
+            return first
+        return reword_and_retry(spec, ctx, first, lambda: self.reword(spec, ctx), lambda: self.attempt(spec, ctx))
+
+    def attempt(self, spec: StageSpec, ctx: StageContext) -> tuple[Outcome, int]:
+        """One run of a stage's command: (its outcome, the exit code)."""
         extra = {**events_env(spec, ctx), **ctx.env}
         if (spec.group == "model" or spec.key in ("3", "3f")) and self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
@@ -463,7 +475,23 @@ class CliRunner:
                 err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
                 code = -1
             seconds = round(time.monotonic() - t0, 2)
-        return self.outcome(spec, ctx, seconds, code, out, err, timed_out)
+        return self.outcome(spec, ctx, seconds, code, out, err, timed_out), code
+
+    def reword(self, spec: StageSpec, ctx: StageContext) -> None:
+        """Ask Muse Spark once for a rewrite of the refused brief (`pipestage reword`, which writes reword.json).
+        Its output is never logged: it can hold the brief."""
+        extra = {**events_env(spec, ctx), **ctx.env}
+        if self._model_key:
+            extra["MODEL_API_KEY"] = self._model_key
+        with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
+            env = base_env({"HOME": home, **extra})
+            argv = [self.python, "-m", "herogen.service.pipestage", "reword", "--run-id", ctx.job_id,
+                    "--runs", str(ctx.runs_root), "--cache", str(ctx.cache_dir)]
+            try:
+                subprocess.run(argv, input=ctx.prompt, capture_output=True, text=True, encoding="utf-8",
+                               timeout=ctx.timeout_s, env=env, cwd=home)
+            except subprocess.TimeoutExpired:
+                log.warning("stage %s of %s: the brief rewrite timed out", spec.key, ctx.job_id)
 
     @staticmethod
     def outcome(spec: StageSpec, ctx: StageContext, seconds: float, code: int, out: str, err: str,
@@ -555,6 +583,106 @@ class CliRunner:
             return Outcome("rejected", seconds, cost, describe_rejection(spec, rec), "rejected", detail=tail)
         code_s, message, transient = describe_error(spec, tail, timed_out)
         return Outcome("failed", seconds, cost, message, code_s, transient, detail=tail)
+
+
+# ---- reword and retry after a content-policy refusal (fast lane; `herogen.pipeline.reword`) ----------------
+
+REWORD_STAGES = ("p", "1", "2")
+
+
+def brief_sent(spec: StageSpec, rec: dict[str, Any] | None) -> bool:
+    """Whether the refused step's request carried the user's brief: stage p's always does, stage 1's when its
+    colour-brief slot was used. Stage 2's turnaround prompt holds no brief (only a redo note), so a rewrite of the
+    brief could not change what it sends."""
+    if spec.key == "p":
+        return True
+    details = (rec or {}).get("details")
+    return spec.key == "1" and isinstance(details, dict) and details.get("brief_slot_used") is True
+
+
+def reword_due(spec: StageSpec, ctx: StageContext, out: Outcome, code: int) -> bool:
+    """A fast-lane content-policy refusal (exit 4) of a step that sent the brief, in a job not yet reworded."""
+    from herogen.pipeline import reword
+
+    lane = {**os.environ, **ctx.env}.get("HEROGEN_FAST_LANE") == "1"
+    return (lane and ctx.kind == "prompt" and bool(ctx.prompt) and spec.key in REWORD_STAGES
+            and out.state == "rejected" and code == 4
+            and brief_sent(spec, read_record(ctx.run_dir, spec.record)) and reword.read(ctx.run_dir) is None)
+
+
+POLICY_CAUSE = "Brand, franchise, character or real-person names usually cause this."
+
+
+def reword_refused_message(failed_rewrite: bool) -> str:
+    """The user's message when the reworded brief was refused too, or no usable rewrite came back."""
+    if failed_rewrite:
+        return ("The image model refused this description under its content policy. " + POLICY_CAUSE
+                + " HeroGen could not reword it automatically. Edit the description and try again.")
+    return ("The image model refused this description under its content policy, even after HeroGen reworded it "
+            "once without brand or character names. " + POLICY_CAUSE
+            + " Edit the reworded description and try again.")
+
+
+def _usd(v: Any) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else 0.0
+
+
+def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite: Callable[[], None],
+                     retry: Callable[[], tuple[Outcome, int]]) -> Outcome:
+    """After `reword_due`: one rewrite of the brief (`rewrite` writes reword.json), then one more run of the
+    refused step (`retry`) with it. The stage record and the build log say what happened; a second refusal or
+    an unusable rewrite stops the job as a refusal, with a message that says why."""
+    from herogen.pipeline import events, reword
+
+    file = ctx.run_dir / events.FILE
+
+    def decision(what: str, ok: bool) -> None:
+        events.emit("decision", file=file, step=spec.key, a=ctx.attempt, what=what, ok=ok)
+
+    refused = read_record(ctx.run_dir, spec.record) or {}
+    refused_try = {"cost_usd": round(first.cost_usd, 6), "seconds": first.seconds, "status": "content_policy",
+                   "calls": refused.get("calls") if isinstance(refused.get("calls"), list) else []}
+    t0 = time.monotonic()
+    rewrite()
+    rw_seconds = round(time.monotonic() - t0, 2)
+    data = reword.read(ctx.run_dir)
+    if data is None:
+        data = {"status": reword.FAILED, "reason": reword.REASON, "original": ctx.prompt, "error": "no_record",
+                "cost_usd": 0.0}
+    data.update(stage=spec.key, seconds=rw_seconds)
+    rw_cost = _usd(data.get("cost_usd"))
+
+    def annotate(rec: dict[str, Any] | None) -> None:
+        if rec is None:
+            return
+        rec["reword"] = {k: data.get(k) for k in ("status", "reason", "original", "reworded", "removed_names",
+                                                  "model", "prompt_version", "cost_usd", "seconds", "error")
+                         if data.get(k) is not None}
+        rec["reword"]["refused_try"] = refused_try
+        rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + rw_cost + (first.cost_usd if rec is not refused else 0),
+                                6)
+        write_record(ctx.run_dir, rec)
+
+    if data.get("status") != reword.USED:
+        reword.write(ctx.run_dir, data)
+        decision("brief_reword_failed", False)
+        annotate(refused)
+        return Outcome("rejected", round(first.seconds + rw_seconds, 2), first.cost_usd + rw_cost,
+                       reword_refused_message(True), "rejected", detail=first.detail)
+    reword.write(ctx.run_dir, data)
+    decision("brief_reworded", True)
+    out, code = retry()
+    again = out.state == "rejected" and code == 4
+    if again:
+        data["status"] = reword.REFUSED_AGAIN
+        reword.write(ctx.run_dir, data)
+        decision("reworded_brief_refused", False)
+    annotate(read_record(ctx.run_dir, spec.record))
+    seconds = round(first.seconds + rw_seconds + out.seconds, 2)
+    cost = first.cost_usd + rw_cost + out.cost_usd
+    if again:
+        return Outcome("rejected", seconds, cost, reword_refused_message(False), "rejected", detail=out.detail)
+    return Outcome(out.state, seconds, cost, out.message, out.code, out.transient, out.detail)
 
 
 def write_record(run_dir: Path, record: dict[str, Any]) -> None:
