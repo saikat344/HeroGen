@@ -1,4 +1,4 @@
-// The download panel under the result: the hero's main call to action once it is finished. Roblox first when its
+// The downloads in the workbench's title block: the hero's main call to action once it is finished. Roblox first when its
 // files are ready, the GLB beside it; while the Roblox files are prepared the GLB stays available and the Roblox
 // button shows its progress; when they are unavailable the panel says why and the GLB leads. Server values reach the
 // page only through textContent and attributes.
@@ -47,7 +47,7 @@ function option({ id, href, label, hint, primary, busy = false, onClick }) {
   const wrap = document.createElement('div');
   wrap.className = `deliver__option${primary ? ' deliver__option--primary' : ''}`;
   const control = document.createElement(href ? 'a' : 'button');
-  control.className = `btn ${primary ? 'btn--primary' : 'btn--secondary'} btn--l btn--block`;
+  control.className = `btn ${primary ? 'btn--primary' : 'btn--secondary'}`;
   control.id = id;
   if (href) { control.href = href; control.setAttribute('download', ''); if (onClick) control.addEventListener('click', onClick); }
   else { control.type = 'button'; control.disabled = true; }   // not aria-busy: the shared busy style hides the label

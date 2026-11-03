@@ -3060,14 +3060,16 @@ stop. The form’s texture-note availability follows the existing session flag. 
 expansion and studio-light controls affect presentation only. Compare variations stays in the saved
 progress bar and retains synchronized cameras.
 
-Downloads sit directly under the viewer, above Retry and Refine (`downloads.js`), and lead the result panel
-once something can be downloaded; Retry and Refine then use the secondary style. When the Roblox bundle is
+Downloads sit in the title block under the heading (`downloads.js`), so they show on the first screen; on a
+finished hero they take the subtitle's place, and Retry and Refine under the viewer use the secondary style. When the Roblox bundle is
 ready, "Download for Roblox (.zip)" is the primary button with the "Roblox ready" pill, and "Download 3D model
 (.glb)" sits beside it. While the Roblox steps still run after the model is ready, the GLB is downloadable and
 the Roblox button is disabled with "Preparing Roblox files…". When the bundle is unavailable, the panel shows
 the service's reason and the GLB becomes the primary button. Your heroes cards for a finished, Roblox-ready
 hero carry a one-click Roblox download beside the card link. The Roblox Studio steps and the full viewer link
-stay in the section under the panel.
+stay in the section under the result. The Roblox bundle can be ready (`roblox_state`) a moment before the
+export's last step ends (`export_state`); the heading and the bar's status already say the files are ready
+then, while Retry and Refine wait for the export to end, as the service requires.
 
 There is no top header. Each page shows the HeroGen wordmark at the top left of its content, and a fixed
 bottom bar holds the main nav (Create, Your heroes, Gallery, Open source) in the centre; the page reserves the
