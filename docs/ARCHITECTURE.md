@@ -1920,11 +1920,12 @@ section's centre, size, pivot and triangles).
 3. Run `bind_meshes.luau` in the Command Bar. After the bind below, it finds ServerStorage's `HeroGenStarterPlace`
    marker, so it also copies the bound rig to `StarterPlayer.StarterCharacter` (its PrimaryPart the
    HumanoidRootPart, turned upright facing -Z), replacing an earlier copy, turns LoadCharacterAppearance off,
-   deletes the imported model and prints "Starter place: press Play to walk around as your hero."
+   anchors every BasePart of the rig left in Workspace so it stands as a statue during Play (the copy stays
+   unanchored), deletes the imported model and prints "Starter place: press Play to walk around as your hero."
 4. Press Play.
 
 In the user's own game, where the marker is absent, the script ends after the bind and never touches
-StarterPlayer:
+StarterPlayer or anchors anything:
 1. File > Import 3D on `high.glb` with Scale Unit Stud and Rig Type No Rig. The importer uploads the meshes and
    texture to the user's account.
 2. Insert `HeroGen-R15.rbxmx` from file.

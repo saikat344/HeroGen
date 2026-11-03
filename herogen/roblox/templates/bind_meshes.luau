@@ -7,8 +7,9 @@
 --                 (already there in the starter place, {{PLACE_FILE}})
 --   {{IMPORTED_NAME}}  the imported meshes: File > Import 3D > {{GLB_FILE}} (Scale Unit: Stud, Rig Type: No Rig)
 -- In the starter place only (ServerStorage holds the BoolValue {{STARTER_MARKER}}), the script then also
--- deletes the imported model and installs a copy of the bound rig as StarterPlayer.StarterCharacter, so Play
--- spawns the player as the hero. Anywhere else it never touches StarterPlayer.
+-- deletes the imported model, installs a copy of the bound rig as StarterPlayer.StarterCharacter, so Play
+-- spawns the player as the hero, and anchors the rig left in Workspace as a statue. Anywhere else it never
+-- touches StarterPlayer or anchors anything.
 -- Every section keeps its rig instance (attachments, Motor6D, scale value); ApplyMesh copies the mesh, texture
 -- and collision geometry from the imported MeshPart (create.roblox.com/docs/reference/engine/classes/MeshPart).
 -- The imported layout is fitted to the rig with one of the 24 axis-aligned rotations plus a translation, so it
@@ -143,6 +144,13 @@ if old then
 end
 character.Parent = StarterPlayer
 StarterPlayer.LoadCharacterAppearance = false -- keep the hero's own look, not the player's avatar
+-- The rig left in Workspace stands next to the spawn as a statue; anchored, it can't fall over during Play.
+-- (The StarterCharacter above was copied first, so the player's character stays unanchored.)
+for _, d in rig:GetDescendants() do
+	if d:IsA("BasePart") then
+		d.Anchored = true
+	end
+end
 src:Destroy()
 print("Starter place: StarterPlayer.StarterCharacter is your hero; deleted '" .. IMPORTED_NAME .. "'.")
 print("Starter place: press Play to walk around as your hero.")
