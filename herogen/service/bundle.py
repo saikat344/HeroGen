@@ -1,5 +1,5 @@
-"""Downloads: the body's GLB, and the Roblox bundle (a zip of the stage 6 rig, its Studio scripts and README, the
-stage record and the GLB the scripts bind).
+"""Downloads: the body's GLB, and the Roblox bundle (a zip of the stage 6 rig, its starter place, its Studio scripts
+and README, the stage record and the GLB the scripts bind).
 
 The bundle takes exactly the files `stage-6.json` lists in its `outputs` (paths relative to the record, which the
 export writes at the run root), and only when that record passed: each must be a plain run-relative path, resolve
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from herogen.service.storage import SAFE_SEGMENT
 
-BUNDLE_TYPES = (".rbxmx", ".luau", ".lua", ".txt", ".md")
+BUNDLE_TYPES = (".rbxmx", ".rbxlx", ".luau", ".lua", ".txt", ".md")
 MAX_BUNDLE_FILE = 64 * 1024 * 1024
 ZIP_DATE = (2026, 1, 1, 0, 0, 0)
 LODS = ("high", "low")

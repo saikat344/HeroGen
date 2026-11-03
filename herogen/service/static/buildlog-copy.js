@@ -220,6 +220,7 @@ const LOCAL = {
   parts_total: (m) => `${n(m.high)} of ${n(m.high_budget)} triangles (high), ${n(m.low)} of ${n(m.low_budget)} (low); largest part ${n(m.largest)} (limit ${n(m.limit)})`,
   rig_write: (m) => `wrote HeroGen-R15.rbxmx: ${n(m.parts) || 15} MeshParts, ${n(m.motors) || 15} Motor6D joints${Number.isFinite(m.attachments) ? `, ${n(m.attachments)} accessory attachments` : ''}${
     Number.isFinite(m.hip_height) ? `, HipHeight ${m.hip_height.toFixed(3)} studs` : ''}`,
+  place_write: () => 'wrote HeroGen-Starter.rbxlx: a starter place with a baseplate, a spawn and the rig',
   studio_scripts: (m) => `wrote ${n(m.files) || 3} Studio helper files (bind_meshes.luau, rig_test.server.luau, README.txt)`,
   landmarks_loaded: (m) => `loaded ${n(m.joints) || 'the'} joint landmarks${Number.isFinite(m.from_model) ? ` (${n(m.from_model)} from SAM 3D Body)` : ''}`,
   decimated: (m) => `reduced the ${n(m.source_triangles) || ''} triangle mesh to fit the in-game budget${Number.isFinite(m.high) && Number.isFinite(m.low)
@@ -375,6 +376,14 @@ const CHECK_MEANINGS = {
   faces_minus_z: 'character faces forward', not_mirrored: "right arm is on the character's right",
   face_front_on_front: 'face attachment is on the front of the head', accessory_attachments: 'accessory attachments present and inside their parts',
   avatar_part_scale_type: 'all parts use the Classic scale type', meshes_bound: 'meshes bound in Studio; 0 until the script runs',
+  place_xml_well_formed: 'starter place is valid Roblox XML', place_referents_resolve: 'every reference in the place resolves',
+  place_services: 'Workspace, Lighting and StarterPlayer present', place_baseplate: 'an anchored baseplate',
+  place_spawn: 'one anchored spawn', place_spawn_on_baseplate: 'the spawn sits on the baseplate',
+  place_marker: 'the starter-place marker is set', place_starter_player_empty: 'StarterPlayer starts empty',
+  place_rig_present: 'the rig is in Workspace', place_rig_matches_file: 'the place holds the same rig as the rig file',
+  place_rig_rigid_move_position: 'the rig was moved as one piece', place_rig_rigid_move_rotation: 'the rig was turned as one piece',
+  place_rig_upright: 'the rig stands upright', place_feet_on_baseplate: 'the feet stand on the baseplate',
+  place_rig_clear_of_spawn: 'the rig stands clear of the spawn', place_rig_faces_spawn: 'the rig faces the spawn',
 };
 const CHECK_GROUP = {4: 'body', 6: 'rig'};
 const OPS = {'<': 'under', '<=': 'at most', '==': 'exactly', '>=': 'at least', '>': 'over', '!=': 'not'};

@@ -653,3 +653,13 @@ test('a view decision leads with a plain verdict, keeps its numbers and says whi
     "Front: keeping the original paint; none of its 3 tries was used (the repainted hair no longer matches the model's hair shape, size or colour).");
   assert.equal(line({what: 'view_kept', ok: false, why: 'spend_cap'}), 'Front: keeping the original paint (the spending cap was reached).');
 });
+
+test('the starter place reads in plain words: its line in the rig step and its checks', () => {
+  const events = [ev(0, 'step_start', '6'), ev(0.1, 'local', '6', {who: 'herogen', what: 'place_write'}),
+    ev(0.2, 'check', '6', {who: 'herogen', name: 'place_marker', ok: true, gate: true, op: '==', m: {value: 1, limit: 1}})];
+  const rows = rowsOf(buildModel(job({6: 'running'}), events), '6');
+  assert.ok(rows.some(r => r.text === 'Wrote HeroGen-Starter.rbxlx: a starter place with a baseplate, a spawn and the rig'),
+    JSON.stringify(rows.map(r => r.text)));
+  assert.equal(copy.checkLine({name: 'place_feet_on_baseplate', ok: true, gate: true, op: '<=', m: {value: 0, limit: 0.001}}),
+    'place_feet_on_baseplate (the feet stand on the baseplate): passed · measured 0, needs at most 0.001');
+});

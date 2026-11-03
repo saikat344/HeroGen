@@ -363,6 +363,7 @@ class TestJobsApi(WebCase):
         self.assertEqual(r.headers["content-type"], "application/zip")
         names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
         self.assertIn("06-roblox/bind_meshes.luau", names)
+        self.assertIn("06-roblox/HeroGen-Starter.rbxlx", names)
         self.assertIn("04-body/high.glb", names)
         self.assertIn("stage-6.json", names)
         self.assertEqual(b.get(f"/api/jobs/{job['id']}/download/other").status_code, 404)

@@ -24,7 +24,8 @@ from herogen.service.runner import Outcome, StageContext, StageSpec, write_recor
 SECTIONS = ("Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm",
             "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg",
             "RightLowerLeg", "RightFoot")
-ROBLOX_FILES = ("HeroGen-R15.rbxmx", "bind_meshes.luau", "rig_test.server.luau", "README.txt")
+ROBLOX_FILES = ("HeroGen-R15.rbxmx", "HeroGen-Starter.rbxlx", "bind_meshes.luau", "rig_test.server.luau",
+                "README.txt")
 
 
 def box_glb(size: tuple[float, float, float] = (1.0, 2.0, 0.5)) -> bytes:
@@ -297,7 +298,7 @@ class FakeRunner:
     def _log_6(self, ctx: StageContext, log: FakeLog) -> None:
         log.emit("local", what="rig_written", m={"parts": 15, "joints": 15, "attachments": 19, "hip_height": 1.719})
         log.wait(0.5)
-        log.emit("checks", n=27, passed=26, gated=26, failed=[], advisory=["meshes_bound"])
+        log.emit("checks", n=43, passed=42, gated=42, failed=[], advisory=["meshes_bound"])
         log.wait(0.5)
 
     def _log_5(self, ctx: StageContext, log: FakeLog) -> None:
@@ -399,6 +400,7 @@ class FakeRunner:
         out = run / "06-roblox"
         out.mkdir(exist_ok=True)
         (out / "HeroGen-R15.rbxmx").write_text('<roblox version="4"><!-- placeholder from the fake runner --></roblox>')
+        (out / "HeroGen-Starter.rbxlx").write_text('<roblox version="4"><!-- placeholder from the fake runner --></roblox>')
         (out / "bind_meshes.luau").write_text("-- placeholder from the fake runner\n")
         (out / "rig_test.server.luau").write_text("-- placeholder from the fake runner\n")
         (out / "README.txt").write_text("Placeholder files from HeroGen's fake runner (dev mode). Not a real rig.\n")

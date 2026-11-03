@@ -96,8 +96,9 @@ class TestBundle(TempDirCase):
         data = bundle.roblox_bundle(self.run)
         z = zipfile.ZipFile(io.BytesIO(data))
         self.assertEqual(sorted(z.namelist()), sorted(
-            ["06-roblox/HeroGen-R15.rbxmx", "06-roblox/bind_meshes.luau", "06-roblox/rig_test.server.luau",
-             "06-roblox/README.txt", "04-body/high.glb", "stage-6.json"]), "the run's own layout")
+            ["06-roblox/HeroGen-R15.rbxmx", "06-roblox/HeroGen-Starter.rbxlx", "06-roblox/bind_meshes.luau",
+             "06-roblox/rig_test.server.luau", "06-roblox/README.txt", "04-body/high.glb", "stage-6.json"]),
+            "the run's own layout")
         self.assertEqual(z.read("04-body/high.glb"), (self.run / "04-body" / "high.glb").read_bytes())
         self.assertTrue(all(i.date_time == bundle.ZIP_DATE for i in z.infolist()))
         self.assertIn("Placeholder", bundle.roblox_readme(self.run))
@@ -174,8 +175,8 @@ REAL_STAGE6 = {
                                  "bytes": 4335},
                "high.glb": {"sha256": "b254d25b8d23e64a65f34b7bcdf22d59d2e59457871226b65a185b345a2331d7",
                             "bytes": 12288}},
-    "outputs": ["06-roblox/HeroGen-R15.rbxmx", "06-roblox/bind_meshes.luau", "06-roblox/rig_test.server.luau",
-                "06-roblox/README.txt"],
+    "outputs": ["06-roblox/HeroGen-R15.rbxmx", "06-roblox/HeroGen-Starter.rbxlx", "06-roblox/bind_meshes.luau",
+                "06-roblox/rig_test.server.luau", "06-roblox/README.txt"],
     "checks": [{"name": "xml_well_formed", "value": 1, "threshold": 1, "pass": True, "gate": True,
                 "detail": "root <roblox version='4'>"},
                {"name": "attachments_at_pivots", "value": 0.0, "threshold": 0.001, "pass": True, "gate": True,
@@ -208,6 +209,32 @@ class TestRealExportRecord(TempDirCase):
         self.assertEqual(names, sorted(REAL_STAGE6["outputs"] + ["04-body/high.glb", "stage-6.json"]))
         # The README the export writes points at ../04-body/high.glb and ../stage-6.json from 06-roblox/.
         self.assertIn("06-roblox/README.txt", bundle.roblox_readme(run))
+
+    def test_bundle_from_a_real_export(self):
+        """The zip from an actual stage 6 export holds the starter place and the GLB its README names, at the
+        paths the README gives relative to 06-roblox/."""
+        import posixpath
+        import re
+
+        from herogen.roblox.export import run_export
+        from herogen.roblox.synth import write_body
+
+        run = self.tmp / "run"
+        write_body(run / "04-body")
+        self.assertTrue(run_export(run / "04-body", run / "06-roblox")["ok"])
+        z = zipfile.ZipFile(io.BytesIO(bundle.roblox_bundle(run)))
+        names = set(z.namelist())
+        self.assertEqual(names, {"06-roblox/HeroGen-R15.rbxmx", "06-roblox/HeroGen-Starter.rbxlx",
+                                 "06-roblox/bind_meshes.luau", "06-roblox/rig_test.server.luau",
+                                 "06-roblox/README.txt", "04-body/high.glb", "stage-6.json"})
+        self.assertEqual(z.read("04-body/high.glb"), (run / "04-body" / "high.glb").read_bytes())
+        self.assertEqual(z.read("06-roblox/HeroGen-Starter.rbxlx"),
+                         (run / "06-roblox" / "HeroGen-Starter.rbxlx").read_bytes())
+        readme = z.read("06-roblox/README.txt").decode()
+        quick = readme[readme.index("Quick start"):readme.index("Add the hero to your own game")]
+        glb = re.search(r"^\s+(\S+high\.glb)$", quick, re.M).group(1)
+        self.assertIn(posixpath.normpath(posixpath.join("06-roblox", glb)), names)
+        self.assertIn("06-roblox/HeroGen-Starter.rbxlx", {f"06-roblox/{w}" for w in quick.split()})
 
     def test_outcomes_from_the_real_record(self):
         from herogen.service.runner import PLAN, CliRunner
