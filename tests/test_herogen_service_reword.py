@@ -147,10 +147,20 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.refusals = {"images/generations": 1}
         self.reword_answers = [answer()]
         self.reword_prompts = []
+        self.precheck_prompts = []
+        self.precheck_names = []      # the up-front check finds nothing unless a test says so
+        self.precheck_error = None
         self.generation_prompts = []
         self.edit_prompts = []
 
     def post(self, client, endpoint, body, **kw):
+        if endpoint == "responses" and body.get("text", {}).get("format", {}).get("name") == "brief_precheck":
+            self.precheck_prompts.append(body["input"][0]["content"][0]["text"])
+            if self.precheck_error is not None:
+                raise self.precheck_error
+            return {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 40},
+                    "output": [{"type": "message", "content": [{"type": "output_text",
+                                                                 "text": json.dumps({"names": self.precheck_names})}]}]}
         if endpoint == "responses" and body.get("text", {}).get("format", {}).get("name") == "brief_reword":
             self.reword_prompts.append(body["input"][0]["content"][0]["text"])
             got = self.reword_answers[min(len(self.reword_prompts), len(self.reword_answers)) - 1]
@@ -218,7 +228,8 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertIn(("decision", None, "brief_reworded", None, True), kinds)
         self.assertLess(kinds.index(("decision", None, "brief_reworded", None, True)),
                         kinds.index(("call_end", "muse-image", "sketch_design", "ok", None)))
-        self.assertEqual(self.view(job)["reword"], {"status": "used", "stage": "p", "text": REWORDED})
+        self.assertEqual(self.view(job)["reword"], {"status": "used", "stage": "p", "text": REWORDED,
+                                                    "reason": "content_policy"})
         self.assertNotIn(BRIEF, "\n".join(logs.output))
         self.assertNotIn(REWORDED, "\n".join(logs.output))
 
@@ -245,9 +256,10 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertEqual((len(self.generation_prompts), len(self.reword_prompts)), (2, 1))
         self.assertEqual(reword.read(self.run_dir(job))["status"], "refused_again")
         self.assertEqual(self.record(job, "p")["reword"]["status"], "refused_again")
-        self.assertEqual(self.view(job)["reword"], {"status": "refused_again", "stage": "p", "text": REWORDED})
+        self.assertEqual(self.view(job)["reword"], {"status": "refused_again", "stage": "p", "text": REWORDED,
+                                                    "reason": "content_policy"})
         whats = [e.get("what") for e in read_events(self.run_dir(job)) if e["kind"] == "decision"]
-        self.assertEqual(whats, ["brief_reworded", "reworded_brief_refused"])
+        self.assertEqual(whats, ["brief_prechecked", "brief_reworded", "reworded_brief_refused"])
 
     def test_failed_rewrite_stops_without_a_retry(self):
         for case, got in (("api", ApiError("HTTP 503", http_status=503, transient=True)),
@@ -269,7 +281,7 @@ class RewordJobTest(prompt_base.PromptJobTest):
                 self.assertNotIn("reworded", data)
                 self.assertIsNone(self.view(job)["reword"]["text"])
                 whats = [e.get("what") for e in read_events(self.run_dir(job)) if e["kind"] == "decision"]
-                self.assertEqual(whats, ["brief_reword_failed"])
+                self.assertEqual(whats, ["brief_prechecked", "brief_reword_failed"])
                 self.store.job_cancel(job["id"], self.user["id"])
 
     def test_non_policy_errors_and_the_full_lane_are_never_reworded(self):
@@ -317,7 +329,7 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertNotIn("Ironman", covers[1])
         # The sketch is drawn again from the rewrite (stage p, then stage 0) before the cover is retried.
         stages = [c[3] if c[2] == "herogen.service.pipestage" else c[c.index("--stages") + 1] for c in self.commands]
-        self.assertEqual(stages, ["p", "0", "1", "reword", "p", "0", "1"])
+        self.assertEqual(stages, ["precheck", "p", "0", "1", "reword", "p", "0", "1"])
         self.assertEqual(len(self.generation_prompts), 2)
         self.assertIn("Ironman", self.generation_prompts[0])
         for name in REMOVED:
@@ -405,10 +417,141 @@ class RedrawRules(unittest.TestCase):
                          ("failed", "model_unavailable", True, ["redraw"], "used"))
 
 
+class PrecheckJobTest(RewordJobTest):
+    """The up-front brand check before stage p, through the real runner and pipestage."""
+
+    def setUp(self):
+        super().setUp()
+        self.refusals = {}
+        self.description = "A street racer in a Nike tracksuit and Adidas trainers, holding a helmet"
+        self.precheck_names = ["Nike", "Adidas"]
+        self.reword_answers = [answer("A street racer in a plain dark tracksuit with striped trainers, holding a "
+                                      "helmet", ["Nike", "Adidas"])]
+
+    def decisions(self, job):
+        return [(e["what"], e.get("ok"), e.get("n"), e.get("code")) for e in read_events(self.run_dir(job))
+                if e["kind"] == "decision" and e["what"].startswith(("brief", "reworded"))]
+
+    def stage_commands(self):
+        return [c[3] if c[2] == "herogen.service.pipestage" else c[c.index("--stages") + 1] for c in self.commands]
+
+    def test_named_brand_is_reworded_up_front_and_stage_p_draws_the_rewrite(self):
+        reworded = "A street racer in a plain dark tracksuit with striped trainers, holding a helmet"
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO") as logs:
+            self.assertEqual(self.go(job), "succeeded")
+        self.assertEqual(self.stage_commands(), ["precheck", "p", "0"])
+        self.assertEqual((len(self.precheck_prompts), len(self.reword_prompts)), (1, 1))
+        self.assertIn(f"«{self.description}»", self.precheck_prompts[0])
+        self.assertEqual(len(self.generation_prompts), 1)
+        self.assertIn(reworded, self.generation_prompts[0])
+        for name in ("Nike", "Adidas"):
+            self.assertNotIn(name.casefold(), self.generation_prompts[0].casefold())
+        run = self.run_dir(job)
+        data = reword.read(run)
+        self.assertEqual((data["status"], data["reason"], data["names_found"], data["original"], data["reworded"]),
+                         ("used", "precheck", ["Nike", "Adidas"], self.description, reworded))
+        self.assertEqual(reword.read(run, reword.PRECHECK_FILE)["status"], "found")
+        rec = self.record(job, "p")
+        self.assertEqual(rec["details"]["user_text"], reworded)
+        self.assertEqual((rec["precheck"]["status"], rec["reword"]["reason"]), ("found", "precheck"))
+        self.assertAlmostEqual(self.stages(job)["p"]["cost_usd"], rec["cost_usd"], places=6)
+        self.assertGreater(rec["precheck"]["cost_usd"], 0)
+        self.assertEqual(self.decisions(job), [("brief_prechecked", True, 2, None),
+                                               ("brief_reworded_upfront", True, None, None)])
+        self.assertEqual(self.view(job)["reword"], {"status": "used", "stage": "p", "text": reworded,
+                                                    "reason": "precheck"})
+        self.assertNotIn(self.description, "\n".join(logs.output))
+
+    def test_clean_brief_is_untouched(self):
+        self.precheck_names = []
+        self.description = "A samurai warrior in black and red lacquered armour with a katana"
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO"):
+            self.assertEqual(self.go(job), "succeeded")
+        self.assertEqual((len(self.precheck_prompts), len(self.reword_prompts)), (1, 0))
+        self.assertIn(self.description, self.generation_prompts[0])
+        self.assertIsNone(reword.read(self.run_dir(job)))
+        self.assertEqual(reword.read(self.run_dir(job), reword.PRECHECK_FILE)["status"], "clean")
+        self.assertEqual(self.record(job, "p")["details"]["user_text"], self.description)
+        self.assertEqual(self.decisions(job), [("brief_prechecked", True, 0, None)])
+        self.assertIsNone(self.view(job)["reword"])
+
+    def test_failed_check_is_loud_and_the_original_brief_continues(self):
+        self.precheck_error = ApiError("HTTP 503", http_status=503, transient=True)
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO") as logs:
+            self.assertEqual(self.go(job), "succeeded")
+        self.assertIn("the brand check failed (ApiError)", "\n".join(logs.output))
+        self.assertEqual(self.reword_prompts, [])
+        self.assertIn(self.description, self.generation_prompts[0])
+        data = reword.read(self.run_dir(job), reword.PRECHECK_FILE)
+        self.assertEqual((data["status"], data["error"], data["http_status"]), ("failed", "ApiError", 503))
+        rec = self.record(job, "p")
+        self.assertEqual((rec["precheck"]["status"], rec["precheck"]["error"]), ("failed", "ApiError"))
+        self.assertEqual(self.decisions(job), [("brief_precheck_failed", False, None, "http_5xx")])
+        self.assertIsNone(reword.read(self.run_dir(job)))
+
+    def test_an_up_front_rewrite_blocks_a_second_rewrite_and_a_refusal_stops(self):
+        self.refusals = {"images/generations": 1}
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO"):
+            self.assertEqual(self.go(job), "rejected")
+        self.assertEqual(len(self.reword_prompts), 1, "only the up-front rewrite")
+        self.assertEqual(self.stage_commands(), ["precheck", "p"])
+        saved = self.store.job_get(job["id"])
+        self.assertIn("even after HeroGen reworded it once", saved["error_message"])
+        self.assertIn("Edit your description and try again", saved["error_message"])
+        data = reword.read(self.run_dir(job))
+        self.assertEqual((data["status"], data["reason"]), ("refused_again", "precheck"))
+        self.assertEqual([d[0] for d in self.decisions(job)],
+                         ["brief_prechecked", "brief_reworded_upfront", "reworded_brief_refused"])
+        self.assertEqual(self.view(job)["reword"]["reason"], "precheck")
+
+    def test_the_full_lane_never_checks(self):
+        job = self.prompt_job()
+        with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": ""}), self.assertLogs("herogen.service", "INFO"):
+            self.assertEqual(self.go(job), "succeeded")
+        self.assertEqual((self.precheck_prompts, self.reword_prompts), ([], []))
+        self.assertNotIn("precheck", self.stage_commands())
+        for name in (reword.PRECHECK_FILE, reword.FILE):
+            self.assertFalse((self.run_dir(job) / name).exists())
+        self.assertIn(self.description, self.generation_prompts[0])
+
+
+class PrecheckDue(unittest.TestCase):
+    def test_once_per_job_on_stage_p_of_a_fast_lane_description(self):
+        import tempfile
+
+        from herogen.service.runner import precheck_due
+
+        spec = {s.key: s for s in PLAN}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, FAST):
+            run = Path(tmp)
+            ctx = RewordDue().ctx(tmp)
+            self.assertTrue(precheck_due(spec["p"], ctx))
+            self.assertFalse(precheck_due(spec["1"], ctx))
+            self.assertFalse(precheck_due(spec["p"], RewordDue().ctx(tmp, kind="sketch", prompt="")))
+            for name in (reword.PRECHECK_FILE, reword.FILE, "redo.json"):
+                with self.subTest(name=name):
+                    (run / name).write_text("{")
+                    self.assertFalse(precheck_due(spec["p"], ctx), "checked, reworded or a redo version")
+                    (run / name).unlink()
+            with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": ""}):
+                self.assertFalse(precheck_due(spec["p"], ctx))
+
+    def test_found_names_must_be_absent_from_the_rewrite(self):
+        with self.assertRaisesRegex(reword.RewordRejected, "still names"):
+            reword.check(BRIEF, {"reworded": "A red robot with Nike shoes", "removed_names": []}, ["Nike"])
+
+
 # Only this file's own tests run on RewordJobTest, not the inherited prompt-job tests.
 for _name in dir(prompt_base.PromptJobTest):
     if _name.startswith("test_") and _name not in RewordJobTest.__dict__:
         setattr(RewordJobTest, _name, None)
+for _name in dir(RewordJobTest):
+    if _name.startswith("test_") and _name not in PrecheckJobTest.__dict__:
+        setattr(PrecheckJobTest, _name, None)
 
 
 class RedoKeepsTheRewrite(unittest.TestCase):
@@ -452,11 +595,12 @@ class FakeRunnerScenarios(jobs_base.JobCase):
 
     def test_marker_words_pick_each_scenario_with_no_spend(self):
         for word, state, status, decisions in (
-                ("fakerefuse", "succeeded", "used", ["brief_reworded"]),
-                ("fakerefusecover", "succeeded", "used", ["brief_reworded", "sketch_redrawn"]),
-                ("fakerefusetwice", "rejected", "refused_again", ["brief_reworded", "reworded_brief_refused"]),
-                ("fakerewordfail", "rejected", "rewrite_failed", ["brief_reword_failed"]),
-                ("plain", "succeeded", None, [])):
+                ("fakerefuse", "succeeded", "used", ["brief_prechecked", "brief_reworded"]),
+                ("fakerefusecover", "succeeded", "used", ["brief_prechecked", "brief_reworded", "sketch_redrawn"]),
+                ("fakerefusetwice", "rejected", "refused_again",
+                 ["brief_prechecked", "brief_reworded", "reworded_brief_refused"]),
+                ("fakerewordfail", "rejected", "rewrite_failed", ["brief_prechecked", "brief_reword_failed"]),
+                ("plain", "succeeded", None, ["brief_prechecked"])):
             with self.subTest(word=word):
                 job = self.job(f"A red armoured robot {word}")
                 self.assertEqual(self.go(job), state)
@@ -471,7 +615,8 @@ class FakeRunnerScenarios(jobs_base.JobCase):
                     self.assertEqual(json.loads((run / "stage-p.json").read_text())["details"]["user_text"],
                                      FAKE_REWORD)
                 if word == "plain":
-                    self.assertFalse(any(e.get("who") == "muse-spark" for e in evs))
+                    self.assertEqual([e.get("what") for e in evs if e.get("who") == "muse-spark"],
+                                     ["precheck_brief", "precheck_brief"], "only the up-front check's call")
 
     def test_a_refused_cover_reruns_p_and_0_before_the_cover(self):
         self.runner = FakeRunner(fail={"1": "policy"})
@@ -481,6 +626,28 @@ class FakeRunnerScenarios(jobs_base.JobCase):
         run = self.storage.run_dir(self.user["id"], job["id"])
         self.assertEqual(json.loads((run / "stage-p.json").read_text())["details"]["user_text"], FAKE_REWORD)
         self.assertEqual(reword.read(run)["redraw"]["status"], "passed")
+
+    def test_fakebrand_is_reworded_up_front_and_fakeprecheckfail_continues(self):
+        job = self.job("A red armoured robot fakebrand")
+        self.assertEqual(self.go(job), "succeeded")
+        run = self.storage.run_dir(self.user["id"], job["id"])
+        data = reword.read(run)
+        self.assertEqual((data["reason"], data["names_found"], data["reworded"]), ("precheck", ["fakebrand"], FAKE_REWORD))
+        self.assertEqual(json.loads((run / "stage-p.json").read_text())["details"]["user_text"], FAKE_REWORD)
+        whats = [e["what"] for e in read_events(run) if e["kind"] == "decision"]
+        self.assertEqual(whats[:2], ["brief_prechecked", "brief_reworded_upfront"])
+        job = self.job("A red armoured robot fakeprecheckfail")
+        self.assertEqual(self.go(job), "succeeded")
+        run = self.storage.run_dir(self.user["id"], job["id"])
+        self.assertIsNone(reword.read(run))
+        self.assertEqual([e["what"] for e in read_events(run) if e["kind"] == "decision"][:1], ["brief_precheck_failed"])
+        # An up-front rewrite then a refusal: the refused-again stop, no second rewrite.
+        self.runner = FakeRunner(fail={"p": "policy"})
+        job = self.job("A red armoured robot fakebrand")
+        self.assertEqual(self.go(job), "rejected")
+        run = self.storage.run_dir(self.user["id"], job["id"])
+        self.assertEqual(reword.read(run)["status"], "refused_again")
+        self.assertIn("Edit your description", self.store.job_get(job["id"])["error_message"])
 
     def test_fail_modes_and_the_full_lane(self):
         self.runner = FakeRunner(fail={"p": "policy"})

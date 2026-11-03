@@ -2121,6 +2121,17 @@ stops the job as a refusal whose message says brand or character names usually c
 opens filled with the rewrite. Stage 2's turnaround prompt holds no brief, so its refusals are not reworded; any
 other error is never reworded or retried, and the full lane is unchanged.
 
+Before stage p on the same fast lane, a described hero's brief is also checked up front, once per job
+(`brief-precheck-v1`, one Muse Spark call): it lists the brand, logo, franchise, trademarked-character and
+real-person names in the brief. With none, nothing changes beyond a "checked, none found" build-log line. With
+some, the same rewrite runs (reason `precheck`, the names found must be absent from it too) and stage p draws from
+it; the hero page says the description named a brand or character and quotes the rewrite. `precheck.json` records
+the check and `reword.json` the rewrite, so an up-front rewrite also means no second rewrite after a refusal: a
+refusal then stops the job with the refused-again message and the description box holds the user's own
+description. A check or an up-front rewrite that fails is a warning in the build log and on the stage p record;
+the brief is then drawn as written, and the refusal path keeps its one rewrite. Retried attempts, continued jobs
+and redo versions are not checked again.
+
 ### Attempts and checks
 
 An attempt is one design and one full-body edit. The image API takes no seed, so a new attempt asks for a new

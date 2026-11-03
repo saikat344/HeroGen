@@ -12,7 +12,8 @@ are passed only when that CLI's `--help` lists them, so the service follows whic
 
 On the fast lane, a content-policy refusal of a step that sent the user's brief is followed once per job by a
 rewrite of the brief and one more run of that step (`reword_and_retry`, `herogen.pipeline.reword`); a refused
-cover first has its sketch drawn again from the rewrite.
+cover first has its sketch drawn again from the rewrite. Before stage p, a fast-lane brief is also checked up front for brand and
+character names and, when it has any, reworded before anything is drawn (`run_with_rewording`).
 
 The Roblox rig (stage 6) runs only when the deployed code has a `herogen.roblox` command; until then the stage is
 skipped with that reason and the job still delivers its GLB.
@@ -447,11 +448,9 @@ class CliRunner:
         why = self.available(spec)
         if why:
             return Outcome("skipped", message=why, code="not_available")
-        first, code = self.attempt(spec, ctx)
-        if not reword_due(spec, ctx, first, code):
-            return first
-        return reword_and_retry(spec, ctx, first, lambda: self.reword(spec, ctx), lambda: self.attempt(spec, ctx),
-                                lambda: redraw_sketch(lambda s: self.attempt(s, ctx)))
+        return run_with_rewording(spec, ctx, lambda: self.attempt(spec, ctx), lambda: self.attempt(spec, ctx),
+                                  lambda: self.reword(spec, ctx), lambda: redraw_sketch(lambda s: self.attempt(s, ctx)),
+                                  lambda: self.precheck(spec, ctx))
 
     def attempt(self, spec: StageSpec, ctx: StageContext) -> tuple[Outcome, int]:
         """One run of a stage's command: (its outcome, the exit code)."""
@@ -480,21 +479,29 @@ class CliRunner:
             seconds = round(time.monotonic() - t0, 2)
         return self.outcome(spec, ctx, seconds, code, out, err, timed_out), code
 
+    def precheck(self, spec: StageSpec, ctx: StageContext) -> None:
+        """Check the brief for brand and character names up front (`pipestage precheck`, which writes
+        precheck.json and, for a usable rewrite, reword.json). Its output is never logged: it can hold the brief."""
+        self._model_text_step("precheck", spec, ctx)
+
     def reword(self, spec: StageSpec, ctx: StageContext) -> None:
         """Ask Muse Spark once for a rewrite of the refused brief (`pipestage reword`, which writes reword.json).
         Its output is never logged: it can hold the brief."""
+        self._model_text_step("reword", spec, ctx)
+
+    def _model_text_step(self, step: str, spec: StageSpec, ctx: StageContext) -> None:
         extra = {**events_env(spec, ctx), **ctx.env}
         if self._model_key:
             extra["MODEL_API_KEY"] = self._model_key
         with tempfile.TemporaryDirectory(prefix="herogen-stage-") as home:
             env = base_env({"HOME": home, **extra})
-            argv = [self.python, "-m", "herogen.service.pipestage", "reword", "--run-id", ctx.job_id,
+            argv = [self.python, "-m", "herogen.service.pipestage", step, "--run-id", ctx.job_id,
                     "--runs", str(ctx.runs_root), "--cache", str(ctx.cache_dir)]
             try:
                 subprocess.run(argv, input=ctx.prompt, capture_output=True, text=True, encoding="utf-8",
                                timeout=ctx.timeout_s, env=env, cwd=home)
             except subprocess.TimeoutExpired:
-                log.warning("stage %s of %s: the brief rewrite timed out", spec.key, ctx.job_id)
+                log.warning("stage %s of %s: the brief %s timed out", spec.key, ctx.job_id, step)
 
     @staticmethod
     def outcome(spec: StageSpec, ctx: StageContext, seconds: float, code: int, out: str, err: str,
@@ -618,14 +625,117 @@ def reword_due(spec: StageSpec, ctx: StageContext, out: Outcome, code: int) -> b
 POLICY_CAUSE = "Brand, franchise, character or real-person names usually cause this."
 
 
-def reword_refused_message(failed_rewrite: bool) -> str:
-    """The user's message when the reworded brief was refused too, or no usable rewrite came back."""
+def reword_refused_message(failed_rewrite: bool, upfront: bool = False) -> str:
+    """The user's message when the reworded brief was refused too, or no usable rewrite came back. After an
+    up-front rewrite the description box holds the user's own description, so the message says so."""
     if failed_rewrite:
         return ("The image model refused this description under its content policy. " + POLICY_CAUSE
                 + " HeroGen could not reword it automatically. Edit the description and try again.")
     return ("The image model refused this description under its content policy, even after HeroGen reworded it "
             "once without brand or character names. " + POLICY_CAUSE
-            + " Edit the reworded description and try again.")
+            + (" Edit your description and try again." if upfront else " Edit the reworded description and try again."))
+
+
+# ---- the up-front brand check before stage p (fast lane; `herogen.pipeline.reword.precheck`) ----------------
+
+
+def precheck_due(spec: StageSpec, ctx: StageContext) -> bool:
+    """Stage p of a fast-lane described hero whose brief was never checked or reworded (a retried attempt, a
+    continued job and a redo version keep what the job already has)."""
+    from herogen.pipeline import reword
+
+    lane = {**os.environ, **ctx.env}.get("HEROGEN_FAST_LANE") == "1"
+    return (lane and spec.key == "p" and ctx.kind == "prompt" and bool(ctx.prompt)
+            and not any((ctx.run_dir / f).exists() for f in (reword.PRECHECK_FILE, reword.FILE, "redo.json")))
+
+
+def run_precheck(spec: StageSpec, ctx: StageContext, precheck: Callable[[], None]) -> dict[str, Any]:
+    """Run the up-front check (`precheck` writes precheck.json, and reword.json for a usable rewrite) and say
+    what it found in the build log. A check that fails is a warning: the brief is drawn as written."""
+    from herogen.pipeline import events, reword
+
+    file = ctx.run_dir / events.FILE
+
+    def decision(what: str, ok: bool, **fields: Any) -> None:
+        events.emit("decision", file=file, step=spec.key, a=ctx.attempt, what=what, ok=ok, **fields)
+
+    ctx.run_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.monotonic()
+    precheck()
+    data = reword.read(ctx.run_dir, reword.PRECHECK_FILE)
+    if data is None:
+        data = {"status": "failed", "error": "no_record", "cost_usd": 0.0}
+        reword.write(ctx.run_dir, data, reword.PRECHECK_FILE)
+    data["seconds"] = round(time.monotonic() - t0, 2)
+    names = data.get("names_found") if isinstance(data.get("names_found"), list) else []
+    if data.get("status") == "failed":
+        decision("brief_precheck_failed", False, code=events.code_for_status(data["http_status"])
+                 if isinstance(data.get("http_status"), int) else events.slug(data.get("error") or "error"))
+        log.warning("stage p of %s: the brand check failed (%s); drawing the brief as written", ctx.job_id,
+                    data.get("error"))
+        return data
+    decision("brief_prechecked", True, n=len(names))
+    if names:
+        if reword.brief(ctx.run_dir):
+            decision("brief_reworded_upfront", True)
+        else:
+            decision("brief_reword_upfront_failed", False)
+            log.warning("stage p of %s: the brief named %d brand or character names but could not be reworded; "
+                        "drawing it as written", ctx.job_id, len(names))
+    return data
+
+
+def refused_after_upfront(spec: StageSpec, ctx: StageContext, out: Outcome, code: int) -> bool:
+    """A fast-lane policy refusal of a step that sent a brief already reworded up front: no second rewrite."""
+    from herogen.pipeline import reword
+
+    lane = {**os.environ, **ctx.env}.get("HEROGEN_FAST_LANE") == "1"
+    data = reword.read(ctx.run_dir)
+    return (lane and ctx.kind == "prompt" and spec.key in REWORD_STAGES and out.state == "rejected" and code == 4
+            and bool(data) and data.get("reason") == reword.PRECHECK and data.get("status") == reword.USED
+            and brief_sent(spec, read_record(ctx.run_dir, spec.record)))
+
+
+def run_with_rewording(spec: StageSpec, ctx: StageContext, first_try: Callable[[], tuple[Outcome, int]],
+                       retry: Callable[[], tuple[Outcome, int]], rewrite: Callable[[], None],
+                       redraw: Callable[[], tuple[Outcome, int]], precheck: Callable[[], None]) -> Outcome:
+    """A model stage with the fast lane's brief handling: the up-front check before stage p (`run_precheck`), the
+    stage, then at most one rewrite after a refusal (`reword_and_retry`) or, when the brief was already reworded
+    up front, a refused-again stop. Stages and lanes it does not apply to run exactly as before."""
+    from herogen.pipeline import events, reword
+
+    pre = run_precheck(spec, ctx, precheck) if precheck_due(spec, ctx) else None
+    first, code = first_try()
+    if reword_due(spec, ctx, first, code):
+        out = reword_and_retry(spec, ctx, first, rewrite, retry, redraw)
+    elif refused_after_upfront(spec, ctx, first, code):
+        data = reword.read(ctx.run_dir) or {}
+        data["status"] = reword.REFUSED_AGAIN
+        reword.write(ctx.run_dir, data)
+        events.emit("decision", file=ctx.run_dir / events.FILE, step=spec.key, a=ctx.attempt,
+                    what="reworded_brief_refused", ok=False)
+        out = Outcome("rejected", first.seconds, first.cost_usd, reword_refused_message(False, upfront=True),
+                      "rejected", detail=first.detail)
+    else:
+        out = first
+    if pre is None:
+        return out
+    # The check and an up-front rewrite are part of stage p: recorded on its record, counted in its cost.
+    rewrite_rec = reword.read(ctx.run_dir) if (pre.get("rewrite") or {}).get("status") == reword.USED else None
+    extra = _usd(pre.get("cost_usd")) + _usd((pre.get("rewrite") or {}).get("cost_usd"))
+    rec = read_record(ctx.run_dir, spec.record)
+    if rec:
+        rec["precheck"] = {k: pre.get(k) for k in ("status", "names_found", "model", "prompt_version", "cost_usd",
+                                                    "seconds", "error", "http_status", "error_code", "rewrite")
+                           if pre.get(k) is not None}
+        if rewrite_rec and "reword" not in rec:
+            rec["reword"] = {k: rewrite_rec.get(k) for k in ("status", "reason", "original", "reworded",
+                                                             "removed_names", "names_found", "model",
+                                                             "prompt_version", "cost_usd") if rewrite_rec.get(k) is not None}
+        rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + extra, 6)
+        write_record(ctx.run_dir, rec)
+    return Outcome(out.state, round(out.seconds + _usd(pre.get("seconds")), 2), out.cost_usd + extra, out.message,
+                   out.code, out.transient, out.detail)
 
 
 def _usd(v: Any) -> float:

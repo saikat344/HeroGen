@@ -43,7 +43,7 @@ def prompt_error_exit(error: BaseException | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m herogen.service.pipestage")
-    ap.add_argument("stage", choices=("p", "1", "2", "reword"))
+    ap.add_argument("stage", choices=("p", "1", "2", "reword", "precheck"))
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
@@ -57,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     run = RunFolder(runs_root(a.runs), a.run_id)
     if a.stage == "reword":
         return reword_main(run, a.cache, sys.stdin.read())
+    if a.stage == "precheck":
+        return precheck_main(run, a.cache, sys.stdin.read())
     try:
         client = ModelClient(a.cache, mode="live")
         if a.stage == "p":
@@ -100,6 +102,44 @@ def reword_main(run, cache: Path, original: str) -> int:
         return 1
     reword.write(run.path, rec)
     print(f"reword: ok (${rec['cost_usd']:.4f} est)")
+    return 0
+
+
+def precheck_main(run, cache: Path, original: str) -> int:
+    """Check the brief up front and, when it names a brand or character, reword it before stage p. Writes
+    precheck.json always and reword.json only for a usable rewrite; a failure is recorded (error class and the
+    API's status and code) and never stops the job: stage p then draws the brief as written."""
+    from herogen.pipeline import reword
+    from herogen.pipeline.client import ApiError, ModelClient
+
+    client = ModelClient(cache, mode="live")
+
+    def failure(e: Exception, calls0: int) -> dict:
+        out = {"error": type(e).__name__, "cost_usd": client.log.cost_usd(calls0)}
+        if isinstance(e, ApiError):
+            out.update(http_status=e.http_status, error_code=e.error_code)
+        return out
+
+    calls0 = len(client.log.calls)
+    try:
+        rec = reword.precheck(client, original)
+    except Exception as e:  # noqa: BLE001  (recorded and shown as a warning; the brief is drawn as written)
+        reword.write(run.path, {"status": "failed", **failure(e, calls0)}, reword.PRECHECK_FILE)
+        print("precheck: failed; continuing with the brief as written", file=sys.stderr)
+        return 1
+    if rec["status"] == "found":
+        calls1 = len(client.log.calls)
+        try:
+            rw = reword.rewrite(client, original, reason=reword.PRECHECK, names=rec["names_found"])
+        except Exception as e:  # noqa: BLE001  (recorded and shown; the brief is drawn as written)
+            rec["rewrite"] = {"status": reword.FAILED, **failure(e, calls1)}
+        else:
+            rw["names_found"] = rec["names_found"]
+            rw["precheck_cost_usd"] = rec["cost_usd"]
+            reword.write(run.path, rw)
+            rec["rewrite"] = {"status": reword.USED, "cost_usd": rw["cost_usd"]}
+    reword.write(run.path, rec, reword.PRECHECK_FILE)
+    print(f"precheck: {rec['status']}")
     return 0
 
 

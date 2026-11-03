@@ -859,7 +859,8 @@ class App:
                 if isinstance(data, dict) and data.get('status') in ('used', 'refused_again', 'rewrite_failed'):
                     from herogen.pipeline.reword import shown
 
-                    reworded = {'status': data['status'], 'stage': str(data.get('stage') or ''), 'text': shown(data)}
+                    reworded = {'status': data['status'], 'stage': str(data.get('stage') or 'p'), 'text': shown(data),
+                                'reason': 'precheck' if data.get('reason') == 'precheck' else 'content_policy'}
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
                     and bundle.complete_glb(run / '03-source.glb')):
