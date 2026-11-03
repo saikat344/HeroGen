@@ -181,6 +181,12 @@
 body.has-expanded-viewer { overflow: hidden; }
 
 /* Keep the hint clear of the dock when the stage is narrow. */
+/* Short stages (a 720-768 px window): smaller slots without the note, so the artwork keeps its room. */
+@container stage (max-height: 460px) {
+  .viewer .view-slots__note { display: none; }
+  .view-slots { margin-top: var(--space-2); }
+  .view-slot { flex-basis: 48px; }
+}
 @container stage (max-width: 880px) {
   .viewer.has-dock .viewer__hint { bottom: calc(var(--viewer-dock-space) - var(--space-2)); }
   .viewer.has-dock .viewer__pending ~ .viewer__hint { display: none; }

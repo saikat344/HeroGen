@@ -887,10 +887,13 @@ def _draft_sheet(run: RunFolder, sheet: Image.Image) -> None:
 def _draft_views(run: RunFolder, sq: dict[str, Any], names=SIDE_VIEWS) -> None:
     """Each view cut out on its own mask, so the page can trace the outline that was found."""
     for name in names:
-        if (v := sq.get(name)) and v.get("image") is not None and v.get("mask") is not None:
-            img = v["image"].convert("RGBA")
-            img.putalpha(imaging.to_mask_image(v["mask"]))
-            save_draft(run.path, f"views/{name}.png", img)
+        try:
+            if (v := sq.get(name)) and v.get("image") is not None and v.get("mask") is not None:
+                img = v["image"].convert("RGBA")
+                img.putalpha(imaging.to_mask_image(v["mask"]))
+                save_draft(run.path, f"views/{name}.png", img)
+        except Exception:  # noqa: BLE001  (a draft is only for the page; it never fails the stage)
+            pass
 
 
 def stage2_turnaround(
