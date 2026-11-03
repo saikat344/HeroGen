@@ -2649,7 +2649,10 @@ without another model call. Otherwise the source is `default` when the independe
 passed, or `default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM
 face masks. Accepted ordinary body/side/head/hair paint and unpainted base residuals all contribute to
 the default atlas. Every default-sourced progressive version restores the whole head from that atlas
-after rebaking beauty paint.
+after rebaking beauty paint. A beauty source keeps every main-run paint in the same head volume. In its
+rear half only (normals facing away from the front camera, ramping over 0.3), the default atlas fills
+the base share no accepted main-run paint covered, before the face is composed. Front-visible residuals
+keep the main run's composition, so the default atlas's ordinary paint cannot ring the beauty face.
 
 When beauty or automatic palette masks are enabled, setup saves its existing highest-confidence SAM
 head mask as `probe/head.png` without another model call. With both options off, setup omits that file.

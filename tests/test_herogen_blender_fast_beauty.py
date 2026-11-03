@@ -463,6 +463,40 @@ class FaceRuleTests(unittest.TestCase):
                 self.assertTrue((pixels[4:6] < grade).all())
                 np.testing.assert_allclose(pixels[6:], grade)
                 self.assertFalse(self.data['face_source']['head_region']['grade_inside'])
+        # A beauty source keeps main-run paint and fills only the rear half's unpainted base share.
+        self.control.default_head_weight = None
+        self.data['face_source'] = {'source': 'beauty'}
+        expected = default.reshape(-1, 3)
+        for share in (1, .5, 0):
+            tex = I.Texture.from_arrays(pos, normals, np.ones((2, 4), bool), np.full((2, 4, 3), .5), 2)
+            # Painted colour .8 differs from the base .5, so a diluted paint share would show.
+            tex.U[:] = share
+            tex.T[:] = .5 * share + .8 * (1 - share)
+            self.control.paint_default_head(tex, self.work, residual=True)
+            pixels = tex.T.reshape(-1, 3)
+            np.testing.assert_allclose(pixels[1], .8 * (1 - share) + expected[1] * share, rtol=1e-6)
+            # Front-facing and side-on texels inside the volume, and texels outside it, keep their paint.
+            np.testing.assert_allclose(pixels[[0, 2, 3, 6, 7]], .5 * share + .8 * (1 - share), rtol=1e-6)
+        self.assertIsNone(self.control.default_head_weight)
+        self.assertEqual(self.data['face_source']['head_residual']['texels'], 0)
+
+    def test_beauty_paint_fills_the_rear_residual_before_composing_the_face(self):
+        self.control.key = 'head+0'
+        self.data['face_source'] = {'source': 'beauty'}
+        calls = []
+        def views(*args, **kwargs):
+            calls.append('views')
+            raise RuntimeError('face composition reached')
+        for atlas in (np.zeros((2, 4, 3), np.float32), None):
+            calls.clear()
+            self.control.fallback_texture = atlas
+            with self.subTest(atlas=atlas is not None), \
+                 mock.patch.object(self.control, 'paint_default_head',
+                                   side_effect=lambda *a, **k: calls.append(k)), \
+                 mock.patch.object(I, 'load_accepted_views', side_effect=views), \
+                 self.assertRaises(RuntimeError):
+                self.control.paint(mock.Mock(), self.work, {'head+0': {}})
+            self.assertEqual(calls, [{'residual': True}, 'views'] if atlas is not None else ['views'])
 
     def test_connected_hat_uses_default_at_all_depths_but_separate_prop_does_not(self):
         probe = self.work / 'probe'
