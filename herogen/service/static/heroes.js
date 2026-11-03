@@ -3,6 +3,8 @@
 // fetches GET /api/jobs/{id} for the few cards that need more than the summary (stage progress for running
 // heroes, a thumbnail when the list has none, the Roblox flag).
 
+import { track } from './analytics.js';
+
 const SVG = 'http://www.w3.org/2000/svg';
 const ACTIVE = new Set(['queued', 'running']);
 const IMAGE_ORDER = ['cover', 'front', 'sketch'];
@@ -10,7 +12,7 @@ export const DETAIL_LIMIT = 12;      // cards beyond this fall back to the monog
 
 // ---- pure helpers (unit-tested in tests/service_heroes.test.mjs) ----------------------------------------
 
-// The one name for an unnamed hero of each kind: cards, the breadcrumb and the workbench heading all use it.
+// The one name for an unnamed hero of each kind: the cards, the workbench heading and the delete dialog use it.
 export const kindName = (job) => job?.kind === 'prompt' ? 'Described hero' : 'Sketched hero';
 
 export function defaultName(job, detail) {
@@ -121,6 +123,13 @@ export function heroStatus(job, detail) {
     default:
       return { tone: 'off', icon: 'circle-dashed', label: job.state || 'Unknown', note: '', progress, active: false };
   }
+}
+
+// A finished, Roblox-ready hero's one-click Roblox download (the card's status pill says "Roblox ready" too), or null.
+export function robloxDownload(job, detail) {
+  if (heroStatus(job, detail).label !== 'Roblox ready') return null;
+  const roblox = detail?.downloads?.roblox;
+  return roblox?.available && typeof roblox.url === 'string' && roblox.url ? roblox.url : null;
 }
 
 // The summary's `thumbnail_url` first when the server provides one, then the images on the job detail, then
@@ -288,12 +297,22 @@ export function heroesView($, { api, open, create, refresh, clock = () => Date.n
     // Reconcile in place so a poll never rebuilds a card that did not change (keeps keyboard focus and images).
     roots.forEach((entry, index) => {
       const data = details.get(entry.job.id)?.data;
-      const sig = signature(entry, data);
+      const download = robloxDownload(entry.job, data);
+      const sig = JSON.stringify([signature(entry, data), download]);
       const current = grid.children[index];
       if (current && current.dataset.key === entry.job.id && current.dataset.sig === sig) return;
       const li = node('li', 'hero-item');
       li.dataset.key = entry.job.id; li.dataset.sig = sig;
       li.append(card(entry, data, now));
+      // A sibling of the card link (a link cannot hold another link), placed over the card's lower corner.
+      if (download) {
+        const get = node('a', 'hero-card__download btn btn--primary btn--s');
+        get.href = download; get.setAttribute('download', '');
+        get.setAttribute('aria-label', `Download ${defaultName(entry.job, data)} for Roblox (.zip)`);
+        get.append(icon('download'), node('span', '', 'Roblox'));
+        get.addEventListener('click', () => track('download_click', { format: 'roblox' }, { flush: true }));
+        li.classList.add('has-download'); li.append(get);
+      }
       if (!current) { grid.append(li); return; }
       const hadFocus = current.contains(document.activeElement);
       current.replaceWith(li);

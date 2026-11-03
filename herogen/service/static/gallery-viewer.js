@@ -110,9 +110,9 @@ async function loadMore(currentId) {
 
 // ---- states ------------------------------------------------------------------------------------------
 
-function state({ crumb, title, text, icon: name, retry }) {
+function state({ title, text, icon: name, retry }) {
   $('#galleryDetail').hidden = true; $('#galleryState').hidden = false;
-  $('#crumbName').textContent = crumb; document.title = `${title} · HeroGen`;
+  document.title = `${title} · HeroGen`;
   $('#galleryStateTitle').textContent = title; $('#galleryStateText').textContent = text;
   $('#galleryStateIcon').setAttribute('href', `/assets/icons/sprite.svg#i-${name}`);
   $('#galleryStateRetry').hidden = !retry;
@@ -125,17 +125,16 @@ async function boot() {
   let response;
   try { response = await fetch(`/api/gallery/${encodeURIComponent(id)}`, { credentials: 'omit', cache: 'no-store' }); }
   catch {
-    return state({ crumb: 'Unavailable', title: 'The gallery is resting.', text: 'The public gallery could not be reached. Check your connection and try again.', icon: 'circle-dashed', retry: true });
+    return state({ title: 'The gallery is resting.', text: 'The public gallery could not be reached. Check your connection and try again.', icon: 'circle-dashed', retry: true });
   }
   if (response.status === 404) {
-    return state({ crumb: 'Not found', title: 'This hero is not in the gallery.', text: 'It may have been renamed or removed. The gallery has other saved heroes to explore.', icon: 'circle-dashed', retry: false });
+    return state({ title: 'This hero is not in the gallery.', text: 'It may have been renamed or removed. The gallery has other saved heroes to explore.', icon: 'circle-dashed', retry: false });
   }
   if (!response.ok) {
-    return state({ crumb: 'Unavailable', title: 'The gallery is resting.', text: 'The public gallery is temporarily unavailable. Try again in a moment.', icon: 'circle-dashed', retry: true });
+    return state({ title: 'The gallery is resting.', text: 'The public gallery is temporarily unavailable. Try again in a moment.', icon: 'circle-dashed', retry: true });
   }
   character = await response.json();
   $('#publicTitle').textContent = character.title; $('#publicDescription').textContent = character.description;
-  $('#crumbName').textContent = character.title;
   document.title = `${character.title} · HeroGen`;
   $('#publicCanvas').setAttribute('aria-label', `3D model of ${character.title}. Drag to orbit and scroll to zoom.`);
   renderFacts(); reference(); loadMore(character.id);
@@ -167,7 +166,7 @@ $('#galleryStateRetry').addEventListener('click', () => boot().catch(fatal));
 window.addEventListener('pagehide', hide);
 
 function fatal(error) {
-  state({ crumb: 'Unavailable', title: 'The gallery is resting.', text: error?.message || 'This public hero could not be opened. Try again in a moment.', icon: 'circle-dashed', retry: true });
+  state({ title: 'The gallery is resting.', text: error?.message || 'This public hero could not be opened. Try again in a moment.', icon: 'circle-dashed', retry: true });
 }
 primeAnalytics();
 track('page_view', { page: 'gallery_detail' });

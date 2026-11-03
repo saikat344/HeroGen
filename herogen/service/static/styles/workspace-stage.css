@@ -22,7 +22,7 @@
 /* Every stage (the landing showcase too) sizes its dock thumbnails from these. */
 .viewer { --thumb-w: 76px; --thumb-h: 64px; }
 .result-panel .viewer { --viewer-dock-space: var(--space-8);
-  height: clamp(420px, 62vh, 720px); border-radius: 0; container: stage / inline-size; }
+  height: clamp(440px, 70vh, 820px); border-radius: 0; container: stage / inline-size; }
 .viewer.has-dock { --viewer-dock-space: calc(var(--space-5) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
 .viewer.is-lit { background: radial-gradient(60% 55% at 50% 34%, color-mix(in srgb, var(--ember-300) 22%, transparent), transparent 72%), var(--stage-bg); }
 .viewer :focus-visible { outline-color: var(--stage-accent-text); }
@@ -96,7 +96,21 @@
 .viewer__dock .thumb[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .viewer__dock .thumb[aria-disabled="true"]:hover .thumb__img { transform: none; }
 
-/* ---------- Retry / Refine, under the stage inside the result panel ---------- */
+/* ---------- Downloads: the hero's main call to action, directly under the stage ---------- */
+.deliver { display: grid; gap: var(--space-4); padding: var(--space-5) var(--space-6); border-top: var(--border-w) solid var(--color-border-subtle); }
+.deliver__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); }
+.deliver .deliver__title { margin: 0; font-family: var(--font-ui); font-size: var(--text-title); line-height: var(--lh-title); font-weight: var(--weight-semibold); letter-spacing: 0; color: var(--color-text); }
+.deliver__options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-4) var(--space-5); }
+.deliver__option { display: grid; gap: var(--space-2); min-width: 0; }
+.deliver__option .btn { white-space: normal; text-align: center; }
+.deliver__option .btn:disabled { opacity: 0.7; }
+.deliver__option .btn.is-busy .icon { animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
+.deliver__hint { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; }
+.deliver__note { display: flex; align-items: flex-start; gap: var(--space-3); margin: 0; font-size: var(--text-body-s); line-height: var(--lh-body-s); color: var(--color-text-muted); }
+.deliver__note .icon { margin-top: var(--space-1); color: var(--color-info); }
+.deliver[data-state="unavailable"] .deliver__note { color: var(--color-text); }
+
+/* ---------- Retry / Refine, under the downloads inside the result panel ---------- */
 .actions { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: var(--space-3) var(--space-6); padding: var(--space-5) var(--space-6) var(--space-4); border-top: var(--border-w) solid var(--color-border-subtle); }
 .actions__col { display: grid; justify-items: center; gap: var(--space-2); min-width: 0; }
 .actions__rule { align-self: start; width: var(--border-w); height: var(--control-h-l); background: var(--color-border); }
@@ -147,7 +161,7 @@ body.has-expanded-viewer { overflow: hidden; }
   .result-head .select-btn { max-width: 180px; }
   .viewer-mode { order: 3; flex: 1 1 100%; }
   .viewer-mode button { flex: 1; justify-content: center; height: var(--tap-min); }
-  .result-panel .viewer { --thumb-w: 56px; --thumb-h: 52px; height: clamp(380px, 64svh, 560px); }
+  .result-panel .viewer { --thumb-w: 56px; --thumb-h: 52px; height: clamp(380px, 70svh, 620px); }
   .viewer__media { inset: calc(var(--space-11) + var(--space-3)) var(--space-5) var(--viewer-dock-space); }
   .viewer__tools { top: var(--space-4); right: var(--space-4); gap: var(--space-2); }
   .viewer__status { top: var(--space-4); left: var(--space-4); max-width: calc(100% - 3 * var(--tap-min) - 2 * var(--space-2) - 3 * var(--space-4)); }
@@ -156,6 +170,7 @@ body.has-expanded-viewer { overflow: hidden; }
   .viewer.has-dock { --viewer-dock-space: calc(var(--space-4) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
   .viewer__dock .thumb { min-width: var(--tap-min); }
   .viewer .viewer__hint { display: none; }
+  .deliver { padding: var(--space-4); }
   .actions { grid-template-columns: minmax(0, 1fr); padding: var(--space-4); }
   .actions__rule { display: none; }
   .generation > .result-section { padding: var(--space-5); }
@@ -167,6 +182,6 @@ body.has-expanded-viewer { overflow: hidden; }
 
 /* ---------- Reduced motion: durations collapse in tokens.css; also stop the spinner and the reveal blur. ---------- */
 @media (prefers-reduced-motion: reduce) {
-  .viewer__pending .icon, .viewer__notice { animation: none; }
+  .viewer__pending .icon, .viewer__notice, .deliver__option .btn.is-busy .icon { animation: none; }
   .viewer .viewer__image.reveal, .viewer canvas#preview.reveal { animation-name: fade; }
 }

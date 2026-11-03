@@ -1,5 +1,4 @@
 // Presentation follows reported model and export stage states.
-import { kindName } from './heroes.js';
 import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
 import { thumbButton, viewerDock } from './viewer-dock.js';
@@ -322,7 +321,6 @@ export function generationView($, select3D) {
       }
       renderSegments(state.steps, changed, state.terminal);
       $('#detail').dataset.jobState = job.state;
-      text($('#workbenchName'), job.name || kindName(job));
       const stageSignature = JSON.stringify(state.steps);
       if ($('#stages').dataset.signature !== stageSignature) {
         $('#stages').dataset.signature = stageSignature;
@@ -337,7 +335,7 @@ export function generationView($, select3D) {
       const exportNote = job.state === 'succeeded' ? (robloxState === 'running' ? 'Roblox files: being prepared' : robloxState === 'ready' ? 'Roblox files: ready' : robloxState === 'unavailable' ? `Roblox files: not available for this hero: ${robloxReason}` : '') : '';
       text($('#exportStatus'), exportNote);
       $('#exportStatus').hidden = !exportNote;
-      $('#exportStatus').classList.toggle('sr', robloxState !== 'running');   // only "being prepared" needs words on screen: the pill and the banner say the rest
+      $('#exportStatus').classList.add('sr');   // announced only: the download panel under the result shows each state
       renderIssues(state, job);
       const available = imageChoices(job);
       const nextSignature = JSON.stringify(available.map(([k]) => [k, job.images[k]]));

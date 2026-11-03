@@ -162,6 +162,7 @@
   --prose-max: 68ch;              /* terms, privacy, long notes */
   --header-h: 64px;
   --footer-status-h: 48px;
+  --app-bar-h: 60px;              /* the bottom bar: nav + workbench status; 48 at >=768 */
   --side-panel-w: clamp(360px, 32vw, 560px);
 
   /* Control sizes */
@@ -355,7 +356,7 @@
 
 /* ---------- Responsive layout tokens ---------- */
 @media (min-width: 768px) {
-  :root { --gutter: 24px; --header-h: 68px; }
+  :root { --gutter: 24px; --header-h: 68px; --app-bar-h: var(--footer-status-h); }
 }
 @media (min-width: 1200px) {
   :root { --gutter: 32px; --header-h: 72px; }

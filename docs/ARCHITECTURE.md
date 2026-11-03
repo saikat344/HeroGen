@@ -3058,7 +3058,23 @@ The selected-result dropdown and branch nodes select the same owner-scoped job. 
 remain below the viewer; the refinement form is also available inline once the job and its exports
 stop. The form’s texture-note availability follows the existing session flag. Viewer fullscreen,
 expansion and studio-light controls affect presentation only. Compare variations stays in the saved
-progress bar and retains synchronized cameras. Downloads and export instructions follow this bar.
+progress bar and retains synchronized cameras.
+
+Downloads sit directly under the viewer, above Retry and Refine (`downloads.js`), and lead the result panel
+once something can be downloaded; Retry and Refine then use the secondary style. When the Roblox bundle is
+ready, "Download for Roblox (.zip)" is the primary button with the "Roblox ready" pill, and "Download 3D model
+(.glb)" sits beside it. While the Roblox steps still run after the model is ready, the GLB is downloadable and
+the Roblox button is disabled with "Preparing Roblox files…". When the bundle is unavailable, the panel shows
+the service's reason and the GLB becomes the primary button. Your heroes cards for a finished, Roblox-ready
+hero carry a one-click Roblox download beside the card link. The Roblox Studio steps and the full viewer link
+stay in the section under the panel.
+
+There is no top header. Each page shows the HeroGen wordmark at the top left of its content, and a fixed
+bottom bar holds the main nav (Create, Your heroes, Gallery, Open source) in the centre; the page reserves the
+bar's height as bottom padding. On the workbench the bar also carries the save indicator on the left and the
+elapsed time, Compare variations and More on the right, and the theme toggle sits in the gutter left of the
+Behind the build panel; elsewhere the toggle ends the bar. Under 768 px the nav items stack an icon over a
+short label, and the save indicator keeps only its dot (its words stay available to screen readers).
 
 The job response includes content-versioned `images`, an ordered `models` list (first shape has `n: 0`), and
 `refinement`. `03-source.glb` is available once stage 3 passes, while the job is still running. Numbered

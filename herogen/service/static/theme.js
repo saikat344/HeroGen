@@ -1,5 +1,5 @@
 // Apply the theme before CSS loads, including when storage is unavailable. Dark is the default for a first visit;
-// the header toggle cycles dark -> light -> system and remembers the choice in this browser.
+// the theme toggle cycles dark -> light -> system and remembers the choice in this browser.
 (() => {
   const root = document.documentElement;
   const media = window.matchMedia('(prefers-color-scheme: dark)');

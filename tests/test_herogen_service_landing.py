@@ -10,22 +10,22 @@ class TestLandingPage(ServiceBrowserCase):
 
     def ready(self):
         self.tab.goto(self.url + '/')
-        self.tab.wait("document.querySelector('[data-theme-toggle]')?.dataset.preference && !document.querySelector('#entry').hidden")
+        self.tab.wait("document.querySelector('.app-bar [data-theme-toggle]')?.dataset.preference && !document.querySelector('#entry').hidden")
 
     def choose(self, value):
         # The header toggle cycles dark -> light -> system; click it until it shows the wanted preference.
         for _ in range(3):
-            if self.tab.eval("document.querySelector('[data-theme-toggle]').dataset.preference") == value:
+            if self.tab.eval("document.querySelector('.app-bar [data-theme-toggle]').dataset.preference") == value:
                 return
-            self.tab.eval("document.querySelector('[data-theme-toggle]').click()")
-        self.assertEqual(self.tab.eval("document.querySelector('[data-theme-toggle]').dataset.preference"), value)
+            self.tab.eval("document.querySelector('.app-bar [data-theme-toggle]').click()")
+        self.assertEqual(self.tab.eval("document.querySelector('.app-bar [data-theme-toggle]').dataset.preference"), value)
 
     def test_first_visit_is_dark_even_when_the_os_is_light(self):
         t = self.tab
         t.call('Emulation.setEmulatedMedia', features=[{'name': 'prefers-color-scheme', 'value': 'light'}])
         self.ready()
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'dark')
-        self.assertEqual(t.eval("document.querySelector('[data-theme-toggle]').getAttribute('aria-label')"),
+        self.assertEqual(t.eval("document.querySelector('.app-bar [data-theme-toggle]').getAttribute('aria-label')"),
                          'Theme: Dark. Switch to light.')
         self.assertEqual(self.tab.errors, [])
 
@@ -38,7 +38,7 @@ class TestLandingPage(ServiceBrowserCase):
         self.choose('light')
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'light')
         t.goto(self.url + '/')
-        t.wait("document.querySelector('[data-theme-toggle]')?.dataset.preference === 'light'")
+        t.wait("document.querySelector('.app-bar [data-theme-toggle]')?.dataset.preference === 'light'")
         self.assertEqual(t.eval('document.documentElement.dataset.theme'), 'light')
         self.choose('dark')
         self.assertEqual(t.eval("getComputedStyle(document.body).backgroundColor"), 'rgb(11, 14, 18)')
@@ -68,6 +68,42 @@ class TestLandingPage(ServiceBrowserCase):
         self.assertEqual(t.eval("document.querySelectorAll('.journey > .step').length"), 4)
         self.assertTrue(t.eval("document.querySelector('#landingCanvas').getBoundingClientRect().top > document.querySelector('#jobForm').getBoundingClientRect().bottom"))
         self.assertTrue(t.eval("document.querySelector('#headerSignIn').hidden"))
+        self.assertEqual(self.tab.errors, [])
+
+    def test_bottom_bar_holds_the_nav_and_fits_a_phone(self):
+        t = self.tab
+        for width, height in ((1440, 900), (375, 812)):
+            t.call('Emulation.setDeviceMetricsOverride', width=width, height=height, deviceScaleFactor=1, mobile=width < 768)
+            self.ready()
+            self.assertIsNone(t.eval("document.querySelector('.site-header, #who')"))
+            bar = t.eval("""(() => {
+              const bar = document.querySelector('#appBar'), r = bar.getBoundingClientRect();
+              const links = [...bar.querySelectorAll('nav[aria-label=Main] .nav__link')];
+              return {fixed: getComputedStyle(bar).position, bottom: r.bottom, top: r.top, height: r.height,
+                      fits: bar.scrollWidth <= bar.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth,
+                      pad: parseFloat(getComputedStyle(document.body).paddingBottom),
+                      names: links.map(a => a.textContent.replace(/\\s+/g, ' ').trim()),
+                      current: links.filter(a => a.getAttribute('aria-current') === 'page').map(a => a.id),
+                      minTap: Math.min(...[...links, bar.querySelector('[data-theme-toggle]')].map(e => e.getBoundingClientRect().height)),
+                      toggle: !!bar.querySelector('[data-theme-toggle]').getClientRects().length,
+                      overlaps: links.some((a, i) => i && a.getBoundingClientRect().left < links[i - 1].getBoundingClientRect().right - 0.5)};
+            })()""")
+            self.assertEqual(bar['fixed'], 'fixed', width)
+            self.assertAlmostEqual(bar['bottom'], height, delta=1)
+            self.assertTrue(bar['fits'], width)
+            self.assertGreaterEqual(bar['pad'], bar['height'] - 1, 'content is never hidden behind the bar')
+            self.assertEqual(bar['current'], ['workspaceNav'])
+            self.assertTrue(bar['toggle'], 'off the workbench the toggle sits at the end of the bar')
+            self.assertFalse(bar['overlaps'], width)
+            if width < 768:
+                self.assertGreaterEqual(bar['minTap'], 44)
+            # Every item keeps its full accessible name, also where the label is shortened on phones.
+            names = t.eval("[...document.querySelectorAll('#siteNav .nav__link')].map(a => a.innerText)")
+            self.assertEqual(len(names), 4)
+            self.assertEqual(t.eval("[...document.querySelectorAll('#siteNav .nav__link .nav__short')].map(e => e.getAttribute('aria-hidden'))"), ['true', 'true'])
+        t.eval("document.querySelector('#heroesNav').click()")
+        t.wait("document.querySelector('#heroesNav').getAttribute('aria-current') === 'page'")
+        self.assertIsNone(t.eval("document.querySelector('#workspaceNav').getAttribute('aria-current')"))
         self.assertEqual(self.tab.errors, [])
 
     def test_empty_gallery_has_no_fake_models_or_account_creation(self):
