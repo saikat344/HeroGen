@@ -567,13 +567,15 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     face_control = None
 
     def drain():
+        """Let every concurrent request settle; return the default-head run's own error, if it raised one."""
         # Generated references run beside setup; never record a result while their calls can still settle.
         if generation is not None:
             generation[0].shutdown(wait=True)
         # So does the default-head run, which starts before the references are known. The waves join
         # it; on a failure before them it submits no further views and its submitted calls drain.
-        if face_control is not None and not face_control.default_joined:
-            face_control.join_default(halt=True)
+        if face_control is None:
+            return None
+        return face_control.join_default(halt=not face_control.default_joined)[1]
 
     try:
         save(ok=False, status="running")
@@ -870,18 +872,28 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             buildlog.skipped("spend_cap")
         return save(status="cap_reached" if stopped else "complete")
     except BudgetStop as exc:
-        drain()
+        model_error = drain()
         if refine_profile == "fast":
             empty_progress(run, done=True)
         rec.data["stop_reason"] = str(exc)
         rec.note(str(exc))
+        if model_error is not None:
+            # A model error in the concurrent default-head run stays loud beside a budget stop:
+            # the stop is recorded, then the model error is raised.
+            save(ok=False, status="error", error=error_text(model_error, run))
+            raise model_error from exc
         from . import buildlog
         buildlog.skipped("spend_cap")
         return save(status="cap_reached")
     except Exception as exc:
-        drain()
+        model_error = drain()
         if current_record is not None:
             current_record.update(accepted=False, reason=type(exc).__name__)
+        if model_error is not None and model_error is not exc:
+            # The default-head run failed too: keep its error in the record and on the raised error.
+            rec.data["concurrent_errors"] = [{"run": "default-head", "error": error_text(model_error, run)}]
+            if exc.__context__ is None:
+                exc.__context__ = model_error
         save(ok=False, status="error", error=error_text(exc, run))
         raise
     finally:

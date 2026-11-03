@@ -2156,3 +2156,29 @@ class FastBeautyStageTests(unittest.TestCase):
                 self.assertEqual(result, first)
         self.assertEqual((first[0]['source'], first[0]['view']), ('beauty', 'body+0'))
         self.assertEqual((len(first[2]['head+0'][4]), first[2]['body+90'][3]), (3, 3))
+
+    def test_default_head_model_error_stays_loud_beside_a_reference_budget_stop(self):
+        failed = threading.Event()
+        original = stage._view
+
+        def view(*args, **kwargs):
+            if 'face-source' in args[0].cache_dir.parts and args[4]['name'] == 'body+90':
+                failed.set()
+                raise self.SERVER
+            return original(*args, **kwargs)
+
+        def generate(run, client, out):
+            # Reference generation reaches the cap after the default-head request failed.
+            self.assertTrue(failed.wait(self.WAIT))
+            raise BudgetStop('API cap: next attempt exceeds $5.0000')
+
+        with mock.patch.object(stage, '_view', side_effect=view):
+            with self.assertRaises(ApiError) as caught:
+                self.run_beauty(generate=generate, cap_usd=5)
+        self.assertIs(caught.exception, self.SERVER)
+        self.assertIsInstance(caught.exception.__cause__, BudgetStop)
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(record['stop_reason'], 'API cap: next attempt exceeds $5.0000')
+        self.assertIn('ApiError', record['error'])
+        self.assertFalse((self.run / '03-refined.glb').exists())
