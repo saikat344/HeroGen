@@ -3160,10 +3160,24 @@ clears `drafts/` when it starts and when it ends, passed or not; drafts are neve
 and the replay cache are unchanged. On Modal `worker.EventPump` mirrors `drafts/` with the build log. The job API
 lists them as `draft_images` (key to versioned URL) only while stage 2's row is running; `images` keeps its meaning.
 The workbench shows the artwork under a light sweep with five view slots, then the draft sheet, then each cut-out
-view with its outline, then a Front-Right-Back-Left turntable until the first 3D shape fades in over it. A user's
-own pick is kept, finished jobs show no reveal, and reduced motion holds the front view without sweep or scan.
+view with its outline. A user's own pick is kept, finished jobs show no reveal, and reduced motion drops the sweep.
 
-The workbench labels the first model “First 3D shape” and explains that its texture is still being refined.
+Stage 3 shows SAM 3D Objects' result the moment it returns: `stage3._draft_shape` writes the mesh, with the smooth
+normals `03-source.glb` gets, as `drafts/03-source.glb` (`runfolder.SHAPE_DRAFT`, atomic, display only: a draft that
+cannot be written is skipped). `run_stage3` clears it when it starts, on a fall back to the carve and when it ends,
+however it ends. On Modal the event pump mirrors it like stage 2's drafts. The job API lists it as `draft_models`
+(`n` 0, `raw` and `draft` true) only while stage 3's row is running, and `/runs/r1/<job>/drafts/03-source.glb` is
+served only then; it is never a download. `models[0]` (`03-source.glb`) carries `raw: true` too. The job API also
+lists `masks` (`front`, `left`: the stage-2 masks, owner-checked like every run file) once stage 2 has passed.
+
+While stage 3 runs and no model is out, the 3D viewer shows a figure of a few thousand small dots sampled inside the
+front mask, with per-row depth from the left mask (`shape-build.js`), drifting and twinkling over a faint light and
+turning slowly until the person moves it. A centred “Building the 3D shape…” line, a thin bar from the step's typical
+and elapsed time (never past 95%) and one tip that changes every 6 s sit under it. When SAM 3D's draft arrives the
+dots gather onto points of its surface while it fades in, keeping the person's view, and are then freed. Reduced
+motion keeps the dots still and only fades. The workbench labels SAM 3D's output “SAM 3D raw shape” (a note says it
+comes straight from SAM 3D Objects and what HeroGen is doing next) and HeroGen's “HeroGen refined · version N”; a
+“SAM 3D raw | HeroGen” switch under the label keeps both one click apart on a refining or finished hero.
 An untouched viewer follows new versions; pointer, wheel or keyboard interaction keeps the chosen version
 until “Sharper version ready - Update” is clicked. Updating preserves camera position, orbit target and zoom.
 The existing job poll supplies progress, with no separate progress-file polling; background tabs stop job

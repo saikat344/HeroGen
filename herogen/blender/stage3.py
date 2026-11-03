@@ -17,6 +17,7 @@ from .record import StageRecord, check
 from .views import load_mask, load_views
 from herogen.pipeline import events
 from herogen.pipeline.fast import enabled, informational
+from herogen.pipeline.runfolder import SHAPE_DRAFT, clear_drafts, save_draft_file
 
 # Historical observed-view threshold retained only for silhouette diagnostics.
 IOU_GATE = 0.90
@@ -153,6 +154,27 @@ def _derived(vs, view: str) -> bool:
     return "visual_hull" in str((vs.meta.get("mask_method") or {}).get(view, ""))
 
 
+def _draft_shape(run: Path, res) -> None:
+    """SAM 3D Objects' mesh as it came back, given the smooth normals `03-source.glb` gets, as the stage's draft
+    (`herogen.pipeline.runfolder.SHAPE_DRAFT`): the website shows it while HeroGen places the shape. Display only:
+    a draft that cannot be written is skipped, and the stage clears it when it ends."""
+    def write(tmp: Path) -> None:
+        import shutil
+
+        from .glb import add_missing_normals
+
+        src = res.path("mesh.glb")
+        try:
+            add_missing_normals(src, tmp)
+        except Exception:  # noqa: BLE001  (the raw file still shows; the stage reports its own errors)
+            shutil.copyfile(src, tmp)
+
+    try:
+        save_draft_file(run, SHAPE_DRAFT, write)
+    except Exception:  # noqa: BLE001  (a draft is only for the page; it never fails the stage)
+        pass
+
+
 def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
     """SAM 3D Objects on the front view and its mask, the mesh put in the contract frame. Returns the mesh, its
     record and the remote result; files are written only once everything succeeded (`03-source.glb` by the
@@ -163,6 +185,7 @@ def _objects_mesh(run: Path, vs, height: float, remote, rec: StageRecord):
 
     res = remote.objects(run / "views" / "front.png", run / "masks" / "front.png")
     _account(rec, "sam-3d-objects", res)
+    _draft_shape(run, res)
     src = sam3d_mesh.load_source(res.path("mesh.glb"))
     with Image.open(run / "views" / "front.png") as im:
         img = np.asarray(im.convert("RGB"), dtype=np.float64)
@@ -315,8 +338,10 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
     """Build the hybrid by default; a failed hybrid build retries the local carve once, with a reason.
 
     Quality rejection is a completed build and never triggers another constructor. Spend from a failed
-    attempt remains in the same record. ``fallback=False`` preserves the original build error.
+    attempt remains in the same record. ``fallback=False`` preserves the original build error. The stage's
+    draft (`_draft_shape`) is cleared when the stage starts and when it ends, however it ends.
     """
+    clear_drafts(run, SHAPE_DRAFT)
     fast = enabled(fast)
     if fast:
         fallback = False
@@ -353,8 +378,10 @@ def run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, ti
         rec.note(f"hybrid build failed ({reason}); fell back to carve and silhouette joints")
         rec.data["fallback"] = {"from": "sam3d-objects", "to": "carve", "reason": reason}
         rec.data["checks"] = []
+        clear_drafts(run, SHAPE_DRAFT)       # the carve replaces the shape the page was showing
         return _run_stage3(run, mesh_source="carve", joints_source="silhouette", fallback=False, **kwargs)
     finally:
+        clear_drafts(run, SHAPE_DRAFT)
         if fast:
             try:
                 import sys
@@ -418,6 +445,7 @@ def _run_stage3(run: Path, height: float = HEIGHT_STUDS, nz: int = DEFAULT_NZ, t
                 if not fallback:
                     raise
                 rec.note(f"sam3d-objects failed ({error_text(exc, run)[:200]}); fell back to the carve")
+                clear_drafts(run, SHAPE_DRAFT)
                 used_source = "carve"
         if used_source == "carve":
             for stale in ("03-source-uv.npz", "03-source-texture.png"):     # a source that failed part-way

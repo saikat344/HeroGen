@@ -374,6 +374,10 @@ class FakeRunner:
         shape.emit("gpu_wait", what="3d_shape", s=round(self.delay_s * 0.3, 3))   # "still waiting"
         log.wait(0.2)
         log.end(shape, 0.101, gpu="a100-40gb", m={"load_s": 60.4, "infer_s": 96.1})
+        # The draft a real run shows as SAM 3D Objects returns (`herogen.blender.stage3._draft_shape`).
+        from herogen.pipeline.runfolder import SHAPE_DRAFT, save_draft_file
+
+        save_draft_file(ctx.run_dir, SHAPE_DRAFT, lambda part: part.write_bytes(box_glb()))
         log.emit("local", what="mesh_placed", m={"triangles": 217836, "rotations_tested": 4})
         body = log.start("sam-3d-body", "body_joints", gpu=True)
         log.wait(0.3)
@@ -490,9 +494,12 @@ class FakeRunner:
 
 
     def _stage_3(self, ctx: StageContext, run: Path) -> None:
+        from herogen.pipeline.runfolder import SHAPE_DRAFT, clear_drafts
+
         (run / "03-mesh.glb").write_bytes(box_glb())
         (run / "03-source.glb").write_bytes(box_glb())
         write_record(run, _record(3, "base_mesh", ["03-mesh.glb"]))
+        clear_drafts(run, SHAPE_DRAFT)
 
     def _stage_4(self, ctx: StageContext, run: Path) -> None:
         body = run / "04-body"

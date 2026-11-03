@@ -76,25 +76,33 @@ class RunFolder:
         return json.loads(p.read_text()) if p.exists() else None
 
 
-# Images a running stage shows before it ends (`save_draft`): the website publishes them as drafts only while
-# their stage runs. They are never outputs, and the stage clears them when it starts and ends.
+# Images (and stage 3's first model) a running stage shows before it ends (`save_draft`, `save_draft_file`): the
+# website publishes them as drafts only while their stage runs. They are never outputs, and the stage clears them
+# when it starts and ends.
 DRAFTS = "drafts"
+# Stage 3's draft: SAM 3D Objects' mesh as it came back (`herogen.blender.stage3`), before HeroGen places it.
+SHAPE_DRAFT = "03-source.glb"
 
 
-def save_draft(run: Path | str, rel: str, img) -> None:
-    """Write ``img`` as ``drafts/<rel>`` atomically (a reader sees the old file or the new one), quickly
-    compressed. A draft that cannot be written is skipped: it never stops the stage."""
+def save_draft_file(run: Path | str, rel: str, write) -> None:
+    """Write ``drafts/<rel>`` atomically (a reader sees the old file or the new one) with ``write(tmp_path)``. A
+    draft that cannot be written is skipped: it never stops the stage."""
     p = Path(run) / DRAFTS / rel
     part = p.with_name(p.name + ".part")   # `.part` files are never copied off a local copy
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        img.save(part, format="PNG", compress_level=1)
+        write(part)
         os.replace(part, p)
     except Exception:  # noqa: BLE001  (a draft is only for the page)
         try:
             part.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def save_draft(run: Path | str, rel: str, img) -> None:
+    """Write the image ``img`` as ``drafts/<rel>`` (`save_draft_file`), quickly compressed."""
+    save_draft_file(run, rel, lambda part: img.save(part, format="PNG", compress_level=1))
 
 
 def clear_drafts(run: Path | str, *rels: str) -> None:

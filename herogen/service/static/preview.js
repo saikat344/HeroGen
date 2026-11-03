@@ -12,6 +12,11 @@ const ORBIT_RADIANS_PER_MS = 2 * Math.PI / 40000; // one idle revolution per 40 
 const REVEAL_MS = 1200;
 const SWAP_MS = 260;                           // cross-fade between the static model and the animated body
 const CLIP_NAMES = ['idle', 'walk', 'wave', 'jump'];
+const CONVERGE_MS = 1600;                      // the figure of dots gathering onto the first model
+const FADE_MS = 400;                           // the same hand-off with reduced motion: a fade, no movement
+const DOT_SIZE = 0.0042;                       // a dot's world size, in figure heights
+const DOT_COLOUR = 0xf3efe8;                   // --stage-text: the stage is dark in both themes
+const FIGURE_ROOM = 1.3, FIGURE_LIFT = 0.1;   // the figure's framing: further out, and raised by part of its height
 const easeOut = t => 1 - Math.pow(1 - t, 4);
 const easeInOut = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const now = () => globalThis.performance?.now?.() ?? Date.now();
@@ -79,7 +84,8 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     }
     // The idle orbit turns the camera directly (not OrbitControls.autoRotate), so input stops it without any coast.
     // A playing animation holds the camera still so the hero keeps facing the way the person chose.
-    const idle = stage && orbitWanted && state.model && !state.tween && !anim?.active && !reducedMotion() && time - state.lastInput >= IDLE_MS;
+    stepCloud(time);
+    const idle = stage && orbitWanted && (state.model || state.cloud) && !state.tween && !anim?.active && !reducedMotion() && time - state.lastInput >= IDLE_MS;
     if (idle && !state.orbiting) emitPreset(null);
     if (idle && state.orbiting) {
       const o = orbitOf();
@@ -101,7 +107,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   }
   const shown = () => [state?.model, anim?.body].filter(Boolean);
   function restore() {
-    finishFade();
+    finishFade(); finishConverge();
     for (const model of shown()) model.traverse(node => {
       if (node.userData?.previewOriginal) {
         node.material.dispose(); node.material = node.userData.previewOriginal; delete node.userData.previewOriginal;
@@ -160,12 +166,12 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     state.lastInput = now();
     state.tween = null; state.orbiting = false;
   }
-  function pause() { paused = true; ++request; stopAnimation(true); loop(); }
+  function pause() { paused = true; ++request; stopAnimation(true); dropCloud(); loop(); }
   function resume() { paused = false; loop(); }
   function dispose() {
     ++request;
     if (!state) return;
-    state.renderer.setAnimationLoop(null); restore(); dropAnimation(); release(state.model);
+    state.renderer.setAnimationLoop(null); restore(); dropCloud(); dropAnimation(); release(state.model);
     for (const [type, fn] of state.inputs) state.canvas.removeEventListener?.(type, fn);
     state.observer.disconnect(); state.controls.dispose(); state.scene.environment?.dispose(); state.grid.geometry.dispose();
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => m.dispose());
@@ -173,9 +179,8 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     state.renderer.dispose();
     document.removeEventListener('hg:theme', theme); state = null; preset = null;
   }
-  async function show(canvas, url, {preserveCamera = false, canReplace = () => true} = {}) {
+  function ensure(canvas) {
     if (state && state.canvas !== canvas) dispose();
-    const token = ++request;
     if (!state) {
       const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: true});
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -223,6 +228,11 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       state.observer = new ResizeObserver(resize); state.observer.observe(canvas); resize();
       document.addEventListener('hg:theme', theme); theme();
     }
+  }
+  async function show(canvas, url, {preserveCamera = false, canReplace = () => true} = {}) {
+    if (state && state.canvas !== canvas) dispose();
+    const token = ++request;
+    ensure(canvas);
     paused = false; loop();
     if (state.url === url && state.model) return true;
     const keepModel = preserveCamera && Boolean(state.model);
@@ -239,13 +249,15 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       state.model = gltf.scene; state.url = url; state.grid.visible = floor && !stage; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
-      const radius = Math.max(size.x, size.y, size.z, 0.01);
-      const d = radius * (stage ? Math.max(2.35, 1.75 / state.camera.aspect) : Math.max(2.2, 1.5 / state.camera.aspect));
-      state.camera.near = radius / 1000; state.camera.far = radius * 100;
-      state.camera.updateProjectionMatrix();
-      state.frame = {centre: {x: centre.x, y: centre.y, z: centre.z}, distance: d};
-      if (!preserveCamera) {
-        state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10;
+      // The figure of dots hands over to the first model: the view keeps its angle and its framing.
+      const cloud = !keepModel && state.cloud, before = cloud && state.frame ? orbitOf() : null, was = state.frame;
+      const {radius, d} = frameBox(size, centre, Boolean(before) || !preserveCamera);
+      if (before) {
+        const k = d / was.distance, t = state.controls.target;
+        t.set(centre.x + (t.x - was.centre.x) * k, centre.y + (t.y - was.centre.y) * k, centre.z + (t.z - was.centre.z) * k);
+        place(t, before.azimuth, before.elevation, before.distance * k);
+        state.lastInput = now();
+      } else if (!preserveCamera) {
         state.controls.target.copy(centre);
         if (!stage) state.camera.position.set(centre.x + d * 0.45, centre.y + d * 0.15, centre.z + d);
         else reveal(centre, d, first);
@@ -256,13 +268,140 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
         state.shadow.visible = true; state.shadow.position.set(centre.x, box.min.y + radius * 0.002, centre.z);
         state.shadow.scale.set(Math.max(size.x, size.z) * 1.6, Math.max(size.x, size.z) * 1.1, 1);
       }
-      shading(mode); resolve(true);
+      shading(mode);
+      if (cloud) converge(cloud, gltf.scene);
+      resolve(true);
     }, undefined, error => {
       if (token === request && state) {
-        if (!keepModel) state.renderer.setAnimationLoop(null);
+        if (!keepModel && !state.cloud) state.renderer.setAnimationLoop(null);
         render(); reject(error);
       } else resolve(false);
     }));
+  }
+  // Near and far planes, zoom limits and the stage framing for an object of `size` at `centre`.
+  function frameBox(size, centre, limits = true) {
+    const radius = Math.max(size.x, size.y, size.z, 0.01);
+    const d = radius * (stage ? Math.max(2.35, 1.75 / state.camera.aspect) : Math.max(2.2, 1.5 / state.camera.aspect));
+    state.camera.near = radius / 1000; state.camera.far = radius * 100;
+    state.camera.updateProjectionMatrix();
+    if (limits) { state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10; }
+    state.frame = {centre: {x: centre.x, y: centre.y, z: centre.z}, distance: d};
+    return {radius, d};
+  }
+  // ---- the figure of dots shown while the 3D shape is built (shape-build.js samples it) ---------------------------
+  const CLOUD_VERTEX = `
+    attribute vec3 target;
+    attribute float seed;
+    uniform float time, converge, size, scale, drift;
+    varying float vAlpha;
+    void main() {
+      float s = seed * 6.28318;
+      vec3 wobble = drift * 0.006 * vec3(sin(time * 0.7 + s * 3.0), sin(time * 0.53 + s * 5.0), cos(time * 0.61 + s * 7.0));
+      float k = clamp(converge * 1.6 - fract(seed * 7.13) * 0.6, 0.0, 1.0);
+      k = k * k * (3.0 - 2.0 * k);
+      vec4 mv = modelViewMatrix * vec4(mix(position + wobble, target, k), 1.0);
+      gl_Position = projectionMatrix * mv;
+      gl_PointSize = max(1.0, size * (0.55 + 0.9 * fract(seed * 13.37)) * scale / max(0.001, -mv.z));
+      float twinkle = drift > 0.5 ? 0.5 + 0.5 * sin(time * (0.8 + 2.2 * fract(seed * 3.7)) + s * 11.0) : 0.6;
+      vAlpha = 0.3 + 0.7 * twinkle;
+    }`;
+  const CLOUD_FRAGMENT = `
+    uniform vec3 colour;
+    uniform float opacity;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      gl_FragColor = vec4(colour, smoothstep(0.5, 0.1, d) * vAlpha * opacity);
+    }`;
+  function dropCloud() {
+    if (!state?.cloud) return;
+    const c = state.cloud; state.cloud = null; state.converge = null;
+    c.group.removeFromParent(); c.points.geometry.dispose(); c.material.dispose();
+  }
+  /** Show `figure` ({key, positions, seeds} from shape-build.js) on `canvas` in place of any model: small dots that
+   *  drift and twinkle, framed like a model and turning slowly until the person moves the view. */
+  function building(canvas, figure) {
+    ensure(canvas);
+    paused = false; loop();
+    if (state.cloud?.key === figure?.key && state.cloud) return true;
+    const count = figure?.positions?.length / 3;
+    if (!(count >= 1) || figure.seeds?.length !== count) return false;
+    ++request; dropCloud(); restore(); stopAnimation(true);
+    if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; state.url = null; }
+    state.grid.visible = false; if (state.shadow) state.shadow.visible = false;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(figure.positions, 3));
+    geometry.setAttribute('target', new THREE.BufferAttribute(new Float32Array(figure.positions), 3));
+    geometry.setAttribute('seed', new THREE.BufferAttribute(figure.seeds, 1));
+    geometry.computeBoundingBox();
+    const material = new THREE.ShaderMaterial({vertexShader: CLOUD_VERTEX, fragmentShader: CLOUD_FRAGMENT, transparent: true,
+      depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: {time: {value: 0}, converge: {value: 0}, size: {value: DOT_SIZE}, scale: {value: 1}, drift: {value: 1},
+        opacity: {value: 0}, colour: {value: new THREE.Color(DOT_COLOUR)}}});
+    const points = new THREE.Points(geometry, material); points.frustumCulled = false;
+    const group = new THREE.Group(); group.name = 'hg-shape-figure'; group.add(points); state.scene.add(group);
+    state.cloud = {key: figure.key, group, points, material, box: geometry.boundingBox.clone(), born: now(), time: 0};
+    const size = state.cloud.box.getSize(new THREE.Vector3()), centre = state.cloud.box.getCenter(new THREE.Vector3());
+    // A little smaller and higher than a model, so the title and progress under it stay clear of the figure.
+    const {d} = frameBox(size, centre);
+    state.controls.target.set(centre.x, centre.y - size.y * FIGURE_LIFT, centre.z);
+    place(state.controls.target, 20 * Math.PI / 180, ELEVATION, d * FIGURE_ROOM);
+    state.tween = null; state.lastInput = now() - IDLE_MS;   // it turns from the start
+    emitPreset(null); render();
+    return true;
+  }
+  function stepCloud(time) {
+    const c = state.cloud;
+    if (!c) return;
+    const still = reducedMotion(), u = c.material.uniforms;
+    if (!still) c.time += Math.min(100, Math.max(0, time - (c.last ?? time))) / 1000;
+    c.last = time;
+    u.time.value = c.time; u.drift.value = still ? 0 : 1;
+    u.scale.value = (state.canvas.height || state.canvas.clientHeight || 1) / (2 * Math.tan(state.camera.fov * Math.PI / 360 || 0.3));
+    if (!state.converge) { u.opacity.value = still ? 0.9 : 0.9 * Math.min(1, (time - c.born) / 600); return; }
+    const g = state.converge, k = g.ms <= 0 ? 1 : Math.min(1, (time - g.start) / g.ms);
+    const ramp = (a, b) => easeInOut(Math.min(1, Math.max(0, (k - a) / (b - a))));
+    u.converge.value = g.still ? 0 : ramp(0, 0.8);
+    u.opacity.value = 0.9 * (1 - ramp(g.still ? 0 : 0.55, 1));
+    for (const [m, opacity] of g.saved) m.opacity = opacity * ramp(g.still ? 0 : 0.3, g.still ? 1 : 0.9);
+    if (k >= 1) finishConverge();
+  }
+  // The dots gather onto points of the model's surface while the model fades in, then the dots go.
+  function converge(cloud, model) {
+    const still = reducedMotion(), box = new THREE.Box3().setFromObject(model);
+    const to = box.getSize(new THREE.Vector3()), from = cloud.box.getSize(new THREE.Vector3());
+    const at = box.getCenter(new THREE.Vector3()), mid = cloud.box.getCenter(new THREE.Vector3());
+    // Lay the figure over the model's box first, so the dots start where the model will be.
+    const k = new THREE.Vector3(to.x / (from.x || 1), to.y / (from.y || 1), to.z / (from.z || 1));
+    cloud.group.scale.copy(k);
+    cloud.group.position.set(at.x - mid.x * k.x, at.y - mid.y * k.y, at.z - mid.z * k.z);
+    cloud.group.updateMatrixWorld(true);
+    const surface = [];
+    model.updateMatrixWorld?.(true);
+    model.traverse(node => { if (node.isMesh && node.geometry?.attributes?.position) surface.push(node); });
+    const target = cloud.points.geometry.attributes.target, n = target.count, v = new THREE.Vector3();
+    const inverse = cloud.group.matrixWorld.clone().invert();
+    for (let i = 0; i < n && surface.length; i++) {
+      const mesh = surface[i % surface.length], p = mesh.geometry.attributes.position;
+      v.fromBufferAttribute(p, Math.floor(Math.random() * p.count)).applyMatrix4(mesh.matrixWorld).applyMatrix4(inverse);
+      target.setXYZ(i, v.x, v.y, v.z);
+    }
+    target.needsUpdate = true;
+    const saved = materialsOf(model).map(m => [m, m.opacity, m.transparent]);
+    for (const [m] of saved) { m.transparent = true; m.opacity = 0; m.needsUpdate = true; }
+    state.converge = {start: now(), ms: still ? duration('--dur-reveal', FADE_MS) : CONVERGE_MS, saved, still, input: state.lastInput};
+  }
+  function finishConverge() {
+    if (!state?.converge) return;
+    const g = state.converge; state.converge = null;
+    for (const [m, opacity, transparent] of g.saved) { m.opacity = opacity; m.transparent = transparent; m.needsUpdate = true; }
+    dropCloud();
+    // Untouched since the hand-off: settle on the model's own framing, from the same side.
+    if (state.lastInput === g.input && state.frame && !state.tween) {
+      const from = {...orbitOf(), target: {...state.controls.target}};
+      animate(from, {...from, distance: state.frame.distance, target: state.frame.centre}, reducedMotion() ? 0 : duration('--dur-slow', 360) * 2, easeInOut);
+    }
   }
   // First model: ease in from 15 degrees off-axis and 8% further out. Later models snap to the front framing.
   function reveal(centre, d, first) {
@@ -430,7 +569,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     orbitWanted = Boolean(on);
     if (state) { state.lastInput = now(); state.orbiting = false; render(); }
   }
-  return {show, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
+  return {show, building, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
     animate: playAnimation, prefetchAnimation,
     onAnimation(callback) { animListener = callback; callback?.(animState.clip, animState.status); },
     camera: name => moveTo(name), reset: () => moveTo('front', {reset: true}),
@@ -439,6 +578,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
 }
 const preview = createPreview({stage: true});
 export const show = (canvas, url, options) => preview.show(canvas, url, options);
+export const building = (canvas, figure) => preview.building(canvas, figure);
 export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
 export const view = () => preview.view();

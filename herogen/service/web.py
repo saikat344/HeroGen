@@ -42,7 +42,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from herogen.pipeline import events as buildlog
-from herogen.pipeline.runfolder import DRAFTS
+from herogen.pipeline.runfolder import DRAFTS, SHAPE_DRAFT
 from herogen.service import bundle, labapi, pages
 from herogen.service.animation import body_joints
 from herogen.service.analytics import (
@@ -808,7 +808,8 @@ class App:
                 "export_message": job["export_message"],
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
                 "code_commit": job["code_commit"] or None, "images": files["images"], "draft_images": files["draft_images"],
-                "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
+                "masks": files["masks"], "downloads": files["downloads"], "models": files["models"],
+                "draft_models": files["draft_models"], "refinement": files["refinement"],
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
                 "animation": files["animation"], "reword": files["reword"], "viewer": f"/viewer#run={rid}"}
@@ -858,6 +859,8 @@ class App:
             drafts = {}
             if rows.get('2', {}).get('state') == 'running':
                 drafts = {k: a['url'] for k, rel in DRAFT_IMAGES.items() if (a := asset(f'{DRAFTS}/{rel}'))}
+            # The stage-2 masks each view was cut out on, for the page's figure of dots while the 3D shape is built.
+            masks = {v: a['url'] for v in ('front', 'left') if image_ready(v) and (a := asset(f'masks/{v}.png'))}
             progress = read_progress(run)
             reworded = None
             if f := st.run_file(user_id, job['id'], 'reword.json'):
@@ -875,7 +878,14 @@ class App:
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
                     and bundle.complete_glb(run / '03-source.glb')):
-                models.append({**source, "n": 0, "glb": "03-source.glb", "accepted": []})
+                models.append({**source, "n": 0, "glb": "03-source.glb", "accepted": [], "raw": True})
+            # While the 3D shape step runs: SAM 3D Objects' mesh as it came back, before HeroGen places it (the step
+            # clears it when it ends; once the step passes the same mesh is `03-source.glb` above).
+            draft_models = []
+            if (rows.get('3', {}).get('state') == 'running' and (a := asset(f'{DRAFTS}/{SHAPE_DRAFT}'))
+                    and bundle.complete_glb(run / DRAFTS / SHAPE_DRAFT)):
+                draft_models.append({**a, "n": 0, "glb": f'{DRAFTS}/{SHAPE_DRAFT}', "accepted": [], "raw": True,
+                                     "draft": True})
             for version in progress['versions']:
                 if a := asset(version['glb']):
                     models.append({**version, **a})
@@ -922,8 +932,8 @@ class App:
             can_redo = {'cover': '0' in passed and bool(images.get('sketch')),
                         'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
                         'texture': can_texture}
-        return {"images": images, "draft_images": drafts, "downloads": downloads, "readme": readme,
-                "animation": animation, "models": models, "refinement": progress,
+        return {"images": images, "draft_images": drafts, "masks": masks, "downloads": downloads, "readme": readme,
+                "animation": animation, "models": models, "draft_models": draft_models, "refinement": progress,
                 "reword": reworded,
                 "can_texture": can_texture, "can_redo": can_redo,
                 "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),
@@ -1298,6 +1308,11 @@ class App:
             st.volume.refresh()
             with st.volume.reading():
                 lower = rel.lower()
+                if lower.startswith(f'{DRAFTS}/') and lower.endswith('.glb'):
+                    # A draft model is served only while its step runs, as the job lists it.
+                    rows = {r['stage']: r for r in self.svc.store.job_stages(jid)}
+                    if rel != f'{DRAFTS}/{SHAPE_DRAFT}' or rows.get('3', {}).get('state') != 'running':
+                        return None
                 if lower == '03-source.glb' or lower.startswith('03-refined') and lower.endswith('.glb'):
                     if rel != lower:
                         return None

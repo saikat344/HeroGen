@@ -32,22 +32,13 @@
 .viewer__image { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; min-height: 0; object-fit: contain; border-radius: var(--radius-l); box-shadow: var(--shadow-3); }
 .viewer .viewer__image.reveal { animation: reveal var(--dur-reveal) var(--ease-out) both; }
 
-/* While the character views are drawn: the artwork under a slow light sweep, five slots that fill as each view is
-   cut out (a cut-out draft traces its own outline), then a turntable of the four views until the 3D shape shows. */
+/* While the character views are drawn: the artwork under a slow light sweep and five slots that fill as each view is
+   cut out (a cut-out draft traces its own outline). */
 .viewer__media { grid-template-rows: minmax(0, 1fr) auto; }
 .viewer__media > :not(.view-slots) { grid-area: 1 / 1; }
 .viewer__sweep { width: 100%; height: 100%; pointer-events: none; -webkit-mask: var(--sweep-mask) center / contain no-repeat; mask: var(--sweep-mask) center / contain no-repeat;
   background: linear-gradient(105deg, transparent 42%, color-mix(in srgb, var(--ember-300) 24%, transparent) 50%, transparent 58%) 0 0 / 300% 100% no-repeat; background-position: 150% 0; }
-.viewer__turn { width: 100%; height: 100%; min-height: 0; container-type: size; display: grid; place-items: center; }
-.viewer__turn-frames { position: relative; width: min(100cqw, 100cqh); aspect-ratio: 1; overflow: hidden; border-radius: var(--radius-l); }
-.viewer__turn-frames.reveal { animation: fade var(--dur-reveal) var(--ease-out) both; }
-.viewer__turn-frames img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity calc(var(--dur-base) * 0.8) var(--ease-standard); }
-.viewer__turn-frames img.is-on { opacity: 1; }
-.viewer[data-reveal="sculpting"] .viewer__turn-frames::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 18%; pointer-events: none; opacity: 0;
-  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--color-accent) 22%, transparent) 82%, var(--stage-accent-text) 100%); }
 .viewer[data-reveal] .viewer__status .viewer__label { height: auto; min-height: var(--control-h-s); padding-block: var(--space-1); white-space: normal; }
-.viewer.is-handoff .viewer__canvas { opacity: 0; }
-.viewer__canvas { transition: opacity var(--dur-reveal) var(--ease-out); }
 .view-slots { grid-row: 2; display: grid; justify-items: center; gap: var(--space-3); width: 100%; margin-top: var(--space-4); }
 .viewer .view-slots__note { margin: 0; font-size: var(--text-caption); font-weight: var(--weight-semibold); color: var(--stage-text-muted); }
 .view-slots__list { display: flex; justify-content: center; gap: var(--space-3); margin: 0; padding: 0; list-style: none; width: 100%; }
@@ -62,11 +53,9 @@
 .view-slot.is-cut .view-slot__img img { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 5px var(--color-accent-glow)); }
 @media (prefers-reduced-motion: no-preference) {
   .viewer[data-reveal="drawing"] .viewer__sweep { animation: art-sweep calc(var(--dur-ambient) * 2) var(--ease-standard) infinite; }
-  .viewer[data-reveal="sculpting"] .viewer__turn-frames::after { animation: scan calc(var(--dur-ambient) * 1.5) var(--ease-linear) infinite; }
   .view-slot.is-cut .view-slot__img img { animation: pop var(--dur-slow) var(--ease-spring) both, outline-glow var(--dur-ambient) var(--ease-standard) var(--dur-slow) infinite; }
 }
 @keyframes art-sweep { 0% { background-position: 150% 0; } 60%, 100% { background-position: -50% 0; } }
-@keyframes scan { 0% { transform: translateY(-100%); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateY(560%); opacity: 0; } }
 @keyframes outline-glow { 0%, 100% { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 5px var(--color-accent-glow)); }
   50% { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 10px var(--color-accent-glow)); } }
 
@@ -85,6 +74,23 @@
 .viewer canvas#preview { display: block; width: 100%; height: 100%; margin: 0; border-radius: 0; background: transparent; touch-action: none; cursor: grab; }
 .viewer canvas#preview:active { cursor: grabbing; }
 .viewer canvas#preview.reveal { animation: reveal var(--dur-reveal) var(--ease-out) both; }
+
+/* While the 3D shape is built: the hero's outline as a figure of dots (drawn by preview.js) under a faint light,
+   a centred title, a thin progress bar and one tip. The overlay never takes the pointer, so the figure can be turned. */
+.viewer[data-mode="shape"] { background: radial-gradient(42% 52% at 50% 44%, var(--stage-shimmer), transparent 72%), var(--stage-bg); }
+.shape-build { position: absolute; left: 50%; bottom: calc(var(--viewer-dock-space) + var(--space-2)); z-index: 4; transform: translateX(-50%); display: grid; justify-items: center; gap: var(--space-3); width: min(26rem, calc(100% - 2 * var(--space-5))); margin: 0; pointer-events: none; text-align: center; }
+.viewer .shape-build__title { margin: 0; color: var(--stage-text); font-size: var(--text-body-s); font-weight: var(--weight-semibold); letter-spacing: 0.01em; }
+.shape-build__bar { width: min(15rem, 100%); height: 3px; border-radius: var(--radius-pill); background: var(--stage-glass-border); overflow: hidden; }
+.shape-build__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--stage-text); transform: scaleX(0); transform-origin: left center; transition: transform calc(var(--dur-reveal) * 1.5) var(--ease-linear); }
+.viewer .shape-build__tip { margin: 0; min-height: 1.4em; color: var(--stage-text-muted); font-size: var(--text-caption); }
+.viewer[data-mode="shape"] .viewer__status .viewer__label { color: var(--stage-text-muted); font-weight: var(--weight-medium); }
+
+/* SAM 3D's raw shape or HeroGen's model: a small segmented switch under the label. */
+.viewer-compare { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--radius-pill); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.viewer-compare button { margin: 0; height: calc(var(--control-h-s) - 6px); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--stage-text-muted); font: inherit; font-size: var(--text-caption); font-weight: var(--weight-semibold); cursor: pointer; transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard); }
+.viewer .viewer-compare button:hover:not([aria-pressed="true"]) { color: var(--stage-text); background: var(--stage-glass-hover); }
+.viewer-compare button[aria-pressed="true"] { background: var(--stage-text); color: var(--stage-lo); }
+.viewer .viewer-compare button:focus-visible { outline: var(--focus-w) solid var(--stage-accent-text); outline-offset: 1px; }
 
 /* Top left: what is shown, plus model notes and the update notice. */
 .viewer__status { position: absolute; top: var(--space-5); left: var(--space-5); z-index: 4; display: grid; justify-items: start; gap: var(--space-3); max-width: calc(100% - 3 * var(--control-h-m) - 2 * var(--space-3) - 3 * var(--space-5)); }
@@ -183,6 +189,8 @@ body.has-expanded-viewer { overflow: hidden; }
 /* Keep the hint clear of the dock when the stage is narrow. */
 /* Short stages (a 720-768 px window): smaller slots without the note, so the artwork keeps its room. */
 @container stage (max-height: 460px) {
+  .viewer .shape-build__title { display: none; }          /* the 3D shape tab and the page title already say it */
+  .shape-build { gap: var(--space-2); bottom: var(--viewer-dock-space); }
   .viewer .view-slots__note { display: none; }
   .view-slots { margin-top: var(--space-2); }
   .view-slot { flex-basis: 48px; }
@@ -211,6 +219,7 @@ body.has-expanded-viewer { overflow: hidden; }
   .viewer.has-dock { --viewer-dock-space: calc(var(--space-4) + var(--thumb-h) + var(--space-2) + var(--text-caption) * 1.4 + 2 * var(--space-3) + var(--space-5)); }
   .viewer__dock .thumb { min-width: var(--tap-min); }
   .viewer .viewer__hint { display: none; }
+  .viewer-compare button { height: calc(var(--tap-min) - 8px); }
   .actions { grid-template-columns: minmax(0, 1fr); padding: var(--space-4); }
   .actions__rule { display: none; }
   .generation > .result-section { padding: var(--space-5); }
@@ -227,4 +236,5 @@ body.has-expanded-viewer { overflow: hidden; }
   .viewer__pending .icon, .viewer__notice, .view-slot:not(.is-filled) .view-slot__img::after { animation: none; }
   .view-slot.is-new .view-slot__img img { animation: fade var(--dur-reveal) var(--ease-out) both; }
   .viewer .viewer__image.reveal, .viewer canvas#preview.reveal { animation-name: fade; }
+  .shape-build__bar > span { transition: none; }
 }
