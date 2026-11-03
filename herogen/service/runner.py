@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -607,9 +608,11 @@ def reword_due(spec: StageSpec, ctx: StageContext, out: Outcome, code: int) -> b
     from herogen.pipeline import reword
 
     lane = {**os.environ, **ctx.env}.get("HEROGEN_FAST_LANE") == "1"
+    # Any reword.json, even one that can't be read, means this job was already reworded.
     return (lane and ctx.kind == "prompt" and bool(ctx.prompt) and spec.key in REWORD_STAGES
             and out.state == "rejected" and code == 4
-            and brief_sent(spec, read_record(ctx.run_dir, spec.record)) and reword.read(ctx.run_dir) is None)
+            and brief_sent(spec, read_record(ctx.run_dir, spec.record))
+            and not (ctx.run_dir / reword.FILE).exists())
 
 
 POLICY_CAUSE = "Brand, franchise, character or real-person names usually cause this."
@@ -660,6 +663,11 @@ def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite
         events.emit("decision", file=file, step=spec.key, a=ctx.attempt, what=what, ok=ok)
 
     refused = read_record(ctx.run_dir, spec.record) or {}
+    # Marks the refused try's record, so a retry that writes no record of its own is never counted as one.
+    marker = secrets.token_hex(6)
+    if refused:
+        refused["reword_try"] = marker
+        write_record(ctx.run_dir, refused)
     refused_try = {"cost_usd": round(first.cost_usd, 6), "seconds": first.seconds, "status": "content_policy",
                    "calls": refused.get("calls") if isinstance(refused.get("calls"), list) else []}
     t0 = time.monotonic()
@@ -675,14 +683,14 @@ def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite
     def annotate(rec: dict[str, Any] | None) -> None:
         if not rec:
             return
+        is_refused = rec.get("reword_try") == marker
         # A redraw's cost stays in the stage p and 0 records; here it is noted, not added.
         rec["reword"] = {k: data.get(k) for k in ("status", "reason", "original", "reworded", "removed_names",
                                                   "model", "prompt_version", "cost_usd", "seconds", "error",
                                                   "redraw")
                          if data.get(k) is not None}
         rec["reword"]["refused_try"] = refused_try
-        rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + rw_cost + (first.cost_usd if rec is not refused else 0),
-                                6)
+        rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + rw_cost + (0 if is_refused else first.cost_usd), 6)
         write_record(ctx.run_dir, rec)
 
     if data.get("status") != reword.USED:

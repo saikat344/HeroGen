@@ -322,12 +322,14 @@ export function rewordNotice(job) {
   if (r.status === 'refused_again' && r.text) return {tone: 'warning', title: 'The reworded description was refused too',
     text: `We reworded it once to ${quoted(r.text)}, but the image model refused that as well. Edit it and try again.`};
   if (r.status === 'rewrite_failed') return {tone: 'warning', title: 'Your description could not be reworded',
-    text: r.text ? `The automatic rewrite, ${quoted(r.text)}, still named a brand or character. Edit it and try again.`
-      : 'The automatic rewrite did not come back. Edit the description to remove brand or character names and try again.'};
+    text: 'HeroGen could not reword it automatically. Brand, franchise or character names usually cause this. '
+      + 'Edit the description to remove them and try again.'};
   return null;
 }
-// What the description box is filled with when the user edits a stopped hero: the rewrite when there is one.
-export const descriptionDraft = (job) => (job?.kind === 'prompt' && job?.reword?.text) || job?.prompt || '';
+// What the description box is filled with when the user edits a stopped hero: a rewrite that was used (the server
+// sends only one that passed the description's rules), else the user's own description.
+export const descriptionDraft = (job) => (job?.kind === 'prompt' && ['used', 'refused_again'].includes(job?.reword?.status)
+  && job.reword.text) || job?.prompt || '';
 
 export function decisionLine(e, job = null) {
   const m = e.m || {};

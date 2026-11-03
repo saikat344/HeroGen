@@ -83,6 +83,14 @@ class RewriteRules(unittest.TestCase):
                          ("used", BRIEF, REWORDED, REMOVED, "content_policy"))
         self.assertEqual(rec["cost_usd"], 0.001)
 
+    def test_only_a_used_rewrite_within_the_limit_is_shown(self):
+        self.assertEqual(reword.shown({"status": "used", "reworded": f"  {REWORDED} "}), REWORDED)
+        self.assertEqual(reword.shown({"status": "refused_again", "reworded": REWORDED}), REWORDED)
+        for data in ({"status": "rewrite_failed", "reworded": REWORDED}, {"status": "used", "reworded": "x" * 301},
+                     {"status": "used", "reworded": 7}, {"status": "used"}, None):
+            with self.subTest(data=str(data)[:40]):
+                self.assertIsNone(reword.shown(data))
+
     def test_only_a_used_rewrite_is_the_brief(self):
         import tempfile
 
@@ -121,6 +129,9 @@ class RewordDue(unittest.TestCase):
                 self.assertFalse(reword_due(spec["1"], self.ctx(tmp, kind="sketch", prompt=""), refused, 4))
                 reword.write(run, {"status": "used", "reworded": REWORDED})
                 self.assertFalse(reword_due(spec["p"], ctx, refused, 4), "at most once per job")
+                (run / reword.FILE).write_text("{not json")
+                self.assertIsNone(reword.read(run))
+                self.assertFalse(reword_due(spec["p"], ctx, refused, 4), "a corrupt record still means reworded")
             (run / reword.FILE).unlink()
             with mock.patch.dict(os.environ, {"HEROGEN_FAST_LANE": ""}):
                 self.assertFalse(reword_due(spec["p"], ctx, refused, 4), "the full lane never rewords")
@@ -244,8 +255,9 @@ class RewordJobTest(prompt_base.PromptJobTest):
                 self.assertEqual((len(self.generation_prompts), len(self.reword_prompts)), (1, 1))
                 data = reword.read(self.run_dir(job))
                 self.assertEqual(data["status"], "rewrite_failed")
-                text = self.view(job)["reword"]["text"]
-                self.assertEqual(text, None if case == "api" else f"{REWORDED}, like Ironman")
+                # A rewrite that failed its checks is never kept or shown; the box gets the user's own brief.
+                self.assertNotIn("reworded", data)
+                self.assertIsNone(self.view(job)["reword"]["text"])
                 whats = [e.get("what") for e in read_events(self.run_dir(job)) if e["kind"] == "decision"]
                 self.assertEqual(whats, ["brief_reword_failed"])
                 self.store.job_cancel(job["id"], self.user["id"])
@@ -353,6 +365,25 @@ class RedrawRules(unittest.TestCase):
         self.assertAlmostEqual(out.cost_usd, 0.005 + 0.004 + 0.02 + 0.01)
         self.assertEqual(self.run_case("p")[1], ["retry"])
         self.assertEqual(self.run_case("1", redo=True)[1], ["retry"], "a redo keeps its parent's sketch")
+
+    def test_a_retry_that_writes_no_record_does_not_count_the_refused_try_twice(self):
+        import tempfile
+
+        from herogen.service.runner import reword_and_retry, write_record
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            write_record(run, {"stage": "p", "ok": False, "status": "error", "cost_usd": 0.005})
+            ctx = RewordDue().ctx(tmp)
+            spec = next(s for s in PLAN if s.key == "p")
+            out = reword_and_retry(
+                spec, ctx, Outcome("rejected", 1.0, 0.005),
+                lambda: reword.write(run, {"status": "used", "reworded": REWORDED, "cost_usd": 0.004}),
+                lambda: (Outcome("failed", 1.0, 0.0, code="stage_error"), 1))
+            rec = json.loads((run / "stage-p.json").read_text())
+            self.assertAlmostEqual(rec["cost_usd"], 0.009)
+            self.assertAlmostEqual(out.cost_usd, 0.009)
+            self.assertEqual(out.state, "failed")
 
     def test_a_refused_or_failed_redraw_stops_without_the_retry(self):
         out, calls, data = self.run_case("1", (Outcome("rejected", 1.0, 0.0, code="rejected"), 4))

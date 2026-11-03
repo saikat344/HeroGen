@@ -709,9 +709,12 @@ test('the hero card says the description was reworded, and the edit box gets the
   assert.equal(again.tone, 'warning');
   assert.equal(again.text, `We reworded it once to “${text}”, but the image model refused that as well. Edit it and try again.`);
   const failed = copy.rewordNotice({...used, reword: {status: 'rewrite_failed', stage: 'p', text: null}});
-  assert.match(failed.text, /did not come back\. Edit the description to remove brand or character names/);
-  assert.match(copy.rewordNotice({...used, reword: {status: 'rewrite_failed', stage: '1', text: 'A robot like Ironman'}}).text,
-    /The automatic rewrite, “A robot like Ironman”, still named a brand or character/);
+  assert.equal(failed.text, 'HeroGen could not reword it automatically. Brand, franchise or character names usually cause this. '
+    + 'Edit the description to remove them and try again.');
+  // A failed rewrite is never quoted or pre-filled, even if text arrives: the box gets the user's own description.
+  assert.doesNotMatch(copy.rewordNotice({...used, reword: {status: 'rewrite_failed', stage: '1', text: 'A robot like Ironman'}}).text, /Ironman/);
+  assert.equal(copy.descriptionDraft({...used, reword: {status: 'rewrite_failed', stage: '1', text: 'A robot like Ironman'}}),
+    'A robot, Ironman inspired');
   assert.equal(copy.rewordNotice({kind: 'prompt', prompt: 'a knight', reword: null}), null);
   assert.equal(copy.rewordNotice({kind: 'sketch', reword: {status: 'used', text}}), null);
   assert.equal(copy.rewordNotice({...used, reword: {status: 'something_else', text}}), null);

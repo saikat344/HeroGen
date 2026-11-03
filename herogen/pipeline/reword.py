@@ -13,7 +13,8 @@ stage p draws from it, stage 1's colour brief reads it (`brief`), and a cover re
 never refused behave exactly as before.
 
 A rewrite is refused here (``RewordRejected``), never repaired, when it is empty, too long, unchanged, or still
-contains a name the model listed as removed.
+contains a name the model listed as removed. A refused rewrite is not kept: only a rewrite that passed the brief's
+own text rules (at most the description's character limit) is ever stored or shown.
 """
 
 from __future__ import annotations
@@ -35,10 +36,6 @@ USED, REFUSED_AGAIN, FAILED = "used", "refused_again", "rewrite_failed"
 class RewordRejected(ValueError):
     """The model's rewrite can't be used: empty, over the limit, unchanged, or still naming what it removed."""
 
-    def __init__(self, message: str, candidate: str = "") -> None:
-        super().__init__(message)
-        self.candidate = candidate
-
 
 def read(run_dir: Path) -> dict[str, Any] | None:
     try:
@@ -53,6 +50,21 @@ def write(run_dir: Path, data: dict[str, Any]) -> None:
     part = p.with_name(p.name + ".part")
     part.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(part, p)
+
+
+def shown(data: dict[str, Any] | None) -> str | None:
+    """The rewrite a person may see or edit: only one that was used (or used and refused again), and only when it
+    still passes the brief's text rules, so nothing longer than a description is ever shown."""
+    from herogen.pipeline.prompt_sketch import PromptRejected, clean_user_text
+
+    if not data or data.get("status") not in (USED, REFUSED_AGAIN):
+        return None
+    rules = prompts.selected("prompt_sketch").data["user_text"]
+    try:
+        return clean_user_text(data.get("reworded"), max_chars=int(rules["max_chars"]),
+                               delimiters=(rules["open"], rules["close"]))
+    except PromptRejected:
+        return None
 
 
 def brief(run_dir: Path) -> str | None:
@@ -88,17 +100,16 @@ def check(original: str, answer: dict[str, Any]) -> tuple[str, list[str]]:
 
     rules = prompts.selected("prompt_sketch").data["user_text"]
     removed = [str(n).strip() for n in answer.get("removed_names") or [] if str(n).strip()]
-    raw = answer.get("reworded")
-    candidate = " ".join(str(raw).split()) if isinstance(raw, str) else ""
     try:
-        text = clean_user_text(raw, max_chars=int(rules["max_chars"]), delimiters=(rules["open"], rules["close"]))
+        text = clean_user_text(answer.get("reworded"), max_chars=int(rules["max_chars"]),
+                               delimiters=(rules["open"], rules["close"]))
     except PromptRejected as e:
-        raise RewordRejected(f"the rewrite can't be used: {e}", candidate) from None
+        raise RewordRejected(f"the rewrite can't be used: {e}") from None
     if text.casefold() == " ".join(original.split()).casefold():
-        raise RewordRejected("the rewrite is the same as the brief", text)
+        raise RewordRejected("the rewrite is the same as the brief")
     still = [n for n in removed if _mentions(text, n)]
     if still:
-        raise RewordRejected(f"the rewrite still names {len(still)} of the removed names", text)
+        raise RewordRejected(f"the rewrite still names {len(still)} of the removed names")
     return text, removed
 
 
