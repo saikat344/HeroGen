@@ -2,6 +2,7 @@
 import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
 import { thumbButton, viewerDock } from './viewer-dock.js';
+import { buildProgress, shapeTip, TIP_EVERY_MS } from './shape-build.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
   0: ['Prepare input', 'Preparing your image', 'Check the input before creating the character artwork.'],
@@ -93,7 +94,7 @@ const defaultImage = (job, available) => (job?.images?.front ? 'front' : availab
 const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
   ...Object.keys(job?.images || {}).filter(k => !IMAGES.some(([known]) => known === k)).map(k => [k, k.replaceAll('_', ' ')])];
 // While the character views are drawn and the 3D shape is built: the views so far, final or still a draft
-// (`draft_images`, shown only while step 2 runs). `turn` once all four sides exist; null when there is nothing to stage.
+// (`draft_images`, shown only while step 2 runs); null when there is nothing to stage.
 const SIDES = ['front', 'right', 'back', 'left'];
 export function viewsReveal(job, drafts = job?.draft_images || {}) {
   if (!job || TERMINAL.has(job.state) || job.downloads?.glb?.available) return null;
@@ -105,7 +106,24 @@ export function viewsReveal(job, drafts = job?.draft_images || {}) {
   // A draft view is cut out on its mask, so its outline is the one that was found.
   const cut = Object.fromEntries([...SIDES, 'top'].map(k => [k, !images[k] && !!own[k]]));
   return { drawing, sheet: drawing && !images.turnaround ? own.turnaround || null : null, views, cut,
-    turn: SIDES.every(k => views[k]), sculpting: !drawing && state['3'] === 'running' };
+    sculpting: !drawing && state['3'] === 'running' };
+}
+// While the 3D shape step runs (or is next) and no 3D model is out yet: the figure of dots the viewer shows, sampled
+// from the front view's mask with the left view's for depth (`masks`, or the front view itself), and the step's timing.
+export function shapeBuild(job) {
+  if (!job || TERMINAL.has(job.state) || job.downloads?.glb?.available || job.models?.length || job.draft_models?.length) return null;
+  const steps = (job.stages || []).filter(s => s && typeof s === 'object'), step = steps.find(s => s.key === '3');
+  if (steps.find(s => s.key === '2')?.state !== 'passed' || !['pending', 'running'].includes(step?.state)) return null;
+  const front = job.masks?.front || job.images?.front;
+  if (!front) return null;
+  return { front, side: job.masks?.left || null, elapsed: step.state === 'running' ? step.elapsed_seconds : 0,
+    typical: step.typical_seconds };
+}
+// What the viewer calls a model: SAM 3D's own output (`raw`, also while it is a draft) or HeroGen's work.
+export function modelLabel(m) {
+  if (!m) return '3D preview';
+  if (m.raw) return 'SAM 3D raw shape';
+  return m.n ? `HeroGen refined · version ${m.n}` : 'HeroGen model';
 }
 export function stageTiming(s) {
   const parts = [];
@@ -146,34 +164,48 @@ export function segmentLabels(steps, terminal) {
 }
 // Messages the service sends for a step that did not simply pass. They are always shown, never hidden behind a click.
 const NOTED = new Set(['skipped', 'unavailable', 'failed', 'rejected']);
-export function generationView($, select3D) {
+export function generationView($, select3D, buildShape = () => {}) {
   const dock = viewerDock($);
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
   let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null, lastImage = null;
-  let reveal = null, drafts = {}, sheetUrl = null, redrawUntil = 0, turnTimer = null, turnSignature = '', handoff = null;
+  let reveal = null, drafts = {}, sheetUrl = null, redrawUntil = 0;
+  // `draftModels`: SAM 3D's shape while step 3 still runs (`draft_models`); `pinned`: the compare toggle's choice,
+  // kept when a new version arrives; `shape`: the figure of dots on show, with the step's timing.
+  let draftModels = [], pinned = false, forceLoad = false, shape = null, shapeKey = null, shapeTimer = null, shapeClock = null, tipAt = 0;
   const reducedMotion = () => Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
-  const models = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
+  const finalModels = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
+  const models = () => { const final = finalModels(); return final.length ? final : draftModels; };
   const latestModel = () => models().at(-1);
+  const rawModel = () => models().find(m => m.raw && !m.draft);
+  const heroGenModel = () => models().filter(m => !m.raw).at(-1);
   function modelCopy() {
-    const first = chosenModel?.n === 0;
-    text($('#modelTabText'), first ? 'First 3D shape' : '3D preview');
-    if (model) text($('#artifactLabel'), first ? 'First 3D shape' : chosenModel?.n ? `Refined version ${chosenModel.n}` : '3D preview');
-    $('#modelNote').hidden = !model || !first;
-    text($('#modelNote'), first ? 'The texture is still being refined.' : '');
+    const raw = Boolean(chosenModel?.raw), building = selected === 'shape';
+    text($('#modelTabText'), building ? '3D shape' : raw ? 'SAM 3D raw' : '3D preview');
+    if (model) text($('#artifactLabel'), modelLabel(chosenModel));
+    const step3 = (job?.stages || []).find(s => s?.key === '3')?.state;
+    const note = !raw ? '' : step3 === 'running' ? 'Straight from SAM 3D Objects · HeroGen is lining it up with your views'
+      : TERMINAL.has(job?.state) ? 'Straight from SAM 3D Objects, before HeroGen’s work'
+      : 'Straight from SAM 3D Objects · HeroGen is repainting the texture from every side';
+    $('#modelNote').hidden = !model || !note;
+    text($('#modelNote'), note);
+    // A finished or refining hero keeps SAM 3D's raw shape one click away from HeroGen's model.
+    const compare = model && rawModel() && heroGenModel();
+    $('#modelCompare').hidden = !compare;
+    for (const b of $('#modelCompare').querySelectorAll('button')) b.setAttribute('aria-pressed', String(compare ? (b.dataset.compare === 'raw') === raw : false));
     const latest = latestModel();
     const newer = latest && chosenModel && latest.url !== chosenModel.url &&
       (latest.n == null || latest.n > (chosenModel.n ?? -1));
-    $('#modelUpdate').hidden = !model || !newer;
+    $('#modelUpdate').hidden = !model || !newer || pinned;
     const added = (latest?.accepted || []).filter(v => !(chosenModel?.accepted || []).includes(v)).length;
     text($('#modelUpdateNote'), added ? `${added} more ${added === 1 ? 'view' : 'views'} added` : 'A sharper texture is ready to inspect.');
   }
   function loadModel(forced = false) {
     if (!chosenModel || loading === chosenModel.url || shownUrl === chosenModel.url) return;
     const candidate = chosenModel, id = jobId, token = ++modelRequest;
+    forced ||= forceLoad; forceLoad = false;
     loading = candidate.url;
     Promise.resolve(select3D(candidate.url, {preserveCamera: shownUrl !== null, canReplace: () => forced || !touched})).then(loaded => {
       if (token !== modelRequest || id !== jobId || !model) return;
-      endHandoff();
       if (loaded === false) {
         if (shownModel) { chosenModel = shownModel; modelCopy(); }
         return;
@@ -189,60 +221,57 @@ export function generationView($, select3D) {
     const latest = latestModel();
     if (!latest || latest.url === chosenModel?.url) return;
     if (latest.n) track('update_clicked', {n: String(latest.n)});
-    chosenModel = latest; modelCopy(); loadModel(true);
+    pinned = false; chosenModel = latest; modelCopy(); loadModel(true);
   });
-  // The turntable cycles Front, Right, Back, Left; with reduced motion it holds the front view.
-  function turntable(on) {
-    const box = $('#turntable'), frames = $('#turnFrames');
-    if (on) {
-      const urls = SIDES.map(k => reveal.views[k]), signature = urls.join();
-      if (signature !== turnSignature) {
-        const at = Math.max(0, [...frames.children].findIndex(f => f.classList.contains('is-on')));
-        turnSignature = signature;
-        frames.replaceChildren(...urls.map((url, i) => { const f = node('img', null, i === at ? 'is-on' : ''); f.src = url; f.alt = ''; return f; }));
-        frames.classList.remove('reveal'); void frames.offsetWidth; frames.classList.add('reveal');
-      }
-      box.setAttribute('aria-label', `Front, right, back and left views of ${job?.name || 'your hero'}`);
-      if (!turnTimer && !reducedMotion()) turnTimer = setInterval(() => {
-        const all = [...frames.children], at = all.findIndex(f => f.classList.contains('is-on'));
-        all.forEach((f, i) => f.classList.toggle('is-on', i === (at + 1) % all.length));
-      }, 600);
-    } else if (!handoff) { clearInterval(turnTimer); turnTimer = null; }
-    box.hidden = !on && !handoff;
+  for (const button of $('#modelCompare').querySelectorAll('button')) button.addEventListener('click', () => {
+    const raw = button.dataset.compare === 'raw', target = raw ? rawModel() : heroGenModel();
+    if (!target || target.url === chosenModel?.url) return;
+    pinned = raw; chosenModel = target; modelCopy(); loadModel(true);
+  });
+  // The figure of dots: its progress bar follows the step's elapsed and typical time between polls, and the tip
+  // under it changes every few seconds. The figure itself is drawn by the viewer (`buildShape`).
+  function shapeTick() {
+    if (!shape || !shapeClock) return;
+    const p = buildProgress(shapeClock.elapsed + (Date.now() - shapeClock.at) / 1000, shape.typical);
+    $('#shapeBuildFill').style.transform = `scaleX(${p.toFixed(4)})`;
+    $('#shapeBuildBar').setAttribute('aria-valuenow', String(Math.round(p * 100)));
+    text($('#shapeBuildTip'), shapeTip(Math.floor((Date.now() - tipAt) / TIP_EVERY_MS)));
   }
-  // Leaving the turntable for the first 3D shape: the turntable stays under the canvas until the model has loaded,
-  // then the canvas fades in over it.
-  function endHandoff() {
-    if (!handoff) return;
-    clearTimeout(handoff); handoff = null;
-    $('#viewer').classList.remove('is-handoff');
-    setTimeout(() => { if (!handoff && selected !== 'turntable') turntable(false); }, 700);
+  function renderShape(on) {
+    $('#shapeBuild').hidden = !on;
+    if (!on) { clearInterval(shapeTimer); shapeTimer = null; shapeClock = null; shapeKey = null; return; }
+    const elapsed = Number.isFinite(shape.elapsed) ? shape.elapsed : 0;
+    if (!shapeClock || Math.abs(shapeClock.elapsed + (Date.now() - shapeClock.at) / 1000 - elapsed) > 4) shapeClock = {elapsed, at: Date.now()};
+    if (!shapeTimer) { tipAt = Date.now(); shapeTimer = setInterval(shapeTick, 1000); }
+    shapeTick();
   }
   function revealLabel() {
     if (!reveal?.drawing) return 'Character views';
     return Date.now() < redrawUntil ? 'Redrawing — the views didn’t line up' : 'First draft · checking the views';
   }
   function pick(key, chosen = false, retry = false) {
-    if (key === 'model' && selected === 'turntable' && !model && !handoff) {
-      handoff = setTimeout(endHandoff, 8000); $('#viewer').classList.add('is-handoff');
-    }
-    selected = key; manual = chosen; model = key === 'model'; if (key && !model && chosen) lastImage = key;
-    $('#previewWrap').hidden = !model;
-    $('#viewer').dataset.mode = model ? 'model' : key ? 'image' : 'empty';
+    const building = key === 'shape' && Boolean(shape);
+    if (key === 'shape' && !building) key = null;
+    selected = key; manual = chosen; model = key === 'model'; if (key && !model && !building && chosen) lastImage = key;
+    $('#previewWrap').hidden = !model && !building;
+    $('#viewer').dataset.mode = model ? 'model' : building ? 'shape' : key ? 'image' : 'empty';
     dock.mode(model);
-    $('#artboardImage').hidden = model || !key || key === 'turntable';
-    turntable(key === 'turntable');
-    $('#artboardEmpty').hidden = model || !!key;
-    $('#modelTab').setAttribute('aria-pressed', String(model));
-    $('#artTab').setAttribute('aria-pressed', String(!model));
+    $('#artboardImage').hidden = model || building || !key;
+    $('#artboardEmpty').hidden = model || building || !!key;
+    $('#modelTab').setAttribute('aria-pressed', String(model || building));
+    $('#artTab').setAttribute('aria-pressed', String(!model && !building));
+    renderShape(building);
     if (model) {
       $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
       modelCopy(); loadModel();
     }
-    else if (key === 'turntable') {
+    else if (building) {
+      // Until SAM 3D's shape arrives: the hero's own outline as a figure of dots (not a model), in the 3D viewer.
       $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
-      text($('#artifactLabel'), revealLabel());
-      ++modelRequest; loading = null; shownUrl = null; select3D(null);
+      text($('#artifactLabel'), 'Outline from your views');
+      const info = {key: `${shape.front}|${shape.side}`, front: shape.front, side: shape.side,
+        count: ($('#viewer').clientWidth || 800) < 560 ? 2400 : 4000};
+      if (shapeKey !== info.key) { shapeKey = info.key; ++modelRequest; loading = null; shownUrl = null; buildShape(info); }
     }
     else {
       const image = key === 'draft' ? [key, revealLabel()] : imageChoices(job).find(([k]) => k === key);
@@ -258,6 +287,7 @@ export function generationView($, select3D) {
       } else { $('#artboardImage').removeAttribute('src'); text($('#artifactLabel'), 'Your character workbench'); }
       ++modelRequest; loading = null; shownUrl = null; select3D(null);
     }
+    if (!building) shapeKey = null;
     modelCopy();
     for (const b of $('#images').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.image === key));
   }
@@ -265,7 +295,7 @@ export function generationView($, select3D) {
     const available = imageChoices(job);
     pick(available.some(([k]) => k === lastImage) ? lastImage : defaultImage(job, available), true);
   });
-  $('#modelTab').addEventListener('click', () => { if (latestModel()) pick('model', true); });
+  $('#modelTab').addEventListener('click', () => { if (latestModel()) pick('model', true); else if (shape) pick('shape', true); });
   $('#artboardImage').addEventListener('error', () => {
     if (selected === 'draft') { $('#artboardImage').hidden = true; return; }   // replaced since; the next poll has it
     if (model || !selected || $('#artboardImage').getAttribute('src') !== job?.images?.[selected]) return;
@@ -383,8 +413,12 @@ export function generationView($, select3D) {
       const changed = jobId !== next.id;
       if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
-        drafts = {}; sheetUrl = null; redrawUntil = 0; turnSignature = ''; if (handoff) endHandoff(); }
+        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; }
       job = next;
+      // Step 3 clears SAM 3D's draft as it ends, a moment before it is reported passed: keep the last one till then.
+      const step3 = (job.stages || []).find(s => s?.key === '3')?.state;
+      draftModels = step3 !== 'running' ? [] : job.draft_models?.length ? job.draft_models : draftModels;
+      shape = latestModel() ? null : shapeBuild(job);
       // The step clears its drafts as it ends, a moment before it is reported passed: keep the last ones till then.
       const step2 = (job.stages || []).find(s => s?.key === '2')?.state;
       drafts = step2 !== 'running' ? {} : Object.keys(job.draft_images || {}).length ? job.draft_images : drafts;
@@ -392,7 +426,12 @@ export function generationView($, select3D) {
       if (reveal?.sheet && sheetUrl && reveal.sheet !== sheetUrl) redrawUntil = Date.now() + 5000;
       if (reveal?.sheet) sheetUrl = reveal.sheet;
       const latest3D = latestModel();
-      if (!chosenModel || !touched && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
+      // The draft becomes `03-source.glb` when the step passes: the same shape, so it is swapped in whatever the view.
+      if (chosenModel?.draft && !models().some(m => m.url === chosenModel.url)) {
+        chosenModel = rawModel() || latest3D; forceLoad = Boolean(chosenModel);
+      }
+      if (pinned && !models().some(m => m.url === chosenModel?.url)) pinned = false;
+      if (!chosenModel || !touched && !pinned && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
       const state = generationState(job);
       if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
       const running = job.state === 'running' ? state.steps.find((x) => x.key === state.focus?.key) : null;
@@ -435,10 +474,11 @@ export function generationView($, select3D) {
       }
       dock.cameras(job.images);
       dock.animation(robloxReady(job) ? job.animation : null);
-      $('#modelTab').hidden = !job.downloads?.glb?.available; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
+      const has3D = Boolean(latest3D);
+      $('#modelTab').hidden = !has3D && !shape; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
       const latest = defaultImage(job, available);
-      const auto = job.downloads?.glb?.available ? 'model' : reveal?.turn ? 'turntable' : reveal?.sheet ? 'draft' : latest;
-      if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !job.downloads?.glb?.available)) {
+      const auto = has3D ? 'model' : shape ? 'shape' : reveal?.sheet ? 'draft' : latest;
+      if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !has3D)) {
         pick(auto);
       } else pick(selected, true);
       renderReveal();
@@ -447,11 +487,11 @@ export function generationView($, select3D) {
         job.state === 'queued' ? 'Starts when a worker is free.' : 'Your first image appears here in about a minute.');
       const idea = !state.terminal && job.kind === 'prompt' && job.prompt ? `“${job.prompt}”` : '';
       text($('#artboardIdea'), idea); $('#artboardIdea').hidden = !idea;
-      $('#modelPending').hidden = state.terminal || !!job.downloads?.glb?.available || model || state.focus?.key !== '3' || !available.length;
+      $('#modelPending').hidden = state.terminal || has3D || model || selected === 'shape' || state.focus?.key !== '3' || !available.length;
       text($('#modelPendingText'), state.left && state.focus?.key === '3' ? `3D shape on the way · ${state.left}` : '3D shape on the way');
       return state;
     },
     reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null);
-      reveal = null; drafts = {}; if (handoff) endHandoff(); turntable(false); renderReveal(); }
+      reveal = null; drafts = {}; draftModels = []; pinned = false; shape = null; renderShape(false); renderReveal(); }
   };
 }

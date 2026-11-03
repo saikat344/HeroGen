@@ -5,17 +5,26 @@ import { SourceTextModule, SyntheticModule } from 'node:vm';
 
 async function setup() {
   const loads=[], scenes=[], renderers=[], cameras=[], controls=[];
-  class Vector3 { constructor(){ this.x=0;this.y=0;this.z=0; } set(x,y,z){Object.assign(this,{x,y,z});} copy(v){Object.assign(this,v);} setScalar(){} toArray(){return [this.x,this.y,this.z];} }
-  class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);} remove(n){this.models=this.models.filter(v=>v!==n);} }
+  class Vector3 { constructor(x=0,y=0,z=0){ this.x=x;this.y=y;this.z=z; } set(x,y,z){Object.assign(this,{x,y,z});return this;} copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;} setScalar(){} toArray(){return [this.x,this.y,this.z];}
+    fromBufferAttribute(a,i){return this.set(a.array[i*3],a.array[i*3+1],a.array[i*3+2]);} applyMatrix4(){return this;} }
+  class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);n.parent=this;} remove(n){this.models=this.models.filter(v=>v!==n);} }
   class Renderer { constructor(){this.disposed=false;this.renders=0;this.lastModels=[];renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(scene){this.renders++;this.lastModels=[...scene.models];} }
   class Camera { constructor(){this.position=new Vector3();cameras.push(this);} updateProjectionMatrix(){} }
-  class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} }
+  class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} clone(){return this;} }
+  // The figure of dots (preview.building): just enough of three.js to build, step and free it.
+  const freed=[];
+  class BufferAttribute { constructor(array,size){this.array=array;this.itemSize=size;this.count=array.length/size;} setXYZ(i,x,y,z){this.array.set([x,y,z],i*3);} }
+  class BufferGeometry { constructor(){this.attributes={};} setAttribute(k,v){this.attributes[k]=v;} computeBoundingBox(){this.boundingBox=new Box3();} dispose(){freed.push('geometry');} }
+  class ShaderMaterial { constructor(o){Object.assign(this,o);} dispose(){freed.push('material');} }
+  class Points { constructor(geometry,material){this.geometry=geometry;this.material=material;} }
+  class Group { constructor(){this.scale=new Vector3(1,1,1);this.position=new Vector3();this.matrixWorld={clone:()=>({invert(){return this;}})};this.children=[];}
+    add(n){this.children.push(n);} updateMatrixWorld(){} removeFromParent(){this.parent?.remove(this);} }
   class Light { constructor(){this.position=new Vector3();this.scale=new Vector3();this.geometry={dispose(){}};this.material={color:{set(){}},dispose(){}};} }
   class Controls { constructor(){this.target=new Vector3();this.listeners={};controls.push(this);} addEventListener(name,callback){this.listeners[name]=callback;} update(){} dispose(){} }
   class Loader { load(url,done,progress,fail){loads.push({url,done,fail});} }
   class PMREMGenerator { fromScene(){return {texture:{dispose(){}}};} dispose(){} }
   const three={WebGLRenderer:Renderer,Scene,HemisphereLight:Light,DirectionalLight:Light,GridHelper:Light,PMREMGenerator,SRGBColorSpace:'srgb',ACESFilmicToneMapping:4,
-    PerspectiveCamera:Camera,Vector3,Box3,MeshStandardMaterial:class { constructor(options){Object.assign(this,options);} dispose(){this.disposed=true;} }};
+    PerspectiveCamera:Camera,Vector3,Box3,BufferAttribute,BufferGeometry,ShaderMaterial,Points,Group,AdditiveBlending:2,Color:class {},MeshStandardMaterial:class { constructor(options){Object.assign(this,options);} dispose(){this.disposed=true;} }};
   const stub=(exports)=>new SyntheticModule(Object.keys(exports),function(){for(const [k,v] of Object.entries(exports))this.setExport(k,v);});
   const source=await readFile(new URL('../herogen/service/static/preview.js',import.meta.url),'utf8');
   globalThis.devicePixelRatio=1; globalThis.ResizeObserver=class {observe(){} disconnect(){}};
@@ -24,7 +33,7 @@ async function setup() {
   await module.link((id)=>stub(id==='three'?three:id.includes('OrbitControls')?{OrbitControls:Controls}:id.includes('RoomEnvironment')?{RoomEnvironment:class {}}:{GLTFLoader:Loader}));
   await module.evaluate();
   const model=()=>({disposed:0,traverse(fn){fn({geometry:{dispose:()=>this.disposed++}});}});
-  return {api:module.namespace,loads,scenes,renderers,cameras,controls,model,canvas:{clientWidth:800,clientHeight:500}};
+  return {api:module.namespace,loads,scenes,renderers,cameras,controls,model,freed,canvas:{clientWidth:800,clientHeight:500}};
 }
 test('a late model response never replaces the selected hero',async()=>{
   const s=await setup(),old=s.model(),current=s.model();
@@ -183,5 +192,48 @@ test('reduced motion skips the reveal, never orbits and snaps presets', async ()
   assert.ok(Math.abs(azimuth(s)) < 1e-6); assert.equal(s.presets.at(-1), 'front');
   s.frame(10000); s.frame(16); const a = azimuth(s); s.frame(16); assert.equal(azimuth(s), a);
   s.api.camera('back'); assert.ok(Math.abs(Math.abs(azimuth(s)) - Math.PI) < 1e-6); assert.equal(s.presets.at(-1), 'back');
+  delete globalThis.matchMedia;
+});
+
+// While the 3D shape is built: the figure of dots, turning from the start, then gathering onto the first model.
+const figure = (key = 'hero') => ({key, positions: new Float32Array([0, 0.5, 0, 0, -0.5, 0, 0.2, 0, 0.1, -0.2, 0, -0.1]),
+  seeds: new Float32Array([0.1, 0.4, 0.7, 0.9])});
+const dots = (s) => s.scenes[0].models.find(n => n.name === 'hg-shape-figure');
+test('the figure of dots turns from the start and is shown once per figure', async () => {
+  const clock = stageClock(), s = await setup(), frame = (ms) => { clock.advance(ms); s.renderers[0].loop(); };
+  assert.equal(s.api.building(clock.canvas, figure()), true);
+  const group = dots(s), material = group.children[0].material;
+  frame(16); const a = azimuth(s); frame(16); assert.notEqual(azimuth(s), a, 'turns at once');
+  frame(1000); assert.ok(material.uniforms.opacity.value > 0.8 && material.uniforms.time.value > 0, 'fades in and drifts');
+  assert.equal(s.api.building(clock.canvas, figure()), true); assert.equal(dots(s), group, 'the same figure is kept');
+  clock.listeners.pointerdown(); frame(16); const b = azimuth(s); frame(2000); assert.equal(azimuth(s), b, 'input stops the turn');
+  s.api.hide(); assert.equal(dots(s), undefined); assert.deepEqual(s.freed, ['geometry', 'material'], 'leaving frees it');
+  delete globalThis.matchMedia;
+});
+test('the first model takes over from the dots without moving the view, then the dots are freed', async () => {
+  const clock = stageClock(), s = await setup(), frame = (ms) => { clock.advance(ms); s.renderers[0].loop(); };
+  s.api.building(clock.canvas, figure()); frame(16); frame(700);
+  const angle = azimuth(s), group = dots(s);
+  const material = {opacity: 1, transparent: false};
+  const position = {array: new Float32Array([0, 1, 0, 0, -1, 0]), count: 2};
+  const model = {traverse(fn) { fn({isMesh: true, userData: {}, material, matrixWorld: {}, geometry: {attributes: {position}, dispose() {}}}); }};
+  const load = s.api.show(clock.canvas, 'sam-raw.glb'); s.loads[0].done({scene: model}); assert.equal(await load, true);
+  assert.ok(Math.abs(azimuth(s) - angle) < 1e-9, 'the view keeps its angle');
+  assert.equal(material.opacity, 0); assert.equal(material.transparent, true);
+  frame(600); assert.ok(group.children[0].material.uniforms.converge.value > 0, 'the dots gather');
+  frame(600); frame(600);
+  assert.deepEqual([material.opacity, material.transparent], [1, false]);
+  assert.equal(dots(s), undefined); assert.deepEqual(s.freed, ['geometry', 'material']);
+  assert.equal(s.scenes[0].models.includes(model), true);
+  delete globalThis.matchMedia;
+});
+test('with reduced motion the dots hold still and the model fades in without them moving', async () => {
+  const clock = stageClock(true), s = await setup(), frame = (ms) => { clock.advance(ms); s.renderers[0].loop(); };
+  s.api.building(clock.canvas, figure());
+  frame(16); const a = azimuth(s), material = dots(s).children[0].material; frame(5000);
+  assert.equal(azimuth(s), a); assert.equal(material.uniforms.drift.value, 0); assert.equal(material.uniforms.time.value, 0);
+  const load = s.api.show(clock.canvas, 'sam-raw.glb'); s.loads[0].done({scene: s.model()}); await load;
+  frame(100); assert.equal(material.uniforms.converge.value, 0);
+  frame(1000); assert.equal(dots(s), undefined);
   delete globalThis.matchMedia;
 });

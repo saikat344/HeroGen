@@ -254,13 +254,14 @@
             <div class="viewer__media" id="viewerMedia">
               <img id="artboardImage" class="viewer__image" alt="" hidden>
               <span id="artSweep" class="viewer__sweep" aria-hidden="true" hidden></span>
-              <div id="turntable" class="viewer__turn" role="img" hidden><div class="viewer__turn-frames" id="turnFrames"></div></div>
               <div id="viewSlots" class="view-slots" hidden><p id="viewSlotsNote" class="view-slots__note">Studying your hero from every side</p><ol class="view-slots__list" aria-label="Character views as they are drawn"><li class="view-slot" data-view="front"><span class="view-slot__img"></span>Front</li><li class="view-slot" data-view="right"><span class="view-slot__img"></span>Right</li><li class="view-slot" data-view="back"><span class="view-slot__img"></span>Back</li><li class="view-slot" data-view="left"><span class="view-slot__img"></span>Left</li><li class="view-slot" data-view="top"><span class="view-slot__img"></span>Top</li></ol></div>
               <div id="artboardEmpty" class="viewer__empty"><span class="viewer__silhouette" aria-hidden="true"><span class="skeleton viewer__silhouette-head"></span><span class="skeleton viewer__silhouette-body"></span></span><p id="artboardEmptyText" class="viewer__empty-title">Your first image appears here in about a minute.</p><p id="artboardIdea" class="viewer__idea" hidden></p></div>
             </div>
             <div id="previewWrap" class="viewer__canvas" hidden><canvas id="preview" aria-label="3D preview of the body. Drag to orbit, scroll to zoom, or use the Front, Side and Back buttons below."></canvas></div>
+            <div id="shapeBuild" class="shape-build" hidden><p class="shape-build__title" id="shapeBuildTitle">Building the 3D shape…</p><div class="shape-build__bar" id="shapeBuildBar" role="progressbar" aria-labelledby="shapeBuildTitle" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="shapeBuildFill"></span></div><p class="shape-build__tip" id="shapeBuildTip"></p></div>
             <div class="viewer__status">
               <p id="artifactLabel" class="viewer__label">Your character workbench</p>
+              <div id="modelCompare" class="viewer-compare" role="group" aria-label="Compare SAM 3D's raw shape with HeroGen's model" hidden><button type="button" data-compare="raw" aria-pressed="false">SAM 3D raw</button><button type="button" data-compare="herogen" aria-pressed="false">HeroGen</button></div>
               <p id="modelNote" class="viewer__note" role="status" hidden></p>
               <div id="modelUpdate" class="viewer__notice" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-sparkles"></use></svg><p id="modelUpdateNote"></p><button type="button" id="updateModel" class="btn btn--secondary btn--s">Show it</button></div>
             </div>

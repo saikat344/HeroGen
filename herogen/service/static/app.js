@@ -33,7 +33,7 @@ function setScreen(next) {
 const heroes = heroesView($, { api, open: (id) => openJob(id, true), create: () => goCreate(),
   refresh: () => refreshList().catch((e) => heroes.fail(e)) });
 const liveLog = buildLog($, api);
-const generation = generationView($, (url, options) => preview(url, options));
+const generation = generationView($, (url, options) => preview(url, options), (info) => buildShape(info));
 const variations = variationsView($, { api, select: openJob, key: idemKey,
   textureNotes: () => S.session?.limits?.texture_notes === true,
   created: j => { ++S.revision; followJob(j, true); refreshList().catch(e => banner(e.message)); },
@@ -368,6 +368,21 @@ async function preview(url, options) {
     previewUrl = null; show('#previewError');
     return false;
   }
+}
+
+// While the 3D shape is built: the hero's figure of dots in the 3D viewer, until the first model takes its place.
+let shapeModule = null;
+async function buildShape(info) {
+  if (!info || screen !== 'generation') return false;
+  const token = ++previewRequest;
+  previewUrl = null; show('#previewError', false);
+  try {
+    [previewModule, shapeModule] = await Promise.all([previewModule || import('/assets/preview.js'), shapeModule || import('/assets/shape-build.js')]);
+    const figure = await shapeModule.figurePoints(info);
+    if (token !== previewRequest) return false;
+    const shown = previewModule.building($('#preview'), figure);
+    show('#orbitHint', shown); return shown;
+  } catch { return false; }
 }
 
 // Poll while the job is queued or running.

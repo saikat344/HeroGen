@@ -925,6 +925,11 @@ class TestStage3SourcesWithoutBlender(HybridBase):
         unshifted = register.call_args.args[0]
         self.assertTrue(res.path("mesh.glb").exists())
         self.assertFalse((run / "03-source.glb").exists())          # kept by run_stage3 once the source is used
+        # shown at once as the stage's draft: SAM 3D Objects' mesh as it came back, with the source's normals
+        draft = run / "drafts" / "03-source.glb"
+        glb.add_missing_normals(res.path("mesh.glb"), self.tmp / "sources-normals.glb")
+        self.assertEqual(draft.read_bytes(), (self.tmp / "sources-normals.glb").read_bytes())
+        self.assertEqual(list((run / "drafts").glob("*.part")), [])
         self.assertTrue((stage3.work_dir(run) / "03-source-uv.npz").exists())
         self.assertEqual(info["facing_deg"], 0.0)
         # step 7: registered on every observed depth view (the synthetic top view is drawn, not derived), and the
@@ -971,6 +976,35 @@ class TestStage3SourcesWithoutBlender(HybridBase):
         jd = stage3._body_joints(run, vs, 5.5, verts, faces, remote, rec, sk, body_detector="vitdet")
         self.assertEqual((jd["remote"]["detector"], jd["remote"]["box_source"]), ("vitdet", "detector (vitdet)"))
         self.assertEqual(jd["remote"]["key"], d.name)
+
+    def test_the_shape_draft_never_fails_the_source_and_is_cleared_however_the_stage_ends(self):
+        from herogen.blender import stage3
+        from herogen.blender.record import StageRecord
+
+        run = self.tmp / "draft-blocked"
+        synth.write_run(run, synth.humanoid(), size=384, ppu=60.0)
+        cache = self.tmp / "draft-blocked-cache"
+        self.replay_entries(run, cache)
+        (run / "drafts").write_text("not a folder")                  # no draft can be written
+        vs = views.load_views(run, 5.5)
+        verts, _, _, _ = stage3._objects_mesh(run, vs, 5.5, rclient.RemoteClient(cache), StageRecord(run, 3, "x"))
+        self.assertGreater(len(verts), 0)
+        self.assertEqual(sorted(p.name for p in run.glob("*.part")), [])
+        (run / "drafts").unlink()
+        # A stage that stops after SAM 3D Objects returned leaves no draft behind, and no record that passed.
+        seen = []
+
+        def blender_fails(*args, **kwargs):
+            seen.append((run / "drafts" / "03-source.glb").is_file())
+            raise bl.BlenderError("blender stopped")
+
+        with mock.patch.object(bl, "run_job", side_effect=blender_fails):
+            with self.assertRaises(bl.BlenderError):
+                stage3.run_stage3(run, nz=96, mesh_source="sam3d-objects", joints_source="sam3d-body",
+                                  remote=rclient.RemoteClient(cache), fallback=False, timeout=300)
+        self.assertEqual(seen, [True], "shown while the stage ran")
+        self.assertFalse((run / "drafts" / "03-source.glb").exists())
+        self.assertFalse((run / "stage-3.json").exists())
 
     def corrupt_run(self, name: str, glb_bytes: bytes = b"not a glb") -> tuple[Path, Path]:
         """A run whose cached SAM 3D Objects result is not a readable GLB."""

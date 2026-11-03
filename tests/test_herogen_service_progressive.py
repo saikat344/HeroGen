@@ -111,6 +111,61 @@ class ProgressiveFiles(WebCase):
         self.assertEqual(view['draft_images'], {})
         self.assertFalse({'turnaround', 'front', 'top', 'top_drawn'} & set(view['images']))
 
+    def test_sam_shape_shows_as_a_draft_while_the_shape_step_runs(self):
+        owner = self.signin()
+        other = self.signin('bob@example.com')
+        jid = self.make_job(owner).json()['id']
+        seen, case = [], self
+
+        class Watching(FakeRunner):
+            def _stage_3(self, ctx, run):
+                view = owner.get(f'/api/jobs/{jid}').json()
+                case.assertEqual(view['models'], [])
+                case.assertFalse(view['downloads']['glb']['available'], 'a draft is never a download')
+                [draft] = view['draft_models']
+                case.assertEqual((draft['n'], draft['raw'], draft['draft']), (0, True, True))
+                case.assertIn('/drafts/03-source.glb?v=', draft['url'])
+                response = owner.get(draft['url'])
+                case.assertEqual((response.status_code, response.headers['content-type']), (200, 'model/gltf-binary'))
+                case.assertEqual(other.get(draft['url']).status_code, 404)
+                case.assertEqual(Browser(case.app).get(draft['url']).status_code, 401)
+                case.assertEqual(set(view['masks']), {'front', 'left'})
+                for url in view['masks'].values():
+                    case.assertEqual(owner.get(url).headers['content-type'], 'image/png')
+                    case.assertEqual(other.get(url).status_code, 404)
+                seen.append(view)
+                super()._stage_3(ctx, run)
+
+            def _stage_3f(self, ctx, run):
+                seen.append(owner.get(f'/api/jobs/{jid}').json())
+                super()._stage_3f(ctx, run)
+
+        self.assertEqual(self.finish(jid, Watching()), 'succeeded')
+        shaping, refining = seen
+        self.assertEqual(refining['draft_models'], [])
+        self.assertEqual([(m['n'], m['glb'], m.get('raw')) for m in refining['models']], [(0, '03-source.glb', True)])
+        self.assertEqual(owner.get(shaping['draft_models'][0]['url']).status_code, 404, 'cleared when the step ended')
+        final = owner.get(f'/api/jobs/{jid}').json()
+        self.assertEqual(final['draft_models'], [])
+        self.assertEqual([m.get('raw', False) for m in final['models']], [True, False, False],
+                         'the raw SAM shape stays selectable beside the refined versions')
+
+    def test_a_crashed_shape_step_never_shows_its_draft(self):
+        owner = self.signin()
+        jid = self.make_job(owner).json()['id']
+
+        class Crashing(FakeRunner):
+            def _stage_3(self, ctx, run):
+                raise RuntimeError('fake crash after SAM 3D Objects returned')
+
+        self.assertEqual(self.finish(jid, Crashing()), 'failed')
+        run = self.svc.storage.run_dir(self.store.users_list()[0]['id'], jid)
+        self.assertTrue((run / 'drafts' / '03-source.glb').is_file(), 'left behind by the crash')
+        view = owner.get(f'/api/jobs/{jid}').json()
+        self.assertEqual((view['draft_models'], view['models']), ([], []))
+        self.assertFalse(view['downloads']['glb']['available'])
+        self.assertEqual(owner.get(f'/runs/r1/{jid}/drafts/03-source.glb').status_code, 404)
+
     def check_private(self, owner, other, view):
         for url in [*view['images'].values(), *(m['url'] for m in view['models']), view['downloads']['glb']['url']]:
             self.assertIn('?v=', url.replace('&v=', '?v='))

@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { SourceTextModule } from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generationState, segmentLabels, stageTiming, viewsReveal } from '../herogen/service/static/generation.js';
+import { generationState, modelLabel, segmentLabels, shapeBuild, stageTiming, viewsReveal } from '../herogen/service/static/generation.js';
+import { buildProgress, figureMask, sampleFigure, shapeTip, SHAPE_TIPS } from '../herogen/service/static/shape-build.js';
 const stage = (key, state, side=false) => ({key, state, side, label:`Stage ${key}`});
 test('prompt and uploaded inputs use only the supplied pipeline, in its real order', () => {
   const stages=[stage('p','passed'),stage('0','passed'),stage('1','running'),stage('6','pending'),stage('5','pending')];
@@ -71,21 +72,83 @@ test('a hero whose Roblox files are ready is not called "preparing" while the ex
   assert.equal(generationState({state:'succeeded',export_state:'running',roblox_state:'ready',stages}).eyebrow,'Hero ready · Roblox R15');
 });
 
-test('the character views show as drafts while drawn, then as the turntable until the first 3D shape', () => {
+test('the character views show as drafts while they are drawn', () => {
   const at = (two, three) => [stage('1','passed'), stage('2',two), stage('3',three)];
   const sides = {front:'f', right:'r', back:'b', left:'l'};
   assert.equal(viewsReveal({state:'running', stages:at('passed','passed'), images:{}}), null);
   const start = viewsReveal({state:'running', stages:at('running','pending'), images:{cover:'c'}, draft_images:{}});
-  assert.equal(start.drawing, true); assert.equal(start.sheet, null); assert.equal(start.turn, false);
+  assert.equal(start.drawing, true); assert.equal(start.sheet, null);
   const sheet = viewsReveal({state:'running', stages:at('running','pending'), images:{cover:'c'},
     draft_images:{turnaround:'t', top_drawn:'td', front:'df'}});
   assert.equal(sheet.sheet, 't'); assert.equal(sheet.views.top, 'td'); assert.equal(sheet.cut.top, false);
-  assert.equal(sheet.cut.front, true); assert.equal(sheet.turn, false);
+  assert.equal(sheet.cut.front, true);
   const cut = viewsReveal({state:'running', stages:at('running','pending'), images:{}, draft_images:{...sides, top:'dt', top_drawn:'td'}});
-  assert.equal(cut.turn, true); assert.equal(cut.views.top, 'dt'); assert.equal(cut.cut.top, true);
+  assert.equal(cut.views.top, 'dt'); assert.equal(cut.cut.top, true);
   const shaping = viewsReveal({state:'running', stages:at('passed','running'), images:{...sides, turnaround:'t'}, draft_images:{front:'stale'}});
-  assert.deepEqual([shaping.drawing, shaping.sculpting, shaping.turn, shaping.views.front, shaping.cut.front], [false, true, true, 'f', false]);
+  assert.deepEqual([shaping.drawing, shaping.sculpting, shaping.views.front, shaping.cut.front], [false, true, 'f', false]);
   assert.equal(viewsReveal({state:'running', stages:at('passed','running'), images:sides, downloads:{glb:{available:true}}}), null);
   for (const state of ['failed', 'succeeded', 'canceled'])
     assert.equal(viewsReveal({state, stages:at('running','pending'), images:{}, draft_images:sides}), null, state);
+});
+
+test('while the 3D shape is built the viewer shows a figure of dots until any 3D model is out', () => {
+  const at = (two, three, extra={}) => [stage('2',two), {...stage('3',three), ...extra}];
+  const masks = {front:'mf', left:'ml'};
+  assert.equal(shapeBuild({state:'running', stages:at('running','pending'), masks}), null, 'not while the views are drawn');
+  const next = shapeBuild({state:'running', stages:at('passed','pending'), masks});
+  assert.deepEqual([next.front, next.side, next.elapsed], ['mf', 'ml', 0]);
+  const running = shapeBuild({state:'running', stages:at('passed','running',{elapsed_seconds:42, typical_seconds:230}), masks});
+  assert.deepEqual([running.elapsed, running.typical], [42, 230]);
+  assert.equal(shapeBuild({state:'running', stages:at('passed','running'), images:{front:'vf'}}).front, 'vf', 'the front view stands in for its mask');
+  assert.equal(shapeBuild({state:'running', stages:at('passed','running'), images:{front:'vf'}}).side, null);
+  assert.equal(shapeBuild({state:'running', stages:at('passed','running')}), null, 'nothing to sample');
+  assert.equal(shapeBuild({state:'running', stages:at('passed','running'), masks, draft_models:[{url:'d', raw:true, draft:true}]}), null, 'SAM 3D shape is in');
+  assert.equal(shapeBuild({state:'running', stages:at('passed','passed'), masks, models:[{url:'s', n:0, raw:true}]}), null);
+  for (const state of ['failed', 'canceled', 'stopped']) assert.equal(shapeBuild({state, stages:at('passed','running'), masks}), null, state);
+});
+
+test('models are labelled as SAM 3D raw output or HeroGen work', () => {
+  assert.equal(modelLabel({n:0, raw:true, draft:true}), 'SAM 3D raw shape');
+  assert.equal(modelLabel({n:0, raw:true}), 'SAM 3D raw shape');
+  assert.equal(modelLabel({n:3}), 'HeroGen refined · version 3');
+  assert.equal(modelLabel({n:null}), 'HeroGen model');
+});
+
+test('the build progress never fills before the shape and the tips cycle', () => {
+  assert.equal(buildProgress(0, 230), 0);
+  assert.ok(Math.abs(buildProgress(115, 230) - 0.5) < 1e-9);
+  assert.ok(buildProgress(230, 230) < 0.95 && buildProgress(230, 230) > 0.8);
+  assert.ok(buildProgress(5000, 230) <= 0.95);
+  assert.ok(buildProgress(60, null) > 0 && buildProgress(1e6, undefined) <= 0.95);
+  for (let i = 1; i < 100; i += 7) assert.ok(buildProgress(i, 100) >= buildProgress(i - 1, 100), 'never goes back');
+  assert.equal(shapeTip(0), SHAPE_TIPS[0]); assert.equal(shapeTip(SHAPE_TIPS.length + 1), SHAPE_TIPS[1]); assert.equal(shapeTip(-1), SHAPE_TIPS.at(-1));
+});
+
+test('the figure of dots is sampled inside the front outline with depth from the side view', () => {
+  // A mask image: white figure on black. Front: a 4-wide, 10-tall bar; side: 2 wide.
+  const image = (w, h, inside, rgba = false) => {
+    const data = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4, on = inside(x, y);
+      data.set(rgba ? [200, 50, 50, on ? 255 : 0] : on ? [255, 255, 255, 255] : [0, 0, 0, 255], o);
+    }
+    return figureMask(data, w, h);
+  };
+  const front = image(20, 20, (x, y) => x >= 8 && x < 12 && y >= 5 && y < 15);
+  const side = image(20, 20, (x, y) => x >= 9 && x < 11 && y >= 5 && y < 15, true);
+  assert.equal(front.count, 40); assert.equal(side.count, 20, 'a cut-out reads its opaque pixels');
+  let seed = 1; const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const {positions, seeds} = sampleFigure(front, side, 3000, random);
+  assert.equal(positions.length, 9000); assert.equal(seeds.length, 3000);
+  let [minY, maxY, maxX, maxZ] = [Infinity, -Infinity, 0, 0];
+  for (let i = 0; i < 3000; i++) {
+    const [x, y, z] = positions.slice(i * 3, i * 3 + 3);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y); maxX = Math.max(maxX, Math.abs(x)); maxZ = Math.max(maxZ, Math.abs(z));
+  }
+  assert.ok(minY >= -0.5 && maxY <= 0.5 && maxY - minY > 0.95, 'height 1, centred');
+  assert.ok(maxX <= 0.2 + 1e-6 && maxX > 0.18, 'x within the front outline (4 of 10 px)');
+  assert.ok(maxZ <= 0.1 + 1e-6 && maxZ > 0.08, 'z within the side outline (2 of 10 px)');
+  const slab = sampleFigure(front, null, 500, random);
+  assert.ok(slab.positions.every((v, i) => i % 3 !== 2 || Math.abs(v) <= 0.12), 'a modest depth without a side view');
+  assert.equal(sampleFigure(image(8, 8, () => false), null, 10), null);
 });
