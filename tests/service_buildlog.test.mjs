@@ -195,7 +195,7 @@ test('the whole sample reads as the run: steps, totals and the idea', () => {
   assert.ok(model.steps.find(s => s.key === '3f').defaultOpen, 'a step with a kept view stays open');
   assert.ok(!model.steps.find(s => s.key === '2').defaultOpen);
   assert.equal(model.lead.rows.length, 1);
-  assert.equal(rowsOf(model, '3f').at(-1).text, 'Your website model is ready. Roblox files continue in the background.');
+  assert.equal(rowsOf(model, '3f').at(-1).text, 'Your 3D model is ready. Roblox files continue in the background.');
 });
 
 // ---------- The panel, with a small DOM and manual timers ----------

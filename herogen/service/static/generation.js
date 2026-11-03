@@ -8,7 +8,7 @@ const COPY = {
   1: ['Artwork', 'Painting your hero', 'Create the coloured character artwork that guides the next steps.'],
   2: ['Character views', 'Seeing every side', 'Create front, back and side views for reconstruction.'],
   3: ['3D shape', 'Building the 3D shape', 'Reconstruct the character in three dimensions.'],
-  '3f': ['Texture refine', 'Refining the texture', 'Improve the texture on your website model.'],
+  '3f': ['Texture refine', 'Refining the texture', "Repaint the texture on your hero's 3D model."],
   4: ['Game body', 'Preparing the game body', 'Build the body parts and textures for the selected target.'],
   6: ['Roblox rig', 'Preparing the Roblox rig', 'Prepare the Roblox rig when this export is available.'],
   5: ['Results', 'Collecting your results', 'Prepare the results and available downloads.'],

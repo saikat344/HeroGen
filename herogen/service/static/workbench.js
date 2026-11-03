@@ -12,7 +12,7 @@ const STEP = {
   3: ['3D shape', 'SAM 3D Objects builds a textured 3D mesh from the front view and SAM 3D Body finds the body joints, both on cloud GPUs. HeroGen then puts the mesh in its own frame and turns it to face forward.'],
   '3f': ['Texture refine', 'HeroGen renders the 3D shape from several cameras, asks Muse Image to repaint each render in better detail, and uses SAM 3.1 to check that each repaint still matches the outline. Accepted paint goes back onto the texture. A view that does not pass keeps its original paint.'],
   4: ['Game body', 'HeroGen (local) turns the 3D shape into the 15 rigid parts Roblox R15 expects, placing the cuts at the joints and fitting the in-game triangle budget. No model is called here.'],
-  6: ['Roblox rig', 'HeroGen (local) writes the Roblox R15 rig and checks it with an independent reader. No model is called. If this step fails, your website model is unaffected.'],
+  6: ['Roblox rig', 'HeroGen (local) writes the Roblox R15 rig and checks it with an independent reader. No model is called. If this step fails, your 3D model is unaffected.'],
   5: ['Results page', 'HeroGen (local) writes the results page for this build. No model is called.'],
 };
 const LOCAL_STEPS = new Set(['0', '4', '6', '5']);
