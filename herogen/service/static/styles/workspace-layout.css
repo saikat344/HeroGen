@@ -1,0 +1,229 @@
+/* The hero workspace as one window: it fills the viewport exactly and the page never scrolls.
+   Loaded last on the single-page app. app.js puts .workspace-screen on <body> while a hero's workspace is open.
+
+   Frame, top to bottom: the toolbar (.page-brand, app.css) with the wordmark, the reworded-description chip and the
+   theme button; the workspace (#detail); the fixed bottom bar (.app-bar, app.css), whose height the body reserves.
+   Inside #detail, on wide screens: the heading, downloads and progress over the result (the viewer takes every
+   remaining pixel), and an inspector column on the right (.workspace-side) that scrolls on its own. Below 960 px the
+   result stays on top at a fixed share and the heading and the inspector scroll under it. Long content (the step list, the build
+   log, notes, the recipe) scrolls inside its own panel or popover.
+
+   Colours, type, radii and durations come from tokens.css. */
+
+/* ---------- Frame ---------- */
+body.workspace-screen {
+  --ws-pad: var(--space-4);
+  --ws-gap: var(--space-4);
+  --ws-side-w: clamp(340px, 31vw, 480px);
+  /* Native UI type in the workspace; the wordmark keeps the brand face (--font-brand). */
+  --font-ui: var(--font-system);
+  --font-display: var(--font-system);
+  display: flex; flex-direction: column; height: 100dvh; min-height: 0; overflow: clip;
+  font-family: var(--font-system); font-size: var(--text-body); background-image: none;
+}
+html:has(> body.workspace-screen) { overflow: hidden; }
+@media (min-width: 1200px) {
+  body.workspace-screen { --ws-pad: var(--space-5); --ws-gap: var(--space-5); }
+}
+body.workspace-screen .page-brand { --toolbar-inset: var(--ws-pad); }
+body.workspace-screen > #banner { flex: none; }
+body.workspace-screen > .site-footer { display: none; }
+body.workspace-screen > main { position: relative; flex: 1 1 auto; min-height: 0; width: 100%; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; overflow: clip; }
+body.workspace-screen #app { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0; padding: 0; border: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* The developer panel (admins only) follows the workspace inside #app, which scrolls to it; the page does not. */
+body.workspace-screen #developerPanel { flex: none; margin: var(--ws-pad); }
+
+/* ---------- Workspace grid ---------- */
+#detail.generation {
+  flex: 1 0 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--ws-side-w);
+  grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "top side" "result side";
+  gap: var(--ws-gap); align-items: stretch; padding: var(--ws-pad);
+}
+#detail > .workspace-top { grid-area: top; gap: var(--space-3); margin: 0; }
+#detail .result-column { grid-area: result; min-height: 0; display: flex; flex-direction: column; }
+#detail .workspace-side { grid-area: side; }
+
+/* ---------- Toolbar items owned by the workspace ---------- */
+/* The theme button sits at the toolbar's right end (in the DOM it stays by the inspector). */
+body.workspace-screen .workbench-theme { --btn-h: var(--control-h-s); position: fixed; top: calc((var(--toolbar-h) - var(--btn-h)) / 2); right: var(--ws-pad); z-index: calc(var(--z-header) + 1); margin: 0; }
+
+/* The reworded-description note: a one-line chip in the middle of the toolbar; it opens a popover with the full
+   rewrite (and, after a stop, Edit description) and can be dismissed. It never takes room from the viewer. */
+#detail #rewordNote { position: fixed; top: calc((var(--toolbar-h) - var(--control-h-s)) / 2); left: 50%; translate: -50% 0; z-index: calc(var(--z-header) + 1);
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 0; height: var(--control-h-s); max-width: min(36rem, calc(100vw - 22rem)); margin: 0; padding: 0 var(--space-1) 0 var(--space-4);
+  border-radius: var(--radius-pill); font-size: var(--text-body-s); line-height: 1; box-shadow: var(--shadow-1); animation: fade var(--dur-base) var(--ease-out); }
+#detail #rewordNote > .icon { width: var(--icon-s); height: var(--icon-s); margin: 0; stroke-width: 2; }
+#detail #rewordNote.banner--warning > .icon { color: var(--color-warning); }
+#detail #rewordNote .reword__toggle, #detail #rewordNote .reword__close { display: inline-flex; align-items: center; margin: 0; border: 0; background: none; color: var(--color-text); font: inherit; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-standard); }
+#detail #rewordNote .reword__toggle { gap: var(--space-2); min-width: 0; height: 100%; padding: 0 var(--space-3) 0 var(--space-3); border-radius: var(--radius-pill); font-weight: var(--weight-medium); }
+#detail #rewordNote .reword__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#detail #rewordNote .reword__chevron { color: var(--color-text-muted); transition: transform var(--dur-base) var(--ease-out); }
+#detail #rewordNote .reword__toggle[aria-expanded="true"] .reword__chevron { transform: rotate(180deg); }
+#detail #rewordNote .reword__close { justify-content: center; flex: none; width: calc(var(--control-h-s) - 2 * var(--space-2)); height: calc(var(--control-h-s) - 2 * var(--space-2)); padding: 0; border-radius: 50%; color: var(--color-text-muted); }
+#detail #rewordNote .reword__toggle:hover:not(:disabled), #detail #rewordNote .reword__close:hover:not(:disabled) { border-color: transparent; background-color: color-mix(in srgb, var(--color-text) 8%, transparent); color: var(--color-text); }
+#detail #rewordNote .reword__toggle:focus-visible, #detail #rewordNote .reword__close:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-w)); }
+#detail #rewordNote .reword__detail { position: absolute; top: calc(100% + var(--space-3)); left: 50%; translate: -50% 0; z-index: var(--z-dropdown); width: min(28rem, calc(100vw - 2 * var(--ws-pad)));
+  display: grid; justify-items: start; gap: var(--space-2); padding: var(--space-4) var(--space-5); border-radius: var(--radius-l); border: var(--border-w) solid var(--color-border);
+  background: var(--color-surface-1); box-shadow: var(--shadow-3); line-height: var(--lh-body-s); animation: banner-in var(--dur-base) var(--ease-out); }
+#detail #rewordNote .banner__title { font-size: var(--text-body-s); line-height: var(--lh-body-s); }
+#detail #rewordNote .banner__text { font-size: var(--text-body-s); }
+#detail #rewordNote #rewordEdit { margin-top: var(--space-2); }
+
+/* Popovers over the workspace use the translucent chrome where the browser can blur behind it. */
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  #detail #rewordNote .reword__detail, #detail .progress__steps { background: var(--popover-bg); -webkit-backdrop-filter: var(--chrome-blur); backdrop-filter: var(--chrome-blur); }
+}
+
+/* ---------- Heading: state, title, a line of context and the downloads, compact ----------
+   The downloads take their own row under the title; when the column is wide enough (about 760 px: a stacked
+   workspace from 784 px, a two-column one from 1104 px) they move to the title's right, and wider still their
+   one-line hints show under them. The hints always describe the buttons to screen readers. Beside the title the
+   "Roblox ready" pill gives way; the eyebrow already says so. (Not a container query: containment would trap the
+   fixed toolbar chip inside the heading.) */
+#detail .generation-heading { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "eyebrow" "title" "sub" "deliver"; align-items: center; gap: var(--space-1) var(--space-6); }
+#detail .generation-heading > .eyebrow { grid-area: eyebrow; margin: 0; font-size: var(--text-caption); letter-spacing: 0.06em; }
+#detail .heading-row { grid-area: title; gap: var(--space-4); }
+#detail .heading-row h1 { font-family: var(--font-system); font-size: var(--text-display-s); line-height: var(--lh-display-s); letter-spacing: -0.012em; font-weight: var(--weight-bold); }
+#detail .generation-subtitle { grid-area: sub; max-width: 72ch; font-size: var(--text-body-s); line-height: var(--lh-body-s); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+#detail .deliver { grid-area: deliver; align-self: center; justify-self: start; max-width: 100%; margin: var(--space-2) 0 0; gap: var(--space-2); }
+#detail .deliver__row { flex-wrap: nowrap; align-items: center; gap: var(--space-3); }
+#detail .deliver__row > .badge-pill { margin: 0; }
+#detail .deliver__options { flex-wrap: nowrap; gap: var(--space-3); }
+#detail .deliver__option .btn { --btn-h: var(--control-h-s); padding: 0 var(--space-5); font-size: var(--text-body-s); }
+#detail .deliver__hint { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#detail .deliver__note { max-width: 46ch; font-size: var(--text-caption); line-height: var(--lh-caption); }
+@media (min-width: 784px) and (max-width: 959px), (min-width: 1104px) {
+  #detail .generation-heading { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "eyebrow deliver" "title deliver" "sub deliver"; }
+  #detail .deliver { justify-self: end; margin: 0; }
+  #detail .deliver__row > .badge-pill { display: none; }
+  #detail .deliver__option .btn { --btn-h: var(--control-h-m); }
+}
+@media (min-width: 1410px) {
+  #detail .deliver__row { align-items: flex-start; }
+  #detail .deliver__hint { position: static; width: auto; height: auto; overflow: visible; clip-path: none; white-space: normal; }
+}
+
+/* ---------- Progress: one row; the step list opens as a popover instead of pushing the viewer down ---------- */
+#detail .progress { min-height: 0; padding: var(--space-2) var(--space-2) var(--space-2) var(--space-5); border-radius: var(--radius-l); column-gap: var(--space-5); }
+#detail .progress__toggle { --btn-h: var(--control-h-s); }
+#detail .progress__steps { position: absolute; top: calc(100% + var(--space-2)); left: 0; right: 0; z-index: var(--z-dropdown); border-radius: var(--radius-l);
+  border: var(--border-w) solid var(--color-border); background: var(--color-surface-1); box-shadow: var(--shadow-3); }
+#detail .progress__steps-inner { max-height: min(52dvh, 34rem); overflow-y: auto; overscroll-behavior: contain; padding: 0 var(--space-5); }
+#detail .progress .stages { margin: var(--space-2) 0; border-top: 0; }
+
+/* ---------- Banners in the heading: compact, and a long one scrolls inside itself ---------- */
+#detail .workspace-top .banner:not(#rewordNote) { gap: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-l); max-height: 7.5rem; overflow-y: auto; }
+#detail .workspace-top .banner:not(#rewordNote) > .icon { width: var(--icon-m); height: var(--icon-m); margin-top: var(--space-1); }
+#detail .workspace-top .banner__title { font-size: var(--text-body-s); line-height: var(--lh-body-s); }
+#detail .workspace-top .banner__text, #detail .workspace-top .banner__list { font-size: var(--text-caption); line-height: var(--lh-caption); }
+
+/* ---------- Result: a slim header, the viewer filling the rest, then Retry / Refine in one row ---------- */
+#detail .result-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border-radius: var(--radius-l); }
+#detail .result-head { flex: none; gap: var(--space-3); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-5); }
+#detail .result-head .result-head__title { font-size: var(--text-body-s); color: var(--color-text-muted); }
+#detail .seg-ctl { padding: var(--space-1); border-radius: var(--radius-m); }
+#detail .seg-ctl button { height: calc(var(--control-h-s) - 2 * var(--space-1)); padding: 0 var(--space-4); border-radius: calc(var(--radius-m) - var(--space-1)); font-weight: var(--weight-medium); }
+#detail .seg-ctl button[aria-pressed="true"] { font-weight: var(--weight-semibold); }
+#detail .result-head .select-btn { height: var(--control-h-s); }
+#detail .result-panel .viewer { flex: 1 1 auto; height: auto; min-height: 0; container: stage / size; }
+/* A short stage drops the empty state's silhouette, then the quoted idea, so the first line always shows. */
+@container stage (max-height: 480px) { #detail .viewer__silhouette { display: none; } }
+@container stage (max-height: 300px) { #detail .viewer .viewer__idea { display: none; } }
+#detail .actions { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5); }
+#detail .actions__col { display: block; flex: none; }
+#detail .actions__col .btn { --btn-h: var(--control-h-s); width: auto; padding: 0 var(--space-5); font-size: var(--text-body-s); }
+#detail .actions__rule { display: none; }
+/* The one-line help under each button stays the button's description for screen readers. */
+#detail .actions__help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#detail .actions__note { order: -1; flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+#detail .actions__error { flex: none; padding: 0 var(--space-5) var(--space-3); }
+
+/* ---------- Inspector: Behind the build, then the downloads and Roblox notes; scrolls on its own ---------- */
+/* Positioned, so visually hidden text inside it is clipped with the rest instead of stretching the page. */
+#detail .workspace-side { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+  background: var(--color-surface-1); border: var(--border-w) solid var(--color-border-subtle); border-radius: var(--radius-l); box-shadow: var(--shadow-inset-top); }
+#detail .workspace-side > .side-panel { order: 0; flex: none; width: auto; margin: 0; overflow: visible; border: 0; border-radius: 0; background: none; box-shadow: none; }
+#detail .side-head { gap: var(--space-1) var(--space-3); padding: var(--space-4) var(--space-5) var(--space-3); }
+#detail .side-head__icon { width: var(--control-h-s); height: var(--control-h-s); border-width: var(--border-w); border-radius: var(--radius-m); }
+#detail .side-head .behind-heading { font-family: var(--font-system); font-size: var(--text-title); line-height: var(--lh-title); letter-spacing: -0.01em; font-weight: var(--weight-bold); }
+#detail .side-head .behind-intro { font-size: var(--text-body-s); }
+/* The tabs: a segmented control that stays at the top of the inspector while it scrolls. */
+#detail .behind-tabs.tabs { position: sticky; top: 0; z-index: 2; gap: var(--space-1); margin: 0; padding: calc(var(--space-3) + var(--space-1)) calc(var(--space-5) + var(--space-1));
+  border-bottom: var(--border-w) solid var(--color-border-subtle); background: var(--chrome-bg-solid); }
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  #detail .behind-tabs.tabs { background: var(--chrome-bg); -webkit-backdrop-filter: var(--chrome-blur); backdrop-filter: var(--chrome-blur); }
+}
+#detail .behind-tabs.tabs::before { content: ""; position: absolute; inset: var(--space-3) var(--space-5); z-index: -1; border-radius: var(--radius-m); background: var(--color-surface-3); }
+#detail .behind-tabs .tab { height: calc(var(--control-h-s) - 2 * var(--space-1)); padding: 0 var(--space-3); border-radius: calc(var(--radius-m) - var(--space-1)); font-size: var(--text-body-s); font-weight: var(--weight-medium);
+  transition: background-color var(--dur-base) var(--ease-out), color var(--dur-fast) var(--ease-standard); }
+#detail .behind-tabs .tab:hover:not(:disabled) { background-color: transparent; color: var(--color-text); }
+#detail .behind-tabs .tab[aria-selected="true"], #detail .behind-tabs .tab[aria-selected="true"]:hover:not(:disabled) { background-color: var(--color-surface-1); color: var(--color-text); box-shadow: var(--shadow-1); font-weight: var(--weight-semibold); }
+#detail .behind-tabs .tab::after { content: none; }
+#detail .side-body { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); padding: var(--space-4) var(--space-5); }
+#detail .side-panel #stageLog { max-height: min(48dvh, 32rem); }
+#detail .side-panel .work-note h2 { font-family: var(--font-system); font-size: var(--text-title); line-height: var(--lh-title); }
+#detail .workspace-side > .result-section { order: 0; flex: none; margin: 0; padding: var(--space-5); border: 0; border-top: var(--border-w) solid var(--color-border-subtle); border-radius: 0; background: none; box-shadow: none; }
+#detail .workspace-side > .result-section .result-section__copy { flex-basis: 100%; }
+#detail .workspace-side > .result-section h2 { font-family: var(--font-system); font-size: var(--text-title); line-height: var(--lh-title); letter-spacing: -0.01em; font-weight: var(--weight-bold); }
+
+/* ---------- Stacked: below 960 px the result stays on top at a fixed share while the heading, the downloads and
+   the inspector scroll under it, inside the workspace (the page itself still never scrolls) ---------- */
+@media (max-width: 959px) {
+  body.workspace-screen { --ws-result-h: clamp(15rem, 50dvh, 40rem); }
+  #detail.generation { display: flex; flex-direction: column; gap: var(--ws-gap); padding-top: 0; overflow-y: auto; overscroll-behavior: contain; }
+  #detail .result-column { order: -1; position: sticky; top: 0; z-index: 3; flex: none; height: var(--ws-result-h); padding-top: var(--ws-pad); background: var(--color-bg); box-shadow: 0 var(--ws-gap) 0 var(--color-bg); }
+  #detail > .workspace-top, #detail .workspace-side { flex: none; }
+  #detail .workspace-side { overflow: visible; }
+  #detail .behind-tabs.tabs { top: calc(var(--ws-result-h) + var(--ws-gap)); }
+  /* The step list opens upward, over the result, where there is room for it. */
+  #detail .progress__steps { top: auto; bottom: calc(100% + var(--space-2)); }
+  #detail .progress__steps-inner { max-height: min(40dvh, 26rem); }
+}
+/* ---------- A very short window: the workspace keeps a usable stage and scrolls inside itself instead ---------- */
+@media (min-width: 960px) and (max-height: 599px) {
+  #detail.generation { grid-template-rows: auto minmax(22rem, 1fr); overflow-y: auto; overscroll-behavior: contain; }
+}
+@media (max-width: 959px) and (max-height: 599px) {
+  #detail .result-column { position: relative; height: max(26rem, var(--ws-result-h)); }
+  #detail .behind-tabs.tabs { top: 0; }
+}
+@media (max-width: 767px) {
+  body.workspace-screen { --ws-pad: var(--space-3); --ws-gap: var(--space-3); }
+  body.workspace-screen .workbench-theme { --btn-h: var(--tap-min); }
+  /* The chip moves to the right of the wordmark, left of the theme button; its popover spans the window. */
+  #detail #rewordNote { left: auto; right: calc(var(--ws-pad) + var(--tap-min) + var(--space-2)); translate: none; max-width: calc(100vw - 2 * var(--ws-pad) - var(--tap-min) - 4.5rem); }
+  /* On a phone the wordmark keeps only its monogram while the chip is up. */
+  body.workspace-screen:has(#rewordNote:not([hidden])) .page-brand .brand > span:last-child { display: none; }
+  #detail #rewordNote .reword__detail { position: fixed; top: calc(var(--toolbar-h) + var(--space-2)); left: var(--ws-pad); right: var(--ws-pad); translate: none; width: auto; }
+  #detail .generation-heading { grid-template-columns: minmax(0, 1fr); grid-template-areas: "eyebrow" "title" "sub" "deliver"; }
+  #detail .heading-row h1 { font-size: var(--text-title); line-height: var(--lh-title); }
+  #detail .generation-subtitle { -webkit-line-clamp: 1; }
+  #detail .deliver { justify-self: stretch; }
+  #detail .deliver__row > .badge-pill { display: none; }
+  #detail .deliver__row, #detail .deliver__options { display: flex; width: 100%; }
+  #detail .deliver__option { flex: 1 1 0; min-width: 0; width: auto; }
+  #detail .deliver__option .btn { --btn-h: var(--tap-min); width: 100%; padding: 0 var(--space-3); white-space: normal; line-height: 1.15; text-align: center; font-size: var(--text-caption); }
+  #detail .progress { row-gap: var(--space-2); padding: var(--space-2) var(--space-2) var(--space-3) var(--space-4); }
+  #detail .progress__toggle { min-height: 0; }
+  /* One header row: the view switch and the version picker; "Selected result" stays as the picker's label. */
+  #detail .result-head { flex-wrap: nowrap; padding: var(--space-2); }
+  #detail .result-head .result-head__title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #detail .viewer-mode { order: 0; flex: none; }
+  #detail .viewer-mode button { flex: none; height: calc(var(--control-h-s) - 2 * var(--space-1)); padding: 0 var(--space-3); }
+  #detail .select-wrap { flex: 1 1 auto; justify-content: flex-end; }
+  #detail .result-head .select-btn { max-width: 100%; }
+  #detail .actions { padding: var(--space-2); }
+  #detail .actions__col { flex: 1 1 0; }
+  #detail .actions__col .btn { --btn-h: var(--tap-min); width: 100%; }
+  #detail .actions__note { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #detail .side-head { padding: var(--space-3) var(--space-4) var(--space-2); }
+  #detail .side-head .behind-intro { display: none; }
+  #detail .behind-tabs.tabs { padding-inline: calc(var(--space-4) + var(--space-1)); }
+  #detail .behind-tabs.tabs::before { inset: var(--space-3) var(--space-4); }
+  #detail .side-body { padding: var(--space-3) var(--space-4); }
+}
+
+/* ---------- Reduced motion: durations collapse in tokens.css; the entrances also stop ---------- */
+@media (prefers-reduced-motion: reduce) {
+  #detail #rewordNote, #detail #rewordNote .reword__detail { animation: none; }
+}

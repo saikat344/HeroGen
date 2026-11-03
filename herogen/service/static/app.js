@@ -6,7 +6,7 @@ import { landingGallery } from '/assets/landing.js';
 let landing;
 import { buildLog } from '/assets/buildlog.js';
 import { generationView, generationState, TERMINAL } from '/assets/generation.js';
-import { descriptionDraft, rewordNotice, usd } from '/assets/buildlog-copy.js';
+import { descriptionDraft, rewordLabel, rewordNotice, usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
 import { renderDownloads } from '/assets/downloads.js';
 import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
@@ -26,6 +26,7 @@ function setScreen(next) {
   document.title = next === 'heroes' ? 'Your heroes · HeroGen' : 'HeroGen';
   landing?.setVisible(next === 'entry');
   $('#app').classList.toggle('generation-screen', next === 'generation');
+  document.body.classList.toggle('workspace-screen', next === 'generation');   // the fixed, non-scrolling workspace frame
   $('#app').classList.toggle('heroes-screen', next === 'heroes');
   if (enteringWorkbench) track('page_view', { page: 'workbench' });
 }
@@ -236,18 +237,37 @@ function jobBanner(j) {
   $('#detailRetry').hidden = kind === 'warning';
 }
 
-// The description reworded after a content-policy refusal: what it now says, and, when the run stopped on it, a
-// button that opens the description box filled with the rewrite.
+// The description reworded after a content-policy refusal: a one-line chip in the toolbar that opens what it now
+// says and, when the run stopped on it, a button that opens the description box filled with the rewrite. A dismissed
+// note stays dismissed for that hero in this tab.
+const REWORD_DISMISSED = 'herogen.rewordDismissed';
+const rewordDismissed = new Set((() => { try { return JSON.parse(sessionStorage.getItem(REWORD_DISMISSED) || '[]'); } catch { return []; } })());
+function rewordOpen(open) { $('#rewordToggle').setAttribute('aria-expanded', String(open)); $('#rewordDetail').hidden = !open; }
 function rewordBanner(j) {
-  const note = rewordNotice(j), box = $('#rewordNote');
-  box.hidden = !note;
-  if (!note) return;
+  const note = rewordNotice(j), box = $('#rewordNote'), key = note ? `${j.id}:${j.reword.status}` : '';
+  if (box.dataset.key !== key) rewordOpen(false);
+  box.dataset.key = key;
+  box.hidden = !note || rewordDismissed.has(key);
+  if (box.hidden) return;
   box.className = `banner banner--${note.tone}`;
   box.querySelector('use').setAttribute('href', `/assets/icons/sprite.svg#i-${note.tone === 'info' ? 'info' : 'triangle-alert'}`);
+  $('#rewordLabel').textContent = rewordLabel(j);
   $('#rewordNoteTitle').textContent = note.title; $('#rewordNoteText').textContent = note.text;
   $('#rewordEdit').hidden = note.tone === 'info' || !TERMINAL.has(j.state);
 }
 $('#rewordEdit').addEventListener('click', () => { if (S.job) $('#changeIdea').click(); });
+$('#rewordToggle').addEventListener('click', () => rewordOpen($('#rewordDetail').hidden));
+$('#rewordClose').addEventListener('click', () => {
+  const box = $('#rewordNote');
+  rewordDismissed.add(box.dataset.key); rewordOpen(false); box.hidden = true;
+  try { sessionStorage.setItem(REWORD_DISMISSED, JSON.stringify([...rewordDismissed])); } catch { /* private mode: this page only */ }
+  $('#detail').focus({ preventScroll: true });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('#rewordDetail').hidden) return;
+  rewordOpen(false); $('#rewordToggle').focus();
+});
+document.addEventListener('click', (e) => { if (!$('#rewordDetail').hidden && !$('#rewordNote').contains(e.target)) rewordOpen(false); });
 
 // ---- status bar ------------------------------------------------------------------------------------------
 

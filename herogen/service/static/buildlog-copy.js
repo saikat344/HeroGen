@@ -332,6 +332,13 @@ export function rewordNotice(job) {
       + 'Edit the description to remove them and try again.'};
   return null;
 }
+// The same note in a few words, for the one-line chip on the workspace toolbar (the full note opens from it).
+export function rewordLabel(job) {
+  const r = job?.reword;
+  if (!rewordNotice(job)) return null;
+  if (r.status === 'used') return r.reason === 'precheck' ? 'Reworded to avoid a brand name' : 'Reworded to pass the content policy';
+  return r.status === 'refused_again' ? 'Reworded description refused too' : 'Description could not be reworded';
+}
 // What the description box is filled with when the user edits a stopped hero: a rewrite that was used (the server
 // sends only one that passed the description's rules), else the user's own description. A rewrite made up front
 // that was still refused gives the box the user's own description back.
