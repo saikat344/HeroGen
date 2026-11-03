@@ -198,6 +198,8 @@ function renderJob(j) {
   // The downloads lead once there is something to download; Retry and Refine then step down to secondary.
   const offer = renderDownloads($, j, { track });
   const lead = !!(offer?.roblox?.url || offer?.glb);
+  // On a finished hero the downloads take the subtitle's place under the title.
+  $('#generationSubtitle').hidden = j.state === 'succeeded' && !!offer;
   $('#refineVersion').classList.toggle('btn--primary', !lead);
   $('#refineVersion').classList.toggle('btn--secondary', lead);
   for (const id of ['#refineVersion', '#retryVersion']) $(id).classList.toggle('btn--l', !lead);

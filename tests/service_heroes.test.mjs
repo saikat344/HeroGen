@@ -28,6 +28,8 @@ test('the finish note waits for the Roblox steps before giving the full time', (
   const secs = (v) => `${Math.round(v)} s`;
   const ready = {state: 'succeeded', created_at: 100, started_at: 100, finished_at: 628};
   assert.equal(finishedNote({...ready, export_state: 'running'}, secs), 'Model ready in 528 s · Roblox files in progress');
+  // The Roblox files can be ready while the export's last step still runs: the note says so at once.
+  assert.equal(finishedNote({...ready, export_state: 'running', roblox_state: 'ready'}, secs), 'Model ready in 528 s · Roblox files ready');
   assert.equal(finishedNote({...ready, export_state: 'ready', export_seconds: 709}, secs), 'Finished in 1237 s');
   assert.equal(finishedNote({...ready, export_state: 'unavailable', export_seconds: 12}, secs), 'Finished in 540 s');
   assert.equal(finishedNote(ready, secs), 'Finished in 528 s');

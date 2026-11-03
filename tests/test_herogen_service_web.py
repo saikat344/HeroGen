@@ -961,15 +961,19 @@ class TestPages(WebCase):
         self.assertIn('.app-bar:not([data-screen="generation"]) .app-bar__status', css)
         self.assertIn("body:has(> .app-bar) { padding-bottom: calc(var(--app-bar-h)", css)
 
-    def test_downloads_sit_under_the_result_and_not_further_down(self):
+    def test_downloads_sit_in_the_title_block_once(self):
         page = Browser(self.app).get("/").text
         self.assertEqual(page.count('id="downloads"'), 1)
+        self.assertEqual(page.count('id="robloxReady"'), 1)
         deliver = page.index('<section class="deliver" id="deliver"')
-        self.assertLess(page.index('<div class="viewer" id="viewer"'), deliver)
-        self.assertLess(deliver, page.index('id="attemptActions"'))
+        heading = page.index('<div class="generation-heading heading">')
+        self.assertLess(heading, page.index('id="generationTitle"'))
+        self.assertLess(page.index('id="generationSubtitle"'), deliver)
+        self.assertLess(deliver, page.index('<div class="progress"'), "under the title, above the progress bar")
         self.assertLess(deliver, page.index('id="robloxReady"'))
-        self.assertGreater(page.index('class="panel result-section"'), page.index('id="downloads"'))
-        self.assertLess(page.index('id="downloads"'), page.index('id="attemptActions"'))
+        self.assertLess(page.index('id="robloxReady"'), page.index('id="downloads"'))
+        # Retry and Refine stay under the viewer.
+        self.assertLess(page.index('<div class="viewer" id="viewer"'), page.index('id="attemptActions"'))
 
     def test_only_tokens_css_writes_hex_colours_in_the_new_styles(self):
         from herogen.service import web

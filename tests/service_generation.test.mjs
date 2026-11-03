@@ -64,3 +64,9 @@ test('each progress segment names its stage and state, so the bar never relies o
   const failed=generationState({state:'failed',stages:[stage('1','failed'),stage('2','pending'),stage('3f','skipped')]});
   assert.deepEqual(segmentLabels(failed.steps,failed.terminal),['Artwork · failed','Character views · not reached','Texture refine · skipped']);
 });
+
+test('a hero whose Roblox files are ready is not called "preparing" while the export finishes', () => {
+  const stages = [stage('4','passed'),stage('6','passed'),stage('5','running')];
+  assert.equal(generationState({state:'succeeded',export_state:'running',stages}).eyebrow,'Hero ready · preparing Roblox files');
+  assert.equal(generationState({state:'succeeded',export_state:'running',roblox_state:'ready',stages}).eyebrow,'Hero ready · Roblox R15');
+});

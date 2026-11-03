@@ -60,7 +60,7 @@ export function generationState(job) {
     status: s.state === 'pending' && TERMINAL.has(job.state) ? (job.state === 'succeeded' && ['4', '6', '5'].includes(s.key) && job.export_state === 'running' ? 'Waiting' : 'Not reached') : STATE[s.state] || s.state || 'Not reported' }));
   const passed = main.filter((s) => s.state === 'passed').length;
   const terminal = TERMINAL.has(job.state);
-  const exporting = job.state === 'succeeded' && job.export_state === 'running';
+  const exporting = job.state === 'succeeded' && job.export_state === 'running' && job.roblox_state !== 'ready';
   const current = steps.find((s) => s.state === 'running') || steps.find((s) => s.state === 'pending');
   const phase = COPY[focus?.key]?.[1] || focus?.label || 'Following the pipeline';
   const left = job.state === 'running' ? timeLeft(steps) : null;

@@ -83,6 +83,8 @@ export function stageProgress(detail) {
 export function finishedNote(job, format, start = job.started_at) {
   const known = Number.isFinite(start) && Number.isFinite(job.finished_at);
   const model = known ? format(job.finished_at - start) : '';
+  // The Roblox files can be ready (roblox_state) a moment before the export's last step ends (export_state).
+  if (job.export_state === 'running' && job.roblox_state === 'ready') return model ? `Model ready in ${model} · Roblox files ready` : 'Roblox files ready';
   if (job.export_state === 'running') return model ? `Model ready in ${model} · Roblox files in progress` : 'Roblox files in progress';
   const total = known ? format(job.finished_at + (Number.isFinite(job.export_seconds) ? job.export_seconds : 0) - start) : '';
   return total ? `Finished in ${total}` : '';

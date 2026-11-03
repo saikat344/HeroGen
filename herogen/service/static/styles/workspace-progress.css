@@ -17,6 +17,19 @@
 .generation-subtitle { margin: 0; max-width: 62ch; font-size: var(--text-body); line-height: var(--lh-body); }
 .badge-pill--wait { color: var(--color-warning); border-color: var(--color-warning-border); background: var(--color-warning-subtle); }
 
+/* ---------- Downloads: the hero's main call to action, one row under the title (downloads.js) ---------- */
+.deliver { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
+.deliver__row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3) var(--space-5); }
+.deliver__row > .badge-pill { margin-top: calc((var(--control-h-m) - 26px) / 2); }
+.deliver__options { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3) var(--space-4); }
+.deliver__option { display: grid; justify-items: center; gap: var(--space-1); min-width: 0; }
+.deliver__option .btn:disabled { opacity: 0.7; }
+.deliver__option .btn.is-busy .icon { animation: spin calc(var(--dur-ambient) / 2) var(--ease-linear) infinite; }
+.deliver__hint { margin: 0; font-size: var(--text-caption); line-height: var(--lh-caption); color: var(--color-text-muted); text-align: center; }
+.deliver__note { display: flex; align-items: flex-start; gap: var(--space-3); margin: 0; max-width: 62ch; font-size: var(--text-body-s); line-height: var(--lh-body-s); color: var(--color-text-muted); }
+.deliver__note .icon { margin-top: var(--space-1); color: var(--color-info); }
+.deliver[data-state="unavailable"] .deliver__note { color: var(--color-text); }
+
 /* ---------- Progress bar and steps list ---------- */
 .generation .progress { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; align-items: center; column-gap: var(--space-6); row-gap: 0; transition: border-color var(--dur-base) var(--ease-standard); }
 .progress__label { margin: 0; white-space: normal; }
@@ -118,6 +131,9 @@ h2.banner__title { font-family: var(--font-ui); letter-spacing: 0; }
   .progress .stages li { grid-template-columns: var(--icon-m) minmax(0, 1fr); }
   .progress .step-duration { grid-column: 2; text-align: left; }
   .heading-row h1 { font-size: var(--text-display-m); line-height: var(--lh-display-m); }
+  .deliver__options, .deliver__option { width: 100%; }
+  .deliver__options { display: grid; }
+  .deliver__option .btn { width: 100%; --btn-h: var(--tap-min); }
   .banner { flex-wrap: wrap; }
   .workspace-top .banner > .banner__body { flex-basis: calc(100% - var(--icon-l) - var(--space-5)); }
   .workspace-top .banner > .btn, .banner__actions { margin-left: calc(var(--icon-l) + var(--space-5)); }
@@ -128,6 +144,6 @@ h2.banner__title { font-family: var(--font-ui); letter-spacing: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stages .st-running .step-icon, #detail[data-job-state="running"] #generationEyebrow::before, .status-bar__saved.is-just-saved .dot, .menu, .modal[open] { animation: none; }
+  .stages .st-running .step-icon, .deliver__option .btn.is-busy .icon, #detail[data-job-state="running"] #generationEyebrow::before, .status-bar__saved.is-just-saved .dot, .menu, .modal[open] { animation: none; }
   .seg--done.is-new { animation: none; }
 }
