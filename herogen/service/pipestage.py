@@ -80,13 +80,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def reword_main(run, cache: Path, original: str) -> int:
-    from herogen.pipeline import reword
+    from herogen.pipeline import events, reword
     from herogen.pipeline.client import ApiError, ModelClient
 
     client = ModelClient(cache, mode="live")
     calls0 = len(client.log.calls)
     try:
-        rec = reword.rewrite(client, original)
+        # The rewrite's call events belong to the refused step the runner names in the environment. Clearing the
+        # context step lets that name win over one left behind by earlier work in the same process.
+        with events.step(None):
+            rec = reword.rewrite(client, original)
     except Exception as e:  # noqa: BLE001  (recorded as a failed rewrite; the job stops loudly on it)
         failed = {"status": reword.FAILED, "reason": reword.REASON, "original": original,
                   "error": type(e).__name__, "cost_usd": client.log.cost_usd(calls0)}
