@@ -225,8 +225,10 @@ export function generationView($, select3D) {
     tipFor = seg || null; tip.hidden = !seg;
     if (!seg) return;
     text(tip, seg.getAttribute('aria-label'));
-    const box = bar.parentElement.getBoundingClientRect(), at = seg.getBoundingClientRect();
-    tip.style.left = `${at.left - box.left + at.width / 2}px`; tip.style.top = `${at.bottom - box.top}px`;
+    // Centred under the segment, but kept inside the progress box so it never runs off a narrow screen.
+    const box = bar.parentElement.getBoundingClientRect(), at = seg.getBoundingClientRect(), half = tip.offsetWidth / 2;
+    tip.style.left = `${Math.min(Math.max(at.left - box.left + at.width / 2, half), box.width - half)}px`;
+    tip.style.top = `${at.bottom - box.top}px`;
   }
   function renderSegments(steps, fresh, terminal) {
     const keys = steps.map((x) => x.key).join();
