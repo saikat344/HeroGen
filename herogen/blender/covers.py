@@ -159,10 +159,13 @@ def add_covers(sections: dict, body_v: np.ndarray, body_f: np.ndarray, owner: st
                radius: float = COVER_RADIUS, outset: float = COVER_OUTSET, inside=None) -> tuple[dict, dict]:
     """Return (sections with covers merged into their owners, cover info per side).
 
-    `owner` is "UpperArm" (the pad turns with the arm) or "UpperTorso" (the pad stays on the body).
+    `owner` is "UpperArm" (the pad turns with the arm), "UpperTorso" (the pad stays on the body) or None (no
+    covers: the sections are returned as they are).
     """
     out = dict(sections)
     info = {}
+    if owner is None:
+        return out, info
     for side in ("Left", "Right"):
         arm = sections[side + "UpperArm"]
         rim = [r["points"] for r in arm.rims if r["neighbour"] == "UpperTorso" and len(r["points"])]

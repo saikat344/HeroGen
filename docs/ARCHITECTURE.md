@@ -443,6 +443,23 @@ An opening that borders several sections contributes only the points shared with
 its centroid. Including another neighbour's boundary can move the pivot and stretch the spherical caps;
 openings with fewer than three shared points retain the whole-loop fallback.
 
+**Caps.** Each joint opening gets a spherical cap about the pivot, bulging into the neighbour and flattened until
+its ring points and apex lie inside the neighbour at rest. The flattening only tests those samples; an opening that
+is not round about the pivot (a cut through a cloak, robe or hood, a crescent far from the joint) slerps into long
+shards between them that stand outside the body at rest. On a hooded elf archer from the development site
+(in-game high) 29.7 square studs of cap surface lay more than 0.01 studs outside every other part at rest (desert
+ranger 9.0, wizard 6.7, blue suit hero 0). Stage 4 therefore tests each cap's own triangles against the neighbour's closed surface
+(`split.dome_outside_area`: triangle centres outside it by more than 0.01 studs). A cap whose such triangles add up
+to more than 0.001 square studs is lowered to a half, a quarter and a tenth of its height, and an opening whose
+lowest cap still shows is filled flat with its own polygon (`split.fill_polygon`, ear clipping on the loop's best
+plane; a loop that does not project to a simple polygon keeps the centroid fan). The flat fill lies on the cut, so it
+is hidden at rest; a centroid fan of a C-shaped opening spanned its empty middle. `Section.flat_fills` counts the
+openings filled flat (`sections.json`: `flat_fills_high` / `flat_fills_low` per section); `cap_triangles` and the
+interior marking are unchanged. `cap="flat"` comparison builds use the
+polygon fill too. `cap_surface_outside_<lod>` records the cap area more than 0.01 studs outside every other part at
+rest, per section (`pose.cap_surface_outside`); it is recorded, not gated, since four rebuilt heroes are too few to
+place a limit.
+
 Before cutting, `rig_geometry.reconcile_skeleton` checks the hybrid landmarks against their limb topology.
 If the selected hips do not straddle Root, their recorded anatomical pair is used; a shoulder below its elbow
 uses its recorded anatomical alternative. Missing alternatives stop construction. For a corrected hip pair,
@@ -994,7 +1011,8 @@ only search-distance bounds, never UVs.
 
 Each bake calibrates its ray limit on at most 4096 evenly spaced exterior texels: four times the exact nearest
 distance p95, with a floating-point floor for coincident surfaces. Section construction marks interior joint
-caps, and shoulder-cover construction marks reversed inner patches and connecting walls. Those faces receive
+caps (and, in comparison runs that still build shoulder covers, their reversed inner patches and connecting
+walls). Those faces receive
 closest-point colour but contribute neither to distance statistics nor to the ray limit. Diagnostics record
 closest, ray, interior and fallback counts, the calibration subset, and exterior travel distances.
 `MeshIndex.ray_first_hit` reuses the uniform-grid DDA and Moller-Trumbore tests, retaining the nearest hit until
@@ -1365,7 +1383,7 @@ and the scorer checks the same names (`--profile`):
 | `roblox-ingame` | `high.glb` and `low.glb`, each the largest whole-body decimation whose sectioned total fits | `triangles_high` <= 24,000, `triangles_low` <= 6,000 |
 | `roblox-avatar` | one `high.glb` (Roblox makes its own LODs) that meets the triangle, watertight-part and texture limits of Roblox's character body specification; each part group takes, from a ladder of whole-body decimations, the densest candidate that fits its own budget (sections are separate closed meshes, so groups may come from different candidates), with the low cap and cover settings | `triangles_total` <= 10,742; per group `triangles_Head` <= 4,000, `triangles_Torso` (`UpperTorso`, `LowerTorso`) <= 1,750, each arm and leg (three sections) <= 1,248; `watertight_parts` (every part closed and manifold after welding); `texture_max_px` <= 2048 |
 
-Triangle selection counts the finished sections, including new cut faces, caps and shoulder covers. If none of
+Triangle selection counts the finished sections, including new cut faces and caps. If none of
 the initial whole-body targets fits, stage 4 halves the smallest target until the finished geometry fits, then
 refines a whole-body bracket at the initial ladder's target spacing. Part-group budgets extend downward too.
 A fitting initial ladder is unchanged. If even a one-triangle target cannot fit the required added geometry,
@@ -1607,10 +1625,27 @@ longer exists; such a record is not a measurement and never counts as passed, wh
 page shows it as "degraded: threshold masks", stage 2h refuses to start from such a stage 2, `herogen.blender`
 refuses to build on it (without `--force`), and a held-out view measured on one is never an accepted view.
 
-**Shoulder covers.** Stage 4 adds one cover per shoulder, merged into its owner section (`UpperTorso`) so each
-GLB keeps exactly 15 meshes. `sections.json` lists them under `"covers"`: the owner, the shaping parameters, and
-`pieces_high` / `pieces_low` with each piece's triangles. Covers count in the triangle budgets (in the Torso
-group under `roblox-avatar`).
+**Shoulder covers.** Stage 4 no longer adds shoulder covers (`stage4.COVER_OWNER = None`). A cover was the body
+surface within 2.5 shoulder cut radii of the shoulder pivot, pushed out and closed into a thin shell owned by the
+`UpperTorso`. On a slim arm that sphere holds the whole upper arm: on a slim blue suit hero from the
+development site each pad ran from 0.21 studs inside the shoulder joint to 0.59 along the arm, past
+the elbow. In the site's Wave clip it stayed in its A-pose place beside the raised arm as a flap, and at rest it lay
+0.001-0.06 studs over the arm, so the two surfaces showed through each other up to its ragged edge at the elbow.
+The joints are now closed by their spherical caps alone. `sections.json` keeps `"covers"` with `owner: null` and
+empty `pieces_high` / `pieces_low`; `covers.add_covers(owner=None)` returns the sections unchanged, and the module
+remains for comparison runs.
+
+**Stray surface.** The pose test follows only the cut rims, and a torso-owned pad hid those rims, so no gap ever
+measured the flap (that hero passed every gap at 0.11 studs). `pose.stray_surface` measures, per arm joint
+(shoulders, elbows, wrists), the outer surface of either section lying within 0.10 studs of the other's outer surface
+and farther than 0.15 studs from their shared rim, at rest: surface that runs along the neighbour and therefore stays
+behind, or leaves, as a flap when the joint turns. Caps and covers' inner faces and walls are not outer surface.
+`stray_surface_<lod>` gates the worst joint at 0.05 square studs (full lane; informational in the fast lane like the
+other quality measurements) and records `by_joint`, `reach_studs` and the constants. Calibration on the 57 recorded
+in-game high bodies of the development site, as built and with their cover faces removed: without covers every
+body's worst arm joint is at most 0.038 (49 under 0.005, a little armpit contact); with covers 51 measure
+0.063-6.7 (the blue suit hero 0.46), while six stay under 0.004 because their pads lie over the torso's own shoulder,
+not the arm. The full record lists every joint under `pose_test.stray_surface`.
 
 ## Versions
 

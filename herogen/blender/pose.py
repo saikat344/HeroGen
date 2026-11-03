@@ -371,3 +371,107 @@ def bone_directions(sk) -> dict[str, np.ndarray]:
         d[s + "LowerLeg"] = u(j[s + "Knee"], j[s + "Ankle"])
         d[s + "Foot"] = u(j[s + "Ankle"], e[s + "Toe"])
     return d
+
+
+# Stray surface: a section's outer surface lying along another section's outer surface, away from the cut they
+# share. The pose test above only follows the cut rims, so it cannot see surface that one section carries over its
+# neighbour (a torso-owned pad shaped from the upper arm hides the shoulder rim and stays behind with the torso
+# when the arm lifts). In a body cut cleanly at the joints two sections' outer surfaces meet only along their
+# rim. Calibration: the in-game high bodies of 57 recorded heroes (the development site's runs, stage 4 of the
+# shoulder-cover build), measured as built and again with the cover faces removed. Without covers the worst arm
+# joint of every body is at most 0.038 square studs (49 of 57 under 0.005: a little armpit contact); with covers 51
+# reach 0.063-6.7 (the blue suit hero 0.46, its pads reaching 0.34 studs from the shoulder rim). The other six hold
+# under 0.004: their pads lie over the torso's own shoulder, not the arm, and stay put harmlessly. A distance of
+# 0.10 covers a pad pushed the full 0.06 studs out; at 0.05 those parts of a pad go unseen. A band of 0.15 leaves
+# the strip where an A-posed arm and the chest meet below the armpit.
+STRAY_DISTANCE = 0.10   # studs: outer surface within this distance of the neighbour's outer surface runs along it
+STRAY_BAND = 0.15       # studs: except within this distance of the joint's shared rim, where the two meet
+STRAY_AREA_GATE = 0.05  # square studs per joint, between the worst clean body (0.038) and the least pad (0.063)
+STRAY_JOINTS = ("LeftShoulder", "RightShoulder", "LeftElbow", "RightElbow", "LeftWrist", "RightWrist")
+
+
+def _exterior(s) -> np.ndarray:
+    ext = getattr(s, "colour_exterior", None)
+    if ext is None:
+        ext = np.arange(len(s.faces)) < len(s.faces) - getattr(s, "cap_triangles", 0)
+    return np.asarray(ext, dtype=bool)
+
+
+def stray_surface(sections: dict, joints=STRAY_JOINTS, distance: float = STRAY_DISTANCE,
+                  band: float = STRAY_BAND) -> dict[str, dict]:
+    """Per joint, the outer surface (square studs) of either section that lies within `distance` of the other's
+    outer surface and farther than `band` from their shared rim, at rest.
+
+    Such surface belongs to the neighbour's shape but moves with the wrong part: when the joint turns, it stays
+    behind (or leaves) as a flap. Caps, the reversed inner faces of covers and their walls are not outer surface.
+    A joint without a shared rim or with an empty section is left out (it is not measured, not zero).
+    Returns {joint: {"area": parent's + child's, "parent_area", "child_area", "reach": the farthest such face
+    centre from the rim (studs, 0 when none)}}.
+    """
+    out: dict[str, dict] = {}
+    for child, parent in PARENT.items():
+        if parent is None or PIVOT_JOINT[child] not in joints:
+            continue
+        c, p = sections[child], sections[parent]
+        rim = [r["points"] for r in c.rims if r["neighbour"] == parent and len(r["points"])]
+        if not rim or not len(c.faces) or not len(p.faces):
+            continue
+        rim = np.concatenate(rim)
+        areas, reach = {}, 0.0
+        for key, a, b in (("parent_area", p, c), ("child_area", c, p)):
+            ea, eb = _exterior(a), _exterior(b)
+            if not ea.any() or not eb.any():
+                areas[key] = 0.0
+                continue
+            tri = a.verts[a.faces[ea]]
+            centre = tri.mean(axis=1)
+            area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+            # only faces near the other section can run along it: a cheap box test before the exact distance
+            lo, hi = b.verts.min(axis=0) - distance, b.verts.max(axis=0) + distance
+            near = np.flatnonzero(((centre >= lo) & (centre <= hi)).all(axis=1))
+            hit = np.zeros(len(centre), dtype=bool)
+            if len(near):
+                d = MeshIndex(b.verts, b.faces[eb]).distance(centre[near])
+                hit[near[d < distance]] = True
+            idx = np.flatnonzero(hit)
+            d_rim = np.full(len(idx), np.inf)
+            for start in range(0, len(idx), 2048):
+                block = centre[idx[start:start + 2048]]
+                d_rim[start:start + 2048] = np.sqrt(((block[:, None] - rim[None]) ** 2).sum(axis=2)).min(axis=1)
+            stray = d_rim > band
+            areas[key] = float(area[idx[stray]].sum())
+            if stray.any():
+                reach = max(reach, float(d_rim[stray].max()))
+        out[PIVOT_JOINT[child]] = {"area": round(areas["parent_area"] + areas["child_area"], 4),
+                                   "parent_area": round(areas["parent_area"], 4),
+                                   "child_area": round(areas["child_area"], 4), "reach": round(reach, 4)}
+    return out
+
+
+def cap_surface_outside(sections: dict, tolerance: float = 0.01) -> dict[str, float]:
+    """Per section, the area (square studs) of its cap triangles whose centres lie outside every other section at
+    rest, farther than `tolerance` from all of them: cap surface that shows on the rest body (a shard). Caps are
+    the faces not marked as outer surface; the tolerance (split.DOME_SHOW_STUDS) leaves out the triangles along a
+    rim, which sit on the neighbour's surface."""
+    index = {n: MeshIndex(s.verts, s.faces) for n, s in sections.items() if len(s.faces)}
+    out = {}
+    for n, s in sections.items():
+        if not len(s.faces):
+            continue
+        tri = s.verts[s.faces[~_exterior(s)]]
+        if not len(tri):
+            out[n] = 0.0
+            continue
+        centre = tri.mean(axis=1)
+        covered = np.zeros(len(centre), dtype=bool)
+        for m, idx in index.items():
+            if m != n and (~covered).any():
+                todo = np.flatnonzero(~covered)
+                covered[todo] = idx.inside(centre[todo])
+        far = np.flatnonzero(~covered)
+        for m, idx in index.items():
+            if m != n and len(far):
+                far = far[idx.distance(centre[far]) > tolerance]
+        area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        out[n] = round(float(area[far].sum()), 4)
+    return out
