@@ -309,7 +309,7 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             passed, measures["parts"], _ = I.part_gate(parts, edited_parts, figure)
             reason = "new face outside the render face"
         if passed and recipe in ("RF6B", "RF17B", "RF18B") and cam["name"] in ("head+0", "body+0") and parts["face"].any():
-            from .beauty import facial_features
+            from .beauty import FACIAL_FEATURES, facial_features
             if reference_features is None:
                 reference_features = facial_features(client, cover)
             painted = Image.fromarray((np.clip(warped, 0, 1) * 255).round().astype(np.uint8))
@@ -317,13 +317,15 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
             if complete_face:
                 from .beauty import frontal_features
                 features.update(frontal_features(client, painted, parts["face"]))
-            missing = [name for name, present in reference_features.items() if present and not features[name]]
-            passed = any(reference_features.values()) and not missing
+            # `mouth_concept` (which SAM concept found the mouth) is a note, not a feature to require.
+            found = [name for name in FACIAL_FEATURES if reference_features[name]]
+            missing = [name for name in found if not features[name]]
+            passed = bool(found) and not missing
             if complete_face:
                 passed = passed and features["both_eyes"] and features["mouth"]
                 missing += [name for name in ("both_eyes", "mouth") if not features[name] and name not in missing]
             measures["facial_features"] = {"reference": reference_features, "repaint": features, "missing": missing}
-            reason = ("beauty reference has no facial features" if not any(reference_features.values())
+            reason = ("beauty reference has no facial features" if not found
                       else "missing facial features: " + ", ".join(missing))
         trial["reason"] = "accepted" if passed else reason
         if not passed:

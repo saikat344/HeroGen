@@ -103,6 +103,13 @@ class FaceRuleTests(unittest.TestCase):
         self.control.choose([self.head], self.work)
         self.assertEqual(self.data['face_source']['view'], 'body+0')
 
+    def test_mouth_found_as_lips_lets_the_beauty_head_win(self):
+        self.frontal()
+        repaint = self.data['views']['head+0']['attempts'][0]['checks']['facial_features']['repaint']
+        repaint['mouth_concept'] = 'lips'
+        self.control.choose([self.head], self.work)
+        self.assertEqual(self.data['face_source'], {'source': 'beauty', 'view': 'head+0', 'attempt': 0})
+
     def test_missing_eye_or_mouth_or_rejected_frontal_uses_default(self):
         for both, mouth, accepted in ((False, True, True), (True, False, True), (True, True, False)):
             with self.subTest(both=both, mouth=mouth, accepted=accepted):

@@ -68,8 +68,67 @@ class BeautyTests(unittest.TestCase):
         self.client.segment.side_effect = segment
         got = beauty.facial_features(self.client, Image.new("RGB", (64, 64)))
         self.assertEqual(got, {"eyes": True, "eyebrows": False, "mouth": False})
+        # "mouth" found nothing inside the face, so "lips" is asked (and finds nothing either).
         self.assertEqual(calls, [((64, 64), "face"), ((20, 20), "eyes"),
-                                 ((20, 20), "eyebrows"), ((20, 20), "mouth")])
+                                 ((20, 20), "eyebrows"), ((20, 20), "mouth"), ((20, 20), "lips")])
+
+    def mouth_client(self, answers):
+        """A face filling the image; ``answers`` maps a concept to the crop rows/cols it finds."""
+        calls = []
+
+        def segment(image, text):
+            calls.append(text)
+            mask = np.zeros(image.size[::-1], bool)
+            if text in answers:
+                mask[answers[text]] = True
+            return [SimpleNamespace(mask=mask)] if mask.any() else []
+
+        return SimpleNamespace(segment=segment), calls
+
+    def test_mouth_found_makes_no_lips_query(self):
+        face = np.ones((20, 20), bool)
+        client, calls = self.mouth_client({"mouth": np.s_[14:16, 8:12], "lips": np.s_[14:16, 8:12]})
+        got = beauty.facial_features(client, Image.new("RGB", (20, 20)), face)
+        self.assertEqual(got, {"eyes": False, "eyebrows": False, "mouth": True})
+        self.assertEqual(calls, ["eyes", "eyebrows", "mouth"])
+        calls.clear()
+        got = beauty.frontal_features(client, Image.new("RGB", (20, 20)), face)
+        self.assertTrue(got["mouth"])
+        self.assertNotIn("mouth_concept", got)
+        self.assertEqual(calls, ["eyes", "mouth"])
+
+    def test_lips_establish_the_mouth_only_when_mouth_finds_nothing(self):
+        face = np.ones((20, 20), bool)
+        client, calls = self.mouth_client({"lips": np.s_[14:16, 8:12]})
+        got = beauty.facial_features(client, Image.new("RGB", (20, 20)), face)
+        self.assertEqual(got, {"eyes": False, "eyebrows": False, "mouth": True, "mouth_concept": "lips"})
+        self.assertEqual(calls, ["eyes", "eyebrows", "mouth", "lips"])
+        got = beauty.frontal_features(client, Image.new("RGB", (20, 20)), face)
+        self.assertEqual((got["mouth"], got["mouth_concept"]), (True, "lips"))
+
+    def test_mouth_stays_missing_when_neither_concept_is_inside_the_face(self):
+        face = np.zeros((20, 20), bool)
+        face[2:12, 2:18] = True
+        face[2:4, 2:5] = False
+        # A "mouth" in the crop corner, outside the face, does not count; nor do "lips" there.
+        client, calls = self.mouth_client({"mouth": np.s_[0:1, 0:2], "lips": np.s_[0:1, 0:2]})
+        for features in (beauty.facial_features(client, Image.new("RGB", (20, 20)), face),
+                         beauty.frontal_features(client, Image.new("RGB", (20, 20)), face)):
+            self.assertFalse(features["mouth"])
+            self.assertNotIn("mouth_concept", features)
+        self.assertEqual(calls, ["eyes", "eyebrows", "mouth", "lips", "eyes", "mouth", "lips"])
+        client, _ = self.mouth_client({})
+        self.assertIsNone(beauty.mouth_concept(client, Image.new("RGB", (20, 20)), np.ones((20, 20), bool)))
+
+    def test_lips_query_errors_propagate(self):
+        face = np.ones((20, 20), bool)
+        for error in (ApiError("failed"), ReplayMiss("missing")):
+            def segment(image, text, error=error):
+                if text == "lips":
+                    raise error
+                return []
+            with self.assertRaises(type(error)):
+                beauty.facial_features(SimpleNamespace(segment=segment), Image.new("RGB", (20, 20)), face)
 
     def test_facial_features_skip_covered_faces_and_propagate_errors(self):
         image = Image.new("RGB", (64, 64))

@@ -1440,6 +1440,36 @@ class StageTests(unittest.TestCase):
         self.assertGreater(self.tex.apply.call_args_list[0].args[5][face].max(), 0)
         self.assertNotIn("face_consistency_guard", rec["views"]["head+40"])
 
+    def test_frontal_beauty_mouth_found_as_lips_passes_the_feature_gate(self):
+        self.artwork()
+        self.tex.T = np.full((64, 64, 3), .2, np.float32)
+        self.tex.Q = np.ones(1)
+        folder, face = self.beauty_folder()
+        segment = self.client.segment
+
+        def features(image, text):
+            # The reference head crop (narrow) finds its mouth only as "lips"; the repaint's square
+            # face crop finds no "mouth" but does find "lips".
+            if text == "mouth":
+                return []
+            if text == "lips":
+                return segment(image, "mouth")
+            return segment(image, text)
+
+        self.client.segment = features
+        with mock.patch.object(stage, "REFINE_ORDER", ("head+0",)), mock.patch.object(stage, "HAIR_ORDER", ()):
+            rec = stage.run_stage3f(self.run, self.client, beauty_dir=folder)
+        front = rec["views"]["head+0"]
+        self.assertTrue(front["accepted"])
+        self.assertEqual(front["tries"], 1)
+        checks = front["attempts"][0]["checks"]["facial_features"]
+        self.assertEqual(checks["missing"], [])
+        self.assertEqual(checks["reference"], {"eyes": True, "eyebrows": True, "mouth": True, "mouth_concept": "lips"})
+        self.assertEqual((checks["repaint"]["mouth"], checks["repaint"]["mouth_concept"]), (True, "lips"))
+        from herogen.blender.refine import buildlog
+        self.assertEqual(buildlog.measures(front["attempts"][0])["mouth_lips"], 1)
+        self.assertNotIn("mouth_lips", buildlog.measures({"checks": {"facial_features": {"repaint": {"mouth": True}}}}))
+
     def test_faceless_frontal_cannot_release_oblique_guard(self):
         self.artwork()
         self.tex.T = np.full((64, 64, 3), .2, np.float32)
