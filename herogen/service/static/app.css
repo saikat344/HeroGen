@@ -39,25 +39,29 @@ a:hover { text-decoration-thickness: 2px; }
 .mono { font-family: var(--font-mono); font-size: var(--text-mono); line-height: var(--lh-mono); }
 .tabular { font-variant-numeric: tabular-nums; }
 
-/* ---------- Wordmark: top-left of each page's content (there is no top header) ---------- */
-.page-brand { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: var(--space-6) var(--gutter) 0; }
-.brand { justify-self: start; display: inline-flex; align-items: center; gap: var(--space-3); min-width: 0; color: var(--color-text); text-decoration: none; font-family: var(--font-display); font-size: var(--text-brand); font-weight: var(--weight-display-strong); letter-spacing: -0.02em; line-height: 1; white-space: nowrap; font-variation-settings: var(--display-variation); border-radius: var(--radius-m); }
+/* ---------- Toolbar: a slim translucent bar across the top of every page, holding the wordmark ----------
+   It stays at the top while a page scrolls. The wordmark lines up with each page's content: --toolbar-inset is the
+   distance from the window edge, set per page below. On the hero workspace the toolbar also carries the theme button
+   and the reworded-description chip (styles/workspace-layout.css). */
+.page-brand { --toolbar-inset: max(var(--gutter), calc((100% - var(--content-max)) / 2 + var(--gutter)));
+  position: sticky; top: 0; z-index: var(--z-header); display: flex; align-items: center; gap: var(--space-4); width: 100%; height: var(--toolbar-h); flex: none; margin: 0; padding: 0 var(--toolbar-inset);
+  background: var(--chrome-bg-solid); border-bottom: var(--border-w) solid var(--color-border-subtle); font-family: var(--font-system); }
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .page-brand { background: var(--chrome-bg); -webkit-backdrop-filter: var(--chrome-blur); backdrop-filter: var(--chrome-blur); }
+}
+.brand { justify-self: start; display: inline-flex; align-items: center; gap: var(--space-3); min-width: 0; color: var(--color-text); text-decoration: none; font-family: var(--font-brand); font-size: var(--text-brand); font-weight: var(--weight-display-strong); letter-spacing: -0.02em; line-height: 1; white-space: nowrap; font-variation-settings: var(--display-variation); border-radius: var(--radius-m); }
 .brand:hover { text-decoration: none; }
 .brand__mark { color: var(--color-accent); font-weight: var(--weight-display-mark); letter-spacing: -0.08em; font-size: var(--text-brand-mark); line-height: 1; }
-/* The workbench and the viewer run wider than the marketing pages; the wordmark lines up with their content. */
-body:has(#app.generation-screen) .page-brand { width: calc(100% - 48px); max-width: 1800px; padding-inline: 0; }
-body.viewer-body .page-brand { max-width: var(--workspace-max); }
-/* The landing's bands run to --content-max plus their own gutters. */
-body:has(#entry:not([hidden])) .page-brand { max-width: calc(var(--content-max) + 2 * var(--gutter)); }
-@media (max-width: 767px) {
-  .page-brand { padding-top: var(--space-5); }
-  body:has(#app.generation-screen) .page-brand { width: calc(100% - 28px); }
-}
+/* The viewer runs wider than the marketing pages; the landing's bands run to --content-max plus their own gutters. */
+body.viewer-body .page-brand { --toolbar-inset: max(var(--gutter), calc((100% - var(--workspace-max)) / 2 + var(--gutter))); }
+body:has(#entry:not([hidden])) .page-brand { --toolbar-inset: max(var(--gutter), calc((100% - var(--content-max)) / 2)); }
+/* Anything that scrolls to an anchor stops below the toolbar. */
+html { scroll-padding-top: var(--toolbar-h); }
 
 /* ---------- Bottom bar: the main nav (centre), the hero's status and actions on the workbench (sides) ---------- */
 body:has(> .app-bar) { padding-bottom: calc(var(--app-bar-h) + env(safe-area-inset-bottom, 0px)); }
 html:has(body > .app-bar) { scroll-padding-bottom: calc(var(--app-bar-h) + var(--space-5)); }
-.app-bar { position: fixed; inset: auto 0 0; z-index: var(--z-header); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-5); height: calc(var(--app-bar-h) + env(safe-area-inset-bottom, 0px)); padding: 0 var(--gutter) env(safe-area-inset-bottom, 0px); background: color-mix(in srgb, var(--color-surface-1) 92%, transparent); -webkit-backdrop-filter: blur(12px) saturate(1.2); backdrop-filter: blur(12px) saturate(1.2); border-top: var(--border-w) solid var(--color-border-subtle); font-size: var(--text-body-s); color: var(--color-text-muted); }
+.app-bar { position: fixed; inset: auto 0 0; z-index: var(--z-header); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-5); height: calc(var(--app-bar-h) + env(safe-area-inset-bottom, 0px)); padding: 0 var(--gutter) env(safe-area-inset-bottom, 0px); background: color-mix(in srgb, var(--color-surface-1) 92%, transparent); -webkit-backdrop-filter: blur(12px) saturate(1.2); backdrop-filter: blur(12px) saturate(1.2); border-top: var(--border-w) solid var(--color-border-subtle); font-family: var(--font-system); font-size: var(--text-body-s); color: var(--color-text-muted); }
 .app-bar__start, .app-bar__end, .app-bar__status { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
 .app-bar__start { justify-self: start; }
 .app-bar__end { justify-self: end; }

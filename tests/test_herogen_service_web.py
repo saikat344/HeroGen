@@ -994,6 +994,45 @@ class TestPages(WebCase):
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css), [])
         self.assertEqual(re.findall(r"\b\d+(?:\.\d+)?m?s\b", css), [])   # durations come from tokens
 
+    def test_workspace_frame_styles_are_served_last_and_use_only_tokens(self):
+        from herogen.service import web
+
+        b = Browser(self.app)
+        page = b.get("/").text
+        # The fixed workspace frame overrides the workspace styles, so it loads after all of them.
+        frame = page.index('href="/assets/styles/workspace-layout.css"')
+        for sheet in ("workspace-progress", "workspace-stage", "workspace-tree", "heroes"):
+            self.assertLess(page.index(f'href="/assets/styles/{sheet}.css"'), frame, sheet)
+        self.assertEqual(b.get("/assets/styles/workspace-layout.css").status_code, 200)
+        css = (web.STATIC_DIR / "styles" / "workspace-layout.css").read_text()
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css), [])
+        self.assertEqual(re.findall(r"\b\d+(?:\.\d+)?m?s\b", css), [])   # durations come from tokens
+        # The page never scrolls on the workspace: the body is the viewport's height and clips.
+        self.assertIn("body.workspace-screen {", css)
+        self.assertRegex(css, r"body\.workspace-screen \{[^}]*height: 100dvh;[^}]*overflow: clip;")
+        self.assertIn("document.body.classList.toggle('workspace-screen', next === 'generation')",
+                      (web.STATIC_DIR / "app.js").read_text())
+
+    def test_reworded_description_is_a_dismissible_chip_with_a_disclosure(self):
+        page = Browser(self.app).get("/").text
+        note = page[page.index('<section id="rewordNote"'):]
+        note = note[:note.index("</section>")]
+        self.assertIn('role="status" aria-labelledby="rewordNoteTitle" hidden', note)
+        self.assertRegex(note, r'<button type="button" class="reword__toggle" id="rewordToggle" aria-expanded="false" '
+                               r'aria-controls="rewordDetail">')
+        self.assertIn('id="rewordClose" aria-label="Dismiss this note"', note)
+        detail = note[note.index('id="rewordDetail"'):]
+        self.assertIn(" hidden>", detail[:40])
+        for part in ('id="rewordNoteTitle"', 'id="rewordNoteText"', 'id="rewordEdit"'):
+            self.assertIn(part, detail, part)
+
+    def test_the_inspector_holds_behind_the_build_then_the_downloads(self):
+        page = Browser(self.app).get("/").text
+        side = page.index('<div class="workspace-side">')
+        self.assertLess(page.index('class="btn btn--ghost btn--icon theme-toggle workbench-theme"'), side)
+        self.assertLess(side, page.index('<section class="generation-notes side-panel"'))
+        self.assertLess(page.index('<section class="generation-notes side-panel"'), page.index('<section class="panel result-section"'))
+
     def test_viewer_and_health(self):
         b = Browser(self.app)
         r = b.get("/viewer")

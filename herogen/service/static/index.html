@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/assets/styles/workspace-stage.css">
 <link rel="stylesheet" href="/assets/styles/workspace-tree.css">
 <link rel="stylesheet" href="/assets/styles/heroes.css">
+<link rel="stylesheet" href="/assets/styles/workspace-layout.css">
 <noscript><link rel="stylesheet" href="/assets/styles/noscript.css"></noscript>
 <script src="/assets/site-header.js" defer></script>
 <script type="importmap">
@@ -229,8 +230,10 @@
       </div>
       <section id="rewordNote" class="banner banner--info" role="status" aria-labelledby="rewordNoteTitle" hidden>
         <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-info"></use></svg>
-        <div class="banner__body"><h2 class="banner__title" id="rewordNoteTitle"></h2><p class="banner__text" id="rewordNoteText"></p></div>
-        <button type="button" class="btn btn--secondary btn--s" id="rewordEdit" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-pencil"></use></svg>Edit description</button>
+        <button type="button" class="reword__toggle" id="rewordToggle" aria-expanded="false" aria-controls="rewordDetail"><span class="reword__label" id="rewordLabel"></span><svg class="icon icon--s reword__chevron" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-down"></use></svg></button>
+        <button type="button" class="reword__close" id="rewordClose" aria-label="Dismiss this note"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-x"></use></svg></button>
+        <div class="banner__body reword__detail" id="rewordDetail" hidden><h2 class="banner__title" id="rewordNoteTitle"></h2><p class="banner__text" id="rewordNoteText"></p>
+        <button type="button" class="btn btn--secondary btn--s" id="rewordEdit" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-pencil"></use></svg>Edit description</button></div>
       </section>
       <section id="stageIssues" class="banner banner--warning" role="status" aria-label="Steps needing attention" hidden>
         <svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-info"></use></svg>
@@ -287,6 +290,7 @@
         </section>
         </div>
         <button type="button" class="btn btn--ghost btn--icon theme-toggle workbench-theme" data-theme-toggle aria-label="Theme"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-moon"></use></svg></button>
+        <div class="workspace-side">
         <section class="generation-notes side-panel" aria-labelledby="behindHeading">
           <div class="side-head"><span class="side-head__icon" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-square-terminal"></use></svg></span><h2 id="behindHeading" class="behind-heading">Behind the build</h2><p class="behind-intro">Understand each step. Shape what comes next.</p></div>
           <div class="behind-tabs tabs" role="tablist" aria-label="Behind the build"><button id="liveTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="livePanel" tabindex="0">Build log</button><button id="recipeTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="recipePanel" tabindex="-1">Recipe</button><button id="branchesTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Branches</button></div>
@@ -307,12 +311,13 @@
           </div>
           <section id="inlineRefine" class="inline-refine" aria-label="Refine this version"></section><button type="button" id="developerMode" class="btn btn--ghost btn--s" aria-controls="developerPanel" aria-pressed="false" hidden>Developer mode</button>
         </section>
-      </div>
       <section class="panel result-section" aria-labelledby="resultsH">
         <div class="result-section__head"><div class="result-section__copy"><p class="eyebrow">The next chapter</p><h2 id="resultsH" class="display-s">Bring your hero into your world.</h2><p class="result-section__sub">The GLB works in any 3D tool. The Roblox bundle appears when every Roblox check passes.</p></div>
           <div class="result-section__actions"><a id="viewerLink" class="btn btn--ghost" href="/viewer">Open full viewer<svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-arrow-right"></use></svg></a></div></div>
         <div id="studio" class="studio" hidden><h3 class="studio__title">Using it in Roblox Studio</h3><ol class="studio__steps"><li>Download the Roblox bundle and unzip it.</li><li>Follow the included README to import <code>high.glb</code>, insert the rig, run <code>bind_meshes.luau</code>, and check it with the rig test script.</li></ol><details class="studio__notes"><summary><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-right"></use></svg>Read Roblox setup notes</summary><pre id="readme" tabindex="0"></pre></details></div>
       </section>
+        </div>
+      </div>
 
     </section>
 

@@ -91,6 +91,10 @@
   --font-display: "Fraunces", "Fraunces Fallback", Georgia, "Times New Roman", serif;
   --font-ui: "Figtree", "Figtree Fallback", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* The app chrome (toolbar, bottom bar) and the hero workspace use the platform's own UI face, so they feel native;
+     the wordmark keeps the brand display face everywhere. */
+  --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-brand: "Fraunces", "Fraunces Fallback", Georgia, "Times New Roman", serif;
 
   /* Fraunces axes: soft, non-wonky display cut. */
   --display-variation: "SOFT" 30, "WONK" 0;
@@ -134,8 +138,8 @@
   --ls-button: 0.005em;
   --text-mono: 0.8125rem;     /* 13 px */
   --lh-mono: 1.55;
-  --text-brand: 1.625rem;     /* 26 px, "HeroGen" wordmark (Fraunces 720) */
-  --text-brand-mark: 1.75rem; /* 28 px, "HG" monogram (Fraunces 800) */
+  --text-brand: 1.25rem;      /* 20 px, "HeroGen" wordmark in the toolbar (Fraunces 720) */
+  --text-brand-mark: 1.3125rem; /* 21 px, "HG" monogram (Fraunces 800) */
   --weight-display-mark: 800;
 
   /* ---------- Spacing (4 px base) ---------- */
@@ -161,9 +165,17 @@
   --workspace-max: 1680px;        /* workspace is near full-bleed */
   --prose-max: 68ch;              /* terms, privacy, long notes */
   --header-h: 64px;
+  --toolbar-h: 44px;              /* the slim top toolbar with the wordmark; 48 at >=768 */
   --footer-status-h: 48px;
   --app-bar-h: 60px;              /* the bottom bar: nav + workbench status; 48 at >=768 */
   --side-panel-w: clamp(360px, 32vw, 560px);
+
+  /* Window chrome: translucent bars and popovers over a blur (macOS-style vibrancy), with a solid fallback where
+     backdrop-filter is missing. The mixes follow the theme because they read the theme's surfaces. */
+  --chrome-bg: color-mix(in srgb, var(--color-surface-1) 76%, transparent);
+  --chrome-bg-solid: var(--color-surface-1);
+  --chrome-blur: saturate(1.8) blur(20px);
+  --popover-bg: color-mix(in srgb, var(--color-surface-1) 86%, transparent);
 
   /* Control sizes */
   --control-h-s: 32px;
@@ -356,7 +368,7 @@
 
 /* ---------- Responsive layout tokens ---------- */
 @media (min-width: 768px) {
-  :root { --gutter: 24px; --header-h: 68px; --app-bar-h: var(--footer-status-h); }
+  :root { --gutter: 24px; --header-h: 68px; --app-bar-h: var(--footer-status-h); --toolbar-h: 48px; }
 }
 @media (min-width: 1200px) {
   :root { --gutter: 32px; --header-h: 72px; }

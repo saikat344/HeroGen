@@ -725,6 +725,17 @@ test('the hero card says the description was reworded, and the edit box gets the
   assert.equal(copy.quoted('ab😀cd', 3), '“ab😀…”');
 });
 
+test('the toolbar chip names the rewrite in a few words', () => {
+  const text = 'An original armoured robot in red plating';
+  const job = (reword) => ({kind: 'prompt', prompt: 'A robot, Ironman inspired', reword});
+  assert.equal(copy.rewordLabel(job({status: 'used', stage: 'p', text, reason: 'precheck'})), 'Reworded to avoid a brand name');
+  assert.equal(copy.rewordLabel(job({status: 'used', stage: 'p', text})), 'Reworded to pass the content policy');
+  assert.equal(copy.rewordLabel(job({status: 'refused_again', stage: 'p', text})), 'Reworded description refused too');
+  assert.equal(copy.rewordLabel(job({status: 'rewrite_failed', stage: 'p', text: null})), 'Description could not be reworded');
+  assert.equal(copy.rewordLabel(job(null)), null);
+  assert.equal(copy.rewordLabel({kind: 'sketch', reword: {status: 'used', text}}), null);
+});
+
 test('an up-front rewrite says the description named a brand, and its Build log rows are distinct', () => {
   const text = 'A street racer in a plain dark tracksuit with striped trainers, holding a helmet';
   const used = {kind: 'prompt', prompt: 'A street racer in a Nike tracksuit', reword: {status: 'used', stage: 'p', text, reason: 'precheck'}};
