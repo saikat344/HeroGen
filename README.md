@@ -109,7 +109,7 @@ from its stage records.
 
 | Measure | Value | Record |
 | --- | --- | --- |
-| Source mesh (SAM 3D Objects, stage 3) | 211,112 triangles, 0 open edges, 0 non-manifold edges | `stage-3.json` |
+| Shape (stage 3) | SAM 3D Objects returned 9,466 triangles; HeroGen's internal watertight remesh of it has 211,112 triangles, 0 open edges and 0 non-manifold edges, and is what stage 4 cuts and decimates | `stage-3.json` (`mesh.source.remote.source_triangles`, `mesh.triangles`) |
 | Texture refine | 6 of 6 repainted views accepted, 4096 px atlas | `stage-3f.json` |
 | R15 cut | 15 of 15 parts, high and low | `stage-4.json` |
 | Roblox high LOD | 23,798 triangles (budget 24,000), 1024 px body atlas | `stage-4.json` |
@@ -231,13 +231,11 @@ in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `HEROGEN_BODY_VOLUME` names another. SAM 3D Objects runs on an A100-40GB by default (`--objects-gpu`; it needs
   about 23 GB), SAM 3D Body on an A10G (`--body-gpu`, `none` for CPU); `--remote-timeout` bounds each call.
   By default local calls use an ephemeral Modal app. For persistent deployments, deploy both runners with
-  `modal deploy herogen/blender/remote/objects.py` and `modal deploy herogen/blender/remote/body.py`, then set
-  `HEROGEN_REMOTE_DEPLOYED=1`. Both deployments default to `min_containers=0` and scale to zero after
-  300 idle seconds. To request warmup ahead of inference, explicitly call
-  `herogen.blender.remote.prewarm()`; it submits model loading without waiting, so inference can still
-  encounter a cold start. The service does not call it automatically; `HEROGEN_PREWARM=0` disables it.
-  `HEROGEN_OBJECTS_MIN_CONTAINERS` / `HEROGEN_BODY_MIN_CONTAINERS` set retained capacity at deployment.
-  A positive minimum incurs ongoing GPU charges while idle; prewarming also incurs startup and idle costs.
+  `python -m herogen.blender.remote.deploy` (it sets each runner's capacity: up to 5 containers, none kept warm),
+  then set `HEROGEN_REMOTE_DEPLOYED=1`. Both deployments scale to zero after 300 idle seconds.
+  `herogen.blender.remote.prewarm()` submits model loading without waiting; the website calls it when a hero
+  that will reach stage 3 is accepted, so the models load while the images are drawn (a cold SAM 3D Objects load
+  takes about 90 s). `HEROGEN_PREWARM=0` disables it. Prewarming incurs startup and idle GPU costs.
   Stop finite deployments with `modal app stop` after draining their inputs. The hosted service uses these
   persistent deployments through its bridge.
 
