@@ -291,7 +291,8 @@ class RewordJobTest(prompt_base.PromptJobTest):
                 with mock.patch.object(self, "post", side_effect=failing), mock.patch.dict(os.environ, env), \
                         self.assertLogs("herogen.service", "INFO"):
                     self.go(job)
-                self.assertEqual(len(self.generation_prompts), 1)
+                # A transient 503 in the fast lane gets the client's one resend; it is never reworded.
+                self.assertEqual(len(self.generation_prompts), 2 if case == "http_503" else 1)
                 self.assertEqual(self.reword_prompts, [])
                 self.assertIsNone(reword.read(self.run_dir(job)))
                 saved = self.store.job_get(job["id"])
