@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { SourceTextModule } from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generationState, stageTiming } from '../herogen/service/static/generation.js';
+import { generationState, segmentLabels, stageTiming } from '../herogen/service/static/generation.js';
 const stage = (key, state, side=false) => ({key, state, side, label:`Stage ${key}`});
 test('prompt and uploaded inputs use only the supplied pipeline, in its real order', () => {
   const stages=[stage('p','passed'),stage('0','passed'),stage('1','running'),stage('6','pending'),stage('5','pending')];
@@ -54,4 +54,13 @@ test('healthy finished heroes get the new title while degraded results keep thei
   assert.equal(generationState({state:'succeeded',stages:[stage('3f','passed')]}).title,'Your hero. Your next idea.');
   assert.equal(generationState({state:'succeeded',stages:[stage('3f','skipped')]}).title,'Meet your hero.');
   assert.equal(generationState({state:'failed'}).title,'Your hero needs attention.');
+});
+test('each progress segment names its stage and state, so the bar never relies on colour alone', () => {
+  const running=generationState({state:'running',stages:[stage('p','passed'),stage('3f','running'),stage('4','pending'),stage('5','pending')]});
+  assert.deepEqual(segmentLabels(running.steps,running.terminal),
+    ['Your idea · done','Texture refine · in progress','Game body · up next','Results · not started']);
+  const queued=generationState({state:'running',stages:[stage('p','passed'),stage('0','pending'),stage('1','pending')]});
+  assert.deepEqual(segmentLabels(queued.steps,queued.terminal),['Your idea · done','Prepare input · up next','Artwork · not started']);
+  const failed=generationState({state:'failed',stages:[stage('1','failed'),stage('2','pending'),stage('3f','skipped')]});
+  assert.deepEqual(segmentLabels(failed.steps,failed.terminal),['Artwork · failed','Character views · not reached','Texture refine · skipped']);
 });

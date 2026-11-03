@@ -118,6 +118,17 @@ const STEP_ICON = { passed: 'circle-check', running: 'loader-circle', pending: '
   unavailable: 'ban', failed: 'circle-x', rejected: 'circle-x', canceled: 'x' };
 const SEGMENT = { passed: 'seg--done', running: 'seg--run', skipped: 'seg--skip', unavailable: 'seg--na',
   failed: 'seg--fail', rejected: 'seg--fail' };
+// Each progress-bar segment names its stage and state (on hover, on focus and to a screen reader), so the bar
+// never relies on colour alone. A step the run will not reach takes the step list's own word.
+const SEG_WORD = { passed: 'done', running: 'in progress', skipped: 'skipped', unavailable: 'not available',
+  failed: 'failed', rejected: 'needs attention', canceled: 'cancelled' };
+export function segmentLabels(steps, terminal) {
+  const next = terminal || steps.some((x) => x.state === 'running') ? null : steps.find((x) => x.state === 'pending');
+  const after = steps.findIndex((x) => x.state === 'running');
+  return steps.map((x, i) => `${x.title} · ${x.state === 'pending'
+    ? (terminal ? String(x.status).toLowerCase() : x === next || (after >= 0 && i === after + 1) ? 'up next' : 'not started')
+    : SEG_WORD[x.state] || String(x.status).toLowerCase()}`);
+}
 // Messages the service sends for a step that did not simply pass. They are always shown, never hidden behind a click.
 const NOTED = new Set(['skipped', 'unavailable', 'failed', 'rejected']);
 export function generationView($, select3D) {
@@ -205,20 +216,50 @@ export function generationView($, select3D) {
     if (!selected || model) return;
     pick(selected, true, true);
   });
-  function renderSegments(steps, fresh) {
-    const bar = $('#progressSegments');
+  // The segments are one tab stop: arrow keys, Home and End move between them, and the focused or hovered one
+  // shows its label in a tooltip under the bar.
+  const bar = $('#progressSegments'), tip = $('#progressTip');
+  let tipFor = null;
+  function showTip(seg) {
+    tipFor = seg || null; tip.hidden = !seg;
+    if (!seg) return;
+    text(tip, seg.getAttribute('aria-label'));
+    const box = bar.parentElement.getBoundingClientRect(), at = seg.getBoundingClientRect();
+    tip.style.left = `${at.left - box.left + at.width / 2}px`; tip.style.top = `${at.bottom - box.top}px`;
+  }
+  function renderSegments(steps, fresh, terminal) {
     const keys = steps.map((x) => x.key).join();
     if (bar.dataset.keys !== keys) {
-      bar.dataset.keys = keys;
-      bar.replaceChildren(...steps.map((x) => { const n = node('span', null, 'seg'); n.dataset.key = x.key; return n; }));
+      bar.dataset.keys = keys; showTip(null);
+      bar.replaceChildren(...steps.map((x) => {
+        const n = node('span', null, 'seg'); n.dataset.key = x.key; n.setAttribute('role', 'img'); n.tabIndex = -1; return n;
+      }));
     }
+    const labels = segmentLabels(steps, terminal), focused = [...bar.children].indexOf(document.activeElement);
+    const current = steps.findIndex((x) => x.state === 'running' || x.state === 'pending');
+    const stop = focused >= 0 ? focused : current >= 0 ? current : steps.length - 1;
     steps.forEach((x, i) => {
       const n = bar.children[i], became = !fresh && n.dataset.state && n.dataset.state !== 'passed' && x.state === 'passed';
       n.className = `seg ${SEGMENT[x.state] || ''}${became ? ' is-new' : ''}`.trim();
-      n.dataset.state = x.state; n.title = `${x.title}: ${x.status}`;
+      n.dataset.state = x.state; n.setAttribute('aria-label', labels[i]); n.tabIndex = i === stop ? 0 : -1;
+      if (x.state === 'running') n.setAttribute('aria-current', 'step'); else n.removeAttribute('aria-current');
     });
     bar.dataset.count = String(steps.length);
+    if (tipFor) showTip(tipFor.isConnected ? tipFor : null);
   }
+  const segOf = (e) => e.target.closest?.('.seg');
+  bar.addEventListener('pointerover', (e) => { if (segOf(e)) showTip(segOf(e)); });
+  bar.addEventListener('pointerleave', () => showTip(bar.contains(document.activeElement) ? document.activeElement : null));
+  bar.addEventListener('focusin', (e) => { if (segOf(e)) showTip(segOf(e)); });
+  bar.addEventListener('focusout', (e) => { if (!bar.contains(e.relatedTarget)) showTip(null); });
+  bar.addEventListener('keydown', (e) => {
+    const segs = [...bar.children], at = segs.indexOf(document.activeElement);
+    if (e.key === 'Escape') { showTip(null); return; }
+    const to = { ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1, Home: 0, End: segs.length - 1 }[e.key];
+    if (at < 0 || to == null || !segs[to]) return;
+    e.preventDefault();
+    segs[at].tabIndex = -1; segs[to].tabIndex = 0; segs[to].focus();
+  });
   function stepRow(s) {
     const li = node('li', null, `st-${s.state}`);
     li.dataset.stage = s.key; li.setAttribute('role', 'listitem');
@@ -276,7 +317,7 @@ export function generationView($, select3D) {
         label.dataset.label = lead;
         label.replaceChildren(...[state.label.lead && document.createTextNode(state.label.lead), node('b', state.label.strong)].filter(Boolean));
       }
-      renderSegments(state.steps, changed);
+      renderSegments(state.steps, changed, state.terminal);
       $('#detail').dataset.jobState = job.state;
       text($('#workbenchName'), job.name || (job.kind === 'prompt' ? 'Your imagined hero' : 'Your uploaded character'));
       const stageSignature = JSON.stringify(state.steps);
