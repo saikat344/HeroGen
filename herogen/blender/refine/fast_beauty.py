@@ -10,7 +10,7 @@ from scipy import ndimage
 
 from herogen.pipeline.client import ApiError
 from herogen.refine_budget import BudgetStop
-from . import beauty, imaging as I
+from . import beauty, face_recovery, imaging as I
 from .cameras import axes, project, px_per_unit
 from .fast import Pass
 
@@ -191,6 +191,13 @@ class FaceControl:
         if not (features.get('both_eyes') and features.get('mouth')):
             return selected, None
         ordinary = self.default_work / key / 'refined.png' if self.default_work is not None else None
+        if ordinary is not None and not ordinary.exists() and key == 'head+0':
+            # Without ordinary head paint, the default atlas's face is the default run's face-only
+            # recovery when applied, else body-scale paint or base texels; the gated head outranks those.
+            recovery = (self.default_data or {}).get('face_recovery') or {}
+            ordinary = self.default_work / face_recovery.FOLDER / 'refined.png'
+            if not (recovery.get('applied') and ordinary.exists()):
+                return selected, {'accepted': True, 'reason': 'no ordinary head paint', 'eyes': []}
         if ordinary is None or not ordinary.exists():
             return selected, {'accepted': False, 'reason': 'ordinary face paint unavailable', 'eyes': []}
         with Image.open(work / key / 'refined.png') as candidate, Image.open(ordinary) as default:
