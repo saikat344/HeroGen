@@ -2080,9 +2080,10 @@ defaults.json` picks the version per kind; the environment variables named there
 and hash of both versions are written to `stage-p.json`, and stage 0 records the sketch's origin
 (`details.origin`: stage, image, prompt version).
 
-`hero-sketch-v2` is the default for new runs. It preserves v1's design intent and adds
-"no halo, no glow, no rings, circles or symbols around or behind the head" to both steps. The v1 file and
-hash remain unchanged for explicit selection and replays. Both versions have two steps, both `muse-image-1.0` at `1024x1536` (the API returns 1280 x 1920):
+`hero-sketch-v3` is the default for new runs: `hero-sketch-v2` asking for both hands empty and no pet, animal
+or companion, in every lane. `hero-sketch-v2` preserved v1's design intent and added "no halo, no glow, no
+rings, circles or symbols around or behind the head" to both steps. The v1 and v2 files and hashes remain
+unchanged for explicit selection and replays. Both versions have two steps, both `muse-image-1.0` at `1024x1536` (the API returns 1280 x 1920):
 
 1. **Design image** (`images/generations`): a hand-drawn graphite first-draft hero in a low-angle three-quarter
    view. The text is the design prompt that rated 4.75 of 5 for "would use" in a blind rating against an
@@ -2184,10 +2185,10 @@ never runs the check. Uploaded sketches that draw a prop are not changed.
 
 Leaving props out of the brief does not stop the image model adding its own: measured on four prop-heavy briefs
 (Nov 3), the rewritten brief kept the parrot, cutlass, longsword and shield out of the pirate and knight covers, but
-the wizard still held a staff and the barista robot a coffee cup. `hero-sketch-v3` (an experiment, not a default;
-`HEROGEN_PROMPT_SKETCH_VERSION=hero-sketch-v3`) is `hero-sketch-v2` asking for both hands empty and no pet or
+the wizard still held a staff and the barista robot a coffee cup. `hero-sketch-v3` (the default since Nov 3;
+`HEROGEN_PROMPT_SKETCH_VERSION=hero-sketch-v2` selects the old one) is `hero-sketch-v2` asking for both hands empty and no pet or
 animal in the design and the full-body edit; on the same four rewritten briefs all four covers and full-body
-views came out with empty hands.
+views came out with empty hands; one side effect seen was an unrequested beanie on the barista robot.
 
 ### Attempts and checks
 

@@ -1,6 +1,6 @@
 """Stage p: a user's text prompt to a hand-drawn, full-body character sketch, which stage 0 then takes as its input.
 
-The prompt version (``hero-sketch-v2`` by default, from ``herogen/prompts``) has two steps: a design image drawn
+The prompt version (``hero-sketch-v3`` by default, from ``herogen/prompts``) has two steps: a design image drawn
 from the user's character brief, then a full-body edit of that design. Each attempt is checked, and a failed
 attempt is drawn again as a new sample (the image API takes no seed) up to ``ATTEMPT_PLAN``'s bound:
 

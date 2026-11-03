@@ -113,8 +113,8 @@ class FrozenVersions(unittest.TestCase):
         v2["name"], v2["sha256"] = v1["name"], v1["sha256"]
         self.assertEqual(v2, v1)
 
-    def test_hero_sketch_v3_is_an_experiment_that_only_asks_for_empty_hands(self):
-        """Not a default (`test_defaults`): hero-sketch-v2 with empty hands and no pets, for an experiment only."""
+    def test_hero_sketch_v3_only_asks_for_empty_hands(self):
+        """The default (`test_defaults`): hero-sketch-v2 with empty hands and no pets, nothing else changed."""
         v2 = json.loads(json.dumps(prompts.load("hero-sketch-v2").data))
         v3 = json.loads(json.dumps(prompts.load("hero-sketch-v3").data))
         swaps = {"design": [("what they look like, wear and carry,", "what they look like and wear,"),
@@ -206,7 +206,7 @@ class Calibration(unittest.TestCase):
 
 class Selection(unittest.TestCase):
     def test_defaults(self):
-        self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v2")
+        self.assertEqual(prompts.selected("prompt_sketch").name, "hero-sketch-v3")
         self.assertEqual(prompts.selected("same_character").name, "same-character-v2")
         self.assertEqual(prompts.selected("turnaround").name, "turnaround-v3")
         self.assertEqual(prompts.selected("turnaround_redo").name, "turnaround-redo-v2")
