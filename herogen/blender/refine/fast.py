@@ -206,6 +206,9 @@ class Pass:
             attempt_art = options.pop('art', art)
             attempt_masks = options.pop('art_masks', art_masks)
             before = options.pop('before', None)
+            # A shielded slot replays another run's finished attempt: a lower slot's selection never
+            # cuts it short, so its record is the same whichever finishes first.
+            cancelled = None if options.pop('shielded', False) else self.cancelled
             child = isolated_client(client, self.key + f'/attempt-{index}', persistence_lock)
             if hasattr(child, 'network_attempts'):
                 child._initial_network_attempts = child.network_attempts
@@ -223,14 +226,14 @@ class Pass:
             folder = self.folder / f'attempt-{index}'
 
             def run():
-                token = _attempt_cancelled.set(self.cancelled)
+                token = _attempt_cancelled.set(cancelled)
                 try:
                     if before is not None:
                         before()
                     return _view(child, prep, frozen, tex, cam, self.hair, folder, private,
                                  timeout, view_cover, face_exclusion=head_found, body_cam=body_cam,
                                  repaint=recipe, rendered=attempt_render, apply=lambda *args: 0,
-                                 attempts=1, attempt_start=attempt_index, cancelled=self.cancelled,
+                                 attempts=1, attempt_start=attempt_index, cancelled=cancelled,
                                  user_note=user_note, art=attempt_art, art_masks=attempt_masks, fast_outline=True,
                                  **options)
                 finally:
@@ -472,33 +475,38 @@ class Publisher:
 
 def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_found, recipe, save, state_lock,
           user_note="", beauty_context=None, art_context=None, palette_manifest=None, attempts=ATTEMPTS,
-          passes=None):
-    """Run the frozen waves. `passes`, when given, receives every submitted Pass for later extension."""
+          passes=None, face_control=None, persistence_lock=None, on_submit=None, on_collect=None, halt=None):
+    """Run the frozen waves. `passes`, when given, receives every submitted Pass for later extension.
+
+    With `beauty_context`, the default-head run (`FaceControl.default_fast`) runs beside these waves:
+    `face_control`, when given, is the FaceControl whose run `start_default` already started.
+    `on_submit(job)` and `on_collect(job, index)` report each submitted pass and each collected slot;
+    `halt()`, when true, stops submitting further views (as a model error does). `persistence_lock`
+    serialises cache saves and publications with an outer run sharing this client's cache.
+    """
     from .backend import blender
     from . import face_recovery
 
     stopped, error, face_error = False, None, None
+    default_error = None
     recovery_changed = False
-    persistence_lock = threading.RLock()
-    face_control = None
+    persistence_lock = persistence_lock or threading.RLock()
     face_client = None
     recovery_client = None
     if beauty_context is not None:
-        from .fast_beauty import FaceControl
-        face_control = FaceControl(*beauty_context, data=data, state_lock=state_lock)
-        face_control.root_client, face_control.persistence_lock = client, persistence_lock
+        if face_control is None:
+            from .fast_beauty import FaceControl
+            face_control = FaceControl(*beauty_context, data=data, state_lock=state_lock)
+            face_control.persistence_lock = persistence_lock
+            face_control.start_default(client, prep, tex, cams, work, timeout, cover, head_found, recipe,
+                                       save, user_note)
+        face_control.references = beauty_context[1]
         face_control.side_art = art_context is not None
-        face_client = isolated_client(client, 'face-source', persistence_lock)
-        if hasattr(face_client, 'network_attempts'):
-            face_client._initial_network_attempts = face_client.network_attempts
-        try:
-            stopped = bool(face_control.default_fast(face_client, prep, tex, cams, work, timeout, cover,
-                                                   head_found, recipe, save, user_note))
-        finally:
-            publish(client, face_client)
-            face_client.log.calls.clear()
-            if hasattr(face_client, 'network_attempts'):
-                face_client._initial_network_attempts = face_client.network_attempts
+        persistence_lock = face_control.persistence_lock
+        face_client = face_control.face_client
+        face_control.open_record()
+    else:
+        face_control = None
     data['waves'] = []
     all_passes = []
     for sequence in WAVES:
@@ -511,7 +519,26 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
     publisher = Publisher(work.parent.parent, prep, tex, work, data, cams["body+0"], timeout,
                           face_control=face_control, palette_manifest=palette_manifest)
 
+    def join_default():
+        """Wait where the complete default-head run is needed: its error, then its stop, apply here."""
+        nonlocal stopped, error, default_error
+        if face_control is None or face_control.default_joined:
+            return
+        default_stopped, exc = face_control.join_default(halt=error is not None or face_error is not None)
+        if exc is not None:
+            default_error = exc
+            error = error or exc
+        elif default_stopped:
+            stopped = True
+
     def collect(job, index, wave):
+        """`collect_slot`; after a model error, the default-head run submits no further views."""
+        result = collect_slot(job, index, wave)
+        if face_control is not None and (error is not None or face_error is not None):
+            face_control.halt_default()   # a model error: submit no further default-head views
+        return result
+
+    def collect_slot(job, index, wave):
         """Collect one slot; return a newly launched conditional slot's future, if one became due."""
         nonlocal stopped, error
         if job.retries.get(index):
@@ -564,6 +591,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 error = exc
             if index < len(job.tries):
                 buildlog.try_failed(job.key, job.tries[index])
+        if on_collect is not None:
+            on_collect(job, index)
         if face_control is None:
             if job.name in ('head+0', 'body+0') and error is None and not stopped:
                 recover()
@@ -571,6 +600,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         if error is not None or face_error is not None:
             return settled(job)
         if index >= job.slots:
+            # Folding attempt 1 rebuilds the complete default-head atlas.
+            join_default()
+            if error is not None or face_error is not None:
+                return settled(job)
             # The default-head run paid this view's ordinary attempt 1 for the conditional slot.
             try:
                 face_control.fold_default(job.key)
@@ -631,21 +664,25 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         buildlog.extra_try(job.key, len(job.tasks))
         return future
 
+    drained = False
     try:
         # Every attempt can run, while the inherited client limiter still bounds HTTP concurrency/RPM.
         with ThreadPoolExecutor(max_workers=(CONCURRENCY + 1) * ATTEMPTS) as pool:
             remaining = {}
             for wave_index, sequence in enumerate(WAVES, 1):
                 jobs = []
+                if wave_index > 1:
+                    join_default()   # later waves render a version composed with the default head
                 for name, hair in sequence:
                     key = ('hair-' if hair else '') + name
                     record = data['views'][key]
                     if record['reason'] == 'head_not_found':
                         buildlog.view_skipped(key, record['reason'])
                         continue
-                    if stopped or error is not None or face_error is not None:
+                    halted = halt is not None and halt()
+                    if stopped or error is not None or face_error is not None or halted:
                         record['reason'] = ('not attempted: API cap' if stopped else
-                                            'not attempted: model error' if error is not None else
+                                            'not attempted: model error' if error is not None or halted else
                                             'not attempted: face unavailable')
                         buildlog.view_skipped(key, record['reason'])
                         continue
@@ -672,7 +709,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         folder / 'blender.log', timeout=timeout)
                 buildlog.rendered(wave_index, len(jobs), time.monotonic() - render_started)
                 if face_control is not None and wave_index == 1 and head_found:
-                    face_control.default_render = face_control.default_work / 'wave-1'
+                    face_control.default_render = face_control.default_folder / 'wave-1'
                 for job in jobs:
                     art, masks, framing = (), None, None
                     if art_context is not None:
@@ -689,6 +726,8 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                                **({"view_options": face_control.options, "conditional": 1}
                                   if face_control is not None else {}))
                     all_passes.append(job)
+                    if on_submit is not None:
+                        on_submit(job)
                     for index, (future, *_) in enumerate(job.tasks):
                         remaining[future] = (job, index, wave_index)
                 # Only first tries contribute at this barrier, even if retries already finished.
@@ -707,6 +746,9 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                             if extra is not None and job.name in ('head+0', 'body+0'):
                                 # The face source is chosen only after a frontal conditional slot resolves.
                                 firsts.add(extra)
+                        if not firsts and face_control is not None:
+                            # Face selection compares with the complete default-head run.
+                            join_default()
                         if (not firsts and face_control is not None and not stopped
                                 and error is None and face_error is None):
                             # Face selection rejecting a gate-accepted beauty head counts as a
@@ -719,6 +761,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                                 face_error, head = exc, None
                             if head is not None:
                                 firsts.add(launch_conditional(head, wave_index))
+                    join_default()
                     if face_control is not None and error is None and face_error is None:
                         try:
                             with state_lock:
@@ -760,6 +803,7 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                                     and ((wave < wave_index and before is None and job.selected is not None)
                                          or take_recovery())):
                                 publisher.publish(wave)
+                join_default()
                 if error is None and face_error is None:
                     take_recovery()
                     texture = publisher.publish(wave_index)
@@ -778,17 +822,26 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                             (before is None and job.selected is not None) or take_recovery()):
                         publisher.publish(wave)
                 save(ok=False, status='running')
+        drained = True
     finally:
+        if face_control is not None and not face_control.default_joined:
+            # Drain the default-head run too; on any failure it submits no further views.
+            _, exc = face_control.join_default(halt=not drained)
+            if exc is not None:
+                default_error = exc
         if passes is not None:
             passes.extend(all_passes)
-        for job in all_passes:
-            for _, child, *_ in job.tasks:
-                publish(client, child)
-        if face_client is not None:
-            publish(client, face_client)
-        if recovery_client is not None:
-            publish(client, recovery_client)
+        with persistence_lock:
+            for job in all_passes:
+                for _, child, *_ in job.tasks:
+                    publish(client, child)
+            if face_client is not None:
+                publish(client, face_client)
+            if recovery_client is not None:
+                publish(client, recovery_client)
     save(ok=False, status='running')
+    if default_error is not None:
+        raise default_error   # the default-head run's own error, as a run that resolved it first raises
     if error is not None:
         raise error
     if face_error is not None:

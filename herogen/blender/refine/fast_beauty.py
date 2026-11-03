@@ -1,4 +1,6 @@
 """Beauty face ownership and closed default-head composition for opt-in repaint waves."""
+from concurrent.futures import ThreadPoolExecutor, wait
+import contextvars
 import copy
 import hashlib
 import shutil
@@ -81,6 +83,13 @@ def eye_quality(candidate, default, boxes):
             'eyes': eyes}
 
 
+class DefaultRunFailed(RuntimeError):
+    """A main slot needed a default-head result that the failed default-head run never produced.
+
+    The default-head run's own error is raised once every submitted request drains.
+    """
+
+
 class FacePass(Pass):
     """The head's beauty and default slots are independent samples, never retries.
 
@@ -135,6 +144,20 @@ class FaceControl:
         self.root_client = self.persistence_lock = None
         # SideBeautyPass turnaround art turns side and rear beauty requests into RF16B.
         self.side_art = False
+        # The default-head run runs on its own thread beside reference generation and the main waves.
+        # Its passes and settled views are published here as they happen, so a main slot waits only
+        # for the exact default-head result it uses.
+        self.default_folder = self.face_client = None
+        self.default_jobs, self.default_settled = {}, set()
+        self.default_changed = threading.Condition()
+        self.default_done = False
+        self.default_future = self.default_pool = None
+        self.default_halt = threading.Event()
+        self.default_joined = False
+        # Once `start_default` runs the default-head run early, its record fields wait until the main
+        # record reaches the waves, so stage-3f.json keeps the key order of a run that resolved it first.
+        self.record_open = True
+        self.staged_fallback, self.staged_source = None, {}
 
     def render_default(self, prep, cam, folder, timeout):
         """Render the same frozen geometry with default fast's original, ungraded atlas."""
@@ -154,10 +177,17 @@ class FaceControl:
         # matches default fast's attempt 0, and conditional slot 3's its attempt 1, for exact cache reuse.
         options = {'face_keep': True, 'save_face': True}
         if index in (1, 2):
-            rendered = (self.default_work / ('wave-2' if job.hair else 'wave-1')
-                        if self.default_work is not None else self.default_render)
+            folder = self.default_folder if self.default_folder is not None else self.default_work
+            rendered = (folder / ('wave-2' if job.hair else 'wave-1')
+                        if folder is not None else self.default_render)
             options = {**options, 'attempt_start': index - 1, 'rendered': rendered,
                        'art': (), 'art_masks': None}
+            if index == 1:
+                # Slot 2 is the default-head run's attempt 0 for this view: it waits for that one
+                # attempt, then replays its cache family, so the request is paid once. It always
+                # completes, as a replay does, whichever slot finishes first.
+                options['before'] = lambda: self.await_attempt(job.key)
+                options['shielded'] = True
             if index == 2:
                 # The default-head run pays ordinary attempt 1 first; this slot replays its cache entry.
                 options['before'] = lambda: self.extend_default(job.key, slot=index + 1)
@@ -300,7 +330,7 @@ class FaceControl:
             # Outer attempts can checkpoint concurrently. Publish complete snapshots rather
             # than exposing the nested wave's dictionary while its pass list is initialized.
             with self.state_lock:
-                self.data['default_fast_fallback'] = copy.deepcopy(data)
+                self.record_fallback(copy.deepcopy(data))
                 return save(**kwargs)
 
         self.default_tex, self.default_data = default, data
@@ -309,19 +339,156 @@ class FaceControl:
         with buildlog.muted():   # the main run logs the outcome of every view; this run only supplies a face
             _, stopped = waves(client, prep, self.default_base, default, cams, folder, data,
                                timeout, cover, head_found, recipe, checkpoint, self.state_lock,
-                               user_note=user_note, attempts=1, passes=self.default_passes)
+                               user_note=user_note, attempts=1, passes=self.default_passes,
+                               persistence_lock=self.persistence_lock, on_submit=self.default_submitted,
+                               on_collect=self.default_collected, halt=self.default_halt.is_set)
         checkpoint(ok=False, status='running')
         # Match the exported default atlas, including its quantization and gutter extension.
         default.save(folder / 'texture.png')
         with Image.open(folder / 'texture.png') as image:
             self.fallback_texture = np.asarray(image.convert('RGB'), dtype=np.float32) / 255
-        self.data.setdefault('face_source', {})
         self.prepare_hair_views(client, folder, data['views'], tex.height)
         self.default_work, self.default_stopped = folder, stopped
-        with self.state_lock:
-            self.data.setdefault('face_source', {}).update(atlas_sha256=hashlib.sha256(
-                (folder / 'texture.png').read_bytes()).hexdigest(), cap_reached=stopped)
+        self.record_source(atlas_sha256=hashlib.sha256((folder / 'texture.png').read_bytes()).hexdigest(),
+                           cap_reached=stopped)
         return stopped
+
+    def start_default(self, client, prep, tex, cams, work, timeout, cover, head_found, recipe, save, user_note):
+        """Start the default-head run (`default_fast`) on its own thread and return at once.
+
+        It needs only the original base, cover and ordinary recipe, never the beauty references,
+        so it runs beside reference generation and the main waves. Main slots wait only for the
+        default-head result each one uses (`await_attempt`, `await_settled`); everything that
+        needs the complete run waits in `join_default`.
+        """
+        from .fast import isolated_client
+        self.root_client = client
+        self.record_open = False
+        if self.persistence_lock is None:
+            self.persistence_lock = threading.RLock()
+        self.default_folder = work / 'default-fast' / 'blender-work' / 'texture-refine'
+        self.face_client = isolated_client(client, 'face-source', self.persistence_lock)
+        if hasattr(self.face_client, 'network_attempts'):
+            self.face_client._initial_network_attempts = self.face_client.network_attempts
+
+        def run():
+            try:
+                return self.default_fast(self.face_client, prep, tex, cams, work, timeout, cover,
+                                         head_found, recipe, save, user_note)
+            finally:
+                with self.default_changed:
+                    self.default_done = True
+                    self.default_changed.notify_all()
+
+        self.default_pool = ThreadPoolExecutor(max_workers=1)
+        # The thread starts from this context (build-log step, no cancelled attempt).
+        self.default_future = self.default_pool.submit(contextvars.copy_context().run, run)
+        return self
+
+    def default_submitted(self, job):
+        with self.default_changed:
+            self.default_jobs[job.key] = job
+            self.default_changed.notify_all()
+
+    def default_collected(self, job, index):
+        with self.default_changed:
+            self.default_settled.add(job.key)
+            self.default_changed.notify_all()
+
+    def halt_default(self):
+        """Submit no further default-head views (a main model error); submitted ones still drain."""
+        self.default_halt.set()
+
+    def join_default(self, halt=False):
+        """Wait for the complete default-head run and publish its calls once.
+
+        Returns (stopped, error): its budget stop, and the exception it raised, if any.
+        """
+        if self.default_future is None:
+            return False, None
+        if halt:
+            self.halt_default()
+        wait([self.default_future])
+        from .fast import publish
+        with self.persistence_lock:
+            if not self.default_joined:
+                self.default_joined = True
+                self.default_pool.shutdown(wait=True)
+                publish(self.root_client, self.face_client)
+                self.face_client.log.calls.clear()
+                if hasattr(self.face_client, 'network_attempts'):
+                    self.face_client._initial_network_attempts = self.face_client.network_attempts
+        error = self.default_future.exception()
+        return (error is None and bool(self.default_future.result())), error
+
+    def default_unavailable(self, key, cause=None):
+        """Raise for a main slot whose default-head result does not exist.
+
+        A budget stop stays a budget stop. Any other failure raises `DefaultRunFailed`; the main
+        waves raise the default-head run's own error after every submitted request drains.
+        """
+        if isinstance(cause, BudgetStop):
+            raise BudgetStop(str(cause))
+        if cause is None and self.default_done:
+            wait([self.default_future])
+            cause = self.default_future.exception()
+            if cause is None and self.default_future.result():
+                raise BudgetStop((self.default_data or {}).get('stop_reason') or 'API cap')
+        raise DefaultRunFailed(f'default-head run has no ordinary attempt for {key}') from cause
+
+    def await_attempt(self, key):
+        """Wait for the default-head run's attempt 0 for `key`, then publish its cache family to the root.
+
+        The main slot then replays every request of that attempt: one paid call per request.
+        """
+        from .fast import publish_files
+        with self.default_changed:
+            self.default_changed.wait_for(lambda: key in self.default_jobs or self.default_done)
+            job = self.default_jobs.get(key)
+        if job is None:
+            self.default_unavailable(key)
+        future, child = job.tasks[0][0], job.tasks[0][1]
+        wait([future])
+        cause = None if future.cancelled() else future.exception()
+        if future.cancelled() or cause is not None:
+            self.default_unavailable(key, cause)
+        with self.persistence_lock:
+            publish_files(self.root_client, child)
+
+    def await_settled(self, key):
+        """Wait until the default-head run has collected its attempt 0 for `key`."""
+        with self.default_changed:
+            self.default_changed.wait_for(lambda: key in self.default_settled or self.default_done)
+            settled = key in self.default_settled
+        if not settled:
+            self.default_unavailable(key)
+
+    def open_record(self):
+        """Write the default-head run's record fields where a sequential run had them, then directly."""
+        with self.state_lock:
+            if self.record_open:
+                return
+            self.record_open = True
+            fallback = self.staged_fallback
+            if fallback is None:
+                fallback = {'views': {}, 'code': self.data.get('code')}
+            self.data['default_fast_fallback'] = fallback
+            self.data.setdefault('face_source', {}).update(self.staged_source)
+            self.staged_fallback, self.staged_source = None, {}
+
+    def record_fallback(self, fallback):
+        with self.state_lock:
+            if self.record_open:
+                self.data['default_fast_fallback'] = fallback
+            else:
+                self.staged_fallback = fallback
+
+    def record_source(self, **fields):
+        with self.state_lock:
+            if self.record_open:
+                self.data.setdefault('face_source', {}).update(fields)
+            else:
+                self.staged_source.update(fields)
 
     def extend_default(self, key, slot=None):
         """Pay ordinary attempt 1 for one view through the default-head run's own Pass.
@@ -331,7 +498,8 @@ class FaceControl:
         """
         from .fast import publish, publish_files
 
-        job = next(p for p in self.default_passes if p.key == key)
+        self.await_settled(key)
+        job = self.default_jobs.get(key) or next(p for p in self.default_passes if p.key == key)
         with self.state_lock:
             record = self.default_data['views'][key]
             if record['accepted'] or record['tries'] != 1:
@@ -452,8 +620,7 @@ class FaceControl:
             with Image.open(work / view['key'] / 'input.png') as image:
                 mask = beauty.union(replay, image.convert('RGB'), 'hair')
             self.hair_views.append({**view, 'head_hair': mask})
-        with self.state_lock:
-            self.data['face_source']['cached_hair_views'] = [v['key'] for v in self.hair_views]
+        self.record_source(cached_hair_views=[v['key'] for v in self.hair_views])
 
     def paint_default_head(self, tex, work, residual=False):
         """Copy a closed head volume through every depth, then fade outside it at the collar.
