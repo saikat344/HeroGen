@@ -5,7 +5,8 @@ import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
 let landing;
 import { buildLog } from '/assets/buildlog.js';
-import { generationView, generationState } from '/assets/generation.js';
+import { generationView, generationState, TERMINAL } from '/assets/generation.js';
+import { usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
 import { finishedNote, heroesView } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
@@ -104,7 +105,6 @@ function svgIcon(name) {
   svg.append(use); return svg;
 }
 function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; }
-function fmtUsd(v) { return typeof v === 'number' ? `$${v.toFixed(v < 0.1 ? 4 : 2)}` : ''; }
 function fmtSecs(v) { return typeof v === 'number' ? (v < 90 ? `${v.toFixed(1)} s` : `${(v / 60).toFixed(1)} min`) : ''; }
 function idemKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, (x) => x.toString(16).padStart(2, '0')).join(''); }
 
@@ -191,7 +191,8 @@ function renderJob(j) {
   $('#state').textContent = j.state;
   const bits = [`started ${fmtTime(j.created_at)}`, `profile ${j.profile}`];
   if (Number.isFinite(j.seconds)) bits.push(`recorded duration ${fmtSecs(j.seconds)}`);
-  if (Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${fmtUsd(j.cost_usd)}`);
+  // The cost is tallied when the run ends; while it runs the Build log shows the running total instead.
+  if (TERMINAL.has(j.state) && Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${usd(j.cost_usd)}`);
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
   S.job = j; S.shown = j.id;
   jobBanner(j);
