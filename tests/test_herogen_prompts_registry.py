@@ -50,6 +50,8 @@ FROZEN = {
     "turnaround-redo-v2": "206e3774dc4535016939d49e97cd28ca722011b7c88b5fc83d4dc18746bbd4dc",
     "brief-reword-v1": "9c4c3f92c726afbbac6b4c0008f8fa4d6771e000db35c159d7a1f11096366bac",
     "brief-precheck-v1": "af82e7835fd4c9217fa6b47f89e23978b4b19db54dfbf992f44ec64805ce554a",
+    "brief-reword-v2": "f9d9f039d697bbe1ed881b92dacf2517e871364e9394fbed9babd5fc297f1441",
+    "brief-precheck-v2": "4ae69d549c1c4889462b3202c4f2ac21d7cdb114cc2e60188dd15a81d33fa214",
     "refine-suggest-v1": "4127b8e75093239f47e635596b8349186ac8745e22682aca1e37cad59df1d24b",
 }
 
@@ -188,6 +190,8 @@ class Selection(unittest.TestCase):
         self.assertEqual(prompts.selected("turnaround").name, "turnaround-v3")
         self.assertEqual(prompts.selected("turnaround_redo").name, "turnaround-redo-v2")
         self.assertEqual(prompts.selected("cover_complete_figure").name, "cover-complete-figure-v1")
+        self.assertEqual(prompts.selected("brief_precheck").name, "brief-precheck-v2")
+        self.assertEqual(prompts.selected("brief_reword").name, "brief-reword-v2")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v2"}):
             self.assertEqual(prompts.selected("turnaround").name, "turnaround-v2")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v1",

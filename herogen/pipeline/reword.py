@@ -12,14 +12,21 @@ stage p draws from it, stage 1's colour brief reads it (`brief`), and a cover re
 (`herogen.pipeline.redo.fork_run`). Without the file nothing changes, so the full lane, uploads and runs that were
 never refused behave exactly as before.
 
-Before stage p, the fast lane can also check a brief up front (`precheck`, ``brief-precheck-v1``): one Muse Spark
-call lists the brand, logo, franchise, trademarked-character and real-person names in it, and when there are any the
-same rewrite runs with reason ``precheck`` before anything is drawn. ``precheck.json`` records that check, so it runs
-once per job; a used rewrite in ``reword.json`` still means no second rewrite for that job.
+Before stage p, the fast lane can also check a brief up front (`precheck`, ``brief-precheck-v2``): one Muse Spark
+call lists the brand, logo, franchise, trademarked-character and real-person names in it (``names_found``) and the
+items the hero holds and the pets or companions with it (``props_found``), and when there are any the same rewrite
+runs with reason ``precheck`` before anything is drawn. ``precheck.json`` records that check, so it runs once per
+job; a used rewrite in ``reword.json`` still means no second rewrite for that job.
 
-A rewrite is refused here (``RewordRejected``), never repaired, when it is empty, too long, unchanged, or still
-contains a name the model listed as removed. A refused rewrite is not kept: only a rewrite that passed the brief's
-own text rules (at most the description's character limit) is ever stored or shown.
+The rewrite (``brief-reword-v2``) takes out both: names, replaced by the plain archetype, and held items, pets and
+companions, which are simply left out; worn clothing and accessories and everything else stay as written. Its record
+lists what it removed (``removed_names``, ``removed_props``). ``shown_props`` is the short list of left-out items a
+person may see.
+
+A rewrite is refused here (``RewordRejected``), never repaired, when it is empty, too long, unchanged, still
+contains a name or held item the model listed as removed (or the check found), or, when no name was involved, adds
+words the brief does not have. A refused rewrite is not kept: only a rewrite that passed the brief's own text rules
+(at most the description's character limit) is ever stored or shown.
 """
 
 from __future__ import annotations
@@ -100,9 +107,43 @@ def _mentions(text: str, name: str) -> bool:
     return letters in "".join(re.findall(r"\w", text.casefold()))
 
 
-def check(original: str, answer: dict[str, Any], names: tuple[str, ...] | list[str] = ()) -> tuple[str, list[str]]:
+# Small words a rewrite that only leaves items out may still add to keep its sentence grammatical.
+GLUE = frozenset("a an the and or with in of on his her their its is are who wearing".split())
+SHOWN_PROPS, SHOWN_PROP_CHARS = 8, 40   # at most this many left-out items, each at most this long, are ever shown
+
+
+def _listed(answer: dict[str, Any], key: str) -> list[str]:
+    """The answer's list under ``key``: each item once (ignoring case), spaces collapsed, empty items dropped."""
+    out: list[str] = []
+    for n in answer.get(key) or []:
+        n = " ".join(str(n).split())
+        if n and n.casefold() not in {x.casefold() for x in out}:
+            out.append(n)
+    return out
+
+
+def _holds(text: str, item: str) -> bool:
+    """Whether ``text`` still holds the held item ``item`` as whole words, ignoring case and punctuation and
+    allowing a plural ("swords" holds "sword", but "rainbow" does not hold "bow")."""
+    words = re.findall(r"\w+", item.casefold())
+    if not words:
+        return False
+    pattern = r"\W+".join(re.escape(w) for w in words)
+    return re.search(rf"(?<!\w){pattern}(?:s|es)?(?!\w)", text.casefold()) is not None
+
+
+def _added_words(original: str, text: str) -> list[str]:
+    """Words of ``text`` that ``original`` does not have, apart from small grammatical ones (`GLUE`)."""
+    have = set(re.findall(r"[^\W\d_]+", original.casefold()))
+    return sorted({w for w in re.findall(r"[^\W\d_]+", text.casefold()) if w not in have and w not in GLUE})
+
+
+def check(original: str, answer: dict[str, Any], names: tuple[str, ...] | list[str] = (),
+          props: tuple[str, ...] | list[str] = ()) -> tuple[str, list[str]]:
     """(rewrite, removed names) from the model's answer, cleaned with the brief's own text rules; raises
-    `RewordRejected` when it can't be used. ``names`` (found up front) must be absent from it too."""
+    `RewordRejected` when it can't be used. ``names`` and ``props`` (found up front) must be absent from it too, as
+    must the held items the answer lists in ``removed_props``. A rewrite that involved no name only leaves things
+    out, so it may not add words the brief does not have."""
     from herogen.pipeline.prompt_sketch import PromptRejected, clean_user_text
 
     rules = prompts.selected("prompt_sketch").data["user_text"]
@@ -117,12 +158,19 @@ def check(original: str, answer: dict[str, Any], names: tuple[str, ...] | list[s
     still = [n for n in [*removed, *names] if _mentions(text, n)]
     if still:
         raise RewordRejected(f"the rewrite still names {len(still)} of the removed names")
+    held = [n for n in [*_listed(answer, "removed_props"), *props] if _holds(text, n)]
+    if held:
+        raise RewordRejected(f"the rewrite still holds {len(held)} of the removed items")
+    if not removed and not names and _added_words(original, text):
+        raise RewordRejected("the rewrite adds words the brief does not have")
     return text, removed
 
 
 def precheck(client, original: str, *, version: prompts.PromptVersion | None = None) -> dict[str, Any]:
     """One Muse Spark call: the brand, logo, franchise, trademarked-character and real-person names in
-    ``original``, as a record (status ``found`` or ``clean``). A Model API failure propagates as it is."""
+    ``original`` and the items the hero holds and the pets or companions with it, as a record (status ``found`` when
+    there is either, else ``clean``). A version that lists no props (``brief-precheck-v1``) records an empty
+    ``props_found``. A Model API failure propagates as it is."""
     version = version or prompts.selected("brief_precheck")
     step = version.step("precheck")
     p = step["params"]
@@ -132,19 +180,16 @@ def precheck(client, original: str, *, version: prompts.PromptVersion | None = N
     answer = client.compare_images(request_prompt(version, original, step="precheck"), [], schema=step["schema"],
                                    model=step["model"], reasoning_effort=p["reasoning_effort"],
                                    max_output_tokens=p["max_output_tokens"])
-    names: list[str] = []
-    for n in answer.get("names") or []:
-        n = " ".join(str(n).split())
-        if n and n.casefold() not in {x.casefold() for x in names}:
-            names.append(n)
-    return {"status": "found" if names else "clean", "names_found": names, "model": step["model"],
-            "prompt_version": version.ref(), "cost_usd": client.log.cost_usd(calls0),
+    names, props = _listed(answer, "names"), _listed(answer, "props")
+    return {"status": "found" if names or props else "clean", "names_found": names, "props_found": props,
+            "model": step["model"], "prompt_version": version.ref(), "cost_usd": client.log.cost_usd(calls0),
             "seconds": round(time.monotonic() - t0, 2)}
 
 
 def rewrite(client, original: str, *, version: prompts.PromptVersion | None = None, reason: str = REASON,
-            names: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
-    """One Muse Spark call: the rewrite of ``original`` as a record (status ``used``). A Model API failure
+            names: tuple[str, ...] | list[str] = (), props: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
+    """One Muse Spark call: the rewrite of ``original`` as a record (status ``used``), listing the names and held
+    items it removed. ``names`` and ``props`` found up front must be absent from it. A Model API failure
     propagates as it is; an unusable answer raises `RewordRejected`."""
     version = version or prompts.selected("brief_reword")
     step = version.step("reword")
@@ -154,11 +199,21 @@ def rewrite(client, original: str, *, version: prompts.PromptVersion | None = No
     client.purpose = "reword brief"   # names the call in the build log and the call records
     answer = client.compare_images(request_prompt(version, original), [], schema=step["schema"], model=step["model"],
                                    reasoning_effort=p["reasoning_effort"], max_output_tokens=p["max_output_tokens"])
-    text, removed = check(original, answer, names)
+    text, removed = check(original, answer, names, props)
     return {"status": USED, "reason": reason, "original": original, "reworded": text, "removed_names": removed,
-            "model": step["model"], "prompt_version": version.ref(),
-            "cost_usd": client.log.cost_usd(calls0), "seconds": round(time.monotonic() - t0, 2)}
+            "removed_props": _listed(answer, "removed_props"), "model": step["model"],
+            "prompt_version": version.ref(), "cost_usd": client.log.cost_usd(calls0),
+            "seconds": round(time.monotonic() - t0, 2)}
+
+
+def shown_props(data: dict[str, Any] | None) -> list[str]:
+    """The held items and companions a used rewrite left out, as a person may see them in the build log
+    ("Left out held items and pets: parrot, cutlass"): at most `SHOWN_PROPS` short items, else an empty list."""
+    if not data or data.get("status") not in (USED, REFUSED_AGAIN) or not isinstance(data.get("removed_props"), list):
+        return []
+    items = [n for n in _listed(data, "removed_props") if len(n) <= SHOWN_PROP_CHARS]
+    return items[:SHOWN_PROPS]
 
 
 __all__ = ["FILE", "PRECHECK_FILE", "RewordRejected", "brief", "check", "precheck", "read", "request_prompt", "rewrite",
-           "write"]
+           "shown_props", "write"]
