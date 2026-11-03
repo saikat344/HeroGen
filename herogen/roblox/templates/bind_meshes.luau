@@ -130,13 +130,25 @@ end
 -- The starter place: the bound rig, copied, becomes the player's character.
 print(string.format("bound 15 meshes; rest-pose joint error %.6f studs", worst))
 local StarterPlayer = game:GetService("StarterPlayer")
-local character = rig:Clone()
-assert(character, "the rig could not be copied (is its Archivable turned off?)")
-character.Name = "StarterCharacter"
-local root = character:FindFirstChild("HumanoidRootPart")
-assert(character:FindFirstChildOfClass("Humanoid") and root and root:IsA("BasePart"),
-	"the rig copy has no Humanoid or HumanoidRootPart")
-character.PrimaryPart = root
+-- A playable copy of a rig: named StarterCharacter, its HumanoidRootPart the PrimaryPart, and every part
+-- unanchored. The Workspace rig is anchored as a statue below, so on a second run of this script (after a
+-- re-import) the copy would otherwise inherit Anchored and freeze the player.
+local function characterCopy(model)
+	local copy = model:Clone()
+	assert(copy, "the rig could not be copied (is its Archivable turned off?)")
+	copy.Name = "StarterCharacter"
+	for _, d in copy:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.Anchored = false
+		end
+	end
+	local copyRoot = copy:FindFirstChild("HumanoidRootPart")
+	assert(copy:FindFirstChildOfClass("Humanoid") and copyRoot and copyRoot:IsA("BasePart"),
+		"the rig copy has no Humanoid or HumanoidRootPart")
+	copy.PrimaryPart = copyRoot
+	return copy, copyRoot
+end
+local character, root = characterCopy(rig)
 character:PivotTo(CFrame.new(root.Position)) -- upright, facing -Z like the spawn; the spawn sets where it starts
 local old = StarterPlayer:FindFirstChild("StarterCharacter")
 if old then
@@ -145,7 +157,7 @@ end
 character.Parent = StarterPlayer
 StarterPlayer.LoadCharacterAppearance = false -- keep the hero's own look, not the player's avatar
 -- The rig left in Workspace stands next to the spawn as a statue; anchored, it can't fall over during Play.
--- (The StarterCharacter above was copied first, so the player's character stays unanchored.)
+-- (characterCopy unanchors the StarterCharacter, so the player's character always moves.)
 for _, d in rig:GetDescendants() do
 	if d:IsA("BasePart") then
 		d.Anchored = true
