@@ -150,8 +150,9 @@ class ExportTest(unittest.TestCase):
         code_before = "\n".join(line for line in bind[:guard].splitlines() if not line.lstrip().startswith("--"))
         self.assertNotIn("StarterPlayer", code_before)
         tail = bind[early:]
-        for want in ('game:GetService("StarterPlayer")', 'character.Name = "StarterCharacter"',
-                     "character.PrimaryPart = root", "FindFirstChildOfClass(\"Humanoid\")",
+        for want in ('game:GetService("StarterPlayer")', 'copy.Name = "StarterCharacter"',
+                     "copy.PrimaryPart = copyRoot", "FindFirstChildOfClass(\"Humanoid\")",
+                     "local character, root = characterCopy(rig)",
                      "character.Parent = StarterPlayer", "LoadCharacterAppearance = false", "src:Destroy()",
                      'print("Starter place: press Play to walk around as your hero.")'):
             self.assertIn(want, tail)
@@ -159,7 +160,7 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(code_before.count("Anchored"), 0)
         self.assertEqual(bind.count("d.Anchored = true"), 1)
         anchor = tail.index("d.Anchored = true")
-        self.assertLess(tail.index("rig:Clone()"), anchor)
+        self.assertLess(tail.index("characterCopy(rig)"), anchor)
         self.assertLess(tail.index("character.Parent = StarterPlayer"), anchor)
         self.assertIn("for _, d in rig:GetDescendants() do", tail[:anchor])
         self.assertIn('d:IsA("BasePart")', tail[:anchor])
@@ -168,6 +169,25 @@ class ExportTest(unittest.TestCase):
         self.assertLess(bind.index("part:ApplyMesh(from)"), guard)
         for name in (BIND_FILE, RIG_TEST_FILE, README_FILE):
             self.assertNotIn("{{", (self.out / name).read_text(), name)
+
+    def test_starter_character_copy_is_always_unanchored(self):
+        """A second run copies a statue whose parts the first run anchored: the copy must unanchor every
+        BasePart after Clone() and before it goes into StarterPlayer, or the player spawns frozen."""
+        bind = (self.out / BIND_FILE).read_text()
+        fn = character_copy_function(bind)
+        clone = fn.index("model:Clone()")
+        loop = fn.index("for _, d in copy:GetDescendants() do")
+        self.assertLess(clone, loop)
+        body = fn[loop:fn.index("end\n", fn.index("d.Anchored = false"))]
+        self.assertIn('if d:IsA("BasePart") then', body)
+        self.assertIn("d.Anchored = false", body)
+        self.assertNotIn("Anchored = true", fn)
+        self.assertIn("return copy, copyRoot", fn)
+        call = bind.index("local character, root = characterCopy(rig)")
+        self.assertLess(bind.index(fn), call)
+        self.assertLess(call, bind.index("character.Parent = StarterPlayer"))
+        self.assertEqual(bind.count(":Clone()"), 2)  # the copy, and SurfaceAppearance in the bind loop
+        self.assertEqual(bind.count("rig:Clone()"), 0, "the rig is copied only through characterCopy")
 
     def test_check_command(self):
         code, stdout, _ = run_cli("check", "--body", str(self.body), "--rig", str(self.out / RIG_FILE))
@@ -431,6 +451,61 @@ class LuauSyntaxTest(unittest.TestCase):
                 self.assertEqual(p.returncode, 0, f"{name}: {p.stderr.decode(errors='replace')}")
 
 
+def character_copy_function(bind: str) -> str:
+    """The text of bind_meshes.luau's characterCopy function, from `local function` to its closing `end`."""
+    start = bind.index("local function characterCopy(model)")
+    return bind[start:bind.index("\nend\n", start) + 5]
+
+
+# Plain Luau stand-ins for the few Instance methods characterCopy uses: Clone copies the tree with its
+# properties, as Roblox's does, so a part anchored in the source stays anchored in the copy unless the
+# function clears it.
+LUAU_MOCK = """
+local Inst = {}
+Inst.__index = Inst
+local function new(class, name, props)
+	local o = setmetatable({ ClassName = class, Name = name, children = {} }, Inst)
+	for k, v in props or {} do o[k] = v end
+	return o
+end
+local BASEPARTS = { Part = true, MeshPart = true }
+function Inst:IsA(c) return self.ClassName == c or (c == "BasePart" and BASEPARTS[self.ClassName] == true) end
+function Inst:add(c) table.insert(self.children, c); c.Parent = self; return c end
+function Inst:GetDescendants()
+	local out = {}
+	local function walk(i) for _, c in i.children do table.insert(out, c); walk(c) end end
+	walk(self)
+	return out
+end
+function Inst:FindFirstChild(n) for _, c in self.children do if c.Name == n then return c end end return nil end
+function Inst:FindFirstChildOfClass(cl) for _, c in self.children do if c.ClassName == cl then return c end end return nil end
+function Inst:Clone()
+	local o = new(self.ClassName, self.Name)
+	for k, v in self do if k ~= "children" and k ~= "Parent" and k ~= "PrimaryPart" then o[k] = v end end
+	for _, c in self.children do o:add(c:Clone()) end
+	return o
+end
+local rig = new("Model", "HeroGen-R15")
+rig:add(new("Humanoid", "Humanoid"))
+rig:add(new("Part", "HumanoidRootPart", { Anchored = false }))
+for _, n in { "Head", "UpperTorso", "LowerTorso", "LeftHand", "RightFoot" } do
+	local p = rig:add(new("MeshPart", n, { Anchored = false }))
+	p:add(new("Attachment", n .. "RigAttachment"))
+end
+"""
+LUAU_RERUN = """
+-- run 1: the copy, then the statue is anchored; run 2 (after a re-import): copy the anchored statue
+local first = characterCopy(rig)
+for _, d in rig:GetDescendants() do if d:IsA("BasePart") then d.Anchored = true end end
+local second, root = characterCopy(rig)
+local function anchored(m) local n = 0 for _, d in m:GetDescendants() do if d:IsA("BasePart") and d.Anchored then n += 1 end end return n end
+local function parts(m) local n = 0 for _, d in m:GetDescendants() do if d:IsA("BasePart") then n += 1 end end return n end
+print(string.format("first %d/%d anchored, second %d/%d anchored, statue %d/%d anchored, %s %s %s",
+	anchored(first), parts(first), anchored(second), parts(second), anchored(rig), parts(rig), second.Name,
+	tostring(second.PrimaryPart == root), root.Name))
+"""
+
+
 LUNE_READBACK = """
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -490,6 +565,52 @@ class RbxDomReadbackTest(unittest.TestCase):
             elif inst.cls == "Attachment":
                 key = f"{inst.parent.name}/{inst.name}"
                 self.assertLess(_worst(got["attachments"][key], inst.props["CFrame"]), tol, key)
+
+
+@unittest.skipUnless(shutil.which("luau"), "luau is not on PATH (optional run of the StarterCharacter copy)")
+class LuauCharacterCopyTest(unittest.TestCase):
+    """bind_meshes.luau's characterCopy, run by the Luau interpreter on stand-in instances: on a second run, after
+    the first run anchored the statue, the copy still has no anchored part."""
+
+    def test_rerun_copy_is_unanchored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run" / "06-roblox"
+            self.assertEqual(run_cli("export", "--body", str(write_body(out.parent / "04-body")), "--out",
+                                     str(out))[0], 0)
+            script = Path(tmp) / "rerun.luau"
+            script.write_text(LUAU_MOCK + character_copy_function((out / BIND_FILE).read_text()) + LUAU_RERUN)
+            p = subprocess.run(["luau", str(script)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertEqual(p.stdout.strip(), "first 0/6 anchored, second 0/6 anchored, statue 6/6 anchored, "
+                                           "StarterCharacter true HumanoidRootPart")
+
+
+LUNE_RERUN = """
+local fs = require("@lune/fs")
+local process = require("@lune/process")
+local roblox = require("@lune/roblox")
+local game = roblox.deserializePlace(fs.readFile(process.args[1]))
+local rig = game:FindFirstChild("Workspace"):FindFirstChild("HeroGen-R15")
+"""
+
+
+@unittest.skipUnless(shutil.which("lune"), "Lune is not on PATH (optional rerun of the StarterCharacter copy)")
+class LuneCharacterCopyTest(unittest.TestCase):
+    """The same rerun on real instances: rbx-dom reads the starter place, the first run's statue is anchored, and
+    characterCopy's copy of it has every BasePart unanchored while the statue stays anchored."""
+
+    def test_rerun_copy_of_the_place_rig_is_unanchored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run" / "06-roblox"
+            self.assertEqual(run_cli("export", "--body", str(write_body(out.parent / "04-body")), "--out",
+                                     str(out))[0], 0)
+            script = Path(tmp) / "rerun.luau"
+            script.write_text(LUNE_RERUN + character_copy_function((out / BIND_FILE).read_text()) + LUAU_RERUN)
+            p = subprocess.run(["lune", "run", str(script), str(out / PLACE_FILE)], capture_output=True,
+                               text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertEqual(p.stdout.strip(), "first 0/16 anchored, second 0/16 anchored, statue 16/16 anchored, "
+                                           "StarterCharacter true HumanoidRootPart")
 
 
 def _rojo_works() -> bool:

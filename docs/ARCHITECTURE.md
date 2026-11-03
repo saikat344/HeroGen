@@ -1903,7 +1903,9 @@ from the installed package, which shows the templates ship as package data (`[to
 in `pyproject.toml`); it skips only when pip can't fetch the build backend. Three optional tests run when their
 tool is on `PATH`: with `lune`, rbx-dom reads the file back and every CFrame and size must agree within 1e-5
 stud; with `rojo`, rbx-dom reads the starter place's services back to the same instances and values; with
-`luau-compile`, both Studio scripts must compile, as templates and as the export fills them in. Place tests
+`luau-compile`, both Studio scripts must compile, as templates and as the export fills them in; with `luau`,
+the bind script's `characterCopy` runs on stand-in instances and a second run's copy of the anchored statue
+must have no anchored part (with `lune`, the same on the starter place's rig read by rbx-dom). Place tests
 corrupt the place the same way: a missing marker or service, a StarterCharacter in the file, a missing spawn, an
 unanchored baseplate, one part moved alone, a changed attachment, a floating, lying-down, misplaced or
 backwards rig, and a place holding another body's rig.
@@ -1919,7 +1921,8 @@ section's centre, size, pivot and triangles).
 2. File > Import 3D on `high.glb` with the settings below.
 3. Run `bind_meshes.luau` in the Command Bar. After the bind below, it finds ServerStorage's `HeroGenStarterPlace`
    marker, so it also copies the bound rig to `StarterPlayer.StarterCharacter` (its PrimaryPart the
-   HumanoidRootPart, turned upright facing -Z), replacing an earlier copy, turns LoadCharacterAppearance off,
+   HumanoidRootPart, turned upright facing -Z, every BasePart unanchored, so a second run that copies the
+   anchored statue still gives a character that moves), replacing an earlier copy, turns LoadCharacterAppearance off,
    anchors every BasePart of the rig left in Workspace so it stands as a statue during Play (the copy stays
    unanchored), deletes the imported model and prints "Starter place: press Play to walk around as your hero."
 4. Press Play.
