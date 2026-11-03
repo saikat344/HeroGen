@@ -10,6 +10,8 @@ const ELEVATION = 8 * Math.PI / 180;          // a slightly raised eye line for 
 const IDLE_MS = 4000;                          // idle time before the auto-orbit starts
 const ORBIT_RADIANS_PER_MS = 2 * Math.PI / 40000; // one idle revolution per 40 s
 const REVEAL_MS = 1200;
+const SWAP_MS = 260;                           // cross-fade between the static model and the animated body
+const CLIP_NAMES = ['idle', 'walk', 'wave', 'jump'];
 const easeOut = t => 1 - Math.pow(1 - t, 4);
 const easeInOut = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const now = () => globalThis.performance?.now?.() ?? Date.now();
@@ -62,9 +64,13 @@ function contactShadow() {
 export function createPreview({damping = true, floor = true, stage = false} = {}) {
   let state = null, request = 0, mode = 'textured', paused = false, viewListener = null, syncing = false;
   let orbitWanted = true, presetListener = null, preset = null;
+  // Animation: `anim` is the animated body (loaded once per body URL), `body` the in-flight load of it.
+  let anim = null, body = null, animRequest = 0, animListener = null, animState = {clip: null, status: 'idle'};
   function emitPreset(value) { if (preset !== value) { preset = value; presetListener?.(value); } }
+  function emitAnim(clip, status) { animState = {clip, status}; animListener?.(clip, status); }
   function step(time) {
     if (!state) return;
+    stepAnimation(time);
     const tween = state.tween;
     if (tween) {
       const t = tween.ms <= 0 ? 1 : Math.min(1, (time - tween.start) / tween.ms);
@@ -72,7 +78,8 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       if (t >= 1) { state.tween = null; state.lastInput = time; tween.done?.(); }
     }
     // The idle orbit turns the camera directly (not OrbitControls.autoRotate), so input stops it without any coast.
-    const idle = stage && orbitWanted && state.model && !state.tween && !reducedMotion() && time - state.lastInput >= IDLE_MS;
+    // A playing animation holds the camera still so the hero keeps facing the way the person chose.
+    const idle = stage && orbitWanted && state.model && !state.tween && !anim?.active && !reducedMotion() && time - state.lastInput >= IDLE_MS;
     if (idle && !state.orbiting) emitPreset(null);
     if (idle && state.orbiting) {
       const o = orbitOf();
@@ -92,8 +99,10 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => { m.color.set(dark ? 0x50504b : 0xc7beb0); m.opacity = 0.32; m.transparent = true; });
     render();
   }
+  const shown = () => [state?.model, anim?.body].filter(Boolean);
   function restore() {
-    state?.model?.traverse(node => {
+    finishFade();
+    for (const model of shown()) model.traverse(node => {
       if (node.userData?.previewOriginal) {
         node.material.dispose(); node.material = node.userData.previewOriginal; delete node.userData.previewOriginal;
       }
@@ -102,7 +111,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   function shading(value) {
     if (!['textured', 'clay', 'wire'].includes(value)) return;
     mode = value; restore();
-    if (value !== 'textured') state?.model?.traverse(node => {
+    if (value !== 'textured') for (const model of shown()) model.traverse(node => {
       if (!node.isMesh) return;
       node.userData.previewOriginal = node.material;
       node.material = new THREE.MeshStandardMaterial({color: value === 'clay' ? 0xb4aca1 : 0xe29a63, roughness: 0.85, wireframe: value === 'wire'});
@@ -151,12 +160,12 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     state.lastInput = now();
     state.tween = null; state.orbiting = false;
   }
-  function pause() { paused = true; ++request; loop(); }
+  function pause() { paused = true; ++request; stopAnimation(true); loop(); }
   function resume() { paused = false; loop(); }
   function dispose() {
     ++request;
     if (!state) return;
-    state.renderer.setAnimationLoop(null); restore(); release(state.model);
+    state.renderer.setAnimationLoop(null); restore(); dropAnimation(); release(state.model);
     for (const [type, fn] of state.inputs) state.canvas.removeEventListener?.(type, fn);
     state.observer.disconnect(); state.controls.dispose(); state.scene.environment?.dispose(); state.grid.geometry.dispose();
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => m.dispose());
@@ -218,13 +227,13 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     if (state.url === url && state.model) return true;
     const keepModel = preserveCamera && Boolean(state.model);
     if (!keepModel) {
-      restore();
+      restore(); stopAnimation(true);
       if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; }
       state.grid.visible = false; if (state.shadow) state.shadow.visible = false; state.url = null; render();
     }
     return new Promise((resolve, reject) => new GLTFLoader().load(url, gltf => {
       if (token !== request || !state || keepModel && !canReplace()) { release(gltf.scene); resolve(false); return; }
-      restore();
+      restore(); stopAnimation(true);
       const first = !state.model;
       if (state.model) { state.scene.remove(state.model); release(state.model); }
       state.model = gltf.scene; state.url = url; state.grid.visible = floor && !stage; state.scene.add(gltf.scene);
@@ -265,6 +274,140 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     emitPreset(null);
     animate({...to, azimuth: 15 * Math.PI / 180, distance: d * 1.08}, to, motion ? REVEAL_MS : 0, easeOut, () => emitPreset('front'));
   }
+  // ---- animation: the Roblox-ready body, re-parented at its R15 joints and posed by animate.js ----------------
+  let fade = null;
+  function materialsOf(model) {
+    const list = new Set();
+    model.traverse(node => {
+      if (node.isMesh) for (const m of Array.isArray(node.material) ? node.material : [node.material]) if (m) list.add(m);
+    });
+    return [...list];
+  }
+  // Fade `to` in over `from` (the two stand in the same place), then hide `from`.
+  function crossFade(from, to, done) {
+    finishFade();
+    to.visible = true;
+    const ms = reducedMotion() ? 0 : SWAP_MS;
+    if (!from || from === to || ms <= 0) { if (from && from !== to) from.visible = false; done?.(); return; }
+    const saved = materialsOf(to).map(m => [m, m.transparent, m.opacity, m.polygonOffset, m.polygonOffsetFactor, m.polygonOffsetUnits]);
+    for (const [m] of saved) {
+      m.transparent = true; m.opacity = 0; m.polygonOffset = true; m.polygonOffsetFactor = -1; m.polygonOffsetUnits = -4; m.needsUpdate = true;
+    }
+    fade = {from, to, start: now(), ms, saved, done};
+  }
+  function finishFade() {
+    if (!fade) return;
+    const f = fade; fade = null;
+    for (const [m, transparent, opacity, offset, factor, units] of f.saved) {
+      m.transparent = transparent; m.opacity = opacity; m.polygonOffset = offset; m.polygonOffsetFactor = factor; m.polygonOffsetUnits = units;
+      m.needsUpdate = true;
+    }
+    f.from.visible = false; f.done?.();
+  }
+  function shadowRest() {
+    if (!state?.shadow || !anim?.shadowScale) return;
+    state.shadow.scale.copy(anim.shadowScale); state.shadow.material.opacity = 1; anim.shadowScale = null;
+  }
+  function stepAnimation(time) {
+    if (fade) {
+      const k = Math.min(1, (time - fade.start) / fade.ms);
+      for (const [m, , opacity] of fade.saved) m.opacity = opacity * easeInOut(k);
+      if (k >= 1) finishFade();
+    }
+    if (!anim?.active) return;
+    let lift = 0;
+    try {
+      const p = anim.player.sample(time);
+      anim.rig.apply(p); lift = p.lift;
+    } catch { stopAnimation(true); emitAnim(null, 'error'); return; }
+    if (state.shadow && anim.shadowScale) {
+      const k = 1 - 0.45 * Math.min(1, lift / anim.rig.maxLift);
+      state.shadow.scale.set(anim.shadowScale.x * k, anim.shadowScale.y * k, 1); state.shadow.material.opacity = 0.4 + 0.6 * k;
+    }
+    // Stopping: once the pose has eased back to rest, fade the static model back in.
+    if (anim.stopping && !anim.player.busy(time)) {
+      anim.stopping = false; anim.active = false; shadowRest();
+      crossFade(anim.body, state.model);
+    }
+  }
+  // The body fills the static model's box: same height, same feet line, same centre.
+  function fit(a) {
+    const box = new THREE.Box3().setFromObject(state.model), rest = a.rig.restBox;
+    const height = rest.max.y - rest.min.y;
+    if (box.isEmpty() || !(height > 0)) return;
+    const k = (box.max.y - box.min.y) / height;
+    a.body.scale.setScalar(k);
+    a.body.position.set((box.min.x + box.max.x) / 2 - k * (rest.min.x + rest.max.x) / 2, box.min.y - k * rest.min.y,
+      (box.min.z + box.max.z) / 2 - k * (rest.min.z + rest.max.z) / 2);
+  }
+  // Load (once per URL) the body GLB and build its joint tree.
+  function loadBody(url, parts) {
+    if (body?.url === url) return body.promise;
+    const promise = Promise.all([import('./animate.js'),
+      new Promise((resolve, reject) => new GLTFLoader().load(url, resolve, undefined, reject))]).then(([module, gltf]) => {
+      try {
+        const rig = module.createAnimator(THREE, gltf.scene, parts), wrap = new THREE.Group();
+        wrap.name = 'hg-animated-body'; wrap.visible = false; wrap.add(gltf.scene);
+        return {url, body: wrap, rig, player: null, active: false, stopping: false, shadowScale: null};
+      } catch (error) { release(gltf.scene); throw error; }
+    });
+    body = {url, promise};
+    promise.catch(() => { if (body?.promise === promise) body = null; });
+    return promise;
+  }
+  function dropAnimation() {
+    finishFade();
+    if (anim) { shadowRest(); anim.body.removeFromParent(); release(anim.body); anim = null; }
+    const pending = body; body = null;
+    pending?.promise.then(b => { if (b !== anim) release(b.body); }, () => {});
+  }
+  // Back to the static model: eased (the pose returns to rest, then a cross-fade), or at once.
+  function stopAnimation(instant = false) {
+    ++animRequest;
+    if (anim && (anim.active || anim.stopping || fade)) {
+      if (instant) {
+        finishFade();
+        anim.active = false; anim.stopping = false; shadowRest();
+        anim.player = anim.rig.player(); anim.rig.apply(anim.player.sample(0));
+        anim.body.visible = false; if (state?.model) state.model.visible = true;
+      } else if (anim.active) {
+        anim.player.play('rest', now()); anim.stopping = true;
+      }
+    }
+    if (animState.clip || animState.status !== 'idle') emitAnim(null, 'idle');
+  }
+  /** Play an animation clip ('idle', 'walk', 'wave', 'jump') on the hero's body, or stop with anything else.
+   *  `info` is the job's `animation` entry ({model, parts}). Resolves true when the clip is playing. */
+  async function playAnimation(name, info) {
+    if (!state?.model) return false;
+    if (!CLIP_NAMES.includes(name)) { stopAnimation(); return true; }
+    const url = info?.model;
+    if (typeof url !== 'string' || !Array.isArray(info.parts)) return false;
+    const token = ++animRequest, model = state.model;
+    if (!anim || anim.url !== url) {
+      emitAnim(name, 'loading');
+      let built;
+      try { built = await loadBody(url, info.parts); }
+      catch { if (token === animRequest) emitAnim(null, 'error'); return false; }
+      if (token !== animRequest || !state || state.model !== model) return false;
+      if (anim !== built) { dropAnimation(); anim = built; body = {url, promise: Promise.resolve(built)}; }
+      state.scene.add(anim.body); shading(mode);
+    }
+    if (!anim.active) {
+      fit(anim);
+      anim.player = anim.rig.player(); anim.active = true; anim.stopping = false;
+      if (state.shadow) { anim.shadowScale = state.shadow.scale.clone(); }
+      crossFade(model, anim.body);
+    }
+    anim.stopping = false;
+    anim.player.play(name, now());
+    state.lastInput = now(); state.orbiting = false;
+    emitAnim(name, 'playing'); render();
+    return true;
+  }
+  function prefetchAnimation(info) {
+    if (state && typeof info?.model === 'string' && Array.isArray(info.parts)) loadBody(info.model, info.parts).catch(() => {});
+  }
   function snapshot() { render(); return state?.canvas.toDataURL('image/png'); }
   function view() {
     return state ? {position: state.camera.position.toArray(), target: state.controls.target.toArray(), zoom: state.camera.zoom} : null;
@@ -288,6 +431,8 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     if (state) { state.lastInput = now(); state.orbiting = false; render(); }
   }
   return {show, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
+    animate: playAnimation, prefetchAnimation,
+    onAnimation(callback) { animListener = callback; callback?.(animState.clip, animState.status); },
     camera: name => moveTo(name), reset: () => moveTo('front', {reset: true}),
     onView(callback) { viewListener = callback; },
     onPreset(callback) { presetListener = callback; callback?.(preset); }};
@@ -303,3 +448,6 @@ export const camera = name => preview.camera(name);
 export const reset = () => preview.reset();
 export const orbit = on => preview.orbit(on);
 export const onPreset = callback => preview.onPreset(callback);
+export const animate = (name, info) => preview.animate(name, info);
+export const prefetchAnimation = info => preview.prefetchAnimation(info);
+export const onAnimation = callback => preview.onAnimation(callback);

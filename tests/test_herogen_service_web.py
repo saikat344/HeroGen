@@ -640,6 +640,43 @@ class TestIsolation(WebCase):
         self.assertEqual(workspace["characters"][0]["title"], "Violet Knight")
 
 
+class TestAnimation(WebCase):
+    """The viewer's animation buttons get the body GLB and its joint pivots only for a Roblox-ready hero."""
+
+    def body(self, job_id: str) -> None:
+        from test_herogen_service_animation import write_body
+
+        uid = self.store.users_list()[0]["id"]
+        write_body(self.svc.storage.run_dir(uid, job_id))
+
+    def test_a_roblox_ready_body_publishes_its_joints(self):
+        b = self.signin()
+        job = self.make_job(b).json()
+        self.assertIsNone(job["animation"], "nothing before the body exists")
+        self.finish(job["id"])
+        self.assertIsNone(b.get(f"/api/jobs/{job['id']}").json()["animation"], "the fake body has no pivots")
+        self.body(job["id"])
+        anim = b.get(f"/api/jobs/{job['id']}").json()["animation"]
+        self.assertTrue(anim["model"].startswith(f"/runs/r1/{job['id']}/04-body/high.glb?v="))
+        self.assertEqual(len(anim["parts"]), 15)
+        self.assertEqual(anim["parts"][0], {"part": "LowerTorso", "parent": None, "joint": "Root",
+                                            "pivot": [2.0, 22.0, -12.0]})
+        r = b.get(anim["model"])
+        self.assertEqual((r.status_code, r.content[:4]), (200, b"glTF"))
+        self.assertNotIn(str(self.tmp), json.dumps(anim), "no server paths")
+        other = self.signin("bob@example.com")
+        self.assertEqual(other.get(anim["model"]).status_code, 404, "another user cannot read the body")
+
+    def test_no_animation_without_the_roblox_rig(self):
+        b = self.signin()
+        job = self.make_job(b).json()
+        self.finish(job["id"], FakeRunner(fail={"6": "reject"}))
+        self.body(job["id"])
+        view = b.get(f"/api/jobs/{job['id']}").json()
+        self.assertFalse(view["downloads"]["roblox"]["available"])
+        self.assertIsNone(view["animation"])
+
+
 class TestErrorPages(WebCase):
     """HTML for people on page routes (404, 500, the legal pages); JSON, as before, for the API and for files."""
 

@@ -44,6 +44,7 @@ from starlette.routing import Route
 from herogen.pipeline import events as buildlog
 from herogen.pipeline.runfolder import DRAFTS
 from herogen.service import bundle, labapi, pages
+from herogen.service.animation import body_joints
 from herogen.service.analytics import (
     DEFAULT_DAYS,
     MAX_DAYS,
@@ -810,7 +811,7 @@ class App:
                 "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
-                "reword": files["reword"], "viewer": f"/viewer#run={rid}"}
+                "animation": files["animation"], "reword": files["reword"], "viewer": f"/viewer#run={rid}"}
 
     def _view_thumbnail(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> str | None:
         with self.svc.storage.volume.reading():
@@ -892,6 +893,7 @@ class App:
                 downloads['glb'] = {"available": False, "reason": "The body is not finished yet." if not done
                                     else "This hero has no body file."}
             readme = None
+            animation = None
             if done:
                 try:
                     rows = {r['stage']: r for r in self.svc.store.job_stages(job['id'])}
@@ -901,6 +903,10 @@ class App:
                     bundle.roblox_files(run)
                     downloads["roblox"] = {"available": True, "url": f"/api/jobs/{job['id']}/download/roblox"}
                     readme = bundle.roblox_readme(run)
+                    # The viewer's animation buttons: the Roblox-ready body and the joints its rig turns about.
+                    if (joints := body_joints(run)) and (body := asset(joints['glb'])):
+                        animation = {"model": body['url'], "bytes": body['bytes'], "frame": joints['frame'],
+                                     "parts": joints['parts']}
                 except bundle.BundleUnavailable as e:
                     rows = {r["stage"]: r for r in self.svc.store.job_stages(job["id"])}
                     six = rows.get("6")
@@ -916,7 +922,8 @@ class App:
             can_redo = {'cover': '0' in passed and bool(images.get('sketch')),
                         'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
                         'texture': can_texture}
-        return {"images": images, "draft_images": drafts, "downloads": downloads, "readme": readme, "models": models, "refinement": progress,
+        return {"images": images, "draft_images": drafts, "downloads": downloads, "readme": readme,
+                "animation": animation, "models": models, "refinement": progress,
                 "reword": reworded,
                 "can_texture": can_texture, "can_redo": can_redo,
                 "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),

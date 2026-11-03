@@ -134,6 +134,17 @@
 .viewer__dock .thumb[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .viewer__dock .thumb[aria-disabled="true"]:hover .thumb__img { transform: none; }
 
+/* Animation buttons: a compact segmented control (icon over label) the height of a dock thumbnail, captioned like one. */
+.viewer__dock .anim-ctl { display: grid; justify-items: center; align-content: start; gap: var(--space-2); line-height: var(--lh-caption); }
+.anim-ctl__seg { display: flex; gap: 2px; box-sizing: border-box; height: var(--thumb-h); padding: 3px; border-radius: var(--radius-s); border: var(--border-w-strong) solid var(--stage-glass-border); background: var(--stage-tool-bg); }
+.viewer__dock .anim-ctl__btn { display: grid; align-content: center; justify-items: center; gap: 4px; min-width: 44px; margin: 0; padding: 0 var(--space-1); border: 0; border-radius: calc(var(--radius-s) - 3px); background: none; color: var(--stage-text-muted); font: inherit; font-size: var(--text-caption); font-weight: var(--weight-medium); line-height: 1; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard); }
+.viewer__dock .anim-ctl__btn:hover:not(:disabled) { background: var(--stage-glass-hover); color: var(--stage-text); }
+.viewer__dock .anim-ctl__btn[aria-pressed="true"] { background: color-mix(in srgb, var(--color-accent) 16%, transparent); color: var(--stage-accent-text); box-shadow: inset 0 0 0 1px var(--color-accent-border); }
+.viewer__dock .anim-ctl__btn:focus-visible { outline: var(--focus-w) solid var(--stage-accent-text); outline-offset: 1px; }
+.anim-ctl__btn[aria-busy="true"] .icon { animation: anim-ctl-wait calc(2 * var(--dur-slow)) var(--ease-standard) infinite alternate; }
+@keyframes anim-ctl-wait { to { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .anim-ctl__btn[aria-busy="true"] .icon { animation: none; opacity: 0.6; } }
+
 /* ---------- Retry / Refine, under the stage inside the result panel ---------- */
 .actions { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: var(--space-3) var(--space-6); padding: var(--space-5) var(--space-6) var(--space-4); border-top: var(--border-w) solid var(--color-border-subtle); }
 .actions__col { display: grid; justify-items: center; gap: var(--space-2); min-width: 0; }

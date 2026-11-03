@@ -18,6 +18,11 @@ class GenerationTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_animation_poses(self):
+        result = subprocess.run([shutil.which('node'), '--test', 'tests/service_animate.test.mjs'],
+                                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 @unittest.skipUnless(shutil.which('node'), 'Node is required for Build log checks')
 class BuildLogTest(unittest.TestCase):
