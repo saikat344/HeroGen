@@ -240,8 +240,10 @@ class RewordJobTest(prompt_base.PromptJobTest):
         job = self.prompt_job()
         with self.assertLogs("herogen.service", "INFO"):
             self.assertEqual(self.go(job), "succeeded")
-        spark = [(e["kind"], e.get("step")) for e in read_events(self.run_dir(job)) if e.get("who") == "muse-spark"]
-        self.assertEqual(spark, [("call_start", "p"), ("call_end", "p")])
+        spark = [(e["kind"], e.get("what"), e.get("step")) for e in read_events(self.run_dir(job))
+                 if e.get("who") == "muse-spark"]
+        self.assertEqual(spark, [("call_start", "precheck_brief", "p"), ("call_end", "precheck_brief", "p"),
+                                 ("call_start", "reword_brief", "p"), ("call_end", "reword_brief", "p")])
 
     def test_second_refusal_stops_with_the_clearer_message_and_keeps_the_rewrite_for_editing(self):
         self.refusals = {"images/generations": 2}
@@ -463,6 +465,16 @@ class PrecheckJobTest(RewordJobTest):
                                                     "reason": "precheck"})
         self.assertNotIn(self.description, "\n".join(logs.output))
 
+    def test_check_and_up_front_rewrite_events_keep_step_p_after_earlier_work_left_a_step(self):
+        self.addCleanup(events.reset_step, events.set_step("3f"))
+        job = self.prompt_job()
+        with self.assertLogs("herogen.service", "INFO"):
+            self.assertEqual(self.go(job), "succeeded")
+        spark = [(e["kind"], e.get("what"), e.get("step")) for e in read_events(self.run_dir(job))
+                 if e.get("who") == "muse-spark"]
+        self.assertEqual(spark, [("call_start", "precheck_brief", "p"), ("call_end", "precheck_brief", "p"),
+                                 ("call_start", "reword_brief", "p"), ("call_end", "reword_brief", "p")])
+
     def test_clean_brief_is_untouched(self):
         self.precheck_names = []
         self.description = "A samurai warrior in black and red lacquered armour with a katana"
@@ -483,6 +495,12 @@ class PrecheckJobTest(RewordJobTest):
         with self.assertLogs("herogen.service", "INFO") as logs:
             self.assertEqual(self.go(job), "succeeded")
         self.assertIn("the brand check failed (ApiError)", "\n".join(logs.output))
+        # A transient Muse Spark failure is not resent (the resend is for Muse Image), logged or counted once.
+        self.assertEqual(len(self.precheck_prompts), 1)
+        ends = [e for e in read_events(self.run_dir(job)) if e.get("what") == "precheck_brief"]
+        self.assertEqual([(e["kind"], e.get("outcome"), e.get("code")) for e in ends],
+                         [("call_start", None, None), ("call_end", "failed", "http_5xx")])
+        self.assertFalse(any(e["kind"] == "call_retry" and e.get("step") == "p" for e in read_events(self.run_dir(job))))
         self.assertEqual(self.reword_prompts, [])
         self.assertIn(self.description, self.generation_prompts[0])
         data = reword.read(self.run_dir(job), reword.PRECHECK_FILE)
