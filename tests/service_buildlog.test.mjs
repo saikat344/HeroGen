@@ -695,6 +695,9 @@ test('a reworded description is named in the Build log, quoting the rewrite from
     'The image model refused your description under its content policy (brand or character names usually cause this). Reworded it and trying this step once more.');
   assert.equal(copy.decisionLine({what: 'reworded_brief_refused', ok: false}), 'The image model refused the reworded description too. The run stops here.');
   assert.match(copy.decisionLine({what: 'brief_reword_failed', ok: false}), /could not be reworded automatically/);
+  assert.equal(copy.decisionLine({what: 'sketch_redrawn', ok: true}),
+    'Redrew the sketch from the reworded description, so the artwork no longer follows the original look.');
+  assert.match(copy.decisionLine({what: 'sketch_redraw_failed', ok: false}), /could not be redrawn/);
 });
 
 test('the hero card says the description was reworded, and the edit box gets the rewrite', () => {
