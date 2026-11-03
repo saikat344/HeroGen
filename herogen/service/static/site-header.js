@@ -1,9 +1,9 @@
-// Site header: the phone menu sheet, and which nav item is current on the single-page app.
+// Site navigation: which item of the bottom bar's main nav is current on the single-page app, and the phone menu
+// sheet of pages that still have a top header (the Lab).
 (() => {
   const header = document.querySelector('.site-header');
-  if (!header) return;
-  const toggle = header.querySelector('.nav-toggle');
-  const nav = header.querySelector('.nav');
+  const toggle = header?.querySelector('.nav-toggle');
+  const nav = header?.querySelector('.nav');
 
   function setOpen(open, {focus = false} = {}) {
     header.classList.toggle('is-open', open);

@@ -95,7 +95,7 @@ test('names fall back to the prompt, then a plain label', () => {
   assert.equal(defaultName(job('a', {name: ''}), {prompt: ' A mage '}), 'A mage');
   assert.equal(defaultName(job('a', {name: ''}), null), 'Described hero');
   assert.equal(defaultName(job('a', {name: '', kind: 'sketch'}), null), 'Sketched hero');
-  // The workbench breadcrumb and heading use the same label as the cards.
+  // The workbench heading uses the same label as the cards.
   assert.equal(kindName({kind: 'prompt'}), 'Described hero');
   assert.equal(kindName({kind: 'sketch'}), 'Sketched hero');
 });

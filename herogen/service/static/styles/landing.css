@@ -5,7 +5,7 @@
 /* While the landing shows, main spans the page so the bands can run edge to edge; content keeps --content-max. */
 main:has(> #entry:not([hidden])) { width: auto; max-width: none; margin: 0; padding: 0; }
 main:has(> #entry:not([hidden])) > :not(#entry):not(dialog):not(#loading) { max-width: var(--content-max); margin-inline: auto; padding-inline: var(--gutter); }
-html:has(#entry:not([hidden])) { scroll-padding-top: calc(var(--header-h) + var(--space-5)); }
+html:has(#entry:not([hidden])) { scroll-padding-top: var(--space-5); }
 .landing { position: relative; overflow-x: clip; }
 .landing h1, .landing h2, .landing h3, .landing p { margin: 0; }
 .landing__hero, .landing .band { width: 100%; max-width: calc(var(--content-max) + 2 * var(--gutter)); margin-inline: auto; padding-inline: var(--gutter); }
@@ -102,7 +102,7 @@ html:has(#entry:not([hidden])) { scroll-padding-top: calc(var(--header-h) + var(
 
 /* ---------- Showcase stage ---------- */
 .showcase { display: grid; gap: var(--space-4); min-width: 0; }
-.showcase__stage { aspect-ratio: 4 / 4.5; max-height: calc(100svh - var(--header-h) - var(--space-10)); min-height: 440px; width: 100%; border-radius: var(--radius-2xl); box-shadow: var(--shadow-3); border: var(--border-w) solid var(--stage-glass-border); }
+.showcase__stage { aspect-ratio: 4 / 4.5; max-height: calc(100svh - var(--app-bar-h) - var(--space-10)); min-height: 440px; width: 100%; border-radius: var(--radius-2xl); box-shadow: var(--shadow-3); border: var(--border-w) solid var(--stage-glass-border); }
 .showcase__canvas { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; touch-action: none; opacity: 0; transition: opacity var(--dur-reveal) var(--ease-out); }
 .showcase__canvas.is-shown { opacity: 1; animation: landing-float 8s var(--ease-standard) infinite; }
 .showcase__sweep { position: absolute; inset: 0; z-index: 2; overflow: hidden; pointer-events: none; }
@@ -159,7 +159,7 @@ html:has(#entry:not([hidden])) { scroll-padding-top: calc(var(--header-h) + var(
 .is-empty .step__art { background: var(--color-surface-2); }
 
 /* Gallery band */
-.landing #gallery { scroll-margin-top: calc(var(--header-h) + var(--space-5)); }
+.landing #gallery { scroll-margin-top: var(--space-5); }
 .gallery-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-7); }
 .landing .g-card { border-radius: var(--radius-l); display: grid; grid-template-rows: auto 1fr; overflow: hidden; margin: 0; padding: 0; color: inherit; text-decoration: none; }
 .landing .g-card:focus-visible { outline: var(--focus-w) solid var(--color-focus); outline-offset: var(--focus-offset); }

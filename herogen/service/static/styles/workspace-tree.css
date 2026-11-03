@@ -4,16 +4,22 @@
    arranged here. */
 
 /* ---------- Panel ---------- */
+/* The theme toggle sits in the gutter just left of the panel, level with its top edge. */
 @media (min-width: 1100px) {
-  .generation { grid-template-columns: minmax(0, 1fr) var(--side-panel-w); column-gap: var(--space-6); }
+  .generation { grid-template-columns: minmax(0, 1fr) auto var(--side-panel-w); column-gap: var(--space-3); }
+  .workbench-theme { grid-column: 2; grid-row: 1; align-self: start; }
 }
-/* Below 1100 px the panel moves under the result at full width, after the downloads. */
+/* Below 1100 px the panel moves under the result at full width, after the downloads; the toggle sits at its top right. */
 @media (max-width: 1099px) {
   .generation { display: flex; flex-direction: column; gap: 0; }
   .generation > .result-section { order: 1; }
-  .generation-notes.side-panel { order: 2; width: 100%; margin-top: var(--space-6); }
+  .workbench-theme { order: 2; align-self: flex-end; margin-top: var(--space-6); }
+  .generation-notes.side-panel { order: 2; width: 100%; margin-top: var(--space-3); }
 }
-.generation-notes.side-panel { grid-column: 2; grid-row: 1 / 5; min-width: 0; padding: 0; overflow: hidden; color: var(--color-text);
+@media (max-width: 767px) {
+  .workbench-theme { --btn-h: var(--tap-min); }
+}
+.generation-notes.side-panel { grid-column: 3; grid-row: 1 / 5; min-width: 0; padding: 0; overflow: hidden; color: var(--color-text);
   background: var(--color-surface-1); border: var(--border-w) solid var(--color-border-subtle); border-radius: var(--radius-xl); box-shadow: var(--shadow-inset-top); }
 .side-panel > #inputRefusal { margin: var(--space-5) var(--space-5) 0; }
 .side-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-2) var(--space-4); padding: var(--space-6) var(--space-6) var(--space-4); }

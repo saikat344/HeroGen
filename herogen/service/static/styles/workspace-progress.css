@@ -75,15 +75,14 @@ h2.banner__title { font-family: var(--font-ui); letter-spacing: 0; }
 .export-status { display: flex; align-items: center; gap: var(--space-3); margin: 0; font-size: var(--text-body-s); color: var(--color-text-muted); }
 .export-status.sr { position: absolute; }
 
-/* ---------- Status bar (sticky at the bottom of the workspace only) ---------- */
-.status-bar { position: sticky; bottom: 0; z-index: var(--z-sticky); flex-wrap: nowrap; }
+/* ---------- Hero status and actions, in the bottom bar on the workspace (the bar itself is in app.css) ---------- */
 .status-bar__saved { font-weight: var(--weight-medium); color: var(--color-text); white-space: nowrap; }
 .status-bar__saved .dot { flex: none; transition: background-color var(--dur-base) var(--ease-standard); }
 .status-bar__saved.is-just-saved .dot { animation: pop var(--dur-slow) var(--ease-spring); }
 .status-bar__saved.is-offline { color: var(--color-danger-text); }
 .status-bar__saved.is-offline .dot { background: var(--color-danger); }
 .status-bar__time { white-space: nowrap; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
-.status-bar .btn__label { white-space: nowrap; }
+.app-bar .btn__label { white-space: nowrap; }
 
 /* ---------- More menu ---------- */
 .more { position: relative; }
@@ -123,11 +122,6 @@ h2.banner__title { font-family: var(--font-ui); letter-spacing: 0; }
   .workspace-top .banner > .banner__body { flex-basis: calc(100% - var(--icon-l) - var(--space-5)); }
   .workspace-top .banner > .btn, .banner__actions { margin-left: calc(var(--icon-l) + var(--space-5)); }
   .banner--global { flex-wrap: nowrap; text-align: left; }
-  .status-bar { gap: var(--space-4); }
-  .status-bar__rule { display: block; }
-  .status-bar__time, .status-bar .btn__label { display: none; }
-  .status-bar #compareVersions { width: var(--tap-min); min-width: var(--tap-min); padding: 0; }
-  .status-bar .btn { min-height: var(--tap-min); min-width: var(--tap-min); }
   .menu__item { height: var(--tap-min); }
   .modal { margin: auto auto 0; width: 100%; max-width: none; border-radius: var(--radius-xl) var(--radius-xl) 0 0; max-height: 90svh; }
   .modal__actions .btn { flex: 1; }

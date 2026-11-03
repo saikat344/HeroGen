@@ -677,7 +677,7 @@ class TestErrorPages(WebCase):
         self.assertEqual(r.status_code, 404)
         self.assertTrue(r.headers["content-type"].startswith("text/html"))
         self.assertIn("This page wandered off.", r.text)
-        self.assertIn('class="site-header"', r.text)
+        self.assertIn('class="app-bar"', r.text)
         self.assertIn('class="site-footer"', r.text)
         self.assertRegex(r.text, r'<a class="btn btn--primary btn--l" href="/">Create a hero')
         self.assertRegex(r.text, r'<a class="btn btn--secondary btn--l" href="/#gallery">Back to gallery</a>')
@@ -751,7 +751,7 @@ class TestErrorPages(WebCase):
         self.assertTrue(r.headers["content-type"].startswith("text/html"))
         self.assertIn("Something went wrong on our side.", r.text)
         self.assertIn("Your heroes and progress are saved.", r.text)
-        self.assertIn('class="site-header"', r.text)
+        self.assertIn('class="app-bar"', r.text)
         self.assertNotIn("boom-secret", r.text)
         self.assert_page_csp(r, "500")
         self.assertEqual(api.status_code, 401, "the API is untouched by the page patch")
@@ -782,7 +782,7 @@ class TestErrorPages(WebCase):
         b = Browser(self.app)
         r = b.get("/terms")
         self.assertEqual(r.status_code, 200)
-        self.assertIn('class="site-header"', r.text)
+        self.assertIn('class="app-bar"', r.text)
         self.assertIn('class="site-footer"', r.text)
         self.assertEqual(r.text.count("<h1>"), 1)
         self.assertIn("<h1>Terms of Service</h1>", r.text)
@@ -793,7 +793,7 @@ class TestErrorPages(WebCase):
         self.assertIn('<p class="clause"><span class="clause__n">5.1</span>You keep your rights.</p>', r.text)
         self.assertIn("<ul><li>break it; or wrap it;</li><li>abuse it.</li></ul>", r.text)
         self.assert_page_csp(r, "/terms")
-        # The visitor's theme choice applies: theme.js runs before the styles paint, and the header toggle exists.
+        # The visitor's theme choice applies: theme.js runs before the styles paint, and the bottom bar's toggle exists.
         self.assertIn('<script src="/assets/theme.js"></script>', r.text)
         self.assertLess(r.text.index("/assets/theme.js"), r.text.index("/assets/tokens.css"))
         self.assertIn('<script src="/assets/site-header.js" defer></script>', r.text)
@@ -806,7 +806,7 @@ class TestErrorPages(WebCase):
         gone = b.get("/terms")
         self.assertEqual(gone.status_code, 404)
         self.assertIn("has not been published yet", gone.text)
-        self.assertIn('class="site-header"', gone.text)
+        self.assertIn('class="app-bar"', gone.text)
         self.assert_page_csp(gone, "/terms unpublished")
 
     def test_page_stylesheet_ships_and_uses_tokens_only(self):
@@ -912,6 +912,64 @@ class TestPages(WebCase):
             used = set(re.findall(r'/assets/icons/sprite\.svg#([\w-]+)', pages[name]))
             self.assertTrue(used and used <= symbols, (name, used - symbols))
         self.assertEqual(b.get("/assets/icons/favicon.svg").headers["content-type"], "image/svg+xml")
+
+    def test_every_page_has_the_bottom_nav_and_the_wordmark_but_no_top_header(self):
+        from herogen.service import web
+
+        b = Browser(self.app)
+        pages = {"/": b.get("/").text, "/gallery/x": b.get("/gallery/x").text, "/nope": b.get("/nope").text,
+                 "viewer.html": (web.STATIC_DIR / "viewer.html").read_text()}
+        for name, page in pages.items():
+            self.assertNotRegex(page, r"class=\"site-header|nav-toggle", name)
+            self.assertNotIn("Private workspace", page, name)
+            self.assertNotIn("workspace-pill", page, name)
+            self.assertNotIn('aria-label="Breadcrumb"', page, name)
+            # One wordmark, at the top of the content, linking home.
+            self.assertEqual(page.count('class="brand"'), 1, name)
+            self.assertRegex(page, r'<div class="page-brand"><a class="brand" href="/" aria-label="HeroGen home">', name)
+            # The main nav lives in the fixed bottom bar, right after <main>, with all four items.
+            self.assertEqual(page.count('aria-label="Main"'), 1, name)
+            bar = page[page.index('<div class="app-bar"'):]
+            self.assertLess(page.index("</main>"), page.index('<div class="app-bar"'), name)
+            nav = bar[bar.index('<nav class="nav" id="siteNav" aria-label="Main">'):bar.index("</nav>")]
+            for label in ("Create", "Your heroes", "Gallery", "Open source"):
+                self.assertIn(label, nav, (name, label))
+            self.assertRegex(nav, r'href="https://github.com/saikat344/HeroGen" target="_blank" rel="noopener">.*'
+                                  r'#i-external-link.*\(opens in a new tab\)', name)
+            # The skip link is still the first focusable element and points at the main content.
+            self.assertLess(page.index('<a class="skip-link" href="#main">'), page.index('class="page-brand"'), name)
+            self.assertIn('<main id="main"', page, name)
+        self.assertIn('href="/#gallery" aria-current="page"', pages["/gallery/x"])
+
+    def test_theme_toggle_sits_by_the_panel_on_the_workbench_and_in_the_bar_elsewhere(self):
+        page = Browser(self.app).get("/").text
+        toggles = [m.start() for m in re.finditer(r"data-theme-toggle", page)]
+        self.assertEqual(len(toggles), 2, "one by the Behind the build panel, one in the bottom bar")
+        workbench = page.index('class="btn btn--ghost btn--icon theme-toggle workbench-theme" data-theme-toggle aria-label="Theme"')
+        panel = page.index('<section class="generation-notes side-panel"')
+        self.assertLess(page.index('<div class="result-column">'), workbench)
+        self.assertLess(workbench, panel)
+        self.assertEqual(page[workbench:panel].count("<section"), 0, "nothing between the toggle and the panel")
+        bar = page[page.index('<div class="app-bar" id="appBar" data-screen="entry">'):]
+        self.assertIn('theme-toggle app-bar__theme" data-theme-toggle aria-label="Theme"', bar[:bar.index("</div>\n</div>")])
+        # The workbench status and actions share the bar with the nav: status, then nav, then actions.
+        self.assertLess(bar.index('id="saveStatus"'), bar.index('aria-label="Main"'))
+        self.assertLess(bar.index('aria-label="Main"'), bar.index('id="elapsed"'))
+        self.assertLess(bar.index('id="compareVersions"'), bar.index('app-bar__theme'))
+        css = Browser(self.app).get("/assets/app.css").text
+        self.assertIn('.app-bar[data-screen="generation"] .app-bar__theme', css)   # never two toggles on the workbench
+        self.assertIn('.app-bar:not([data-screen="generation"]) .app-bar__status', css)
+        self.assertIn("body:has(> .app-bar) { padding-bottom: calc(var(--app-bar-h)", css)
+
+    def test_downloads_sit_under_the_result_and_not_further_down(self):
+        page = Browser(self.app).get("/").text
+        self.assertEqual(page.count('id="downloads"'), 1)
+        deliver = page.index('<section class="deliver" id="deliver"')
+        self.assertLess(page.index('<div class="viewer" id="viewer"'), deliver)
+        self.assertLess(deliver, page.index('id="attemptActions"'))
+        self.assertLess(deliver, page.index('id="robloxReady"'))
+        self.assertGreater(page.index('class="panel result-section"'), page.index('id="downloads"'))
+        self.assertLess(page.index('id="downloads"'), page.index('id="attemptActions"'))
 
     def test_only_tokens_css_writes_hex_colours_in_the_new_styles(self):
         from herogen.service import web

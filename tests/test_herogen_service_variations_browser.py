@@ -107,7 +107,7 @@ class TestVariationsBrowser(ServiceBrowserCase):
         self.signin(); self.make_hero('Full body please'); t = self.tab
         t.wait("!document.querySelector('#inputRefusal').hidden")
         self.assertIn('cut off', t.eval("document.querySelector('#inputReason').textContent"))
-        self.assertFalse(t.eval("[...document.querySelectorAll('#downloads a')].some(a=>a.textContent==='Download GLB')"))
+        self.assertFalse(t.eval("[...document.querySelectorAll('#downloads a')].some(a=>a.textContent==='Download 3D model (.glb)')"))
         self.screenshot('variations-refused-input.png')
         first = self.store.jobs_admin_list()[0]['id']
         t.eval("document.querySelector('#retryInput').click()")
@@ -147,10 +147,18 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
     def assert_layout(self):
         t = self.tab
         self.assertTrue(t.eval("""(() => {
-          const b=document.querySelector('.workbench-breadcrumb').getBoundingClientRect();
+          const b=document.querySelector('.page-brand .brand').getBoundingClientRect();
           const e=document.querySelector('.generation-heading .eyebrow').getBoundingClientRect();
-          return b.bottom <= e.top && b.height > 0 && e.height > 0;
-        })()"""), 'Breadcrumb and eyebrow must occupy separate lines')
+          return b.bottom <= e.top && b.height > 0 && e.height > 0 && b.left <= e.left + 1;
+        })()"""), 'The wordmark sits above the eyebrow, at the left of the content')
+        self.assertIsNone(t.eval("document.querySelector('.site-header, .workbench-breadcrumb')"), 'no top header or breadcrumb')
+        # The bottom bar never covers content: the page reserves its height, and the bar stays inside the viewport.
+        self.assertTrue(t.eval("parseFloat(getComputedStyle(document.body).paddingBottom) >= document.querySelector('#appBar').getBoundingClientRect().height - 1"))
+        self.assertTrue(t.eval("document.querySelector('#appBar').getBoundingClientRect().bottom <= innerHeight + 1"))
+        self.assertTrue(t.eval("document.querySelector('#appBar').scrollWidth <= document.querySelector('#appBar').clientWidth + 1"), 'the bar fits')
+        # One visible theme toggle on the workbench: the one by the panel.
+        self.assertEqual(t.eval("[...document.querySelectorAll('[data-theme-toggle]')].filter(b => b.getClientRects().length).map(b => b.className)"),
+                         ['btn btn--ghost btn--icon theme-toggle workbench-theme'])
         self.assertTrue(t.eval('document.documentElement.scrollWidth <= innerWidth'), 'Page must fit the viewport')
         self.assertEqual(t.eval("""[...document.querySelectorAll('#detail *')].filter(e => {
           const r=e.getBoundingClientRect(); if (!r.width || !r.height || getComputedStyle(e).position==='absolute') return false;
@@ -224,8 +232,8 @@ class TestWorkbenchPresentation(ServiceBrowserCase):
             self.assertEqual(t.eval("document.querySelector('#stageLog').getAttribute('role')"), 'log')
             self.assertTrue(t.eval("document.querySelector('#stageLog .bl-step.st-running details').open"))
             self.assertFalse(t.eval("document.querySelector('#cancelJob').hidden"))
-            self.assertFalse(t.eval("document.querySelector('.site-header').contains(document.querySelector('#developerMode'))"))
-            self.assertEqual(t.eval("document.querySelector('#who').textContent"),'Private workspace')
+            self.assertFalse(t.eval("document.querySelector('#appBar').contains(document.querySelector('#developerMode'))"))
+            self.assertIsNone(t.eval("document.querySelector('#who')"), 'no Private workspace pill')
             self.capture_matrix('running')
         finally:
             stage_gate.set()

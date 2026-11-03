@@ -297,7 +297,11 @@ class TestServicePage(ServiceBrowserCase):
         self.tab.wait("!document.querySelector('#previewWrap').hidden && !!document.querySelector('#previewWrap canvas')", timeout=60)
         self.tab.wait("!document.querySelector('#orbitHint').hidden", timeout=60)
         self.tab.wait("/not available for this hero/.test(document.querySelector('#exportStatus').textContent)", timeout=60)
-        self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some(a => a.textContent === 'Download GLB')"))
+        self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some(a => a.textContent === 'Download 3D model (.glb)')"))
+        # No Roblox version: the panel says why in words and the GLB is the primary download.
+        self.assertEqual(self.tab.eval("document.querySelector('#deliver').dataset.state"), 'unavailable')
+        self.assertTrue(self.tab.eval("document.querySelector('#glbDownload').classList.contains('btn--primary')"))
+        self.assertRegex(self.tab.eval("document.querySelector('#deliverNoteText').textContent"), r'^Roblox version unavailable\. ')
         self.assertIn('unrefined texture', self.tab.eval("document.querySelector('#stageIssues').textContent"))
         self.assertTrue(self.tab.eval("document.querySelector('#previewWrap canvas').width > 0"))
         self.assertFalse(self.tab.eval("[...document.querySelectorAll('#downloads a')].some(a => /Roblox/.test(a.textContent))"))
@@ -325,9 +329,22 @@ class TestServicePage(ServiceBrowserCase):
             self.assertEqual(self.tab.eval("document.querySelector('#exportStatus').textContent"), 'Roblox files: being prepared')
             self.assertEqual(self.tab.eval("fetch(document.querySelector('#downloads a').href).then(r=>r.status)"), 200)
             self.assertTrue(self.tab.eval("!document.querySelector('#modelTab').hidden"))
+            # The Roblox button waits with its progress; the GLB beside it works now.
+            self.assertEqual(self.tab.eval("document.querySelector('#deliver').dataset.state"), 'exporting')
+            self.assertTrue(self.tab.eval("document.querySelector('#robloxDownload').disabled"))
+            self.assertEqual(self.tab.eval("document.querySelector('#robloxDownload').textContent"), 'Preparing Roblox files…')
+            self.assertEqual(self.tab.eval("document.querySelector('#glbDownload').textContent"), 'Download 3D model (.glb)')
         finally:
             gate.set()
         self.tab.wait("document.querySelector('#exportStatus').textContent === 'Roblox files: ready'", timeout=30)
+        # Ready: Roblox is the primary download, the GLB secondary beside it, and Retry and Refine step down.
+        self.tab.wait("document.querySelector('#deliver').dataset.state === 'ready'")
+        self.assertEqual(self.tab.eval("document.querySelector('#robloxDownload').tagName"), 'A')
+        self.assertTrue(self.tab.eval("document.querySelector('#robloxDownload').classList.contains('btn--primary')"))
+        self.assertTrue(self.tab.eval("document.querySelector('#glbDownload').classList.contains('btn--secondary')"))
+        self.assertFalse(self.tab.eval("document.querySelector('#robloxReady').hidden"))
+        self.assertTrue(self.tab.eval("document.querySelector('#refineVersion').classList.contains('btn--secondary')"))
+        self.assertEqual(self.tab.eval("fetch(document.querySelector('#robloxDownload').href).then(r=>r.status)"), 200)
 
     def test_progressive_shape_versions_interaction_camera_and_hidden_polling(self):
         shape, version_one, version_two = (threading.Event() for _ in range(3))
@@ -590,7 +607,7 @@ class TestServicePage(ServiceBrowserCase):
         states = self.stage_states()
         self.assertIsNone(self.tab.eval("document.querySelector('#qualityReview')"))
         self.assertTrue(self.tab.eval("[...document.querySelectorAll('#downloads a')].some((a) => "
-                                      "a.textContent === 'Download GLB')"))
+                                      "a.textContent === 'Download 3D model (.glb)')"))
         time.sleep(POLL_S + 1.5)
         settled = self.tab.eval("window.__polls")
         time.sleep(2 * POLL_S + 1)
@@ -613,7 +630,8 @@ class TestPublicLivePage(ServiceBrowserCase):
         self.runner.gate.set()
         t.wait("document.querySelector('#state').textContent === 'succeeded'",timeout=60)
         t.goto(self.url+'/')
-        t.wait("document.querySelector('#who').textContent === 'Private workspace'")
+        t.wait("!document.querySelector('#app').hidden")
+        self.assertIsNone(t.eval("document.querySelector('#who')"), 'no Private workspace pill')
         self.assertTrue(t.eval("document.querySelector('#guestAccessSummary').hidden"))
         self.assertEqual(len(self.store.users_list()),1)
         t.eval("document.querySelector('[data-idea=moon]').click(); document.querySelector('#jobForm').requestSubmit()")

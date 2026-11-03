@@ -1,4 +1,5 @@
-"""Server-rendered pages: the shared shell (marketing header and footer), the 404 and 500 pages, and the legal text.
+"""Server-rendered pages: the shared shell (wordmark, bottom nav bar and marketing footer), the 404 and 500 pages,
+and the legal text.
 
 Every page here loads only its own origin's files, so `PAGE_CSP` needs no inline script or style."""
 
@@ -20,7 +21,8 @@ _CLAUSE = re.compile(r"^(\d+\.\d+)\s+(.*)$", re.S)
 
 
 def shell(title: str, main: str, body_class: str) -> str:
-    """The page around `main` (trusted markup): head, skip link, header, footer. `title` is escaped."""
+    """The page around `main` (trusted markup): head, skip link, wordmark, bottom nav bar, footer. `title` is
+    escaped."""
     return (SHELL.read_text()
             .replace("<!--title-->", html.escape(title))
             .replace("<!--body_class-->", html.escape(body_class))

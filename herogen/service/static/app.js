@@ -8,6 +8,7 @@ import { buildLog } from '/assets/buildlog.js';
 import { generationView, generationState, TERMINAL } from '/assets/generation.js';
 import { usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
+import { renderDownloads } from '/assets/downloads.js';
 import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
@@ -18,7 +19,8 @@ let entry;
 let screen = 'entry';   // 'entry' (landing), 'heroes' (#heroes), or 'generation' (a hero's workspace)
 function setScreen(next) {
   const enteringWorkbench = next === 'generation' && screen !== 'generation';
-  screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation'); show('#statusBar', next === 'generation');
+  screen = next; show('#entry', next === 'entry'); show('#detail', next === 'generation');
+  $('#appBar').dataset.screen = next;   // the bottom bar shows the hero's status and actions on the workbench only
   heroes.setVisible(next === 'heroes');
   if (next === 'heroes') show('#app');
   document.title = next === 'heroes' ? 'Your heroes · HeroGen' : 'HeroGen';
@@ -99,11 +101,6 @@ function el(tag, props = {}, ...kids) {
   for (const k of kids) if (k) e.append(k);
   return e;
 }
-function svgIcon(name) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-  svg.setAttribute('class', 'icon'); svg.setAttribute('aria-hidden', 'true'); use.setAttribute('href', `/assets/icons/sprite.svg#i-${name}`);
-  svg.append(use); return svg;
-}
 function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; }
 function fmtSecs(v) { return typeof v === 'number' ? (v < 90 ? `${v.toFixed(1)} s` : `${(v / 60).toFixed(1)} min`) : ''; }
 function idemKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, (x) => x.toString(16).padStart(2, '0')).join(''); }
@@ -133,7 +130,7 @@ async function loadSession() {
   return S.session;
 }
 
-for (const id of ['heroesNav', 'breadcrumbHeroes']) $(`#${id}`).addEventListener('click', () => showHeroes());
+$('#heroesNav').addEventListener('click', () => showHeroes());
 $('#workspaceNav').addEventListener('click', () => $('#backToIdeas').click());
 
 const developer = developerMode($('#developerMode'), $('#developerPanel'),
@@ -198,27 +195,13 @@ function renderJob(j) {
   jobBanner(j);
   generation.update(j); liveLog.update(j);
   variations.update(j);
-  const dl = $('#downloads');
-  const items = [];
-  const g = j.downloads.glb;
-  if (g.available) {
-    const glbLink = el('a', { href: g.url, cls: `btn ${j.downloads.roblox.available ? 'btn--secondary' : 'btn--primary'}`, download: '', text: 'Download GLB' });
-    glbLink.prepend(svgIcon('download'));
-    glbLink.addEventListener('click', () => track('download_click', { format: 'glb' }, { flush: true }));
-    items.push(glbLink);
-  } else {
-    items.push(el('span', { cls: 'downloads__note', text: `GLB: ${g.reason}` }));
-  }
-  const r = j.downloads.roblox;
-  if (r.available) {
-    const rbxLink = el('a', { href: r.url, cls: 'btn btn--primary', download: '', text: 'Download Roblox bundle (.zip)' });
-    rbxLink.prepend(svgIcon('download'));
-    rbxLink.addEventListener('click', () => track('download_click', { format: 'roblox' }, { flush: true }));
-    items.push(rbxLink);
-  } else {
-    items.push(el('span', { cls: 'downloads__note', text: `Roblox bundle: ${r.reason}` }));
-  }
-  dl.replaceChildren(...items);
+  // The downloads lead once there is something to download; Retry and Refine then step down to secondary.
+  const offer = renderDownloads($, j, { track });
+  const lead = !!(offer?.roblox?.url || offer?.glb);
+  $('#refineVersion').classList.toggle('btn--primary', !lead);
+  $('#refineVersion').classList.toggle('btn--secondary', lead);
+  for (const id of ['#refineVersion', '#retryVersion']) $(id).classList.toggle('btn--l', !lead);
+  const g = j.downloads.glb, r = j.downloads.roblox;
   show('#studio', r.available);
   $('#readme').textContent = j.roblox_readme || '';
   $('#viewerLink').href = j.viewer;
@@ -317,7 +300,7 @@ function initMenu() {
   });
   list.addEventListener('click', (e) => { if (e.target.closest('[role=menuitem]')) close(false); });
   document.addEventListener('click', (e) => { if (!list.hidden && !e.target.closest('.more')) close(false); });
-  $('#deleteDialog').addEventListener('close', () => { if ($('#moreMenu').isConnected && !$('#statusBar').hidden) $('#moreMenu').focus(); });
+  $('#deleteDialog').addEventListener('close', () => { if ($('#moreMenu').isConnected && $('#appBar').dataset.screen === 'generation') $('#moreMenu').focus(); });
   $('#closeDelete').addEventListener('click', () => $('#deleteDialog').close());
   $('#cancelDelete').addEventListener('click', () => $('#deleteDialog').close());
   // The Retry on the failure banner presses the real Retry button, so it is allowed exactly when that one is.
@@ -492,7 +475,7 @@ function initJobs() {
     finally { $('#cancelJob').disabled = false; }
   });
   $('#deleteJob').addEventListener('click', () => {
-    $('#deleteHeading').textContent = `Delete ${$('#workbenchName').textContent || 'this hero'}?`;
+    $('#deleteHeading').textContent = `Delete ${S.job ? S.job.name || kindName(S.job) : 'this hero'}?`;
     $('#deleteError').hidden = true; $('#confirmDelete').disabled = false; $('#deleteDialog').showModal();
   });
   $('#confirmDelete').addEventListener('click', async () => {
@@ -515,8 +498,7 @@ function initJobs() {
 
 async function signedIn() {
   const guest = S.session.user.kind === 'guest';
-  $('#who').textContent = 'Private workspace'; $('#who').title = guest ? 'Saved in this browser' : S.session.user.email;
-  show('#who'); show('#signOut', !guest);
+  show('#signOut', !guest);
   updateAccessSummary();
   show('#developerMode'); show('#app');
   const jobs = await refreshList();
@@ -530,7 +512,7 @@ function updateAccessSummary() {
 }
 function expireAccess() {
   if (S.session) S.session.signed_in = false;
-  returnToEntry(); show('#app', false); show('#who', false); show('#signOut', false); show('#developerMode', false);
+  returnToEntry(); show('#app', false); show('#signOut', false); show('#developerMode', false);
   heroes.update([]);
   show('#guestAccessSummary', false); show('#headerSignIn', false);
   entry?.say('Your workspace session has expired. Create your hero to open a new private workspace.', 'info');
