@@ -2138,7 +2138,8 @@ class FastBeautyStageTests(unittest.TestCase):
             verdict = lambda views: {k: (v['accepted'], v['reason'], v.get('selected_attempt'), v.get('winning_slot'),
                                          [(a['try'], a['accepted'], a['reason']) for a in v['attempts']])
                                      for k, v in views.items()}
-            calls = Counter((c['key'], c['cached']) for c in record['calls'])
+            # The record's call rows in order: their order is fixed, not the finishing order.
+            calls = [(c['key'], c['cached']) for c in record['calls']]
             return (record['face_source'], record['face_fallback'], verdict(record['views']),
                     verdict(record['default_fast_fallback']['views']), paid, ordinary, calls,
                     sorted((e['view'], e['slot'], e['nested'], e['key'], e['cached']) for e in edits))
@@ -2182,3 +2183,41 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['stop_reason'], 'API cap: next attempt exceeds $5.0000')
         self.assertIn('ApiError', record['error'])
         self.assertFalse((self.run / '03-refined.glb').exists())
+
+    def test_record_writes_wait_for_a_save_in_progress_on_another_thread(self):
+        # Force the interleave: a save on the default-head thread holds the record lock while the
+        # main waves start writing their records. Those writes must wait for it to finish.
+        from herogen.blender import record as R
+        real = json.dumps
+        main_ready, in_dump, main_wrote = threading.Event(), threading.Event(), threading.Event()
+        changed, armed = [], [True]
+
+        def dumps(obj, **kwargs):
+            if armed[0] and main_ready.is_set() and threading.current_thread() is not threading.main_thread():
+                armed[0] = False
+                before = real(obj, sort_keys=True, default=str)
+                in_dump.set()
+                main_wrote.wait(1)   # bounded only for the passing case, where the writer waits
+                changed.append(real(obj, sort_keys=True, default=str) != before)
+            return real(obj, **kwargs)
+
+        original_open = B.FaceControl.open_record
+
+        def open_record(control):
+            original_open(control)
+            main_ready.set()
+            self.assertTrue(in_dump.wait(self.WAIT))
+
+        original_publisher = fast.Publisher.__init__
+
+        def publisher(instance, *args, **kwargs):
+            if threading.current_thread() is threading.main_thread():
+                main_wrote.set()   # the main waves wrote their records and reached their publisher
+            original_publisher(instance, *args, **kwargs)
+
+        with mock.patch.object(R, 'json', SimpleNamespace(dumps=dumps, loads=json.loads)), \
+             mock.patch.object(B.FaceControl, 'open_record', open_record), \
+             mock.patch.object(fast.Publisher, '__init__', publisher):
+            record = self.run_beauty(cap_usd=5)
+        self.assertEqual(changed, [False])
+        self.assertEqual(record['status'], 'complete')

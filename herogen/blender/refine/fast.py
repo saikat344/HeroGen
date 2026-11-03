@@ -1,5 +1,6 @@
 """Frozen-atlas repaint waves with isolated requests and ordered texture projection."""
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
+import contextlib
 import contextvars
 import copy
 import hashlib
@@ -353,10 +354,11 @@ class Pass:
         buildlog.view_kept(self.key, self.record.get('reason'), len(self.tries))
 
 
-def reproject(tex, work, records, body_cam, recovery=None):
+def reproject(tex, work, records, body_cam, recovery=None, lock=None):
     """Rebuild from the immutable base and saved accepted paint, in the declared pass order.
 
     An applied face recovery paints at head+0's position, first, only while no frontal is accepted.
+    `lock`, when given, guards the texel counts written back into `records` and `recovery`.
     """
     import numpy as np
     from . import face_recovery, imaging as I
@@ -385,15 +387,19 @@ def reproject(tex, work, records, body_cam, recovery=None):
                 weight *= np.where(has_current, np.clip((hi - delta) / (hi - lo), 0, 1), 1).astype(np.float32)
         texels = tex.apply(view['cam'], rgb, feather, view['depth'], view['valid'],
                                                  weight, I.HAIR_BONUS if view['hair'] else 1.0)
-        if view is recovered:
-            recovery['texels'] = texels
-        else:
-            records[view['key']]['texels'] = texels
+        with lock if lock is not None else contextlib.nullcontext():
+            if view is recovered:
+                recovery['texels'] = texels
+            else:
+                records[view['key']]['texels'] = texels
 
 
 class Publisher:
     """Publish immutable GLBs before atomic progress pointers, retaining every progress snapshot."""
-    def __init__(self, run, prep, tex, work, data, body_cam, timeout, face_control=None, palette_manifest=None):
+    def __init__(self, run, prep, tex, work, data, body_cam, timeout, face_control=None, palette_manifest=None,
+                 lock=None):
+        # `lock` guards writes into the stage record, which other threads serialise while they save.
+        self.lock = lock if lock is not None else threading.RLock()
         self.run, self.prep, self.tex, self.work = run, prep, tex, work
         self.data, self.body_cam, self.timeout = data, body_cam, timeout
         self.face_control, self.palette_manifest = face_control, palette_manifest
@@ -419,7 +425,7 @@ class Publisher:
         if (not set(accepted) > set(previous) and recovered == before
                 and (self.progress['versions'] or self.face_control is None)):
             return None
-        reproject(self.tex, self.work, records, self.body_cam, recovery)
+        reproject(self.tex, self.work, records, self.body_cam, recovery, lock=self.lock)
         if self.face_control is not None:
             self.face_control.paint(self.tex, self.work, records)
         n = len(self.progress['versions']) + 1
@@ -431,7 +437,8 @@ class Publisher:
             export_texture, grades = grade_export(manifest, self.prep, texture, self.body_cam,
                                              self.work / f'region-palette-v{n}', timeout=self.timeout,
                                              **({'protected_head': protection} if protection is not None else {}))
-            self.data['region_palette'] = grades
+            with self.lock:
+                self.data['region_palette'] = grades
         name = f'03-refined-v{n}.glb'
         target = self.run / name
         temporary = target.with_name(target.stem + '.part.glb')
@@ -448,7 +455,8 @@ class Publisher:
                    'atlas_sha256': hashlib.sha256(export_texture.read_bytes()).hexdigest(),
                    'code_sha': (self.data.get('code') or {}).get('commit'), 'wave': wave}
         if self.face_control is not None:
-            version['face_source'] = dict(self.data['face_source'])
+            with self.lock:
+                version['face_source'] = dict(self.data['face_source'])
         if recovered is not None:
             version['face_recovery'] = recovered
         self.progress['versions'].append(version)
@@ -507,17 +515,20 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         face_control.open_record()
     else:
         face_control = None
-    data['waves'] = []
     all_passes = []
-    for sequence in WAVES:
-        for name, hair in sequence:
-            key = ('hair-' if hair else '') + name
-            record = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
-            data['views'][key] = record
-            if not head_found and name.startswith('head'):
-                record['reason'] = 'head_not_found'
+    # Every write into the stage record holds `state_lock`: other threads (the default-head run and
+    # every request's budget hooks) serialise the record under it while they save.
+    with state_lock:
+        data['waves'] = []
+        for sequence in WAVES:
+            for name, hair in sequence:
+                key = ('hair-' if hair else '') + name
+                record = {'accepted': False, 'reason': 'incomplete', 'tries': 0, 'attempts': []}
+                if not head_found and name.startswith('head'):
+                    record['reason'] = 'head_not_found'
+                data['views'][key] = record
     publisher = Publisher(work.parent.parent, prep, tex, work, data, cams["body+0"], timeout,
-                          face_control=face_control, palette_manifest=palette_manifest)
+                          face_control=face_control, palette_manifest=palette_manifest, lock=state_lock)
 
     def join_default():
         """Wait where the complete default-head run is needed: its error, then its stop, apply here."""
@@ -575,18 +586,20 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
             if job.tasks[index][0].done() and not job.tasks[index][0].cancelled():
                 exc = job.tasks[index][0].exception()
                 if isinstance(exc, BudgetStop):
-                    data['stop_reason'] = str(exc)
+                    with state_lock:
+                        data['stop_reason'] = str(exc)
                     stopped = True
         except BudgetStop as exc:
             job.completed[index] = job.tasks[index][2]
-            data['stop_reason'] = str(exc)
+            with state_lock:
+                data['stop_reason'] = str(exc)
             stopped = True
         except Exception as exc:
             private = job.tasks[index][2]
-            private['reason'] = type(exc).__name__
-            if private['attempts']:
-                private['attempts'][-1]['reason'] = type(exc).__name__
             with state_lock:
+                private['reason'] = type(exc).__name__
+                if private['attempts']:
+                    private['attempts'][-1]['reason'] = type(exc).__name__
                 job.completed[index] = private
                 job.record.update(reason=type(exc).__name__,
                                   attempts=[a for i in sorted(job.completed) for a in job.completed[i]['attempts']])
@@ -685,9 +698,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                         continue
                     halted = halt is not None and halt()
                     if stopped or error is not None or face_error is not None or halted:
-                        record['reason'] = ('not attempted: API cap' if stopped else
-                                            'not attempted: model error' if error is not None or halted else
-                                            'not attempted: face unavailable')
+                        with state_lock:
+                            record['reason'] = ('not attempted: API cap' if stopped else
+                                                'not attempted: model error' if error is not None or halted else
+                                                'not attempted: face unavailable')
                         buildlog.view_skipped(key, record['reason'])
                         continue
                     factory = face_control.pass_type(name) if face_control is not None else Pass
@@ -702,8 +716,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                 if not jobs:
                     continue
                 folder = work / f'wave-{wave_index}'
-                data['waves'].append({'views': [j.key for j in jobs], 'frozen_atlas': os.path.relpath(current, work),
-                                      'concurrency': CONCURRENCY, 'parallel_attempts': True})
+                with state_lock:
+                    data['waves'].append({'views': [j.key for j in jobs],
+                                          'frozen_atlas': os.path.relpath(current, work),
+                                          'concurrency': CONCURRENCY, 'parallel_attempts': True})
                 save(ok=False, status='running')
                 buildlog.wave(wave_index, len(jobs), attempts, from_version=len(publisher.progress['versions'])
                               if wave_index > 1 else 0)
@@ -836,9 +852,13 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
         if passes is not None:
             passes.extend(all_passes)
         with persistence_lock:
+            # The record's calls: main slots in pass order, then attempt-one slices in view order,
+            # then the face requests (`FaceControl.publish_extensions`).
             for job in all_passes:
                 for _, child, *_ in job.tasks:
                     publish(client, child)
+            if face_control is not None:
+                face_control.publish_extensions()
             if face_client is not None:
                 publish(client, face_client)
             if recovery_client is not None:
