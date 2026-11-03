@@ -48,6 +48,7 @@ STARTERS = ("trail-keeper", "little-inventor", "cloud-sailor", "garden-guardian"
 SHADES = ("textured", "clay", "wire")
 FORMATS = ("glb", "roblox")
 THEMES = ("light", "dark", "system")
+ANIMATIONS = ("idle", "walk", "wave", "jump", "stop")
 SURFACES = ("landing", "gallery_detail", "workbench")
 CREATE_RESULTS = (
     "accepted",
@@ -92,6 +93,7 @@ _ENUM_PROPS: dict[str, tuple[str, tuple[str, ...]]] = {
     "shade_toggle": ("mode", SHADES),
     "download_click": ("format", FORMATS),
     "theme_change": ("theme", THEMES),
+    "animation_play": ("clip", ANIMATIONS),
 }
 
 

@@ -130,11 +130,12 @@ class TestEventsApiAndPrivacy(WebCase):
                 {"name": "result_viewed"},
                 {"name": "download_click", "props": {"format": "glb"}},
                 {"name": "theme_change", "props": {"theme": "dark"}},
+                {"name": "animation_play", "props": {"clip": "walk"}},
             ],
         }
         r = b.post("/api/events", json=valid_batch, headers={"User-Agent": "SensitiveBrowser/99.0"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json(), {"ok": True, "recorded": 14})
+        self.assertEqual(r.json(), {"ok": True, "recorded": 15})
         self.assertEqual(self.store.users_list(), [], "analytics never creates guest or user rows")
         self.assertNotIn("hg_session", dict(b.c.cookies), "no new session or tracking cookie")
 

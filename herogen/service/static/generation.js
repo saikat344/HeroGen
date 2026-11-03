@@ -434,6 +434,7 @@ export function generationView($, select3D) {
         }));
       }
       dock.cameras(job.images);
+      dock.animation(robloxReady(job) ? job.animation : null);
       $('#modelTab').hidden = !job.downloads?.glb?.available; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
       const latest = defaultImage(job, available);
       const auto = job.downloads?.glb?.available ? 'model' : reveal?.turn ? 'turntable' : reveal?.sheet ? 'draft' : latest;

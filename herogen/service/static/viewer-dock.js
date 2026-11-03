@@ -19,6 +19,31 @@ export function thumbButton(label, url, data = {}) {
   button.append(frame, text);
   return button;
 }
+// The animation buttons: clip key, label and sprite icon. Shown only for a hero whose job has an `animation` entry.
+export const ANIMATIONS = [['idle', 'Idle', 'person-standing'], ['walk', 'Walk', 'footprints'], ['wave', 'Wave', 'hand'],
+  ['jump', 'Jump', 'arrow-up-from-line']];
+const PLAYING = {idle: 'Standing idle', walk: 'Walking', wave: 'Waving', jump: 'Jumping'};
+const SVG = 'http://www.w3.org/2000/svg';
+// A compact segmented control (icon over label, aria-pressed) with a caption like the other dock thumbnails.
+export function animationControl(doc = document) {
+  const group = doc.createElement('div'); group.className = 'dock-group anim-ctl'; group.id = 'animationControl';
+  group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Animations'); group.hidden = true;
+  const seg = doc.createElement('div'); seg.className = 'anim-ctl__seg';
+  for (const [key, label, name] of ANIMATIONS) {
+    const button = doc.createElement('button'); button.type = 'button'; button.className = 'anim-ctl__btn';
+    button.dataset.animation = key; button.setAttribute('aria-pressed', 'false'); button.title = `Play ${label}`;
+    const svg = doc.createElementNS(SVG, 'svg'), use = doc.createElementNS(SVG, 'use');
+    svg.setAttribute('class', 'icon icon--s'); svg.setAttribute('aria-hidden', 'true');
+    use.setAttribute('href', `/assets/icons/sprite.svg#i-${name}`); svg.append(use);
+    const text = doc.createElement('span'); text.textContent = label;
+    button.append(svg, text); seg.append(button);
+  }
+  const caption = doc.createElement('span'); caption.className = 'thumb__label anim-ctl__caption'; caption.textContent = 'Animate';
+  caption.setAttribute('aria-hidden', 'true');
+  const status = doc.createElement('span'); status.className = 'sr'; status.setAttribute('role', 'status');
+  group.append(seg, caption, status);
+  return group;
+}
 const reducedMotion = () => Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 function storedOrbit() {
   try { return sessionStorage.getItem('hg:orbit') !== 'off'; } catch { return true; }
@@ -26,7 +51,26 @@ function storedOrbit() {
 
 export function viewerDock($) {
   let model = false, views = '', shade = 'textured', orbitOn = storedOrbit(), expanded = false;
+  let moves = null, moveKey = '', playing = null;
   const dock = $('#viewerDock'), stage = $('#viewer');
+  // The animation control follows the camera views (before Orbit, Clay and Wireframe, which a narrow stage scrolls
+  // to), behind its own separator.
+  const anim = animationControl(), animSep = document.createElement('span');
+  animSep.className = 'dock-sep'; animSep.setAttribute('aria-hidden', 'true'); animSep.hidden = true;
+  $('#cameraViews').after(animSep, anim);
+  const animStatus = anim.querySelector('[role="status"]');
+  function syncMoves(clip, status) {
+    playing = clip;
+    for (const b of anim.querySelectorAll('[data-animation]')) {
+      const on = b.dataset.animation === clip, label = ANIMATIONS.find(([k]) => k === b.dataset.animation)[1];
+      b.setAttribute('aria-pressed', String(on));
+      b.setAttribute('aria-busy', String(on && status === 'loading'));
+      b.title = on ? `Stop ${label}` : `Play ${label}`;
+    }
+    animStatus.textContent = status === 'error' ? 'The animation could not be loaded.' :
+      status === 'loading' ? 'Loading the animation…' : clip ? PLAYING[clip] : '';
+  }
+  function stopMoves() { if (playing) viewer().then(m => m.animate(null)).catch(() => {}); syncMoves(null, 'idle'); }
   function setPreset(name) {
     for (const b of $('#cameraViews').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.camera === name));
   }
@@ -41,16 +85,18 @@ export function viewerDock($) {
     const images = $('#images').children.length > 0;
     $('#images').hidden = model;
     $('#cameraViews').hidden = !model; $('#workbenchShading').hidden = !model; $('#dockSep').hidden = !model;
+    anim.hidden = animSep.hidden = !model || !moves;
     dock.hidden = !model && !images;
     stage.classList.toggle('has-dock', !dock.hidden);
   }
   // Show the 3D or the image tools. Called on every selection change.
   function mode(isModel) {
     const entering = isModel && !model;
+    if (!isModel && model) stopMoves();
     model = isModel;
     $('#resetView').hidden = !model; $('#previewLighting').hidden = !model;
     syncDock();
-    if (entering) viewer().then(m => { m.onPreset(setPreset); syncOrbit(); }).catch(() => {});
+    if (entering) viewer().then(m => { m.onPreset(setPreset); m.onAnimation(syncMoves); syncOrbit(); }).catch(() => {});
   }
   // Rebuild the Front/Side/Back thumbnails only when their images change.
   function cameras(images) {
@@ -65,6 +111,25 @@ export function viewerDock($) {
     }));
   }
   function images(buttons) { $('#images').replaceChildren(...buttons); syncDock(); }
+  // The job's `animation` entry (body GLB and joint pivots), or nothing: no buttons without it.
+  function animation(info) {
+    const next = info && typeof info.model === 'string' && Array.isArray(info.parts) && info.parts.length ? info : null;
+    const key = next ? next.model : '';
+    if (key === moveKey) return;
+    if (playing) stopMoves();
+    moves = next; moveKey = key; syncDock();
+  }
+  for (const button of anim.querySelectorAll('[data-animation]')) button.addEventListener('click', () => {
+    if (!moves || !model) return;
+    const clip = playing === button.dataset.animation ? null : button.dataset.animation;
+    syncMoves(clip, clip ? 'loading' : 'idle');
+    track('animation_play', {clip: clip || 'stop'});
+    viewer().then(m => m.animate(clip, moves)).then(ok => { if (ok === false && playing === clip) syncMoves(null, 'idle'); })
+      .catch(() => syncMoves(null, 'error'));
+  });
+  // Start downloading the body as soon as a pointer or the keyboard reaches the buttons.
+  const prefetch = () => { if (moves && model) viewer().then(m => m.prefetchAnimation(moves)).catch(() => {}); };
+  anim.addEventListener('pointerenter', prefetch); anim.addEventListener('focusin', prefetch);
 
   $('#orbitToggle').addEventListener('click', () => {
     if (reducedMotion()) return;
@@ -115,5 +180,5 @@ export function viewerDock($) {
   $('#preview').addEventListener('pointerdown', () => $('#orbitHint').classList.add('is-faded'), {once: true, passive: true});
   globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').addEventListener?.('change', syncOrbit);
   syncOrbit();
-  return {mode, cameras, images};
+  return {mode, cameras, images, animation};
 }
