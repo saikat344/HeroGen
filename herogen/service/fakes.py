@@ -271,10 +271,11 @@ class FakeRunner:
                     log.emit("decision", what="view_result", view=view, try_=t, ok=False, why="outline_moved",
                              m={"median_px": median, "median_limit": limit[0], "p90_px": p90,
                                 "p90_limit": limit[1]})
-                log.emit("decision", what="view_kept_original", view=view, ok=False, why="outline_moved")
+                log.emit("decision", what="view_kept", view=view, ok=False, why="outline_moved", m={"tries": 2})
             else:
                 log.emit("decision", what="view_result", view=view, try_=1, ok=True,
                          m={"overlap": 0.93, "median_px": 2.1})
+                log.emit("decision", what="view_selected", view=view, try_=1, ok=True, m={"tries": 2})
                 if view == "body-90":
                     log.emit("decision", what="view_result", view=view, try_=2, ok=False, why="lower_try_accepted")
         log.wait(0.2)
