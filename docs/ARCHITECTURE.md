@@ -2764,10 +2764,31 @@ cost and cap. Its requests are beauty-only, so a transient error is resent once 
 remains is contained, as described under "Contained beauty-only model errors" below; any other model
 or replay error drains every yaw and fails the stage loudly. `beauty_generation` records the yaws,
 attempts, selection, cost, seconds, resends and contained errors. Ordinary fast waves
-first resolve from the original ungraded base, using the same cover, gates and user note, but only
+resolve from the original ungraded base, using the same cover, gates and user note, but only
 attempt zero per pass. Their saved renders supply the exact ordinary frozen input for each enhanced pass, including upper
 back, and their complete quantized atlas supplies a default head when needed. These ordinary views remain
 recorded in `default_fast_fallback`, including when a beauty face is retained.
+
+This default-head run needs no beauty reference, so it runs on its own thread from the end of
+preparation, beside reference generation, the palette grade and the main waves. It keeps a copy of the
+ungraded base and its own texture state; the grade writes a new base and texture array and never
+touches them. The main waves wait only where they use one of its results:
+- slot 2 of a view waits for that view's ordinary attempt zero alone, publishes its cache family to the
+  root cache and replays it, so each of its requests is paid once. A shielded slot 2 always completes
+  as a replay, so a lower slot's win never cuts it short whichever finishes first;
+- slot 3 waits until the run has collected that view's attempt zero, then pays attempt one through the
+  run's own pass (below);
+- folding attempt one, face selection (`face_conditional`, `choose`), the default-head atlas
+  (`fallback_texture`, cached hair views, face recovery) and every later wave wait for the complete run.
+  Wave 2 renders a version composed with the default head, so it starts only then.
+Its record fields stay staged until the main record reaches the waves, so `stage-3f.json` keeps the
+same fields and key order as before. A model error in either run stops the other from submitting more
+views, every submitted request drains, and the default-head run's own error is raised first. A main
+slot whose default-head attempt failed raises `DefaultRunFailed` instead of sending that request again;
+a default-head budget stop stops the main run as before. If generation leaves no usable front
+reference, the run continues as ordinary fast: the default-head run submits nothing more, its submitted
+calls drain and stay in the record and cost, and its files are removed. That is the only case in which it
+pays for requests that a run starting it after generation would not send.
 The head pass's two independent slots run one beauty sample and the ordinary recipe's first sample
 (`RF2R` or `RF2W`) with the original cover and ungraded render. Both frontal samples drain before face
 selection. Body and hair use selected beauty references where available, with the existing standard
@@ -2869,8 +2890,8 @@ repeats the nested run's view, attempt, reason and mask area; a `default` or `be
 paint and no recovery.
 Every enhanced pass uses slot 1 for its enhanced request and slot 2 for the
 exact ordinary-fast first request for that pass: original cover, ordinary recipe, sample index zero and
-ordinary wave's frozen render. Slots 1 and 2 are submitted together. Slot 2 replays the actual nested
-ordinary attempt zero from cache; it makes no new paid edit. Slot 2 receives neither turnaround images
+ordinary wave's frozen render. Slots 1 and 2 are submitted together. Slot 2 waits for the actual nested
+ordinary attempt zero and replays it from cache; it makes no new paid edit. Slot 2 receives neither turnaround images
 nor beauty references.
 Only when the existing gates reject both slot 1 and slot 2 does the pass launch conditional slot 3,
 inside the same frozen wave: the exact ordinary-fast attempt-one request (original cover, ordinary

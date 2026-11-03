@@ -1955,3 +1955,136 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual(record['status'], 'error')
         self.assertEqual(record['face_source']['region_error'], 'ApiError')
         self.assertFalse((self.run / '03-refined.glb').exists())
+
+    # The default-head run runs beside reference generation and the main waves.
+
+    WAIT = 20   # seconds; a wait that times out means the phases ran in series
+
+    def test_default_head_run_overlaps_reference_generation(self):
+        nested_sent = threading.Event()
+        generate, calls = self.generated()
+
+        def slow_generate(run, client, out):
+            # Generation returns only after the default-head run has sent an ordinary repaint.
+            self.assertTrue(nested_sent.wait(self.WAIT), 'the default-head run waited for the references')
+            return generate(run, client, out)
+
+        original = stage._view
+
+        def view(*args, **kwargs):
+            if 'face-source' in args[0].cache_dir.parts:
+                nested_sent.set()
+            return original(*args, **kwargs)
+
+        with mock.patch.object(stage, '_view', side_effect=view):
+            record = self.run_beauty(generate=slow_generate, cap_usd=5)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(record['face_source']['source'], 'beauty')
+        self.assertEqual(record['status'], 'complete')
+        # The record keeps a sequential run's key order: references, grade, then the default head.
+        keys = list(json.loads((self.run / 'stage-3f.json').read_text()))
+        self.assertLess(keys.index('beauty_generation'), keys.index('default_fast_fallback'))
+        self.assertLess(keys.index('palette_grade'), keys.index('default_fast_fallback'))
+        self.assertLess(keys.index('default_fast_fallback'), keys.index('face_source'))
+        self.assertLess(keys.index('face_source'), keys.index('waves'))
+
+    def test_slot_two_shares_the_in_flight_default_attempt_and_pays_once(self):
+        waiting, slot_two_done = threading.Event(), threading.Event()
+        original_await = B.FaceControl.await_attempt
+
+        def await_attempt(control, key):
+            if key == 'body+90':
+                waiting.set()
+            return original_await(control, key)
+
+        original = stage._view
+
+        def view(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if (args[4]['name'] == 'body+90' and 'face-source' not in args[0].cache_dir.parts
+                    and args[0].cache_dir.parts[-1] == 'attempt-1'):
+                slot_two_done.set()
+            return result
+
+        def hold(view, slot, nested):
+            if nested and view == 'body+90':
+                # The main slot 2 is already waiting while this paid request is in flight.
+                self.assertTrue(waiting.wait(self.WAIT), 'slot 2 did not start beside the default-head run')
+            if nested and view == 'hair-upper+180':
+                # The default-head run's second wave is still to come: slot 2 never waits for all of it.
+                self.assertTrue(slot_two_done.wait(self.WAIT), 'slot 2 waited for the whole default-head run')
+            return None
+
+        with mock.patch.object(B.FaceControl, 'await_attempt', await_attempt), \
+             mock.patch.object(stage, '_view', side_effect=view):
+            record, paid, ordinary, edits = self.paid_run(fail=hold)
+        self.assertEqual(paid['body+90'], 2)
+        self.assertEqual(ordinary['body+90'], 1)
+        nested = [e for e in edits if e['nested'] and e['view'] == 'body+90']
+        main = {e['slot']: e for e in edits if not e['nested'] and e['view'] == 'body+90'}
+        self.assertEqual(len(nested), 1)
+        self.assertFalse(nested[0]['cached'])
+        self.assertEqual((main['attempt-1']['key'], main['attempt-1']['cached']), (nested[0]['key'], True))
+        self.assertEqual(record['status'], 'complete')
+
+    def test_default_head_model_error_drains_the_main_waves_and_is_raised(self):
+        main_sent = threading.Event()
+        sends = Counter()
+
+        def fail(view, slot, nested):
+            sends[view, slot, nested] += 1
+            if not nested and slot == 'attempt-0':
+                main_sent.set()
+            if nested and view == 'body+90':
+                # Fail only once the main waves have their own paid requests in flight.
+                self.assertTrue(main_sent.wait(self.WAIT))
+                return self.SERVER
+            return None
+
+        before = set(threading.enumerate())
+        with self.assertRaises(ApiError) as caught:
+            self.paid_run(fail=fail)
+        self.assertIs(caught.exception, self.SERVER)
+        # Every worker of both runs drained before the error was raised.
+        self.assertFalse([t for t in threading.enumerate() if t not in before and t.is_alive()])
+        record = json.loads((self.run / 'stage-3f.json').read_text())
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(record['default_fast_fallback']['views']['body+90']['reason'], 'ApiError')
+        # The failed default-head request was sent once; the main slot 2 never sent it again.
+        self.assertEqual(sends['body+90', 'attempt-0', True], 1)
+        self.assertEqual(sends['body+90', 'attempt-1', False], 0)
+        self.assertEqual(record['views']['body+90']['reason'], 'DefaultRunFailed')
+        self.assertFalse((self.run / '03-refined.glb').exists())
+
+    def test_face_choice_and_records_do_not_depend_on_finish_order(self):
+        import time
+
+        def outcome(slow):
+            def delay(view, slot, nested):
+                if slow(view, slot, nested):
+                    time.sleep(.15)
+                return None
+            # The head and body+90 reject both first samples, so they pay slot 3 and fold attempt one in.
+            record, paid, ordinary, edits = self.paid_run(
+                fail=delay, reject=lambda view, kind: view in ('head+0', 'body+90') and kind in ('beauty', 0))
+            verdict = lambda views: {k: (v['accepted'], v['reason'], v.get('selected_attempt'), v.get('winning_slot'),
+                                         [(a['try'], a['accepted'], a['reason']) for a in v['attempts']])
+                                     for k, v in views.items()}
+            calls = Counter((c['key'], c['cached']) for c in record['calls'])
+            return (record['face_source'], record['face_fallback'], verdict(record['views']),
+                    verdict(record['default_fast_fallback']['views']), paid, ordinary, calls,
+                    sorted((e['view'], e['slot'], e['nested'], e['key'], e['cached']) for e in edits))
+
+        orders = {'default-head run last': lambda view, slot, nested: nested,
+                  'main waves last': lambda view, slot, nested: not nested,
+                  'beauty slots first': lambda view, slot, nested: slot != 'attempt-0'}
+        results = {}
+        for name, slow in orders.items():
+            self.setUp()
+            results[name] = outcome(slow)
+        first, *others = results.values()
+        for name, result in zip(list(results)[1:], others):
+            with self.subTest(order=name):
+                self.assertEqual(result, first)
+        self.assertEqual((first[0]['source'], first[0]['view']), ('beauty', 'body+0'))
+        self.assertEqual((len(first[2]['head+0'][4]), first[2]['body+90'][3]), (3, 3))

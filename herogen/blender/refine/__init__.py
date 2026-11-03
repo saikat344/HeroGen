@@ -536,11 +536,16 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         client.after_api_attempt = settle
     current_record = None
     generation = None
+    face_control = None
 
     def drain():
         # Generated references run beside setup; never record a result while their calls can still settle.
         if generation is not None:
             generation[0].shutdown(wait=True)
+        # So does the default-head run, which starts before the references are known. The waves join
+        # it; on a failure before them it submits no further views and its submitted calls drain.
+        if face_control is not None and not face_control.default_joined:
+            face_control.join_default(halt=True)
 
     try:
         save(ok=False, status="running")
@@ -629,12 +634,27 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         current = prep / "base.png"
         grade = None
         default_face_base = None
+        if refine_profile == "fast" and (generate_beauty or beauty_refs is not None):
+            # The default-head run needs only the original ungraded base, cover and ordinary recipe,
+            # never the beauty references, so it starts now, beside reference generation. Main
+            # waves wait only for the results they use. The palette grade below writes a new
+            # base.png and a new texture array; this run keeps its own copy of the original.
+            import shutil
+            from .fast_beauty import FaceControl
+            default_face_base = work / "default-face-base.png"
+            shutil.copyfile(current, default_face_base)
+            face_control = FaceControl(beauty_dir, beauty_refs, default_face_base, info, data=rec.data,
+                                       state_lock=state_lock)
+            face_control.start_default(client, prep, tex, cams, work, timeout, cover, head_found, recipe,
+                                       save, user_note)
         if generation is not None:
             generated = generation[1].result()
-            drain()
-            rec.data["beauty_generation"] = {k: generated.get(k) for k in (
-                "angles", "attempts_per_angle", "fallback", "selected", "status", "cost_usd", "seconds",
-                "contained_errors", "retries")}
+            generation[0].shutdown(wait=True)
+            # The default-head run checkpoints this record from its own thread: write under its lock.
+            with state_lock:
+                rec.data["beauty_generation"] = {k: generated.get(k) for k in (
+                    "angles", "attempts_per_angle", "fallback", "selected", "status", "cost_usd", "seconds",
+                    "contained_errors", "retries")}
             # Transient reference errors were resent once; errors that remain are contained (no reference).
             contained, resent = generated.get("contained_errors") or [], generated.get("retries") or []
             with state_lock:
@@ -649,29 +669,43 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
             beauty_selection = beauty_refs = beauty.load(beauty_dir)
             if beauty.selected_yaw(beauty_refs, 0) is None:
                 beauty_refs = None
-            rec.data["beauty_references"] = beauty_selection
-            if beauty_refs is not None:
-                rec.data["prompt_sha256"].update({name: hashlib.sha256(PROMPTS[name].encode()).hexdigest()
-                                                  for name in ("RF5B", "RF6B", "RF17B", "RF18B")})
-                if not artwork:
-                    rec.data["recipes"] = ["RF6B"]
-            else:
-                rec.note("no usable front beauty reference; standard recipes")
+            with state_lock:
+                rec.data["beauty_references"] = beauty_selection
+                if beauty_refs is not None:
+                    rec.data["prompt_sha256"].update({name: hashlib.sha256(PROMPTS[name].encode()).hexdigest()
+                                                      for name in ("RF5B", "RF6B", "RF17B", "RF18B")})
+                    if not artwork:
+                        rec.data["recipes"] = ["RF6B"]
+                else:
+                    rec.note("no usable front beauty reference; standard recipes")
+            if beauty_refs is None and face_control is not None:
+                # Without a front reference the run is ordinary fast: the default-head run is not
+                # used. Its submitted calls drain and stay in the record; a model error stays loud.
+                _, default_error = face_control.join_default(halt=True)
+                face_control = None
+                default_face_base.unlink(missing_ok=True)
+                import shutil
+                shutil.rmtree(work / "default-fast", ignore_errors=True)
+                if default_error is not None:
+                    raise default_error
             save(ok=False, status="running")
-        if beauty_refs is not None and refine_profile == "fast":
-            import shutil
-            default_face_base = work / "default-face-base.png"
-            shutil.copyfile(current, default_face_base)
         if beauty_refs is not None:
             import numpy as np
             from .palette import apply
             front_yaw = beauty.selected_yaw(beauty_refs, 0)
             front = beauty_refs["views"][str(front_yaw)]
-            rec.data["palette_grade"] = {"target": "beauty reference", "yaw": front_yaw}
-            grade = _artwork_grade(run, prep, cams["body+0"], work / "palette",
-                                   rec.data["palette_grade"], timeout,
-                                   artwork=beauty_dir / front["image"],
-                                   artwork_mask=beauty_dir / front["mask"])
+            palette_grade = {"target": "beauty reference", "yaw": front_yaw}
+            with state_lock:
+                rec.data["palette_grade"] = palette_grade
+            fitted = dict(palette_grade)
+            try:
+                # Fit into a private record; another thread may serialise this record meanwhile.
+                grade = _artwork_grade(run, prep, cams["body+0"], work / "palette", fitted, timeout,
+                                       artwork=beauty_dir / front["image"],
+                                       artwork_mask=beauty_dir / front["mask"])
+            finally:
+                with state_lock:
+                    rec.data["palette_grade"] = fitted
             if grade is not None:
                 with Image.open(current) as image:
                     base = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
@@ -697,7 +731,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                                      cover, head_found, recipe, save, state_lock, user_note=user_note,
                                      art_context=(run, info, artwork) if artwork else None,
                                      palette_manifest=palette_manifest,
-                                     **({"beauty_context": (beauty_dir, beauty_refs, default_face_base, info)}
+                                     **({"beauty_context": (beauty_dir, beauty_refs, default_face_base, info),
+                                         "face_control": face_control}
                                         if beauty_refs is not None else {}))
         else:
             for step, (name, hair) in enumerate(sequence):
