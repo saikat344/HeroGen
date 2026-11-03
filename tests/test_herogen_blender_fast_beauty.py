@@ -1,4 +1,5 @@
 """Beauty face ownership, independent fallback and progressive repaint contracts."""
+import base64
 from concurrent.futures import Future
 from collections import Counter
 import json
@@ -18,7 +19,7 @@ try:
     HAVE_REFINE = True
 except ImportError:
     HAVE_REFINE = False
-from herogen.pipeline.client import ApiError, ReplayMiss, ModelClient
+from herogen.pipeline.client import ApiError, ReplayMiss, ModelClient, png_bytes
 from herogen.refine_budget import BudgetStop
 from tests import test_herogen_blender_refine as fixture
 from tests import test_herogen_blender_refine_note as note_fixture
@@ -1037,8 +1038,9 @@ class FastBeautyStageTests(unittest.TestCase):
                 with mock.patch.object(stage, '_view', side_effect=self.rejecting(
                         stage._view, reject or (lambda view, kind: False))):
                     record = self.run_fast(cap_usd=None, side_beauty=all_flags)
+        # A fast client also logs its failed requests (`outcome` the error); only answered edits are paid.
         self.assertEqual(sum(paid.values()), sum(c['kind'] == 'edit' and not c['cached']
-                                               for c in self.client.log.calls))
+                                               and c.get('outcome', 'ok') == 'ok' for c in self.client.log.calls))
         return record, paid, ordinary, edits
 
     expected_views = property(lambda self: {('hair-' if hair else '') + name
@@ -1543,7 +1545,29 @@ class FastBeautyStageTests(unittest.TestCase):
     def test_enhanced_server_error_then_success_keeps_the_beauty_sample(self):
         self.assert_resent_then_kept(self.SERVER)
 
-    def assert_resent_then_kept(self, error):
+    def test_fast_client_resends_the_enhanced_edit_once_itself(self):
+        # A fast client resends its own Muse Image calls; the beauty wrapper records that resend and adds none.
+        self.client.fast = True
+        record, sent, errored, _, lines = self.contained_run(self.enhanced(self.TIMEOUT, 'body+90'),
+                                                             all_flags=True)
+        self.assertEqual(errored, Counter({'body+90': 2}))   # the timeout and the client's one resend
+        self.assertEqual(sent, Counter({view: 3 if view == 'body+90' else 2 for view in self.expected_views}))
+        self.assert_contained(record, lines, 'body+90', self.TIMEOUT, slot_after=2, prompts=('RF16B',))
+        # Both sends are one build-log call of try 1, with the resend inside it.
+        self.assertEqual(self.call_retries(lines), [('body+90', 1, 'timeout', 1, 2)])
+
+    def test_fast_client_enhanced_server_error_then_success_keeps_the_beauty_sample(self):
+        self.client.fast = True
+        self.assert_resent_then_kept(self.SERVER, fast=True)
+
+    @staticmethod
+    def call_retries(lines):
+        """Each `call_retry` line as (view, try, code, attempt, of), the view and try from its call's start."""
+        starts = {e['id']: e for e in lines if e['kind'] == 'call_start'}
+        return [(starts[e['id']].get('view'), starts[e['id']].get('try'), e['code'], e['attempt'], e['of'])
+                for e in lines if e['kind'] == 'call_retry']
+
+    def assert_resent_then_kept(self, error, fast=False):
         record, sent, errored, _, lines = self.contained_run(
             self.enhanced(error, 'body+90', once=True), all_flags=True)
         self.assertEqual(errored, Counter({'body+90': 1}))
@@ -1561,10 +1585,15 @@ class FastBeautyStageTests(unittest.TestCase):
                           if e['kind'] == 'decision' and e['what'] == 'model_retry'],
                          [(1, True, None, self.code(error),
                            {'retry': 1, **({'http_status': status} if status else {})})])
-        # Both sends are logged as calls of try 1: the failed one, then the answered resend.
+        # Both sends are logged as calls of try 1: the failed one, then the answered resend; a fast client
+        # resends inside one call, with its `call_retry`.
         ends = [e['outcome'] for e in lines if e['kind'] == 'call_end' and e['who'] == 'muse-image'
                 and e.get('view') == 'body+90' and e.get('try') == 1]
-        self.assertEqual(sorted(ends), ['failed', 'ok'])
+        self.assertEqual(sorted(ends), ['ok'] if fast else ['failed', 'ok'])
+        self.assertEqual(self.call_retries(lines), [('body+90', 1, self.code(error), 1, 2)] if fast else [])
+        if fast:
+            self.assertEqual([(c['attempt'], c.get('resend'), c['outcome']) for c in self.client.log.calls
+                              if c.get('resend') or c.get('outcome', 'ok') != 'ok'], [(2, True, 'ok')])
         self.assertEqual(self.outcomes(lines)['body+90'], [('view_selected', 1, 2)])
 
     def test_resend_is_identical_and_respects_budget_stops(self):
@@ -1602,6 +1631,55 @@ class FastBeautyStageTests(unittest.TestCase):
             with self.assertRaises(type(error)):
                 client.segment('image', 'face')
             self.assertEqual((len(calls), retries), (1, []))
+
+    def test_a_fast_client_resend_is_never_doubled(self):
+        # A fast client resends its own image edits: the wrapper only records them, so two transient failures
+        # make exactly two requests. Its SAM queries are still resent once by the wrapper.
+        sent = []
+        def post(outcomes):
+            def send(client, endpoint, body, **kwargs):
+                sent.append(endpoint)
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+            return send
+        answer = {'data': [{'b64_json': base64.b64encode(png_bytes(Image.new('RGB', (8, 8)))).decode()}]}
+        sam = {'status': 'completed', 'output': []}
+        cases = (
+            ('edit', [self.SERVER, self.SERVER], ApiError, self.fields(self.SERVER)),
+            ('edit', [self.TIMEOUT, answer], None, 'ok'),
+            ('edit', [self.SERVER, BudgetStop('API cap: next attempt exceeds $0.0100')], BudgetStop, 'BudgetStop'),
+            ('edit', [self.POLICY, answer], ApiError, None),
+            ('segment', [self.SERVER, self.SERVER], ApiError, self.fields(self.SERVER)),
+            ('segment', [self.TIMEOUT, sam], None, 'ok'),
+        )
+        for kind, outcomes, raised, retry in cases:
+            with self.subTest(kind=kind, first=type(outcomes[0]).__name__, second=type(outcomes[1]).__name__), \
+                    tempfile.TemporaryDirectory() as tmp, mock.patch.dict('os.environ', {'MODEL_API_KEY': 'k'}), \
+                    mock.patch.object(ModelClient, '_post', post(list(outcomes))):
+                sent.clear()
+                client, retries = ModelClient(Path(tmp), mode='live', fast=True), []
+                fast.retry_once(client, retries)
+                call = ((lambda: client.edit_image('prompt', [Image.new('RGB', (8, 8))])) if kind == 'edit'
+                        else lambda: client.segment(Image.new('RGB', (8, 8)), 'eyes'))
+                if raised:
+                    with self.assertRaises(raised):
+                        call()
+                else:
+                    call()
+                self.assertEqual(len(sent), 1 if retry is None else 2)
+                if retry is None:
+                    self.assertEqual(retries, [])
+                    continue
+                request = ({'request': 'image edit'} if kind == 'edit'
+                           else {'request': 'SAM query', 'concept': 'eyes'})
+                first = self.fields(outcomes[0])
+                self.assertEqual(len(retries), 1)
+                if retry == 'BudgetStop':
+                    self.assertEqual((retries[0]['retry']['error'], retries[0]['http_status']), ('BudgetStop', 500))
+                else:
+                    self.assertEqual(retries, [{**request, **first, 'retry': retry}])
 
     def test_plain_fast_errors_stay_loud(self):
         self.assert_loud(lambda view, slot, nested: self.TIMEOUT if view == 'body+90' else None,

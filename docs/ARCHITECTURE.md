@@ -265,10 +265,28 @@ prompts, thresholds, retries and acceptance rules are unchanged.
   `03-refined.glb`, else `03-source.glb`, else the sectioned high body if available. Completion succeeds when
   a model is available, even if a local export failed; inspect the stage records for those failures. A stage
   3 or 3f model/construction error stops that invocation with a nonzero exit and a loud record and log.
-- The image/segmentation client's transport policy allows exactly one attempt per request, including
-  photo judging. HTTP refusals and model failures are recorded and propagated without automatic retries.
-  Fast transport errors also disable the exception's caller-retry flag, so the service does not requeue
-  the stage automatically after a normally transient HTTP or network failure.
+- The image/segmentation client's transport policy allows one attempt per request, including photo
+  judging, with one exception: a Muse Image generation or edit (stages p, 1, 2 and 3f) that fails with a
+  transient error is resent once, identically (`ModelClient._answered_post`). Transient means an HTTP 5xx
+  other than 501 and 505, or no HTTP answer at all (a timeout, a dropped or refused connection), read from
+  the error's `http_status` and the client's `network_error`, never from message text (`retry.transient`,
+  the same rule as the stage-3f beauty resend). A 4xx (including `content_policy_violation`), a 429, an
+  unreadable answer, a call that got no slot, a replay miss, a budget stop or cancellation and a gate
+  failure are never resent; replayed and cached calls never reach the network, so they never resend. The
+  resend is another `_post`, so it passes the same budget check, reservation, limiter, ledger and spend
+  hooks as the first attempt; it is sent at once, without a backoff wait. It is loud: a warning on the
+  `herogen.pipeline.client` logger, a `call_retry` build-log event inside the same call (`attempt` 1, `of`
+  2, `why` `transient`, the first failure's `code` and `m.http_status` when an answer came back), a ledger
+  receipt with `attempt` 2, and a stage-record call row with `attempt` 2 and `resend: true` after the
+  failed first attempt's row. A resend after a failure of unknown outcome (a Muse Image 5xx other than 503,
+  a timeout) may bill as a second generation, and both attempts are counted in the cost estimate. Only the
+  answered resend writes a cache entry, the same entry an unfailed call writes. When the resend fails too,
+  its `ApiError` ("failed on its resend ... the first attempt failed with HTTP 502", say) is recorded and
+  propagated with no further attempt. SAM 3.1 and Muse Spark calls are never resent by the client (stage
+  3f's beauty-only SAM queries keep their own resend, below). HTTP refusals and other model failures are
+  recorded and propagated without automatic retries. Fast transport errors also disable the exception's
+  caller-retry flag, so the service does not requeue the stage automatically after a normally transient
+  HTTP or network failure.
 
 Fast Model API attempts use a rolling 60-second request budget per model and API key: 140 RPM for
 `muse-image-1.0`, 60 RPM each for `sam-3.1` and `muse-spark-1.3`. All models share a 32-call in-flight
@@ -1975,6 +1993,8 @@ without usage is never counted at $0.
 - **Limits:** at most 8 attempts within a per-call time limit of 10 minutes for SAM 3.1 and Muse Spark and 15
   for Muse Image (`DEADLINE_S`), separate from each attempt's 240 s socket timeout. A wait that would end past
   it is not started; the call fails at once. A call that fails raises `ApiError`, which stops the stage (see "Mask method").
+  The fast lane makes one attempt per request instead, apart from one identical resend of a Muse Image call
+  after a transient failure ("Fast product lane").
 - **Shared limit per key:** every process calling with one API key shares one limit on calls in flight, in a
   JSON state file under `HEROGEN_LIMITER_DIR` (default `~/.cache/herogen/api-limiter`) named by a 16-hex-digit
   SHA-256 prefix of the key, never the key, and guarded by an exclusive file lock (`herogen/pipeline/filelock.py`:
@@ -2519,7 +2539,8 @@ An event that does not fit is dropped; writing one never fails a stage.
   `runner.events_env`. Without the file variable every emit is a no-op, so the standalone CLIs are unchanged.
 - The model client brackets every Muse Image, SAM 3.1 and Muse Spark call (`fast.tracked`) with `call_start` and
   `call_end` sharing an id: outcome, duration, cost estimate, and a failure class from the transport (never the
-  error text). Cache hits end `reused` at $0. Full-lane retries and limiter waits are `call_retry`/`call_wait`.
+  error text). Cache hits end `reused` at $0. Full-lane retries and limiter waits are `call_retry`/`call_wait`;
+  the fast lane's one resend of a Muse Image call is a `call_retry` with `of` 2 and `why` `transient`.
   GPU calls are `gpu_wait`/`gpu_end`; a second `gpu_wait` after 20 s says the call is still waiting, and
   `gpu_end` carries the runner's model-load and inference seconds.
 - Pipeline stages add their checks summary and images; the service adds step boundaries around each stage and the
@@ -2815,8 +2836,8 @@ attempt one only when attempt zero and the enhanced sample were both rejected.
 Thus an uncached run pays two image-edit samples per view when slot 1 or slot 2 passes (for the head,
 when slot 2 passes or face selection accepts slot 1), and three (one enhanced, two ordinary) only when
 both are rejected, never more, including when SideBeautyPass and region palette are also on. The one
-identical resend of a beauty-only request after a transient error (below) is the only extra send; the
-service may bill it as a second generation.
+identical resend of a request after a transient error (the client's for every image edit, below for
+beauty-only SAM queries) is the only extra send; the service may bill it as a second generation.
 The lowest passing slot wins (1, then 2, then 3); higher body/hair slots are cancelled when a lower slot
 wins. Head candidates drain because eye-detail selection requires the ordinary paint; the lowest
 accepted default slot (2, then 3) is the head's default candidate. Wave 1 chooses the face source only
@@ -2850,10 +2871,16 @@ timeout or read timeout, a dropped or refused connection, or an HTTP 5xx (except
 client never retries) is resent once, identically,
 through the same budget reservation, limiter and spend hooks; a budget stop or cancellation there behaves
 as for any request. "Transient" comes from the error's `http_status` and the client's `network_error` (the
-transport failure class when no HTTP answer came back), never from message text. An answered resend
-keeps the beauty sample or reference; a failed one is contained as below. Any 4xx, including
+transport failure class when no HTTP answer came back), never from message text (`retry.transient`). An
+answered resend keeps the beauty sample or reference; a failed one is contained as below. Any 4xx, including
 `content_policy_violation`, and any other `ApiError` (an unreadable answer, no call slot) are contained at
-once with no resend. Plain-equivalent requests are never resent.
+once with no resend. A fast client already resends every Muse Image call once itself ("Fast product
+lane"), so for a beauty-only image edit `fast.retry_once` only records the client's resend
+(`client.observe_resend`) and never adds a second one: one beauty edit with two transient failures makes
+exactly two requests. Beauty-only SAM queries, which the client never resends, are resent by
+`fast.retry_once`. A client that does not resend itself (outside the fast lane) has both resent there.
+Plain-equivalent SAM queries are never resent; their image edits get only the client's resend, and a
+failed resend still fails the stage loudly.
 Apart from that one resend, no contained error pays an extra sample, retry or gate: per view, at most the
 samples the existing rule allows are sent. Every other request still fails the stage loudly: slot 2 and slot 3, the nested
 default-head run (which sends plain fast's requests), slot 2 of a SideBeautyPass-only view, the frontal

@@ -157,6 +157,97 @@ class FastPipelineTests(unittest.TestCase):
                         <= {e["what"] for e in got if e["kind"] == "image"})
         self.assertEqual({e["step"] for e in got if e["kind"] == "checks"}, {"0", "1", "2"})
 
+    def _transient_run(self, failures):
+        """Stages p, 0, 1 and 2 in the fast lane with the build log on; ``failures`` maps a request label
+        (``design``, ``full_body``, ``cover``, ``turnaround``, ``top``) to the Model API errors its first sends
+        raise. (exit code, run folder, build-log lines, sends per label)."""
+        from herogen.pipeline import events
+        api = ConcurrentAPI()
+        original = api.post
+        sent = {}
+        def label(endpoint, body):
+            if endpoint == "images/generations":
+                return "design"
+            prompt = body.get("prompt", "")
+            for name, prefix in (("cover", stages.COVER_PROMPT), ("turnaround", stages.TURNAROUND_PROMPT),
+                                 ("top", stages.TOP_PROMPT)):
+                if prompt.startswith(prefix):
+                    return name
+            return "full_body" if endpoint == "images/edits" else endpoint
+        lock = threading.Lock()
+        def post(client, endpoint, body, **kw):
+            name = label(endpoint, body)
+            with lock:
+                sent[name] = sent.get(name, 0) + 1
+                queue = failures.get(name) or []
+                error = queue.pop(0) if queue else None
+            if error is not None:   # logged like the real transport logs a failed attempt
+                client.log.add(kw["model"], kw["kind"], kw["key"], cached=False, outcome="failed")
+                raise error
+            if endpoint == "images/edits" and name == "full_body":
+                img = flow.paint(flow.place(flow.figure_mask(200, "front"), (300, 280), (50, 40)))
+                return {"data": [{"b64_json": flow._b64png(img)}]}
+            return original(client, endpoint, body)
+        log = self.root / "events.jsonl"
+        env = {"MODEL_API_KEY": flow.DUMMY_KEY, events.ENV_FILE: str(log)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ModelClient, "_post", post), \
+                mock.patch.object(client_module, "decode_sam_output", api.decode), \
+                mock.patch.object(client_module.log, "warning"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            os.environ.pop(events.ENV_STEP, None)
+            code = run_pipeline(None, "hero", ["p", 0, 1, 2], runs=str(self.root), prompt="a blue knight",
+                                mode="live", fast=True)
+        return code, RunFolder(self.root, "hero"), [json.loads(x) for x in log.read_text().splitlines()], sent
+
+    def test_one_transient_failure_per_image_call_is_resent_once_in_every_stage(self):
+        from herogen.pipeline.client import ApiError
+        def server(status=502):
+            return ApiError(f"images failed after 1 attempts: HTTP {status}: busy", http_status=status)
+        timeout = ApiError("images failed after 1 attempts: TimeoutError: timed out", network_error="TimeoutError")
+        code, run, lines, sent = self._transient_run({"design": [server()], "cover": [timeout],
+                                                       "turnaround": [server(500)], "top": [server(503)]})
+        self.assertEqual(code, 0)
+        # Each failing request was sent exactly twice (the error and its one identical resend), others once.
+        self.assertEqual({k: sent[k] for k in ("design", "full_body", "cover", "turnaround", "top")},
+                         {"design": 2, "full_body": 1, "cover": 2, "turnaround": 2, "top": 2})
+        resent = {n: [c["purpose"] for c in run.read_stage(n)["calls"] if c.get("resend")] for n in ("p", 1, 2)}
+        self.assertEqual({n: len(v) for n, v in resent.items()}, {"p": 1, 1: 1, 2: 2})
+        self.assertTrue(all(c["attempt"] == 2 and c["outcome"] == "ok" for n in ("p", 1, 2)
+                            for c in run.read_stage(n)["calls"] if c.get("resend")))
+        # The failed first sends stay in the records too.
+        self.assertEqual(sorted(c["purpose"] for n in ("p", 1, 2) for c in run.read_stage(n)["calls"]
+                                if c["outcome"] == "failed"),
+                         sorted(p for v in resent.values() for p in v))
+        starts = {e["id"]: e for e in lines if e["kind"] == "call_start"}
+        retried = sorted((starts[e["id"]]["step"], starts[e["id"]]["what"], e["code"]) for e in lines
+                         if e["kind"] == "call_retry")
+        self.assertEqual(retried, [("1", "cover_art", "timeout"), ("2", "top_view", "http_5xx"),
+                                   ("2", "turnaround", "http_5xx"), ("p", "sketch_design", "http_5xx")])
+        self.assertTrue(all(e["outcome"] in ("ok", "reused") for e in lines if e["kind"] == "call_end"))
+
+    def test_a_failed_resend_stops_the_stage_loudly(self):
+        from herogen.pipeline.client import ApiError
+        busy = ApiError("images/edits failed after 1 attempts: HTTP 502: busy", http_status=502)
+        code, run, lines, sent = self._transient_run({"turnaround": [busy, busy]})
+        self.assertEqual(code, 1)
+        self.assertEqual(sent["turnaround"], 2)   # one resend, never more
+        rec = run.read_stage(2)
+        self.assertEqual(rec["status"], "error")
+        self.assertIn("the Model API failed", rec["error"])
+        sends = [c for c in rec["calls"] if c["purpose"] == "turnaround"]
+        self.assertEqual([(c["outcome"], c.get("resend"), c.get("attempt")) for c in sends],
+                         [("failed", None, None), ("ApiError", True, 2)])
+        # A 4xx is never resent: one send, and the stage stops at once.
+        refused = ApiError("images/edits failed: HTTP 400: refused (not retried)", http_status=400,
+                           error_code="content_policy_violation")
+        for p in self.root.glob("*"):
+            import shutil
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        code, run, lines, sent = self._transient_run({"cover": [refused]})
+        self.assertNotEqual(code, 0)
+        self.assertEqual(sent["cover"], 1)
+        self.assertNotIn("call_retry", [e["kind"] for e in lines])
+
     def test_cli_flag_and_environment_select_fast_execution(self):
         from herogen.pipeline import __main__ as pipeline_cli
         from herogen.blender.__main__ import main as blender_main

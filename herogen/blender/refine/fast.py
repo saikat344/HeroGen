@@ -12,8 +12,8 @@ import time
 import uuid
 from types import MethodType
 
-from herogen.pipeline.client import ApiError, CallLog
-from herogen.pipeline.retry import NEVER_RETRY_5XX
+from herogen.pipeline.client import IMAGE_MODEL, SAM_MODEL, ApiError, CallLog, observe_resend
+from herogen.pipeline.retry import transient
 from herogen.refine_budget import BudgetStop
 
 from . import buildlog
@@ -43,34 +43,40 @@ def contained_error(exc, fallback, retried=False, **where):
     return {**where, **error_fields(exc), **({'retried': True} if retried else {}), 'fallback': fallback}
 
 
-def transient(exc):
-    """A timeout, a dropped connection or an HTTP 5xx, from status and transport state only (never the message).
-
-    Any 4xx, including a content-policy refusal, is not transient, nor are the 5xx answers the client
-    never retries (501, 505)."""
-    status = getattr(exc, 'http_status', None)
-    if type(status) is int:
-        return 500 <= status <= 599 and status not in NEVER_RETRY_5XX
-    return getattr(exc, 'network_error', None) is not None
-
-
 def retry_once(client, retries):
-    """Make a beauty-only client resend a request once, identically, after a transient model error.
+    """Make a beauty-only client resend a request once, identically, after a `transient` model error.
 
     Each resend is recorded in ``retries`` with the first error and the resend's outcome (``'ok'`` or its error).
     It goes through the client's own budget, reservation and limiter hooks, so a budget stop or cancellation
     there propagates unchanged, as does a failed resend's ApiError (then the last entry's ``retry`` is an error).
-    Plain-equivalent requests never use this.
+    A fast client already resends its Muse Image calls once itself (`ModelClient.resends_transient`): those are
+    only recorded here, never resent a second time. SAM queries are resent here. Plain-equivalent requests never
+    use this.
     """
-    for name, request in (('edit_image', 'image edit'), ('segment', 'SAM query')):
-        def call(*args, _method=getattr(client, name), _request=request, **kwargs):
+    resends = getattr(client, 'resends_transient', None)
+    for name, request, model in (('edit_image', 'image edit', IMAGE_MODEL), ('segment', 'SAM query', SAM_MODEL)):
+        def call(*args, _method=getattr(client, name), _request=request,
+                 _own=callable(resends) and resends(model), **kwargs):
+            where = {'request': _request, **({'concept': str(args[1])} if _request == 'SAM query'
+                                              and len(args) > 1 else {})}
+            if _own:   # the client resends itself; record what it did
+                first = []
+                try:
+                    with observe_resend(first.append):
+                        result = _method(*args, **kwargs)
+                except BaseException as again:
+                    if first:
+                        retries.append({**where, **error_fields(first[0]), 'retry': error_fields(again)})
+                    raise
+                if first:
+                    retries.append({**where, **error_fields(first[0]), 'retry': 'ok'})
+                return result
             try:
                 return _method(*args, **kwargs)
             except ApiError as exc:
                 if not transient(exc):
                     raise
-                entry = {'request': _request, **({'concept': str(args[1])} if _request == 'SAM query'
-                                                  and len(args) > 1 else {}), **error_fields(exc)}
+                entry = {**where, **error_fields(exc)}
             try:
                 result = _method(*args, **kwargs)
             except BaseException as again:

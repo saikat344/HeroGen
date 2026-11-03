@@ -398,7 +398,8 @@ class BuildLogEventsTest(unittest.TestCase):
         env = {"MODEL_API_KEY": DUMMY_KEY, events.ENV_FILE: str(self.events), events.ENV_STEP: "2",
                events.ENV_ATTEMPT: "1"}
         with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, env), \
-                self.assertLogs("herogen.pipeline.client", "WARNING") if not fast else contextlib.nullcontext():
+                self.assertLogs("herogen.pipeline.client", "WARNING") if not fast or retry.transient(
+                    ApiError("", http_status=answers[0][0])) else contextlib.nullcontext():
             try:
                 c.generate_image("a sheet")
             except ApiError:
@@ -418,11 +419,22 @@ class BuildLogEventsTest(unittest.TestCase):
         self.assertNotIn("a sheet", self.events.read_text())   # the prompt never reaches the log
 
     def test_fast_lane_single_failure_ends_the_call_failed_with_its_class(self):
-        got, c = self._generate(True, (503, {}, error_body(503)))
+        got, c = self._generate(True, (400, {}, error_body(400)))
         self.assertEqual([(e["kind"], e.get("outcome"), e.get("code")) for e in got],
-                         [("call_start", None, None), ("call_end", "failed", "http_5xx")])
+                         [("call_start", None, None), ("call_end", "failed", "http_4xx")])
         self.assertEqual(got[1]["usd"], 0)
         self.assertEqual(c.log.calls[-1]["outcome"], "ApiError")   # the stage record is unchanged
+
+    def test_fast_lane_failed_resend_ends_the_call_failed_with_its_class(self):
+        got, c = self._generate(True, (503, {}, error_body(503)))
+        self.assertEqual([(e["kind"], e.get("outcome"), e.get("code")) for e in got],
+                         [("call_start", None, None), ("call_retry", None, "http_5xx"),
+                          ("call_end", "failed", "http_5xx")])
+        self.assertEqual((got[1]["attempt"], got[1]["of"], got[1]["why"], got[1]["m"]),
+                         (1, 2, "transient", {"http_status": 503}))
+        self.assertEqual(got[2]["usd"], 0)   # a 503 is refused unprocessed, never billed
+        self.assertEqual([(r["attempt"], r.get("resend"), r["outcome"]) for r in c.log.calls],
+                         [(1, None, "failed"), (2, True, "ApiError")])
 
     def test_a_cache_hit_is_reused_at_no_cost(self):
         self._generate(True, self.image)
@@ -439,6 +451,236 @@ class BuildLogEventsTest(unittest.TestCase):
             os.environ.pop(events.ENV_FILE, None)
             c.generate_image("a sheet")
         self.assertFalse(self.events.exists())
+
+
+class FastResendTest(unittest.TestCase):
+    """The fast lane resends a Muse Image call once, identically, after a transient failure, through the real
+    request path (a local server stands in for the Model API): the ledger, the call log and the build log."""
+
+    def setUp(self):
+        self.addCleanup(events.reset_step, events.set_step(None))
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache = Path(self.tmp.name) / "cache"
+        self.events = Path(self.tmp.name) / events.FILE
+        self.limiter = retry.SharedLimiter(Path(self.tmp.name) / "limiter", "k")
+        self.image = (200, {}, {"data": [{"b64_json": _png_b64("red")}]})
+        self.inputs = [Image.new("RGB", (16, 16), "white")]
+
+    def _call(self, *answers, fast=True, edit=False, client=None, call=None):
+        """Answer requests from ``answers`` in turn (the last one repeats); (result or ApiError, client, server,
+        build-log events, completed ledger rows)."""
+        queue = list(answers)
+        bodies = []
+
+        def respond(endpoint, body):
+            bodies.append(body)
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+        server = FakeModelServer(respond, DUMMY_KEY)
+        server.bodies = bodies
+        c = client or ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter, fast=fast)
+        c.purpose = "cover art"
+        env = {"MODEL_API_KEY": DUMMY_KEY, events.ENV_FILE: str(self.events), events.ENV_STEP: "1",
+               events.ENV_ATTEMPT: "1"}
+        self.warnings = []
+        with server.serving(self.tmp.name + "/limiter"), mock.patch.dict(os.environ, env), \
+                mock.patch.object(client_mod.log, "warning", lambda *a: self.warnings.append(a[0] % a[1:])):
+            try:
+                if call is not None:
+                    out = call(c)
+                elif edit:
+                    out = c.edit_image("a cover", self.inputs)
+                else:
+                    out = c.generate_image("a cover")
+            except ApiError as e:
+                out = e
+        got = [json.loads(x) for x in self.events.read_text().splitlines()] if self.events.exists() else []
+        self.events.unlink(missing_ok=True)
+        ledger_rows = ([json.loads(x) for x in (self.cache / client_mod.LEDGER).read_text().splitlines()]
+                       if (self.cache / client_mod.LEDGER).exists() else [])
+        return out, c, server, got, ledger_rows
+
+    def _entries(self):
+        return sorted(p.name for p in self.cache.glob("*") if p.name != client_mod.LEDGER)
+
+    def test_a_5xx_then_ok_is_resent_once_and_recorded(self):
+        for edit, first, endpoint in ((False, 502, "images/generations"), (True, 500, "images/edits")):
+            with self.subTest(endpoint=endpoint):
+                for p in self.cache.glob("*"):
+                    p.unlink()
+                out, c, server, got, rows = self._call((first, {}, error_body(first)), self.image, edit=edit)
+                self.assertIsInstance(out, Image.Image)
+                self.assertEqual(server.count(endpoint), 2)
+                self.assertEqual(server.bodies[0], server.bodies[1])   # identical request
+                # Call log (the stage record's calls): the failed attempt, then the answered resend. A Muse Image
+                # 5xx other than 503 may have generated the image, so it is an unknown outcome counted in the cost.
+                self.assertEqual([(r["attempt"], r.get("resend"), r["outcome"], r["cost_usd"]) for r in c.log.calls],
+                                 [(1, None, "unknown", 0.01), (2, True, "ok", 0.01)])
+                self.assertEqual(len({r["key"] for r in c.log.calls}), 1)
+                # Build log: one call with its resend inside.
+                self.assertEqual([(e["kind"], e.get("code"), e.get("outcome")) for e in got],
+                                 [("call_start", None, None), ("call_retry", "http_5xx", None),
+                                  ("call_end", None, "ok")])
+                self.assertEqual(len({e["id"] for e in got}), 1)
+                self.assertEqual((got[1]["attempt"], got[1]["of"], got[1]["why"], got[1]["m"]),
+                                 (1, 2, "transient", {"http_status": first}))
+                self.assertNotIn("s", got[1])   # resent at once
+                self.assertEqual(self.warnings, [f"muse-image-1.0 {endpoint} attempt 1/2 failed (HTTP {first}); "
+                                                 "resending once"])
+                self.assertEqual(got[2]["usd"], 0.02)
+                # Ledger: two sent receipts and two completions, attempts 1 and 2.
+                self.assertEqual([(r["outcome"], r["attempt"]) for r in rows],
+                                 [("sent", 1), ("unknown", 1), ("sent", 2), ("ok", 2)])
+                # One cache entry for the success, exactly as an unfailed call writes it.
+                key = c.log.calls[0]["key"]
+                self.assertEqual(self._entries(), [f"{key}.json", f"{key}.png"])
+
+    def test_a_resent_success_caches_the_same_entry_and_replays_without_the_network(self):
+        out, c, _, _, _ = self._call((503, {}, error_body(503)), self.image, edit=True)
+        resent = json.loads((self.cache / f"{c.log.calls[0]['key']}.json").read_text())
+        other = Path(self.tmp.name) / "plain"
+        plain = ModelClient(other, mode="live", policy=no_wait_policy(), limiter=self.limiter, fast=True)
+        self._call(self.image, client=plain, edit=True)
+        direct = json.loads((other / f"{c.log.calls[0]['key']}.json").read_text())
+        self.assertEqual({k: v for k, v in resent.items() if k != "seconds"},
+                         {k: v for k, v in direct.items() if k != "seconds"})
+        replay = ModelClient(self.cache, mode="replay", fast=True)
+        with mock.patch.object(ModelClient, "_post", side_effect=AssertionError("network during replay")):
+            again = replay.edit_image("a cover", self.inputs)
+        self.assertEqual(again.tobytes(), out.tobytes())
+        self.assertEqual([(r["cached"], r.get("resend")) for r in replay.log.calls], [(True, None)])
+
+    def test_a_5xx_twice_fails_loudly_with_the_failed_resend_recorded(self):
+        out, c, server, got, rows = self._call((502, {}, error_body(502)))
+        self.assertIsInstance(out, ApiError)
+        self.assertEqual(server.count("images/generations"), 2)
+        self.assertEqual((out.http_status, out.transient, out.network_error), (502, False, None))
+        self.assertIn("images/generations failed on its resend: HTTP 502", str(out))
+        self.assertIn("the first attempt failed with HTTP 502", str(out))
+        self.assertNotIn("not retried", str(out))
+        self.assertEqual([(r["attempt"], r.get("resend"), r["outcome"]) for r in c.log.calls],
+                         [(1, None, "unknown"), (2, True, "ApiError")])
+        self.assertEqual([(e["kind"], e.get("code"), e.get("outcome")) for e in got],
+                         [("call_start", None, None), ("call_retry", "http_5xx", None),
+                          ("call_end", "http_5xx", "unknown")])
+        self.assertEqual(got[2]["usd"], 0.02)   # both attempts may have generated an image
+        self.assertEqual([(r["outcome"], r["attempt"]) for r in rows],
+                         [("sent", 1), ("unknown", 1), ("sent", 2), ("unknown", 2)])
+        self.assertEqual(self._entries(), [])   # a failure is never cached
+
+    def test_4xx_content_policy_429_501_and_505_are_never_resent(self):
+        policy = (400, {}, {"error": {"code": "content_policy_violation", "message": "refused"}})
+        for answer, code in ((policy, "content_policy_violation"), ((400, {}, error_body(400)), None),
+                             ((429, {}, error_body(429)), None), ((501, {}, error_body(501)), None),
+                             ((505, {}, error_body(505)), None)):
+            with self.subTest(status=answer[0], code=code):
+                out, c, server, got, _ = self._call(answer, edit=True)
+                self.assertIsInstance(out, ApiError)
+                self.assertEqual(server.count("images/edits"), 1)
+                self.assertEqual(out.http_status, answer[0])
+                if code:
+                    self.assertEqual(out.error_code, code)
+                self.assertNotIn("call_retry", [e["kind"] for e in got])
+                self.assertEqual([r.get("resend") for r in c.log.calls], [None])
+                self.assertNotIn("resend", str(out))
+                self.assertIn("after 1 attempts" if answer[0] == 429 else "(not retried)", str(out))
+
+    def test_a_timeout_or_dropped_connection_without_an_answer_is_resent_once(self):
+        slow = (200, {}, {"data": [{"b64_json": _png_b64("blue")}]}, 2.0)
+        with mock.patch.object(client_mod, "TIMEOUT_S", 0.3):
+            out, c, server, got, _ = self._call(slow, self.image)
+        self.assertIsInstance(out, Image.Image)
+        self.assertEqual(out.getpixel((0, 0)), (255, 0, 0))   # the resend's answer, not the late one
+        self.assertEqual(server.count("images/generations"), 2)
+        self.assertEqual([(r["attempt"], r.get("resend"), r["outcome"]) for r in c.log.calls],
+                         [(1, None, "unknown"), (2, True, "ok")])
+        self.assertEqual([(e["kind"], e.get("code")) for e in got if e["kind"] == "call_retry"], [("call_retry", "timeout")])
+        self.assertNotIn("m", [e for e in got if e["kind"] == "call_retry"][0])   # no answer, no status
+        dropped = (0, {}, {})
+        for p in self.cache.glob("*"):
+            p.unlink()
+        out, c, server, got, _ = self._call(dropped, self.image, edit=True)
+        self.assertIsInstance(out, Image.Image)
+        self.assertEqual(server.count("images/edits"), 2)
+        self.assertEqual([(e["kind"], e.get("code")) for e in got if e["kind"] == "call_retry"],
+                         [("call_retry", "network")])
+        # Dropped twice: one resend, then a loud error naming the transport failure.
+        for p in self.cache.glob("*"):
+            p.unlink()
+        out, c, server, _, _ = self._call(dropped, edit=True)
+        self.assertIsInstance(out, ApiError)
+        self.assertEqual(server.count("images/edits"), 2)
+        self.assertEqual((out.http_status, out.network_error), (None, "RemoteDisconnected"))
+        self.assertIn("failed on its resend", str(out))
+
+    def test_sam_and_muse_spark_keep_one_attempt(self):
+        sam = lambda c: c.segment(self.inputs[0], "character")   # noqa: E731
+        out, c, server, got, _ = self._call((500, {}, error_body(500)), call=sam)
+        self.assertIsInstance(out, ApiError)
+        self.assertEqual(server.count("responses"), 1)
+        self.assertFalse(c.resends_transient(client_mod.SAM_MODEL))
+        ask = lambda c: c.compare_images("q", self.inputs, schema=SAMPLE_SCHEMA)   # noqa: E731
+        out, c, server, got, _ = self._call((502, {}, error_body(502)), call=ask)
+        self.assertIsInstance(out, ApiError)
+        self.assertEqual(server.count("responses"), 1)
+        self.assertFalse(c.resends_transient(client_mod.TEXT_MODEL))
+        self.assertTrue(c.resends_transient(client_mod.IMAGE_MODEL))
+
+    def test_the_resend_passes_the_budget_and_settlement_hooks(self):
+        seen, settled = [], []
+        c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter, fast=True,
+                        before_api_attempt=seen.append)
+        c.after_api_attempt = settled.append
+        out, _, server, _, _ = self._call((502, {}, error_body(502)), self.image, client=c)
+        self.assertIsInstance(out, Image.Image)
+        self.assertEqual(seen, [client_mod.IMAGE_MODEL] * 2)
+        self.assertEqual(settled, [0.01, 0.01])
+        # A budget stop at the resend's reservation ends the call there, unchanged, after one request.
+        class Stop(Exception):
+            pass
+        calls = []
+
+        def budget(model):
+            calls.append(model)
+            if len(calls) > 1:
+                raise Stop("API cap")
+        for p in self.cache.glob("*"):
+            p.unlink()
+        c = ModelClient(self.cache, mode="live", policy=no_wait_policy(), limiter=self.limiter, fast=True,
+                        before_api_attempt=budget)
+        with self.assertRaises(Stop):
+            self._call((502, {}, error_body(502)), self.image, client=c)
+        self.assertEqual(len(calls), 2)
+
+    def test_replay_never_resends_and_a_replay_miss_is_never_resent(self):
+        replay = ModelClient(self.cache, mode="replay", fast=True)
+        self.assertFalse(replay.resends_transient(client_mod.IMAGE_MODEL))
+        with mock.patch.object(ModelClient, "_post", side_effect=AssertionError("network during replay")) as post:
+            with self.assertRaises(ReplayMiss):
+                replay.generate_image("a cover")
+            with self.assertRaises(ReplayMiss):
+                replay.edit_image("a cover", self.inputs)
+        post.assert_not_called()
+        self.assertEqual([r["outcome"] for r in replay.log.calls], ["ReplayMiss", "ReplayMiss"])
+
+    def test_best_and_full_lane_are_unchanged(self):
+        # A non-fast client never uses the resend: the full retry policy retries as before.
+        out, c, server, got, rows = self._call((502, {}, error_body(502)), self.image, fast=False)
+        self.assertIsInstance(out, Image.Image)
+        self.assertFalse(c.resends_transient(client_mod.IMAGE_MODEL))
+        self.assertEqual(server.count("images/generations"), 2)
+        self.assertEqual([(e["kind"], e.get("of"), e.get("why")) for e in got],
+                         [("call_start", None, None), ("call_retry", retry.MAX_ATTEMPTS, None),
+                          ("call_end", None, None)])
+        self.assertTrue(all("resend" not in r and "attempt" not in r for r in c.log.calls))
+        self.assertEqual([(r["outcome"], r["attempt"]) for r in rows],
+                         [("sent", 1), ("unknown", 1), ("sent", 2), ("ok", 2)])
+        for p in self.cache.glob("*"):
+            p.unlink()
+        out, *_ = self._call((502, {}, error_body(502)), fast=False)
+        self.assertEqual(str(out).split(":", 1)[0], f"images/generations failed after {retry.MAX_ATTEMPTS} attempts")
+        out, *_ = self._call((400, {}, error_body(400)), fast=False)
+        self.assertTrue(str(out).endswith("(not retried)"))
 
 
 class SchemaErrorsTest(unittest.TestCase):

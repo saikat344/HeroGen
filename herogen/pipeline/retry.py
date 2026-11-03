@@ -4,6 +4,8 @@ Retry policy (`RetryPolicy`):
 - Retried: HTTP 408, 409, 425, 429 and 5xx except 501 and 505 (which say the request can never work), and
   network errors (no HTTP status). Never any other 4xx, and never a 409 on a paid generation (Muse Image). A 200 answer whose status is "failed" with error code
   `rate_limit_exceeded` or `server_error` is retried as a 429 or a 500.
+- Fast lane: one attempt per request, and a Muse Image call that fails with a `transient` error (an HTTP 5xx
+  except 501 and 505, or no HTTP answer) is resent once, identically (`client.ModelClient._answered_post`).
 - Wait before a retry: the server's `Retry-After` (seconds or an HTTP date; a non-finite or unreadable value
   is ignored) plus 0-1 s of jitter when it sent one; else the largest rate-limit reset header it sent (`retry-after-ms`, `ratelimit-reset`,
   `x-ratelimit-reset`, `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens`) plus the same jitter; else
@@ -56,6 +58,18 @@ def retryable(status: int | None, *, paid_edit: bool = False) -> bool:
     if paid_edit and status == 409:
         return False
     return status in RETRY_STATUSES or (500 <= status <= 599 and status not in NEVER_RETRY_5XX)
+
+
+def transient(exc: object) -> bool:
+    """Whether a failed call is worth exactly one identical resend where only that is allowed (the fast lane's
+    Muse Image calls, `client.ModelClient`, and stage 3f's beauty-only requests): an HTTP 5xx except
+    `NEVER_RETRY_5XX`, or no HTTP answer at all (a timeout, a dropped or refused connection: the client's
+    ``network_error``). Read from the error's ``http_status`` and ``network_error`` only, never its message, so
+    any 4xx (a content-policy refusal included), an unreadable answer and a call that got no slot are not."""
+    status = getattr(exc, "http_status", None)
+    if type(status) is int:
+        return 500 <= status <= 599 and status not in NEVER_RETRY_5XX
+    return getattr(exc, "network_error", None) is not None
 
 
 def maybe_billed(status: int | None, *, paid_edit: bool) -> bool:

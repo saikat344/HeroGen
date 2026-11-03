@@ -42,7 +42,7 @@ class CallReportTests(unittest.TestCase):
         self.assertEqual(client.log.cost_usd(), 0)
         self.assertTrue(all(c["wall_seconds"] >= 0 for c in client.log.calls))
 
-    def test_failed_answer_keeps_one_unknown_billing_receipt_without_retry(self):
+    def test_failed_answer_is_resent_once_and_keeps_both_unknown_billing_receipts(self):
         from herogen.pipeline.retry import RetryPolicy
         limiter = mock.Mock()
         limiter.acquire.return_value = ("slot", 0)
@@ -56,13 +56,15 @@ class CallReportTests(unittest.TestCase):
                 mock.patch.object(client_module, "_open", return_value=response) as send:
             with self.assertRaises(ApiError) as raised:
                 client.generate_image("a knight")
+        # A "failed" answer with code server_error is a 500: the fast lane resends it once, and no more.
         self.assertFalse(raised.exception.transient)
-        self.assertEqual(send.call_count, 1)
-        self.assertEqual(len(client.log.calls), 1)
-        self.assertEqual(client.log.cost_usd(), client_module.PRICE_PER_IMAGE_USD[client_module.IMAGE_MODEL])
+        self.assertEqual(raised.exception.http_status, 500)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual([(c["attempt"], c.get("resend")) for c in client.log.calls], [(1, None), (2, True)])
+        self.assertEqual(client.log.cost_usd(), 2 * client_module.PRICE_PER_IMAGE_USD[client_module.IMAGE_MODEL])
         rows = [json.loads(line) for line in (self.root / "cache/calls-ledger.jsonl").read_text().splitlines()]
         complete = [r for r in rows if r["outcome"] != "sent"]
-        self.assertEqual(len(complete), 1)
+        self.assertEqual(len(complete), 2)
         self.assertTrue(all(r["unknown"] for r in complete))
 
     def test_cached_calls_and_replay_misses_have_receipts(self):
