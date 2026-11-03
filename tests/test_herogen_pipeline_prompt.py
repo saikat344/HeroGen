@@ -531,7 +531,7 @@ class PipelineTest(_Base):
         self.assertTrue(np.array_equal(a, b))
         s0 = json.loads((run / "stage-0.json").read_text())
         self.assertEqual(s0["details"]["origin"], {"stage": "p", "image": P.SKETCH, "prompt_version": prompts.selected("prompt_sketch").ref()})
-        self.assertIn("hero-sketch-v2", s0["details"]["label"])
+        self.assertIn("hero-sketch-v3", s0["details"]["label"])
         res = json.loads((run / "results.json").read_text())
         self.assertEqual(res["stages"][0]["stage"], "p")
         self.assertEqual(res["stages"][0]["status"], "pass")

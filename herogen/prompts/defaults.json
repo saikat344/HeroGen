@@ -1,5 +1,5 @@
 {
-  "prompt_sketch": {"version": "hero-sketch-v2", "env": "HEROGEN_PROMPT_SKETCH_VERSION"},
+  "prompt_sketch": {"version": "hero-sketch-v3", "env": "HEROGEN_PROMPT_SKETCH_VERSION"},
   "same_character": {"version": "same-character-v2", "env": "HEROGEN_SAME_CHARACTER_VERSION"},
   "turnaround": {"version": "turnaround-v3", "env": "HEROGEN_TURNAROUND_VERSION"},
   "cover_complete_figure": {"version": "cover-complete-figure-v1", "env": "HEROGEN_COVER_COMPLETE_FIGURE_VERSION"},
