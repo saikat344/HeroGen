@@ -2641,7 +2641,10 @@ corresponding accepted ordinary-fast paint. Each eye box gains a 15% horizontal-
 then both greyscale crops resize to 64 by 48. Both eyes must retain at least the ordinary paint's interior
 Laplacian variance and edge density (Sobel gradient above 0.04), both strictly positive for the ordinary
 crop. Missing boxes, ordinary paint or ordinary eye detail reject
-the beauty face. `eye_quality` records both measurements and their ratios; this uses existing eye masks,
+the beauty face, with one exception. When the completed default-head run holds no accepted `head+0`
+paint, the beauty head is compared with that run's face recovery paint if it applied. Without one,
+the gated beauty head is accepted (`no ordinary head paint`): the default atlas's face would otherwise
+be ordinary `body+0` paint at a fraction of the head camera's resolution, or base texels. `eye_quality` records both measurements and their ratios; this uses existing eye masks,
 without another model call. Otherwise the source is `default` when the independent ordinary head sample
 passed, or `default-fast-fallback` when it did not. All other beauty repaints exclude their grown SAM
 face masks. Accepted ordinary body/side/head/hair paint and unpainted base residuals all contribute to

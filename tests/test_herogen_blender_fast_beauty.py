@@ -648,6 +648,39 @@ class EyeQualityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             B.eye_quality(image, image, [[10, 10, 10, 20], self.boxes[1]])
 
+    def verdict(self, key, *, ordinary=None, recovery=None, default_run=True):
+        """Face verdict on one accepted beauty view whose repaint is a slightly soft face."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work, default = tmp / 'work', tmp / 'default'
+            (work / key).mkdir(parents=True)
+            self.face(1).save(work / key / 'refined.png')
+            features = {'both_eyes': True, 'mouth': True, 'eye_boxes': self.boxes}
+            data = {'views': {key: {'accepted': True, 'prompt': 'RF6B', 'attempts': [
+                {'accepted': True, 'checks': {'facial_features': {'repaint': features}}}]}}}
+            control = B.FaceControl(tmp, {}, data=data)
+            if default_run:
+                control.default_work, control.default_data = default, {}
+                default.mkdir()
+                if ordinary is not None:
+                    (default / key).mkdir()
+                    ordinary.save(default / key / 'refined.png')
+                if recovery is not None:
+                    (default / 'face-recovery').mkdir()
+                    recovery.save(default / 'face-recovery' / 'refined.png')
+                    control.default_data['face_recovery'] = {'applied': True}
+            return control.face_verdict(key, work)[1]
+
+    def test_head_without_ordinary_head_paint_is_compared_with_recovery_or_accepted(self):
+        self.assertEqual(self.verdict('head+0', ordinary=self.face())['reason'], 'less eye detail than ordinary fast')
+        self.assertEqual(self.verdict('head+0', recovery=self.face())['reason'], 'less eye detail than ordinary fast')
+        self.assertTrue(self.verdict('head+0', recovery=self.face(3))['accepted'])
+        quality = self.verdict('head+0')
+        self.assertEqual((quality['accepted'], quality['reason']), (True, 'no ordinary head paint'))
+        # Body+0 and a missing default run keep the strict comparison.
+        for quality in (self.verdict('body+0'), self.verdict('head+0', default_run=False)):
+            self.assertEqual((quality['accepted'], quality['reason']), (False, 'ordinary face paint unavailable'))
+
 
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
@@ -1144,11 +1177,34 @@ class FastBeautyStageTests(unittest.TestCase):
     def head_edits(self, edits):
         return sorted((e['slot'], e['attempt'], e['nested']) for e in edits if e['view'] == 'head+0')
 
+    def recovery_outranks_head(self):
+        """Face selection rejects a beauty head that has no ordinary head paint to compare with,
+        as a default-run face recovery with more eye detail would."""
+        verdict = B.FaceControl.face_verdict
+        def face_verdict(control, key, work):
+            selected, quality = verdict(control, key, work)
+            if quality is not None and quality['reason'] == 'no ordinary head paint':
+                quality = {'accepted': False, 'reason': 'less eye detail than ordinary fast', 'eyes': []}
+            return selected, quality
+        return mock.patch.object(B.FaceControl, 'face_verdict', face_verdict)
+
+    def test_gated_beauty_head_without_ordinary_head_paint_owns_the_face(self):
+        # The gates accept the beauty head; the ordinary head's attempt 0 fails in both runs and no
+        # recovery applies, so the default atlas's face is body-scale paint and the head wins.
+        record, paid, _, edits = self.paid_run(reject=lambda view, kind: view == 'head+0' and kind == 0)
+        self.assertEqual(paid['head+0'], 2)
+        self.assertFalse([e for e in edits if e['slot'] == 'attempt-2'])
+        head = record['views']['head+0']
+        self.assertEqual(head['attempts'][0]['checks']['eye_quality']['reason'], 'no ordinary head paint')
+        self.assertEqual((record['face_source']['source'], record['face_source']['view']), ('beauty', 'head+0'))
+        self.assertNotIn('beauty_head_candidate', record)
+
     def test_face_rejected_beauty_head_with_rejected_default_pays_exactly_three(self):
         # The gates accept the beauty head; the ordinary head's attempt 0 fails in both runs,
-        # so face selection has no ordinary paint and rejects the beauty face.
-        record, paid, ordinary, edits = self.paid_run(
-            reject=lambda view, kind: view == 'head+0' and kind == 0)
+        # and face selection rejects the beauty face.
+        with self.recovery_outranks_head():
+            record, paid, ordinary, edits = self.paid_run(
+                reject=lambda view, kind: view == 'head+0' and kind == 0)
         expected = self.expected_views
         self.assertEqual(paid, Counter({view: 3 if view == 'head+0' else 2 for view in expected}))
         self.assertEqual(ordinary, Counter({view: 2 if view == 'head+0' else 1 for view in expected}))
@@ -1172,15 +1228,16 @@ class FastBeautyStageTests(unittest.TestCase):
         self.assertEqual((nested['accepted'], nested['tries'], nested['selected_attempt']), (True, 2, 1))
 
     def test_face_rejected_head_with_rejected_third_slot_never_pays_a_fourth(self):
-        record, paid, ordinary, edits = self.paid_run(
-            reject=lambda view, kind: view == 'head+0' and kind in (0, 1))
+        with self.recovery_outranks_head():
+            record, paid, ordinary, edits = self.paid_run(
+                reject=lambda view, kind: view == 'head+0' and kind in (0, 1))
         self.assertEqual(paid['head+0'], 3)
         self.assertEqual(self.head_edits(edits)[-1], ('attempt-2', 1, False))
         self.assertFalse([e for e in edits if e['slot'] not in ('attempt-0', 'attempt-1', 'attempt-2')])
         head = record['views']['head+0']
         self.assertEqual(head['tries'], 3)
-        # No ordinary head paint exists, so the beauty head stays rejected; body+0 may own the face.
-        self.assertEqual(head['attempts'][0]['checks']['eye_quality']['reason'], 'ordinary face paint unavailable')
+        # Face selection still rejects the beauty head; body+0 may own the face.
+        self.assertEqual(head['attempts'][0]['checks']['eye_quality']['reason'], 'less eye detail than ordinary fast')
         self.assertNotEqual(record['face_source'].get('view'), 'head+0')
 
     def test_face_accepted_beauty_head_still_pays_two(self):
