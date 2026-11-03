@@ -88,6 +88,17 @@ def _value_xml(kind: str, name: str, value, pad: str) -> list[str]:
         return [f'{pad}<double name="{name}">{_num64(value)}</double>']
     if kind == "token":
         return [f'{pad}<token name="{name}">{int(value)}</token>']
+    if kind == "int":
+        return [f'{pad}<int name="{name}">{int(value)}</int>']
+    if kind == "Color3":  # 0..1 floats
+        r, g, b = value
+        return [f'{pad}<Color3 name="{name}">', f"{pad}  <R>{_num32(r)}</R>", f"{pad}  <G>{_num32(g)}</G>",
+                f"{pad}  <B>{_num32(b)}</B>", f"{pad}</Color3>"]
+    if kind == "Color3uint8":  # 0..255 bytes, written as one 0xRRGGBB integer (BasePart.Color)
+        r, g, b = (int(c) for c in value)
+        if not all(0 <= c <= 255 for c in (r, g, b)):
+            raise ValueError(f"{name}: colour bytes out of range")
+        return [f'{pad}<Color3uint8 name="{name}">{(r << 16) | (g << 8) | b}</Color3uint8>']
     if kind == "Ref":
         return [f'{pad}<Ref name="{name}">{value.ref if value is not None else "null"}</Ref>']
     if kind == "Vector3":
@@ -174,11 +185,19 @@ def build_model(spec: dict) -> Item:
     return model
 
 
-def write_rbxmx(spec: dict) -> str:
-    """The `.rbxmx` text for a rig spec."""
-    model = build_model(spec)
-    _assign_refs(model, [0])
+def write_items(roots: list[Item]) -> str:
+    """A `<roblox version="4">` document holding `roots` (a model file's instances or a place's services).
+    Referents are numbered in document order across all roots, so Ref properties may point between them."""
+    counter = [0]
+    for item in roots:
+        _assign_refs(item, counter)
     out = ['<roblox version="4">']
-    _item_xml(model, 1, out)
+    for item in roots:
+        _item_xml(item, 1, out)
     out.append("</roblox>")
     return "\n".join(out) + "\n"
+
+
+def write_rbxmx(spec: dict) -> str:
+    """The `.rbxmx` text for a rig spec."""
+    return write_items([build_model(spec)])

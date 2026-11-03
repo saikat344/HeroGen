@@ -1,5 +1,5 @@
 """CLI: `python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`
-and `python3 -m herogen.roblox check --body <run>/04-body --rig <file.rbxmx>`.
+and `python3 -m herogen.roblox check --body <run>/04-body --rig <file.rbxmx> [--place <file.rbxlx>]`.
 
 Exit codes: 0 passed, 1 a gate check failed, 2 the body or a file couldn't be used (one `error:` line)."""
 from __future__ import annotations
@@ -24,9 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--body", required=True, type=Path, help="the stage-4 folder (sections.json and the GLB)")
     e.add_argument("--out", required=True, type=Path, help="the folder to write, e.g. <run>/06-roblox")
     e.add_argument("--glb", default="high.glb", help="the body GLB inside --body (default high.glb)")
-    c = sub.add_parser("check", help="check an .rbxmx rig against a stage-4 body")
+    c = sub.add_parser("check", help="check an .rbxmx rig (and optionally its starter place) against a stage-4 body")
     c.add_argument("--body", required=True, type=Path)
     c.add_argument("--rig", required=True, type=Path)
+    c.add_argument("--place", type=Path, help="also check this starter place (.rbxlx) against the rig")
     c.add_argument("--glb", default="high.glb")
     a = ap.parse_args(argv)
     try:
@@ -45,9 +46,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"{rec['rig']['hip_height']:.4f}, {passed}/{len(rec['checks'])} checks passed, "
                   f"record {record_path(a.out)}")
             return 0 if rec["ok"] else 1
-        from .check import check_rig
+        from .check import check_place, check_rig
 
         checks = check_rig(a.body, a.rig, a.glb)
+        if a.place is not None:
+            checks += check_place(a.place, a.rig)
         for x in checks:
             print(_line(x))
         ok = all(x["pass"] for x in checks if x.get("gate", True))

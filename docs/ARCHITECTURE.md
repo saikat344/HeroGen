@@ -21,7 +21,7 @@ tested separately. A run can also start from a text prompt: stage p draws the sk
 | 4 game body | `herogen/blender` | `04-body/high.glb`, `04-body/sections.json`, `04-body/atlas-high.png` (every section but the Head), `04-body/atlas-head-high.png` (the Head's own texture), `04-body/pose-renders/*.png`; `04-body/low.glb`, `atlas-low.png` and `atlas-head-low.png` when the profile has a low LOD (`roblox-ingame`); validated refined colour is primary in both textures at every LOD; comparison textures `04-body/atlas-high-<variant>.png` with `atlas-head-high-<variant>.png`: `views` when refined colour is primary, otherwise `no-closeup` when stage 2f's close-ups were used, and for a SAM 3D Objects mesh `no-source-fallback` and `side-trust`; comparisons are scoring-only |
 | scores (after 4) | `herogen/blender` | `05-scores.json`, `05-renders/<body>/<view>{,-silhouette,-diff}.png`, `05-renders/heldout-comparison*.png` |
 | 5 results | `herogen/pipeline` | `results.html`, `results.json` |
-| 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
+| 6 Roblox export | `herogen/roblox` | `06-roblox/HeroGen-R15.rbxmx`, `06-roblox/HeroGen-Starter.rbxlx`, `06-roblox/bind_meshes.luau`, `06-roblox/rig_test.server.luau`, `06-roblox/README.txt`, `stage-6.json` |
 
 Stage 6 writes the files Roblox Studio imports (see "Roblox export"); play-testing in a game engine is not part
 of this pipeline.
@@ -1767,11 +1767,11 @@ or irregular file, an unlisted file, an unsafe name or a label mismatch.
 
 ```bash
 python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox
-python3 -m herogen.roblox check --body <run>/04-body --rig <file>.rbxmx
+python3 -m herogen.roblox check --body <run>/04-body --rig <file>.rbxmx [--place <file>.rbxlx]
 ```
 
 `herogen/roblox` uses Python and numpy only. `export` writes the rig, checks it and records the result; `check`
-runs the same checks on any `.rbxmx` against a body. Exit codes: 0 when every gate check passes, 1 when one
+runs the same checks on any `.rbxmx` against a body, and with `--place` the starter-place checks too. Exit codes: 0 when every gate check passes, 1 when one
 fails (each failure is printed), 2 when the body can't be exported (one `error:` line, and for `export` a
 `stage-6.json` with `"ok": false` and an `"error"`).
 
@@ -1781,6 +1781,7 @@ earlier run):
 | File | What it is |
 | --- | --- |
 | `HeroGen-R15.rbxmx` | The R15 rig, a Roblox XML model (`<roblox version="4">`) |
+| `HeroGen-Starter.rbxlx` | A starter place, a Roblox XML place file holding the same rig on a baseplate next to a spawn |
 | `bind_meshes.luau` | A Command Bar script that binds the meshes Studio's importer makes from `high.glb` onto the rig |
 | `rig_test.server.luau` | An optional Script that plays stock R15 catalog animations and prints joint separation |
 | `README.txt` | Step-by-step Studio instructions for the end user, with the path to `high.glb` and the HipHeight |
@@ -1817,6 +1818,22 @@ Units are studs throughout.
 The file holds only the properties listed; Studio gives every other property its class default. Floats are
 float32 in shortest round-trip decimals and referents are numbered in document order, so a body always gives
 the same bytes.
+
+**The starter place** (`place.py`) is the same `<roblox version="4">` format, written by the same writer
+(`rbxmx.write_items`), with the place's services as its top-level items:
+- Workspace: an anchored Part `Baseplate` (512 x 20 x 512, its top at Y = 0, Locked, Plastic, smooth surfaces); an
+  anchored `SpawnLocation` (12 x 1 x 12) on it at the origin, Neutral, with Duration 0 (no force field); and the
+  rig Model, every part moved by one rigid transform: turned 180 degrees about Y so it faces +Z, towards the
+  spawn, its root part over (0, 0, -16) and its lowest foot vertex on the baseplate's top. Attachments and
+  Motor6D C0/C1 are part-relative, so they are the rig file's own.
+- Lighting: Ambient and OutdoorAmbient (70, 70, 70), Brightness 3, ClockTime 14.5, GlobalShadows, Technology
+  ShadowMap, both environment scales 1.
+- StarterPlayer with no children and LoadCharacterAppearance off, ServerScriptService, and ServerStorage holding
+  the BoolValue `HeroGenStarterPlace` (true), the marker `bind_meshes.luau` looks for.
+
+Studio fills in every service and property the file leaves out. Property names and types are the ones rbx-dom
+writes (for example `size`, `Color3uint8` as one 0xRRGGBB integer, SpawnLocation `Duration` as `int`); an optional
+test reads each service back through Rojo (rbx-dom) and compares every value. The place holds no meshes either.
 
 **Refused bodies** (exit 2):
 - a missing or unreadable `sections.json` or GLB, or a GLB that isn't glTF 2.0 binary with an embedded buffer;
@@ -1859,6 +1876,23 @@ from the GLB's POSITION accessor min/max and pivots and toe points from `section
 | `accessory_attachments`, `avatar_part_scale_type` | All 19 present and inside their parts; every section `Classic` |
 | `meshes_bound` (info, not a gate) | The number of sections with a MeshId |
 
+The starter place's checks (`check_place`, all gates) read it back the same independent way and compare it with
+the rig file:
+
+| Check | Passes when |
+| --- | --- |
+| `place_xml_well_formed`, `place_referents_resolve` | The file parses as `<roblox version="4">`; referents are unique and every Ref resolves |
+| `place_services` | Workspace, Lighting and StarterPlayer, once each |
+| `place_baseplate`, `place_spawn`, `place_spawn_on_baseplate` | An anchored Part `Baseplate`; one anchored SpawnLocation, its bottom within 0.001 stud of the baseplate's top |
+| `place_marker` | ServerStorage holds the BoolValue `HeroGenStarterPlace`, set to true |
+| `place_starter_player_empty` | StarterPlayer has no children (the StarterCharacter comes from the bind script) |
+| `place_rig_present`, `place_rig_matches_file` | One Model of the rig's name in Workspace, with the rig file's instances and every value except the parts' CFrames |
+| `place_rig_rigid_move_position`, `place_rig_rigid_move_rotation` | Every part is the rig file's part moved by the root part's transform, within 1e-4 stud and 1e-5 |
+| `place_rig_upright` | That transform turns about the vertical only |
+| `place_feet_on_baseplate` | The lowest foot is within 0.001 stud of the baseplate's top |
+| `place_rig_clear_of_spawn` | The rig's footprint and the spawn's do not overlap |
+| `place_rig_faces_spawn` | The rig's forward points at the spawn (cosine above 0.9) |
+
 Tests (`tests/test_herogen_roblox_*.py`) build synthetic box bodies (`herogen/roblox/synth.py`) and corrupt
 rigs to show each check catches its fault: a C0 offset, a renamed part, a missing joint, a wrong HipHeight, a
 moved neck pivot, a mirrored rig, a resized foot, a reflected rotation, a wrong rig type, a mislinked Motor6D,
@@ -1866,9 +1900,13 @@ an extra part, an unreadable property value, a body facing backwards, a writer w
 conversion and a section below the feet.
 Another test installs the project with `pip install --target` from a copy of the checkout and runs an export
 from the installed package, which shows the templates ship as package data (`[tool.setuptools.package-data]`
-in `pyproject.toml`); it skips only when pip can't fetch the build backend. Two optional tests run when their
+in `pyproject.toml`); it skips only when pip can't fetch the build backend. Three optional tests run when their
 tool is on `PATH`: with `lune`, rbx-dom reads the file back and every CFrame and size must agree within 1e-5
-stud; with `luau-compile`, both Studio scripts must compile.
+stud; with `rojo`, rbx-dom reads the starter place's services back to the same instances and values; with
+`luau-compile`, both Studio scripts must compile, as templates and as the export fills them in. Place tests
+corrupt the place the same way: a missing marker or service, a StarterCharacter in the file, a missing spawn, an
+unanchored baseplate, one part moved alone, a changed attachment, a floating, lying-down, misplaced or
+backwards rig, and a place holding another body's rig.
 
 **Stage record** (`stage-6.json`, placed as in the outputs table): the stage-record fields above, with
 `outputs` relative to the record's folder, plus `code` (`{"commit", "dirty"}`, or null outside a git
@@ -1876,7 +1914,17 @@ checkout), `body` (the body folder relative to the record's folder), `inputs` (s
 `sections.json` and the GLB), and `rig` (name, frame, joint type, HipHeight, root part, and each
 section's centre, size, pivot and triangles).
 
-**In Studio** (`README.txt` gives the end user these steps):
+**In Studio** (`README.txt` gives the end user these steps). The quick start, in the starter place:
+1. Open `HeroGen-Starter.rbxlx`.
+2. File > Import 3D on `high.glb` with the settings below.
+3. Run `bind_meshes.luau` in the Command Bar. After the bind below, it finds ServerStorage's `HeroGenStarterPlace`
+   marker, so it also copies the bound rig to `StarterPlayer.StarterCharacter` (its PrimaryPart the
+   HumanoidRootPart, turned upright facing -Z), replacing an earlier copy, turns LoadCharacterAppearance off,
+   deletes the imported model and prints "Starter place: press Play to walk around as your hero."
+4. Press Play.
+
+In the user's own game, where the marker is absent, the script ends after the bind and never touches
+StarterPlayer:
 1. File > Import 3D on `high.glb` with Scale Unit Stud and Rig Type No Rig. The importer uploads the meshes and
    texture to the user's account.
 2. Insert `HeroGen-R15.rbxmx` from file.
