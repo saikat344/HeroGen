@@ -132,7 +132,7 @@ class Store(GenerationStore, AnalyticsStore):
         "reconcile_stale", "retention_due", "job_mark_purged", "purge_expired", "audit_add",
         "job_renew", "job_model_ready", "job_export_finish",
         "job_continue", "job_versions", "jobs_stage_states", "queue_positions",
-        "guest_open", "generation_get",
+        "guest_open", "generation_get", "spend_record",
     }) | ANALYTICS_PUBLIC
     # Methods reached through StoreService.admin_call with the hosted admin key.
     ADMIN = frozenset({

@@ -51,7 +51,7 @@ function storedOrbit() {
 
 export function viewerDock($) {
   let model = false, views = '', shade = 'textured', orbitOn = storedOrbit(), expanded = false;
-  let moves = null, moveKey = '', playing = null;
+  let moves = null, moveKey = '', playing = null, split = false, beforePlay = null;
   const dock = $('#viewerDock'), stage = $('#viewer');
   // The animation control follows the camera views (before Orbit, Clay and Wireframe, which a narrow stage scrolls
   // to), behind its own separator.
@@ -85,7 +85,8 @@ export function viewerDock($) {
     const images = $('#images').children.length > 0;
     $('#images').hidden = model;
     $('#cameraViews').hidden = !model; $('#workbenchShading').hidden = !model; $('#dockSep').hidden = !model;
-    anim.hidden = animSep.hidden = !model || !moves;
+    // The animation buttons work on one model, so the split stage (two models) has none.
+    anim.hidden = animSep.hidden = !model || !moves || split;
     dock.hidden = !model && !images;
     stage.classList.toggle('has-dock', !dock.hidden);
   }
@@ -119,11 +120,17 @@ export function viewerDock($) {
     if (playing) stopMoves();
     moves = next; moveKey = key; syncDock();
   }
-  for (const button of anim.querySelectorAll('[data-animation]')) button.addEventListener('click', () => {
+  // A clip first lets the stage put the right body on show (`beforePlay`, e.g. Refined to Roblox high), then plays.
+  for (const button of anim.querySelectorAll('[data-animation]')) button.addEventListener('click', async () => {
     if (!moves || !model) return;
     const clip = playing === button.dataset.animation ? null : button.dataset.animation;
-    syncMoves(clip, clip ? 'loading' : 'idle');
     track('animation_play', {clip: clip || 'stop'});
+    if (clip && beforePlay) {
+      syncMoves(null, 'idle'); animStatus.textContent = 'Loading the animation…';
+      try { if (await beforePlay(clip) === false) { syncMoves(null, 'error'); return; } } catch { syncMoves(null, 'error'); return; }
+      if (!moves || !model) return;
+    }
+    syncMoves(clip, clip ? 'loading' : 'idle');
     viewer().then(m => m.animate(clip, moves)).then(ok => { if (ok === false && playing === clip) syncMoves(null, 'idle'); })
       .catch(() => syncMoves(null, 'error'));
   });
@@ -180,5 +187,11 @@ export function viewerDock($) {
   $('#preview').addEventListener('pointerdown', () => $('#orbitHint').classList.add('is-faded'), {once: true, passive: true});
   globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').addEventListener?.('change', syncOrbit);
   syncOrbit();
-  return {mode, cameras, images, animation};
+  function splitMode(on) {
+    if (Boolean(on) === split) return;
+    split = Boolean(on);
+    if (split && playing) stopMoves();
+    syncDock();
+  }
+  return {mode, cameras, images, animation, split: splitMode, beforePlay(fn) { beforePlay = fn; }};
 }

@@ -35,6 +35,10 @@ class Settings:
     meta_path: Path = Path("service-data/meta.db")
     signing_key: bytes = field(default=b"", repr=False)
     gallery_dir: Path | None = None
+    # HEROGEN_SERVICE_SKETCH_IDEAS: a read-only folder of proven sketches for the composer's "Suggest a sketch"
+    # (`catalog.json`, {"version": 1, "items": [{"id", "title", "file", "sha256", "job"}]}, beside the PNGs; see
+    # `herogen.service.sketch_ideas`). Kept out of the repository like the gallery. Unset hides the button.
+    sketch_ideas_dir: Path | None = None
     public_demo: bool = False
     # Email
     email_provider: str = "file"
@@ -63,6 +67,8 @@ class Settings:
     rate_auth_email: tuple[int, int] = (5, 3600)
     rate_link_ip: tuple[int, int] = (60, 3600)
     rate_jobs_user: tuple[int, int] = (20, 3600)
+    # Suggested hero ideas (`POST /api/ideas`, one Muse Spark call each, about $0.006) per user.
+    rate_ideas_user: tuple[int, int] = (20, 60)
     rate_api_ip: tuple[int, int] = (600, 60)
     # The build-log poll (`GET /api/jobs/<id>/events`, every 1.5 s, about 40 a minute per open log) has its own
     # budgets instead of the API's: per address, room for about 8 viewers behind one network address; per signed-in
@@ -130,6 +136,7 @@ ENV = {
     "texture_notes": "HEROGEN_TEXTURE_NOTES",
     "mode": "HEROGEN_SERVICE_MODE",
     "gallery_dir": "HEROGEN_SERVICE_GALLERY",
+    "sketch_ideas_dir": "HEROGEN_SERVICE_SKETCH_IDEAS",
     "public_demo": "HEROGEN_SERVICE_PUBLIC_DEMO",
     "base_url": "HEROGEN_SERVICE_BASE_URL",
     "data_dir": "HEROGEN_SERVICE_DATA",
@@ -158,6 +165,7 @@ ENV = {
     "rate_auth_email": "HEROGEN_SERVICE_RATE_AUTH_EMAIL",
     "rate_link_ip": "HEROGEN_SERVICE_RATE_LINK_IP",
     "rate_jobs_user": "HEROGEN_SERVICE_RATE_JOBS_USER",
+    "rate_ideas_user": "HEROGEN_SERVICE_RATE_IDEAS_USER",
     "rate_api_ip": "HEROGEN_SERVICE_RATE_API_IP",
     "rate_events_ip": "HEROGEN_SERVICE_RATE_EVENTS_IP",
     "rate_events_user": "HEROGEN_SERVICE_RATE_EVENTS_USER",
@@ -199,7 +207,7 @@ def _parse(name: str, raw: str, default: Any) -> Any:
             return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
         if isinstance(default, tuple) or name == "allowed_hosts":
             return tuple(x.strip() for x in raw.split(",") if x.strip())
-        if name in ("data_dir", "meta_path", "outbox_path", "legal_dir", "gallery_dir"):
+        if name in ("data_dir", "meta_path", "outbox_path", "legal_dir", "gallery_dir", "sketch_ideas_dir"):
             return Path(raw)
         return raw.strip()
     except ValueError:

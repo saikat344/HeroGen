@@ -14,6 +14,8 @@ What runs where:
   It also holds `<app>-admin` (HEROGEN_ADMIN_KEY) to update settings after admin authentication.
   Stage workers hold no admin key.
 - `sanitize_image`: opens uploads, with no network, no secrets and no volumes.
+- `suggest_idea`: one suggested hero idea from Muse Spark for `POST /api/ideas` (`herogen.service.ideas`); holds
+  only `<app>-model`, so the web container never holds the model key, and no volumes.
 - `run_job`: one orchestrator per job attempt; `model_stages` (holds `<app>-model`: MODEL_API_KEY),
   `blender_stages` (Blender 4.5 LTS; SAM 3D through the deployed GPU apps by default, and
   the model secret for stage 3's usability question) and `export_stages` run the stage groups on local copies of the job's files, each in a fresh container
@@ -109,8 +111,9 @@ def price_per_s(group: str) -> float:
     return cpu * CPU_CORE_USD_S + mem / 1024 * MEM_GIB_USD_S
 
 
+FOLDER_ENV = ("HEROGEN_SERVICE_GALLERY", "HEROGEN_SERVICE_SKETCH_IDEAS")   # local paths, remapped to mounts below
 IMAGE_ENV = {**{k: v for k, v in service_config.env_for_deploy().items()
-                if k != "HEROGEN_SERVICE_GALLERY"}, "HEROGEN_SERVICE_APP": APP_NAME,
+                if k not in FOLDER_ENV}, "HEROGEN_SERVICE_APP": APP_NAME,
              "HEROGEN_SERVICE_COMMIT": _commit(), "HEROGEN_SERVICE_DATA": DATA, "PYTHONDONTWRITEBYTECODE": "1"}
 base = (modal.Image.debian_slim(python_version=PYTHON)
         .pip_install_from_requirements(str(HERE / "requirements.txt"))
@@ -118,6 +121,9 @@ base = (modal.Image.debian_slim(python_version=PYTHON)
         .env(IMAGE_ENV))
 # Environment build steps must precede all lazy local mounts.
 web_image = base.env({"HEROGEN_SERVICE_GALLERY": "/public-gallery"}) if DEPLOY.gallery_dir else base
+# The proven sketches for "Suggest a sketch" (HEROGEN_SERVICE_SKETCH_IDEAS) ride along the same way, at their own path.
+if DEPLOY.sketch_ideas_dir is not None:
+    web_image = web_image.env({"HEROGEN_SERVICE_SKETCH_IDEAS": "/sketch-ideas"})
 web_image = web_image.add_local_python_source("herogen").add_local_dir(
     str(HERE / "static"), "/root/herogen/service/static")
 if DEPLOY.gallery_dir is not None:
@@ -128,6 +134,13 @@ if DEPLOY.gallery_dir is not None:
             for kind in ('sketch', 'artwork', 'model'):
                 artifact(DEPLOY.gallery_dir, character['id'], kind)
     web_image = web_image.add_local_dir(str(DEPLOY.gallery_dir), "/public-gallery")
+if DEPLOY.sketch_ideas_dir is not None:
+    # Check every suggested sketch against its catalog hash before packaging the folder.
+    from herogen.service.sketch_ideas import catalog as sketch_catalog, image as sketch_image
+    if modal.is_local():
+        for sketch in sketch_catalog(DEPLOY.sketch_ideas_dir):
+            sketch_image(DEPLOY.sketch_ideas_dir, sketch['id'])
+    web_image = web_image.add_local_dir(str(DEPLOY.sketch_ideas_dir), "/sketch-ideas")
 blender_image = (
     base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93")  # BSD-3-Clause; Apache-2.0
     .apt_install(*BLENDER_APT)
@@ -265,6 +278,13 @@ def sanitize_image(data: bytes, limits: dict) -> dict:
     return {"ok": True, "png": png, "info": info}
 
 
+@app.function(image=web_image, secrets=[model_secret], cpu=0.25, memory=512, timeout=120, max_containers=10)
+def suggest_idea() -> dict:
+    from herogen.service.ideas import live
+
+    return live()
+
+
 def _submit(job_id: str) -> str:
     return run_job.spawn(job_id).object_id
 
@@ -296,7 +316,7 @@ def web():
     svc = Services(settings=s, store=RemoteStore(admin_key=os.environ.get("HEROGEN_ADMIN_KEY")), signer=Signer(s.signing_key),
                    storage=Storage(Path(DATA), ModalVolumeView(data_vol)),
                    sender=make_sender(s.email_provider, api_key=s.email_api_key, sender=s.email_from),
-                   sanitize=sanitize, submit=_submit, prewarm=prewarm_models)
+                   sanitize=sanitize, submit=_submit, prewarm=prewarm_models, ideas=lambda: suggest_idea.remote())
     return create_app(svc)
 
 
@@ -341,7 +361,7 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
     work = CopyWorkdir(ctx, Path("/tmp/herogen-work") / job["id"], data_vol,
                        lambda: store.job_current(job["id"], attempt),
                        still_wanted=lambda: (store.job_get(job["id"]) or {}).get("deleted_at") is None)
-    runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group in ("model", "blender") else "")
+    runner = CliRunner(model_api_key=os.environ.get("MODEL_API_KEY", "") if group in ("model", "blender", "body") else "")
     return run_group(store, s, job, attempt, group, resume, runner, work, price_per_s("blender" if group == "body" else group), TIMEOUTS[group]).to_dict()
 
 
@@ -359,7 +379,9 @@ def blender_stages(job: dict, attempt: int, resume: int) -> dict:
     return _group(job, attempt, resume, "blender")
 
 
-@app.function(image=blender_image, volumes={DATA: data_vol}, cpu=WORKERS["blender"][0],
+# The body worker holds the model key for one reason: the Refine box's suggestions (`herogen.pipeline.suggest`)
+# run beside the game body. CliRunner gives the key only to that subprocess; stage 4 itself never sees it.
+@app.function(image=blender_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["blender"][0],
               memory=WORKERS["blender"][1], timeout=TIMEOUTS["body"], nonpreemptible=True,
               single_use_containers=True, max_containers=20)
 def body_stages(job: dict, attempt: int, resume: int) -> dict:

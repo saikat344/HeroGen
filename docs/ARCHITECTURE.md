@@ -78,6 +78,7 @@ CSRF middleware:
 
 | Endpoint | Behavior |
 | --- | --- |
+| `POST /api/ideas` | One suggested hero description for the Describe box: `{idea, prompt_version}`. One Muse Spark call (`hero-idea-v2`, `herogen/pipeline/idea.py`; a second only when the reply is unusable) with a random seed theme and mood (no held items or pets), made by `herogen.service.ideas` (in Modal, the `suggest_idea` function, which holds the model key). Requires session (a guest workspace will do) and CSRF; `rate_ideas_user` per user (default 20 a minute); refused with 503 while live generation is paused or out of budget. Each request's estimated cost is a `model_spend` row, counted in `spent_usd` (and `side_spend_usd`). Failures are `idea_refused` (422), `idea_failed` (502) or `ideas_unavailable` (503) with a fixed sentence, never model text. |
 | `POST /api/jobs/<id>/redo` | Accepts `stage: "cover"\|"turnaround"\|"texture"`, optional `note`, and optional boolean `build_all`; requires the normal `Idempotency-Key`. Copies the owned inactive parent's earlier run data, commits the copy, then creates a new queued job with the parent's input, profile and owner, `parent_job`, `from_stage`, `note`, and `stop_after`. Texture always runs through the remaining stages. `build_all: true` also makes cover and view variations run through the remaining stages; the default preserves single-step redos. Different requests with one key conflict. |
 | `POST /api/jobs/<id>/retry-input` | Resubmits an owned hero rejected by a recorded stage-0 or stage-1 `input_rejected` check as a new root hero, preserving its cleaned input, name and profile. Requires session, CSRF, the normal job rate limit and `Idempotency-Key`; another owner's hero returns 404. |
 | `POST /api/jobs/<id>/continue` | Queues only a `stopped` version, clears `stop_after`, retains prior stage spend. Repeated active continuation requests return the same job. Completed, rejected, failed and canceled jobs cannot continue. |
@@ -3366,6 +3367,13 @@ integrity check as the full image, and cached as `<data>/gallery-thumbs/<id>/<ki
 published gallery is read-only. It is written to a temporary file in that folder and renamed into place, so a
 half-written image is never served, and a republished image's older thumbnail is removed. A matching `v` is
 served with `Cache-Control: public, max-age=31536000, immutable`, any other with `public, max-age=3600`.
+
+"Suggest a sketch" (`sketch-idea.js`, Sketch and Upload modes) puts a proven sketch in as the chosen image, through
+the same preview, type check and multipart `sketch` field as an upload, from a shuffled no-repeat queue; Undo brings
+back an image the person chose. The sketches live outside the repository in `HEROGEN_SERVICE_SKETCH_IDEAS`, a
+read-only folder of PNGs beside `catalog.json` (`{"version": 1, "items": [{"id", "title", "file", "sha256", "job"}]}`,
+`file` a plain `<name>.png` in that folder, `job` kept private). `/api/sketch-ideas` lists `{id, title, url}` (empty
+when unset, which hides the button); `/sketch-ideas/<id>` serves a PNG only after its SHA-256 matches the catalog.
 
 ### First-party analytics and admin panel
 

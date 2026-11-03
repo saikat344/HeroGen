@@ -103,6 +103,17 @@ def _read(glb: Path, sections: Path) -> dict[str, Any] | None:
     return {"glb": BODY_GLB, "frame": FRAME, "parts": parts}
 
 
+def has_parts(glb: Path | None) -> bool:
+    """The body GLB has a mesh node for every one of the 15 R15 parts (the low body is animated with the high body's
+    joints, which hold for it because both are cut from the same sections)."""
+    if glb is None or not complete_glb(glb):
+        return False
+    try:
+        return set(SECTIONS) <= _node_names(glb)
+    except (OSError, ValueError):
+        return False
+
+
 def _node_names(glb: Path) -> set[str]:
     """The names of the GLB's mesh nodes, from its JSON chunk (the header was checked by complete_glb)."""
     with glb.open("rb") as f:

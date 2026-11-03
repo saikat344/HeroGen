@@ -91,10 +91,16 @@
   .build-log .st-running > .bl-mark .icon, .build-log .st-running > details > .bl-head .bl-mark .icon { display: none; }
   .build-log .st-running > .bl-mark .bl-dots, .build-log .st-running > details > .bl-head .bl-mark .bl-dots { display: inline; }
 }
-/* Phones: numbers drop under the sentence, the log takes more of the screen, headers are full tap targets. */
+/* Phones: the log takes more of the screen, headers are full tap targets. */
 @media (max-width: 767px) {
   .side-panel #stageLog { max-height: 60vh; }
-  .build-log .bl-head { min-height: var(--tap-min); grid-template-columns: auto auto minmax(0, 1fr); }
+  .build-log .bl-head { min-height: var(--tap-min); }
+}
+/* A narrow log (a phone, or the job page's side column): numbers drop under the sentence, so a long
+   "running … · usually about …" never squeezes the step name to one letter per line. */
+.side-panel #stageLog { container: build-log / inline-size; }
+@container build-log (max-width: 640px) {
+  .build-log .bl-head { grid-template-columns: auto auto minmax(0, 1fr); }
   .build-log .bl-head .bl-meta { grid-column: 3; text-align: left; white-space: normal; }
   .build-log .bl-row { grid-template-columns: auto minmax(0, 1fr); padding-left: var(--space-4); }
   .build-log .bl-row .bl-meta { grid-column: 2; text-align: left; white-space: normal; }

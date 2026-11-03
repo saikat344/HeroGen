@@ -1,4 +1,5 @@
 import { stageTiming } from './generation.js';
+import { acceptPlaceholderOnTab } from './placeholder-tab.js';
 // Version actions and owner-scoped lineage share the selected workbench job.
 const STAGE = {'1': 'cover', '2': 'turnaround', '3f': 'texture'};
 export const versionLabel = (v, index = 1) => v.note || (!v.parent_job ? 'Original texture' : `Variation ${Math.max(1, index)}`);
@@ -36,13 +37,16 @@ export function variationTree(versions, known = new Map()) {
   const byId = new Map(versions.map(v => [v.id, v]));
   return versionRows(versions).filter(r => r.depth === 0 && !seen.has(r.id)).map(r => build(byId.get(r.id), null));
 }
+// The time to what a game engine needs: the 3D model (a GLB is enough for Unity and the rest), or for a texture-only
+// redo the new texture. The Roblox body and rig run in the background after it, so they do not count.
 export function expectedTime(job, stage) {
-  const keys = stage === 'texture' ? ['3f','4','6','5'] : stage === 'turnaround' ? ['2','3','3f','4','6','5'] : ['1','2','3','3f','4','6','5'];
+  const keys = stage === 'texture' ? ['3f'] : stage === 'turnaround' ? ['2','3'] : ['1','2','3'];
+  const target = stage === 'texture' ? 'the new texture' : 'the 3D model';
   const stages = keys.map(key => job.stages?.find(s => s.key === key)).filter(s => !['skipped', 'unavailable'].includes(s?.state));
   if (!stages.length) return 'Time estimate needs more real runs.';
   if (!stages.every(s => Number.isFinite(s?.typical_seconds))) return 'Time estimate needs more real runs.';
   const seconds = Math.max(1, Math.round(stages.reduce((sum, s) => sum + s.typical_seconds, 0)));
-  return `Usually about ${seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${seconds} s`}`;
+  return `Usually about ${seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${seconds} s`} to ${target}`;
 }
 function node(tag, value, cls) {
   const n = document.createElement(tag); if (value != null) n.textContent = value; if (cls) n.className = cls; return n;
@@ -66,6 +70,11 @@ const SCOPE = {
   turnaround: 'Redraws the character views, then rebuilds the 3D shape and texture.',
 };
 
+// The Refine box's example per step: HeroGen's suggestion for this hero when it has one (a fix the step can make,
+// from comparing the artwork with the finished model), otherwise a fixed example of what the step honours.
+export const REFINE_EXAMPLES = {texture: 'Make the jacket deep red leather with brass buttons.',
+  turnaround: 'Add a hooded cloak and make the boots dark brown.'};
+export const refineExample = (job, stage) => job?.refine_suggestions?.[stage] || REFINE_EXAMPLES[stage] || REFINE_EXAMPLES.texture;
 export function variationsView($, {api, select, created, changeIdea, key, textureNotes}) {
   let job = null, versions = [], signature = '', request = 0, busy = false, family = '', panel = 'live';
   let compare = null, compareRequest = 0, rootJob = null, nodes = [], focusKey = null, failedChild = null;
@@ -356,6 +365,7 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
     $('#refineNotesOff').hidden = !notesOff;
     $('#submitLabel').textContent = notesOff ? 'Retry texture' : 'Create variation';
     $('#refineScope').textContent = SCOPE[stage] || '';
+    $('#refineNote').placeholder = refineExample(job, stage);
     $('#refineTime').textContent = job ? expectedTime(job, stage) : '';
     for (const chip of document.querySelectorAll('[data-refine-stage]')) {
       chip.setAttribute('aria-pressed', String(chip.dataset.refineStage === stage));
@@ -372,6 +382,7 @@ export function variationsView($, {api, select, created, changeIdea, key, textur
   for (const chip of document.querySelectorAll('[data-refine-stage]')) chip.addEventListener('click', () => {
     $('#refineStage').value = chip.dataset.refineStage; refineChoice();
   });
+  acceptPlaceholderOnTab($('#refineNote'));
   $('#refineNote').addEventListener('input', () => {
     const n = Array.from($('#refineNote').value).length;
     $('#refineCount').textContent = `${n} / 300 characters`;

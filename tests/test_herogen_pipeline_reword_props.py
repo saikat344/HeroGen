@@ -225,7 +225,7 @@ class PropsJobTest(rw_base.PrecheckJobTest):
         self.assertEqual((data["reworded"], data["names_found"], data["removed_names"], data["removed_props"]),
                          ("A masked acrobat with a red scarf", ["Spider-Man"], ["Spider-Man"], ["lantern"]))
         self.assertIn("«A masked acrobat with a red scarf»", self.generation_prompts[0])
-        self.assertEqual([d[0] for d in self.decisions(job)], ["brief_prechecked", "brief_reworded_upfront"])
+        self.assertEqual([d[0] for d in self.decisions(job)], ["brief_prechecked", "brief_reworded_upfront", "brief_props_left_out"])
 
     def test_a_rewrite_that_keeps_an_item_is_not_used_and_the_brief_is_drawn_as_written(self):
         self.reword_answers = [spark({"reworded": "A pirate captain with a cutlass", "removed_names": [],

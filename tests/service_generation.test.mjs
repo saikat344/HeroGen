@@ -152,3 +152,39 @@ test('the figure of dots is sampled inside the front outline with depth from the
   assert.ok(slab.positions.every((v, i) => i % 3 !== 2 || Math.abs(v) <= 0.12), 'a modest depth without a side view');
   assert.equal(sampleFigure(image(8, 8, () => false), null, 10), null);
 });
+
+test('time left counts to the ready hero, and the shape pill counts to the shape alone', () => {
+  const s = (key, state, typical, extra={}) => ({key, label: key, state, typical_seconds: typical, ...extra});
+  const job = {state: 'running', stage: '3', stages: [s('2','passed',55), s('3','running',230,{elapsed_seconds:50}),
+    s('3f','pending',135), s('4','pending',290), s('6','pending',1), s('5','pending',1)]};
+  const g = generationState(job);
+  assert.equal(g.left, 'about 6 min left', 'the Roblox steps run after the hero is ready');
+  assert.equal(g.shapeLeft, 'est. 3 min');
+  assert.equal(generationState({...job, stage: '3f', stages: job.stages.map((x) => x.key === '3' ? {...x, state: 'passed'} :
+    x.key === '3f' ? {...x, state: 'running'} : x)}).shapeLeft, null);
+});
+
+test('triangle counts read as plain numbers', async () => {
+  const { trianglesText, modelLabel } = await import('../herogen/service/static/generation.js');
+  assert.equal(trianglesText(138736), '138,736 triangles');
+  assert.equal(trianglesText(0), '');
+  assert.equal(modelLabel({url: 'x', body: 'low'}), 'Roblox game body · low detail');
+});
+
+test('the Refine example is the hero’s own suggestion for the step, or a fixed one', async () => {
+  const { refineExample, REFINE_EXAMPLES } = await import('../herogen/service/static/variations.js');
+  const job = {refine_suggestions: {texture: 'Make the goggle lenses amber like the artwork.'}};
+  assert.equal(refineExample(job, 'texture'), 'Make the goggle lenses amber like the artwork.');
+  assert.equal(refineExample(job, 'turnaround'), REFINE_EXAMPLES.turnaround);
+  assert.equal(refineExample(null, 'texture'), REFINE_EXAMPLES.texture);
+});
+
+test('the empty artwork frame shows only while the artwork step paints and the sketch is on the stage', async () => {
+  const { paintingArtwork } = await import('../herogen/service/static/generation.js');
+  const job = {state: 'running', images: {sketch: '/s.png'}, stages: [{key: '0', state: 'passed'}, {key: '1', state: 'running'}]};
+  assert.equal(paintingArtwork(job, 'sketch'), true);
+  assert.equal(paintingArtwork(job, 'cover'), false);
+  assert.equal(paintingArtwork({...job, images: {sketch: '/s.png', cover: '/c.png'}}, 'sketch'), false);
+  assert.equal(paintingArtwork({...job, stages: [{key: '1', state: 'passed'}]}, 'sketch'), false);
+  assert.equal(paintingArtwork({...job, state: 'succeeded'}, 'sketch'), false);
+});

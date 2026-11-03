@@ -231,7 +231,7 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertLess(kinds.index(("decision", None, "brief_reworded", None, True)),
                         kinds.index(("call_end", "muse-image", "sketch_design", "ok", None)))
         self.assertEqual(self.view(job)["reword"], {"status": "used", "stage": "p", "text": REWORDED,
-                                                    "reason": "content_policy"})
+                                                    "reason": "content_policy", "props": [], "names": True})
         self.assertNotIn(BRIEF, "\n".join(logs.output))
         self.assertNotIn(REWORDED, "\n".join(logs.output))
 
@@ -261,7 +261,7 @@ class RewordJobTest(prompt_base.PromptJobTest):
         self.assertEqual(reword.read(self.run_dir(job))["status"], "refused_again")
         self.assertEqual(self.record(job, "p")["reword"]["status"], "refused_again")
         self.assertEqual(self.view(job)["reword"], {"status": "refused_again", "stage": "p", "text": REWORDED,
-                                                    "reason": "content_policy"})
+                                                    "reason": "content_policy", "props": [], "names": True})
         whats = [e.get("what") for e in read_events(self.run_dir(job)) if e["kind"] == "decision"]
         self.assertEqual(whats, ["brief_prechecked", "brief_reworded", "reworded_brief_refused"])
 
@@ -464,7 +464,7 @@ class PrecheckJobTest(RewordJobTest):
         self.assertEqual(self.decisions(job), [("brief_prechecked", True, 2, None),
                                                ("brief_reworded_upfront", True, None, None)])
         self.assertEqual(self.view(job)["reword"], {"status": "used", "stage": "p", "text": reworded,
-                                                    "reason": "precheck"})
+                                                    "reason": "precheck", "props": [], "names": True})
         self.assertNotIn(self.description, "\n".join(logs.output))
 
     def test_check_and_up_front_rewrite_events_keep_step_p_after_earlier_work_left_a_step(self):

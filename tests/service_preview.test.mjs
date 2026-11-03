@@ -10,7 +10,9 @@ async function setup() {
   class Scene { constructor(){this.models=[];scenes.push(this);} add(n){this.models.push(n);n.parent=this;} remove(n){this.models=this.models.filter(v=>v!==n);} }
   class Renderer { constructor(){this.disposed=false;this.renders=0;this.lastModels=[];renderers.push(this);} dispose(){this.disposed=true;} setPixelRatio(){} setSize(){} setAnimationLoop(fn){this.loop=fn;} render(scene){this.renders++;this.lastModels=[...scene.models];} }
   class Camera { constructor(){this.position=new Vector3();cameras.push(this);} updateProjectionMatrix(){} }
-  class Box3 { constructor(){this.min={y:0};} setFromObject(){return this;} getSize(v){v.x=1;v.y=2;v.z=1;return v;} getCenter(v){return v;} clone(){return this;} }
+  // An object may carry its own `box` ({size, centre}); everything else is 1 x 2 x 1 at the origin.
+  class Box3 { constructor(){this.min={x:0,y:0,z:0};this.max={x:1,y:2,z:1};this.size=[1,2,1];this.centre=[0,0,0];} setFromObject(o){if(o?.box){this.size=o.box.size;this.centre=o.box.centre;}return this;}
+    getSize(v){[v.x,v.y,v.z]=this.size;return v;} getCenter(v){[v.x,v.y,v.z]=this.centre;return v;} clone(){return this;} }
   // The figure of dots (preview.building): just enough of three.js to build, step and free it.
   const freed=[];
   class BufferAttribute { constructor(array,size){this.array=array;this.itemSize=size;this.count=array.length/size;} setXYZ(i,x,y,z){this.array.set([x,y,z],i*3);} }
@@ -236,4 +238,83 @@ test('with reduced motion the dots hold still and the model fades in without the
   frame(100); assert.equal(material.uniforms.converge.value, 0);
   frame(1000); assert.equal(dots(s), undefined);
   delete globalThis.matchMedia;
+});
+
+// The split stage while the texture refines: SAM 3D's raw shape and HeroGen's model, two panels under one camera.
+function meshModel(){
+  const original={dispose(){this.disposed=true;}},mesh={isMesh:true,userData:{},material:original,geometry:{dispose(){}}};
+  return {mesh,original,visible:true,position:{set(...v){this.v=v;}},scale:{setScalar(k){this.k=k;}},updateMatrixWorld(){},traverse(fn){fn(mesh);}};
+}
+async function splitStage(reduced=false){
+  const clock=stageClock(reduced),s=await setup(),hero=meshModel(),raw=meshModel(),passes=[];
+  const load=s.api.show(clock.canvas,'version-1.glb');s.loads[0].done({scene:hero});await load;
+  const r=s.renderers[0];
+  r.setScissorTest=on=>passes.push(['scissor',on]);r.setViewport=(...v)=>passes.push(['viewport',...v]);r.setScissor=()=>{};
+  const render=r.render.bind(r);r.render=scene=>{passes.push(['draw',hero.visible,raw.visible]);render(scene);};
+  return {...s,clock,hero,raw,passes,frame(ms){clock.advance(ms);passes.length=0;r.loop();}};
+}
+test('the split stage draws SAM 3D and HeroGen side by side under one camera, then joins again',async()=>{
+  const s=await splitStage();
+  const shown=s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.5,axis:'columns',waiting:false});
+  assert.equal(s.loads[1].url,'source.glb');s.loads[1].done({scene:s.raw});assert.equal(await shown,true);
+  assert.equal(s.scenes[0].models.includes(s.raw),true);
+  s.frame(16);
+  assert.deepEqual(s.passes.filter(p=>p[0]==='viewport').slice(1),[['viewport',0,0,400,500],['viewport',400,0,400,500]]);
+  assert.deepEqual(s.passes.filter(p=>p[0]==='draw'),[['draw',false,true],['draw',true,false]],'each panel shows only its own model');
+  assert.equal(s.cameras.length,1,'one camera for both panels');
+  // Dragging the divider only moves the panels; the same raw shape is not fetched again.
+  await s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.95,axis:'columns'});s.frame(16);
+  assert.deepEqual(s.passes.filter(p=>p[0]==='viewport')[1],['viewport',0,0,640,500],'the ratio stops at 80%');
+  assert.equal(s.loads.length,2);
+  // Stacked: SAM 3D on top (WebGL counts from the bottom).
+  await s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.5,axis:'rows'});s.frame(16);
+  assert.deepEqual(s.passes.filter(p=>p[0]==='viewport').slice(1),[['viewport',0,250,800,250],['viewport',0,0,800,250]]);
+  await s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.5,axis:'rows',inset:100});s.frame(16);
+  assert.deepEqual(s.passes.filter(p=>p[0]==='viewport').slice(1),[['viewport',0,300,800,200],['viewport',0,100,800,200]],'both stop above the dock');
+  // A new HeroGen version keeps the camera.
+  s.frame(1300);s.cameras[0].position.set(4,5,6);s.controls[0].target.set(1,2,3);s.clock.listeners.pointerdown();
+  const next=s.api.show(s.clock.canvas,'version-2.glb',{preserveCamera:true});s.loads[2].done({scene:meshModel()});await next;
+  assert.deepEqual({...s.cameras[0].position},{x:4,y:5,z:6});assert.deepEqual({...s.controls[0].target},{x:1,y:2,z:3});
+  assert.equal(await s.api.animate('walk',{model:'body.glb',parts:[]}),false,'no animation while split');
+  await s.api.split(s.clock.canvas,null);s.frame(16);
+  assert.equal(s.scenes[0].models.includes(s.raw),false);assert.equal(s.raw.mesh.material,s.raw.original);
+  assert.equal(s.passes.some(p=>p[0]==='viewport'),false,'one full view again');
+  delete globalThis.matchMedia;
+});
+test('while the texture is repainted the HeroGen panel shows the shape in clay under a moving light',async()=>{
+  const s=await splitStage();
+  const shown=s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.5,axis:'columns',waiting:true});s.loads[1].done({scene:s.raw});await shown;
+  const swept=s.hero.mesh.material;
+  assert.notEqual(swept,s.hero.original);assert.equal(typeof swept.onBeforeCompile,'function');assert.equal(swept.wireframe,false);
+  assert.equal(s.raw.mesh.material,s.raw.original,'SAM 3D keeps its own texture');
+  const shader={uniforms:{},vertexShader:'#include <common>\n#include <project_vertex>',fragmentShader:'#include <common>\n#include <emissivemap_fragment>'};
+  swept.onBeforeCompile(shader);
+  assert.match(shader.fragmentShader,/totalEmissiveRadiance \+=/);assert.ok('hgPhase' in shader.uniforms);
+  s.frame(16);const a=shader.uniforms.hgPhase.value;s.frame(900);assert.notEqual(shader.uniforms.hgPhase.value,a,'the light moves');
+  s.api.shading('wire');assert.equal(s.hero.mesh.material.wireframe,true);assert.equal(typeof s.hero.mesh.material.onBeforeCompile,'function');
+  assert.equal(s.raw.mesh.material.wireframe,true,'the dock shading applies to both panels');
+  s.api.shading('textured');
+  await s.api.split(s.clock.canvas,{left:'source.glb',ratio:0.5,axis:'columns',waiting:false});
+  assert.equal(s.hero.mesh.material,s.hero.original,'the refined texture shows once it lands');
+  delete globalThis.matchMedia;
+});
+test('with reduced motion the repaint light stays parked',async()=>{
+  const s=await splitStage(true);
+  const shown=s.api.split(s.clock.canvas,{left:'source.glb',waiting:true});s.loads[1].done({scene:s.raw});await shown;
+  const shader={uniforms:{},vertexShader:'',fragmentShader:''};s.hero.mesh.material.onBeforeCompile(shader);
+  s.frame(16);s.frame(900);assert.equal(shader.uniforms.hgPhase.value,-10);
+  delete globalThis.matchMedia;
+});
+
+test('a mesh in other units (the Roblox body in studs) takes the place of the last one under the same view',async()=>{
+  const s=await setup(),v=s.api.createPreview(),refined=s.model();refined.box={size:[1,2,1],centre:[0,1,0]};
+  const first=v.show(s.canvas,'refined.glb');s.loads[0].done({scene:refined});await first;
+  s.cameras[0].position.set(0,1.5,4);s.controls[0].target.set(0,1,0);
+  const body=s.model();body.box={size:[2.5,5.5,1.5],centre:[0,2.75,0]};
+  const next=v.show(s.canvas,'high.glb',{preserveCamera:true});s.loads[1].done({scene:body});await next;
+  assert.deepEqual({...s.controls[0].target},{x:0,y:2.75,z:0},'the target keeps its place on the hero');
+  const p=s.cameras[0].position;assert.ok(Math.abs(p.y-4.125)<1e-9&&Math.abs(p.z-11)<1e-9,'the camera keeps its angle, scaled');
+  const low=s.model();low.box={size:[2.5,5.5,1.5],centre:[0,2.75,0]};
+  const third=v.show(s.canvas,'low.glb',{preserveCamera:true});s.loads[2].done({scene:low});await third;
+  assert.ok(Math.abs(s.cameras[0].position.z-11)<1e-9,'high to low: the very same camera');
 });

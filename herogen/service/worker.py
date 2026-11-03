@@ -39,6 +39,7 @@ from herogen.service.runner import (
     GROUPS,
     Outcome,
     StageContext,
+    SUGGEST_FILE,
     StageRunner,
     plan_for,
     read_record,
@@ -435,6 +436,14 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
     prior = {r["stage"]: r for r in store.job_stages(jid)}
     ctx = workdir.open()
     ctx.attempt = attempt
+    # The Refine box's suggestions for a refined hero are written beside the game body, which takes longer.
+    suggestion, finished = None, False
+    if (group == "body" and prior.get("3f", {}).get("state") == "passed" and hasattr(runner, "start_suggest")
+            and not (ctx.run_dir / SUGGEST_FILE).exists()):
+        try:
+            suggestion = runner.start_suggest(ctx)
+        except OSError:
+            log.exception("refine suggestions for %s did not start", jid)
     log_file = ctx.run_dir / events.FILE
 
     def step_event(kind: str, spec, **fields: Any) -> None:
@@ -534,8 +543,13 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             if out.state == "failed":
                 return GroupResult("error", spec.key, out.code, out.message, out.transient, total.seconds,
                                    total.cost_usd, total.compute_usd)
+        finished = True
         return total
     finally:
+        if suggestion is not None:
+            # A group that ends early (stale, rejected, failed) stops the suggestions at once instead of waiting.
+            total.cost_usd += suggestion.finish() if finished else suggestion.finish(wait_s=0)
+            workdir.sync()   # the suggestions file can land after stage 4's last copy back to the volume
         workdir.close()
 
 

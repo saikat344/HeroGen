@@ -689,7 +689,7 @@ test('a reworded description is named in the Build log, quoting the rewrite from
     ['passed', `The image model refused your description under its content policy (brand or character names usually cause this). Reworded it to “${reworded}” and trying this step once more.`],
     ['passed', 'Design drawing ready']]);
   assert.equal(copy.callStart({who: 'muse-spark', what: 'reword_brief'}),
-    'rewording your description as an original character, without brand or character names');
+    'rewording your description without brand or character names, held items or pets');
   // Without the job's text the line still says what happened, never a raw id.
   assert.equal(copy.decisionLine({what: 'brief_reworded', ok: true}),
     'The image model refused your description under its content policy (brand or character names usually cause this). Reworded it and trying this step once more.');
@@ -756,7 +756,7 @@ test('an up-front rewrite says the description named a brand, and its Build log 
     'The brand and character check did not finish (the model service returned an error). Continuing with your description as written.');
   assert.match(copy.decisionLine({what: 'brief_reword_upfront_failed', ok: false}), /Continuing with it as written/);
   assert.equal(copy.callStart({who: 'muse-spark', what: 'precheck_brief'}),
-    'checking your description for brand, logo, character or real-person names');
+    'checking your description for brand, logo, character or real-person names, held items and pets');
   const rows = rowsOf(buildModel(job({p: 'passed'}, used), [ev(1, 'step_start', 'p'),
     ev(2, 'decision', 'p', {what: 'brief_precheck_failed', ok: false, code: 'http_5xx'})], {now: START + 3000}), 'p');
   assert.equal(rows[0].state, 'kept', 'a failed check is a warning row, not a failure');

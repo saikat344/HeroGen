@@ -3,11 +3,14 @@
 import { developerMode } from '/assets/developer.js';
 import { entryPage } from '/assets/entry.js';
 import { landingGallery } from '/assets/landing.js';
+import { ideaButton } from '/assets/idea.js';
+import { sketchButton } from '/assets/sketch-idea.js';
 let landing;
 import { buildLog } from '/assets/buildlog.js';
-import { generationView, generationState, TERMINAL } from '/assets/generation.js';
+import { generationView, generationState, TERMINAL, trianglesText } from '/assets/generation.js';
 import { descriptionDraft, rewordLabel, rewordNotice, usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
+import { acceptPlaceholderOnTab } from '/assets/placeholder-tab.js';
 import { renderDownloads } from '/assets/downloads.js';
 import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
@@ -33,7 +36,7 @@ function setScreen(next) {
 const heroes = heroesView($, { api, open: (id) => openJob(id, true), create: () => goCreate(),
   refresh: () => refreshList().catch((e) => heroes.fail(e)) });
 const liveLog = buildLog($, api);
-const generation = generationView($, (url, options) => preview(url, options), (info) => buildShape(info));
+const generation = generationView($, (url, options) => preview(url, options), (info) => buildShape(info), (info) => split3D(info));
 const variations = variationsView($, { api, select: openJob, key: idemKey,
   textureNotes: () => S.session?.limits?.texture_notes === true,
   created: j => { ++S.revision; followJob(j, true); refreshList().catch(e => banner(e.message)); },
@@ -348,9 +351,14 @@ function initMenu() {
 }
 
 let previewUrl = null, previewRequest = 0, previewModule = null;
+// The count of the model on screen; the line hides with no model.
+function modelStats(n) {
+  generation.triangles(n);   // the line under the label names the mesh and its Roblox budget (detail.js)
+  $('#splitTris').textContent = trianglesText(n);   // the split stage: the count of HeroGen's panel, under its label
+}
 async function preview(url, options) {
   if (url && screen !== 'generation') return false;
-  if (!url) { ++previewRequest; previewUrl = null; previewModule?.hide(); show('#orbitHint', false); show('#previewError', false); return; }
+  if (!url) { ++previewRequest; previewUrl = null; previewModule?.hide(); show('#orbitHint', false); show('#previewError', false); modelStats(0); return; }
   if (previewUrl === url) return true;
   const previousUrl = previewUrl;
   previewUrl = url;
@@ -362,12 +370,22 @@ async function preview(url, options) {
     const replaced = await previewModule.show($('#preview'), url, options);
     if (token !== previewRequest) return false;
     if (replaced === false) { previewUrl = previousUrl; show('#orbitHint', Boolean(previousUrl)); return false; }
-    show('#orbitHint'); return true;
+    show('#orbitHint'); modelStats(previewModule.triangles()); return true;
   } catch {
     if (token !== previewRequest) return false;
     previewUrl = null; show('#previewError');
     return false;
   }
+}
+
+// The split stage (SAM 3D's raw shape beside HeroGen's model, one camera), or back to one model with null.
+async function split3D(info) {
+  if (!info) { previewModule?.split($('#preview'), null); return true; }
+  if (screen !== 'generation') return false;
+  try {
+    previewModule ||= await import('/assets/preview.js');
+    return await previewModule.split($('#preview'), info);
+  } catch { return false; }
 }
 
 // While the 3D shape is built: the hero's figure of dots in the 3D viewer, until the first model takes its place.
@@ -378,7 +396,7 @@ async function buildShape(info) {
   previewUrl = null; show('#previewError', false);
   try {
     [previewModule, shapeModule] = await Promise.all([previewModule || import('/assets/preview.js'), shapeModule || import('/assets/shape-build.js')]);
-    if (token === previewRequest) previewModule.clear($('#preview'));
+    if (token === previewRequest) { previewModule.clear($('#preview')); modelStats(0); }
     const figure = await shapeModule.figurePoints(info);
     if (token !== previewRequest) return false;
     const shown = previewModule.building($('#preview'), figure);
@@ -438,6 +456,7 @@ async function openJob(id, reveal = false) {
 
 function initJobs() {
   const prompt = $('#prompt');
+  acceptPlaceholderOnTab(prompt);
   const count = $('#promptCount');
   const limit = S.session.limits.prompt_max_chars;
   // Allow excess text so pasting a long description shows the problem without silently truncating it.
@@ -451,6 +470,13 @@ function initJobs() {
   prompt.addEventListener('input', updatePromptCount);
   entry = entryPage($, updatePromptCount);
   updatePromptCount();
+  // "Suggest an idea": like a create, the first request opens the private guest workspace silently.
+  ideaButton($, { say: entry.say, track, request: async () => {
+    if (!S.session.signed_in) { await openGuestWorkspace(); await signedIn(); }
+    return api('/api/ideas', { method: 'POST', json: {} });
+  } });
+  // "Suggest a sketch": a proven sketch goes in exactly like an upload (hidden when the service lists none).
+  sketchButton($, { entry, track });
   for (const r of document.querySelectorAll('input[name=kind]')) r.addEventListener('change', () => {
     const p = document.querySelector('input[name=kind]:checked').value === 'prompt';
     show('#promptIn', p); show('#sketchIn', !p);

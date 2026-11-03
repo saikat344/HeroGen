@@ -1,0 +1,103 @@
+{
+  "name": "hero-idea-v2",
+  "kind": "hero_idea",
+  "summary": "Suggests one playful, original hero description for the website's Describe box: one full-body standing character with clear colours and materials, empty hands and no pets, no brand, franchise or real-person names, family friendly, under 300 characters. A random seed theme and mood vary each idea.",
+  "seed": {
+    "theme_slot": "{theme}",
+    "mood_slot": "{mood}",
+    "themes": [
+      "sky pirate",
+      "deep-sea diver",
+      "desert courier",
+      "lighthouse keeper",
+      "mountain ranger",
+      "beekeeper",
+      "star cartographer",
+      "river ferry captain",
+      "snowy-village postal carrier",
+      "jungle botanist",
+      "tea-house alchemist",
+      "moss-covered stone golem",
+      "clockwork librarian",
+      "cloud shepherd",
+      "cactus-country wanderer",
+      "tide-pool explorer",
+      "winter fox spirit",
+      "comet chaser",
+      "candy-shop wizard",
+      "robot chef",
+      "retired space knight",
+      "junkyard tinkerer",
+      "mushroom forager",
+      "coral-reef guardian",
+      "storm messenger",
+      "fire-lookout scout",
+      "sunflower farmer",
+      "bubble alchemist",
+      "sky-railway conductor",
+      "owl-feathered night courier",
+      "glacier climber",
+      "jellyfish sorcerer",
+      "frog knight",
+      "raccoon treasure hunter",
+      "desert robot nomad",
+      "snail mail carrier",
+      "volcano-island chef",
+      "subway-tunnel explorer",
+      "orchard golem",
+      "music-box toy soldier",
+      "glacier-cave miner",
+      "tidal-marsh ranger",
+      "sky-island gardener",
+      "desert-caravan cook",
+      "snow-owl courier",
+      "copper-plated greenhouse robot",
+      "meadow beetle knight",
+      "harbour-crane engineer"
+    ],
+    "moods": [
+      "cheerful",
+      "sleepy",
+      "brave",
+      "curious",
+      "grumpy but kind",
+      "mischievous",
+      "dignified",
+      "clumsy",
+      "dreamy",
+      "determined"
+    ]
+  },
+  "limits": {
+    "min_chars": 20,
+    "max_chars": 300
+  },
+  "steps": [
+    {
+      "name": "idea",
+      "endpoint": "responses",
+      "model": "muse-spark-1.3",
+      "params": {
+        "reasoning_effort": "low",
+        "max_output_tokens": 3000
+      },
+      "prompt": "A game tool turns a short description into an original 3D character. Invent ONE playful, original hero for it. Seed for inspiration, to use loosely: a {mood} {theme}. Rules: 1. Exactly one character, shown full body and standing, with empty hands; no companions, pets or creatures on the body, mounts, crowds, vehicles or scenery. Nothing held or carried: no weapons (sheathed ones too), staffs, wands, lanterns, tools, cups, books, bags or shields. Worn clothing and accessories are fine. 2. Describe only how the character looks, in plain visual terms: what they are (person, creature or robot), face and hair, and clear colours and materials for the outfit and worn accessories (for example 'a mustard wool coat with brass buttons'). 3. Original only: no brand, company, product, franchise, film, comic, game, trademarked character or real-person names, no lookalikes of a famous character, and no logos or text on clothing. 4. Family friendly: no gore, blood, injuries, nudity or anything sexual. 5. Do not name the character. No quotes, markdown, lists or line breaks. 6. Write one or two sentences of at most 240 characters in all, then end with exactly: Full body, standing, plain background. Reply with JSON only.",
+      "schema": {
+        "name": "hero_idea",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "sha256": "1ec7fca5e35cceeedc973e4a8ea3235f8d393384c15999eab56f190a50ab98a8"
+}

@@ -3,6 +3,8 @@ import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
 import { thumbButton, viewerDock } from './viewer-dock.js';
 import { buildProgress, shapeTip, TIP_EVERY_MS } from './shape-build.js';
+import { splitDivider, splitWanted, textureRefining } from './split-view.js';
+import { animateDetail, animateNote, detailChoices, meshStats } from './detail.js';
 const COPY = {
   p: ['Your idea', 'Sketching your idea', 'Turn your description into a character sketch.'],
   0: ['Prepare input', 'Preparing your image', 'Check the input before creating the character artwork.'],
@@ -33,14 +35,20 @@ export function queueNote(job) {
   if (!Number.isInteger(ahead) || ahead < 0) return 'Starts when a worker is free';
   return ahead === 0 ? 'Starting…' : `${ahead} ${ahead === 1 ? 'hero' : 'heroes'} ahead of you`;
 }
-function timeLeft(steps) {
+// The Roblox steps run after the hero is shown as ready, so they never count toward the time left.
+const AFTER_READY = new Set(['4', '5', '6']);
+function secondsLeft(steps) {
   let seconds = 0;
   for (const s of steps) {
-    if (!['pending', 'running'].includes(s.state)) continue;
+    if (!['pending', 'running'].includes(s.state) || AFTER_READY.has(s.key)) continue;
     if (!Number.isFinite(s.typical_seconds)) return null;
     seconds += s.state === 'running' && Number.isFinite(s.elapsed_seconds) ? Math.max(0, s.typical_seconds - s.elapsed_seconds) : s.typical_seconds;
   }
-  return seconds <= 0 ? null : seconds < 60 ? 'under a minute left' : `about ${Math.ceil(seconds / 60)} min left`;
+  return seconds > 0 ? seconds : null;
+}
+function timeLeft(steps) {
+  const seconds = secondsLeft(steps);
+  return seconds == null ? null : seconds < 60 ? 'under a minute left' : `about ${Math.ceil(seconds / 60)} min left`;
 }
 export function generationState(job) {
   const stages = (Array.isArray(job.stages) ? job.stages : []).filter((s) => s && typeof s === 'object');
@@ -65,10 +73,13 @@ export function generationState(job) {
   const current = steps.find((s) => s.state === 'running') || steps.find((s) => s.state === 'pending');
   const phase = COPY[focus?.key]?.[1] || focus?.label || 'Following the pipeline';
   const left = job.state === 'running' ? timeLeft(steps) : null;
+  // The SAM 3D shape pill counts down to the shape itself, not the whole hero.
+  const shapeSeconds = job.state === 'running' && focus?.key === '3' ? secondsLeft(steps.filter((s) => s.key === '3')) : null;
+  const shapeLeft = shapeSeconds == null ? null : shapeSeconds < 60 ? 'est. under 1 min' : `est. ${Math.ceil(shapeSeconds / 60)} min`;
   const eyebrow = { queued: 'Queued · your hero is saved', running: left ? `${phase} · ${left}` : phase,
     succeeded: issues.length ? 'Hero ready · see the notes' : exporting ? 'Hero ready · preparing Roblox files' : robloxReady(job) ? 'Hero ready · Roblox R15' : 'Hero ready',
     stopped: 'Saved at this step', failed: 'Needs attention', rejected: 'Input needs attention', canceled: 'Cancelled' }[job.state] || 'Following the pipeline';
-  return { title, subtitle, eyebrow, left, main, focus, issues, terminal, passed, steps, label: progressLabel(job, steps, passed, current, exporting) };
+  return { title, subtitle, eyebrow, left, shapeLeft, main, focus, issues, terminal, passed, steps, label: progressLabel(job, steps, passed, current, exporting) };
 }
 // The progress label as plain text pieces: `lead` then the emphasised `strong` part (never both empty).
 function progressLabel(job, steps, passed, current, exporting) {
@@ -96,6 +107,9 @@ const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
 // While the character views are drawn and the 3D shape is built: the views so far, final or still a draft
 // (`draft_images`, shown only while step 2 runs); null when there is nothing to stage.
 const SIDES = ['front', 'right', 'back', 'left'];
+// The artwork step is running, the sketch is on the stage and no artwork exists yet.
+export const paintingArtwork = (job, selected) => job?.state === 'running' && selected === 'sketch' && !job?.images?.cover
+  && (job?.stages || []).some((s) => s?.key === '1' && s.state === 'running');
 export function viewsReveal(job, drafts = job?.draft_images || {}) {
   if (!job || TERMINAL.has(job.state) || job.downloads?.glb?.available) return null;
   const state = Object.fromEntries((job.stages || []).filter(s => s && typeof s === 'object').map(s => [s.key, s.state]));
@@ -119,10 +133,15 @@ export function shapeBuild(job) {
   return { front, side: job.masks?.left || null, elapsed: step.state === 'running' ? step.elapsed_seconds : 0,
     typical: step.typical_seconds };
 }
-// What the viewer calls a model: SAM 3D's own output (`raw`, also while it is a draft) or HeroGen's work.
+// What the viewer calls a model: SAM 3D's own output (`raw`, also while it is a draft), HeroGen's work, or the
+// Roblox game body at one level of detail (`body`: 'high' or 'low'; the detail switch).
+// The triangle count under the model label is the model on screen's (detail.js meshStats adds its Roblox budget).
+const count = (n) => Number(n).toLocaleString('en-US');
+export const trianglesText = (n) => Number.isFinite(n) && n > 0 ? `${count(n)} triangles` : '';
 export function modelLabel(m) {
   if (!m) return '3D preview';
   if (m.raw) return 'SAM 3D raw shape';
+  if (m.body) return `Roblox game body · ${m.body} detail`;
   return m.n ? `HeroGen refined · version ${m.n}` : 'HeroGen model';
 }
 export function stageTiming(s) {
@@ -164,7 +183,13 @@ export function segmentLabels(steps, terminal) {
 }
 // Messages the service sends for a step that did not simply pass. They are always shown, never hidden behind a click.
 const NOTED = new Set(['skipped', 'unavailable', 'failed', 'rejected']);
-export function generationView($, select3D, buildShape = () => {}) {
+// The split stage's second panel: HeroGen's model on show (`shown`), or the texture still being repainted.
+export function splitCopy(shown, refining) {
+  const done = shown && !shown.raw;
+  if (!done) return {label: refining ? 'HeroGen · refining…' : 'HeroGen', working: refining ? 'Repainting the texture from every side…' : '', waiting: refining};
+  return {label: shown.n ? `HeroGen · version ${shown.n}` : 'HeroGen', working: refining ? 'Still refining…' : '', waiting: false};
+}
+export function generationView($, select3D, buildShape = () => {}, split3D = () => {}) {
   const dock = viewerDock($);
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
   let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null, lastImage = null;
@@ -172,49 +197,135 @@ export function generationView($, select3D, buildShape = () => {}) {
   // `draftModels`: SAM 3D's shape while step 3 still runs (`draft_models`); `pinned`: the compare toggle's choice,
   // kept when a new version arrives; `shape`: the figure of dots on show, with the step's timing.
   let draftModels = [], pinned = false, forceLoad = false, shape = null, shapeKey = null, shapeFailed = null, shapeTimer = null, shapeClock = null, tipAt = 0;
+  // `layout`: the compare switch's choice ('raw', 'herogen', 'split'), or null to split only while the texture refines.
+  let layout = null, splitShown = false;
+  // `detail`: the level of detail switch ('refined', 'high', 'low'); `tris`: the count of the mesh the viewer loaded;
+  // `detailNote`: what the stage says after Animate moved it to another body.
+  let detail = 'refined', tris = 0, detailNote = '', loadingPromise = null;
+  const bodyModels = new Map();
   const reducedMotion = () => Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
   const finalModels = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
   const models = () => { const final = finalModels(); return final.length ? final : draftModels; };
   const latestModel = () => models().at(-1);
   const rawModel = () => models().find(m => m.raw && !m.draft);
   const heroGenModel = () => models().filter(m => !m.raw).at(-1);
+  const wantSplit = () => splitWanted({refining: textureRefining(job), raw: rawModel(), choice: layout});
+  const splitting = () => model && wantSplit();
+  const bodies = () => job?.roblox_bodies || null;
+  // The Roblox body as a model the viewer can show, kept per URL so it stays the same object between polls.
+  function bodyModel(kind) {
+    const url = bodies()?.[kind]?.url;
+    if (!url) return null;
+    if (!bodyModels.has(url)) bodyModels.set(url, {url, body: kind});
+    return bodyModels.get(url);
+  }
+  // HeroGen's side of the compare switch: the refined model, or the Roblox body the detail switch picked.
+  const heroSide = () => (detail !== 'refined' && bodyModel(detail)) || heroGenModel();
+  const animationInfo = () => {
+    const info = robloxReady(job) ? job.animation : null, low = bodies()?.low;
+    return info && detail === 'low' && low?.animates ? {...info, model: low.url} : info;
+  };
+  // SAM 3D's raw shape and HeroGen's model side by side: the viewer draws both, this keeps the labels.
+  const divider = splitDivider($('#splitDivider'), $('#viewer'), $('#previewWrap'), $('#viewerDock'), () => { if (splitShown) syncSplit(); });
+  function syncSplit() {
+    const on = splitting(), viewer = $('#viewer');
+    $('#splitView').hidden = !on;
+    dock.split(on);
+    if (!on) {
+      delete viewer.dataset.split;
+      if (splitShown) { splitShown = false; split3D(null); }
+      return;
+    }
+    const copy = splitCopy(shownModel, textureRefining(job));
+    viewer.dataset.split = copy.waiting ? 'waiting' : 'on';
+    text($('#splitHeroLabel'), copy.label);
+    text($('#splitWorking'), copy.working); $('#splitWorking').hidden = !copy.working;
+    splitShown = true;
+    split3D({left: rawModel().url, waiting: copy.waiting, ratio: divider.ratio, axis: divider.axis, inset: divider.inset});
+  }
   function modelCopy() {
-    const raw = Boolean(chosenModel?.raw), building = selected === 'shape';
+    const split = splitting(), raw = !split && Boolean(chosenModel?.raw), building = selected === 'shape';
     text($('#modelTabText'), building ? '3D shape' : raw ? 'SAM 3D raw' : '3D preview');
-    if (model) text($('#artifactLabel'), modelLabel(chosenModel));
+    if (model) text($('#artifactLabel'), split ? 'SAM 3D raw' : modelLabel(chosenModel));
     const step3 = (job?.stages || []).find(s => s?.key === '3')?.state;
     const note = !raw ? '' : step3 === 'running' ? 'Straight from SAM 3D Objects · HeroGen is lining it up with your views'
       : TERMINAL.has(job?.state) ? 'Straight from SAM 3D Objects, before HeroGen’s work'
       : 'Straight from SAM 3D Objects · HeroGen is repainting the texture from every side';
     $('#modelNote').hidden = !model || !note;
     text($('#modelNote'), note);
+    renderStats();
+    // Refined, Roblox high or Roblox low: HeroGen's model in one view, once stage 4 has made the game body.
+    const choices = detailChoices(bodies()), shownDetail = chosenModel?.body || 'refined';
+    const detailed = model && !split && !raw && choices.length > 0;
+    $('#modelDetail').hidden = !detailed;
+    for (const b of $('#modelDetail').querySelectorAll('button')) {
+      b.hidden = !choices.includes(b.dataset.detail);
+      b.setAttribute('aria-pressed', String(detailed && b.dataset.detail === shownDetail));
+    }
+    if (detailed && detailNote) { $('#modelNote').hidden = false; text($('#modelNote'), detailNote); }
     // A finished or refining hero keeps SAM 3D's raw shape one click away from HeroGen's model.
-    const compare = model && rawModel() && heroGenModel();
+    // "Side by side" puts the two in one split stage under one camera.
+    const compare = model && rawModel() && heroGenModel(), pressed = split ? 'split' : raw ? 'raw' : 'herogen';
     $('#modelCompare').hidden = !compare;
-    for (const b of $('#modelCompare').querySelectorAll('button')) b.setAttribute('aria-pressed', String(compare ? (b.dataset.compare === 'raw') === raw : false));
+    for (const b of $('#modelCompare').querySelectorAll('button')) b.setAttribute('aria-pressed', String(compare ? b.dataset.compare === pressed : false));
     const latest = latestModel();
     const newer = latest && chosenModel && latest.url !== chosenModel.url &&
       (latest.n == null || latest.n > (chosenModel.n ?? -1));
-    $('#modelUpdate').hidden = !model || !newer || pinned;
+    $('#modelUpdate').hidden = !model || !newer || pinned || split || Boolean(chosenModel?.body);
     const added = (latest?.accepted || []).filter(v => !(chosenModel?.accepted || []).includes(v)).length;
     text($('#modelUpdateNote'), added ? `${added} more ${added === 1 ? 'view' : 'views'} added` : 'A sharper texture is ready to inspect.');
   }
+  // The triangle line counts only the mesh on screen, against its Roblox budget when it is a game body.
+  function renderStats() {
+    const shown = shownModel, kind = !shown ? 'model' : shown.raw ? 'raw' : shown.body ||
+      (detailChoices(bodies()).length ? 'refined' : 'model');
+    const line = model && tris > 0 ? meshStats(kind, tris, job?.roblox_triangles) : {text: '', over: false};
+    text($('#modelTris'), line.text);
+    $('#modelTris').classList.toggle('is-over', line.over);
+    $('#modelStats').hidden = !line.text;
+  }
   function loadModel(forced = false) {
-    if (!chosenModel || loading === chosenModel.url || shownUrl === chosenModel.url) return;
+    if (!chosenModel || shownUrl === chosenModel.url) return Promise.resolve(true);
+    if (loading === chosenModel.url) return loadingPromise;
     const candidate = chosenModel, id = jobId, token = ++modelRequest;
-    forced ||= forceLoad; forceLoad = false;
+    // The split stage swaps each new version in as it lands: the camera stays where the person left it.
+    forced ||= forceLoad || splitting(); forceLoad = false;
     loading = candidate.url;
-    Promise.resolve(select3D(candidate.url, {preserveCamera: shownUrl !== null, canReplace: () => forced || !touched})).then(loaded => {
-      if (token !== modelRequest || id !== jobId || !model) return;
+    return loadingPromise = Promise.resolve(select3D(candidate.url, {preserveCamera: shownUrl !== null, canReplace: () => forced || !touched})).then(loaded => {
+      if (token !== modelRequest || id !== jobId || !model) return false;
       if (loaded === false) {
         if (shownModel) { chosenModel = shownModel; modelCopy(); }
-        return;
+        return false;
       }
       shownUrl = candidate.url; shownModel = candidate;
+      renderStats();
+      if (splitShown) syncSplit();
       if (candidate.n === 0) trackOnce(`model_first_shown:${id}`, 'model_first_shown');
       else if (candidate.n) trackOnce(`refined_version_shown:${id}:${candidate.n}`, 'refined_version_shown', {n: String(candidate.n)});
+      return true;
     }).finally(() => { if (token === modelRequest) loading = null; });
   }
+  // The detail switch: the same camera, another mesh. Animation follows the body on screen.
+  function setDetail(next) {
+    if (!detailChoices(bodies()).includes(next)) return Promise.resolve(false);
+    detail = next; pinned = false;
+    if (layout === 'raw') layout = null;
+    chosenModel = heroSide();
+    dock.animation(animationInfo());
+    modelCopy();
+    return loadModel(true);
+  }
+  for (const button of $('#modelDetail').querySelectorAll('button')) button.addEventListener('click', () => {
+    if (button.dataset.detail === (chosenModel?.body || 'refined')) return;
+    detailNote = ''; setDetail(button.dataset.detail);
+  });
+  // Animate plays on a Roblox body: from Refined (or a low body without joints) the stage moves to Roblox high first.
+  dock.beforePlay(() => {
+    const want = animateDetail(detail, bodies()), from = chosenModel?.body || 'refined';
+    if (!model || splitting() || from === want || !bodyModel(want)) return null;
+    detailNote = animateNote(from, want);
+    return setDetail(want);
+  });
   const interact = () => { if (model) touched = true; };
   for (const type of ['pointerdown', 'wheel', 'keydown']) $('#preview').addEventListener(type, interact, {passive: true});
   $('#updateModel').addEventListener('click', () => {
@@ -224,9 +335,10 @@ export function generationView($, select3D, buildShape = () => {}) {
     pinned = false; chosenModel = latest; modelCopy(); loadModel(true);
   });
   for (const button of $('#modelCompare').querySelectorAll('button')) button.addEventListener('click', () => {
-    const raw = button.dataset.compare === 'raw', target = raw ? rawModel() : heroGenModel();
-    if (!target || target.url === chosenModel?.url) return;
-    pinned = raw; chosenModel = target; modelCopy(); loadModel(true);
+    const choice = button.dataset.compare, raw = choice === 'raw', target = raw ? rawModel() : heroSide() || rawModel();
+    if (!target || target.url === chosenModel?.url && (choice === 'split') === splitting()) return;
+    layout = choice; pinned = raw; chosenModel = target;
+    modelCopy(); syncSplit(); loadModel(true);
   });
   // The figure of dots: its progress bar follows the step's elapsed and typical time between polls, and the tip
   // under it changes every few seconds. The figure itself is drawn by the viewer (`buildShape`).
@@ -274,7 +386,7 @@ export function generationView($, select3D, buildShape = () => {}) {
         count: ($('#viewer').clientWidth || 800) < 560 ? 2400 : 4000};
       if (shapeKey !== info.key) {
         shapeKey = info.key; ++modelRequest; loading = null; shownUrl = null;
-        // No figure (the outline could not be read): show the images instead, with the "on the way" pill.
+        // No figure (the outline could not be read): show the images instead, with the SAM 3D shape pill.
         Promise.resolve(buildShape(info)).then(shown => {
           if (shown !== false || shapeKey !== info.key || selected !== 'shape') return;
           shapeFailed = info.key; shapeKey = null;
@@ -297,7 +409,7 @@ export function generationView($, select3D, buildShape = () => {}) {
       ++modelRequest; loading = null; shownUrl = null; select3D(null);
     }
     if (!building) shapeKey = null;
-    modelCopy();
+    modelCopy(); syncSplit(); renderPainting();
     for (const b of $('#images').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.image === key));
   }
   $('#artTab').addEventListener('click', () => {
@@ -392,6 +504,17 @@ export function generationView($, select3D, buildShape = () => {}) {
       const li = node('li'); li.append(node('b', x.title), document.createTextNode(` ${x.message || `${x.title} ${fallback[x.state] || 'did not finish.'}`}`)); return li;
     }));
   }
+  // While the artwork step runs and the sketch is on the stage: an empty frame the sketch's size beside it.
+  const sketchBox = new ResizeObserver(() => {
+    const r = $('#artboardImage').getBoundingClientRect();
+    if (r.width && r.height) { $('#artPending').style.setProperty('--art-w', `${r.width}px`); $('#artPending').style.setProperty('--art-h', `${r.height}px`); }
+  });
+  sketchBox.observe($('#artboardImage'));
+  function renderPainting() {
+    const on = paintingArtwork(job, selected) && !$('#artboardImage').hidden;
+    if (on) $('#viewer').dataset.painting = ''; else delete $('#viewer').dataset.painting;
+    $('#artPending').hidden = !on;
+  }
   function renderReveal() {
     const viewer = $('#viewer');
     if (reveal) viewer.dataset.reveal = reveal.drawing ? 'drawing' : 'sculpting'; else delete viewer.dataset.reveal;
@@ -422,7 +545,8 @@ export function generationView($, select3D, buildShape = () => {}) {
       const changed = jobId !== next.id;
       if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
-        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; }
+        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; layout = null;
+        detail = 'refined'; detailNote = ''; tris = 0; bodyModels.clear(); }
       job = next;
       // Step 3 clears SAM 3D's draft as it ends, a moment before it is reported passed: keep the last one till then.
       const step3 = (job.stages || []).find(s => s?.key === '3')?.state;
@@ -441,6 +565,11 @@ export function generationView($, select3D, buildShape = () => {}) {
       }
       if (pinned && !models().some(m => m.url === chosenModel?.url)) pinned = false;
       if (!chosenModel || !touched && !pinned && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
+      // Split: HeroGen's newest version in its panel (SAM 3D's shape until the first one lands).
+      if (wantSplit()) chosenModel = heroGenModel() || rawModel();
+      // The detail switch's Roblox body stays on screen between polls (and goes back to Refined if it is gone).
+      else if (detail !== 'refined' && !bodyModel(detail)) { detail = 'refined'; if (chosenModel?.body) chosenModel = heroGenModel(); }
+      else if (detail !== 'refined' && !pinned) chosenModel = bodyModel(detail);
       const state = generationState(job);
       if (job.state === 'succeeded' && !$('#detail')?.hidden) trackOnce(`result_viewed:${job.id}`, 'result_viewed');
       const running = job.state === 'running' ? state.steps.find((x) => x.key === state.focus?.key) : null;
@@ -482,7 +611,7 @@ export function generationView($, select3D, buildShape = () => {}) {
         }));
       }
       dock.cameras(job.images);
-      dock.animation(robloxReady(job) ? job.animation : null);
+      dock.animation(animationInfo());
       const has3D = Boolean(latest3D);
       $('#modelTab').hidden = !has3D && !shape; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
       const latest = defaultImage(job, available);
@@ -491,16 +620,20 @@ export function generationView($, select3D, buildShape = () => {}) {
         pick(auto);
       } else pick(selected, true);
       renderReveal();
+      renderPainting();
       if (changed) $('#imageError').hidden = true;
       text($('#artboardEmptyText'), state.terminal ? 'No images were saved for this job.' :
         job.state === 'queued' ? 'Starts when a worker is free.' : 'Your first image appears here in about a minute.');
       const idea = !state.terminal && job.kind === 'prompt' && job.prompt ? `“${job.prompt}”` : '';
       text($('#artboardIdea'), idea); $('#artboardIdea').hidden = !idea;
       $('#modelPending').hidden = state.terminal || has3D || model || selected === 'shape' || state.focus?.key !== '3' || !available.length;
-      text($('#modelPendingText'), state.left && state.focus?.key === '3' ? `3D shape on the way · ${state.left}` : '3D shape on the way');
+      text($('#modelPendingText'), state.shapeLeft ? `3D shape from SAM 3D · ${state.shapeLeft}` : '3D shape from SAM 3D');
       return state;
     },
+    // The viewer's count for the mesh it just loaded (0: none on screen).
+    triangles(n) { tris = Number.isFinite(n) ? n : 0; renderStats(); },
     reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null);
-      reveal = null; drafts = {}; draftModels = []; pinned = false; shape = null; shapeFailed = null; renderShape(false); renderReveal(); }
+      model = false; layout = null; syncSplit();
+      reveal = null; drafts = {}; draftModels = []; pinned = false; shape = null; shapeFailed = null; renderShape(false); renderReveal(); renderPainting(); }
   };
 }

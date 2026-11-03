@@ -18,10 +18,12 @@ test('version labels and measurements preserve notes and distinguish missing mea
 });
 test('expected time uses measured medians for the continued stages and never fills missing values', () => {
   const stages = ['1','2','3','3f','4','6','5'].map(key=>({key,typical_seconds:60}));
-  assert.equal(expectedTime({stages},'texture'),'Usually about 4 min');
-  assert.equal(expectedTime({stages},'turnaround'),'Usually about 6 min');
+  // Only up to what a game engine needs: the 3D model, or the new texture; the Roblox steps run after it.
+  assert.equal(expectedTime({stages},'texture'),'Usually about 60 s to the new texture');
+  assert.equal(expectedTime({stages},'turnaround'),'Usually about 2 min to the 3D model');
+  assert.equal(expectedTime({stages},'cover'),'Usually about 3 min to the 3D model');
   stages[2].typical_seconds=null;
-  assert.equal(expectedTime({stages},'texture'),'Usually about 4 min');
+  assert.equal(expectedTime({stages},'texture'),'Usually about 60 s to the new texture');
   assert.equal(expectedTime({stages},'turnaround'),'Time estimate needs more real runs.');
 });
 
