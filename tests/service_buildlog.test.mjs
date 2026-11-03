@@ -724,3 +724,29 @@ test('the hero card says the description was reworded, and the edit box gets the
   // A long rewrite is cut on whole characters with an ellipsis.
   assert.equal(copy.quoted('ab😀cd', 3), '“ab😀…”');
 });
+
+test('an up-front rewrite says the description named a brand, and its Build log rows are distinct', () => {
+  const text = 'A street racer in a plain dark tracksuit with striped trainers, holding a helmet';
+  const used = {kind: 'prompt', prompt: 'A street racer in a Nike tracksuit', reword: {status: 'used', stage: 'p', text, reason: 'precheck'}};
+  assert.deepEqual(copy.rewordNotice(used), {tone: 'info', title: 'We reworded your description',
+    text: `Your description named a brand or character, so we reworded it to: “${text}”`});
+  const again = {...used, reword: {...used.reword, status: 'refused_again'}};
+  assert.match(copy.rewordNotice(again).text, /Your own description is ready to edit/);
+  // A refused up-front rewrite gives the box the user's own description back; a refusal-path rewrite keeps the rewrite.
+  assert.equal(copy.descriptionDraft(again), 'A street racer in a Nike tracksuit');
+  assert.equal(copy.descriptionDraft({...again, reword: {...again.reword, reason: 'content_policy'}}), text);
+  assert.equal(copy.decisionLine({what: 'brief_prechecked', ok: true, n: 0}),
+    'Checked your description for brand, logo, character or real-person names: none found.');
+  assert.equal(copy.decisionLine({what: 'brief_prechecked', ok: true, n: 2}),
+    'Checked your description: it names 2 brands or characters, so it is reworded before anything is drawn.');
+  assert.equal(copy.decisionLine({what: 'brief_reworded_upfront', ok: true}, used),
+    `Reworded your description up front, without brand or character names, to “${text}”. The sketch is drawn from it.`);
+  assert.equal(copy.decisionLine({what: 'brief_precheck_failed', ok: false, code: 'http_5xx'}),
+    'The brand and character check did not finish (the model service returned an error). Continuing with your description as written.');
+  assert.match(copy.decisionLine({what: 'brief_reword_upfront_failed', ok: false}), /Continuing with it as written/);
+  assert.equal(copy.callStart({who: 'muse-spark', what: 'precheck_brief'}),
+    'checking your description for brand, logo, character or real-person names');
+  const rows = rowsOf(buildModel(job({p: 'passed'}, used), [ev(1, 'step_start', 'p'),
+    ev(2, 'decision', 'p', {what: 'brief_precheck_failed', ok: false, code: 'http_5xx'})], {now: START + 3000}), 'p');
+  assert.equal(rows[0].state, 'kept', 'a failed check is a warning row, not a failure');
+});
