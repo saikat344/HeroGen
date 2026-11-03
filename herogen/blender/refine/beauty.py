@@ -222,7 +222,7 @@ def generate_fast(run, client, out):
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor, wait
-    from herogen.pipeline.client import ApiError
+    from herogen.pipeline.client import ApiError, content_refusal
     from .fast import contained_error, isolated_client, publish, retry_once
 
     run, out = Path(run), Path(out)
@@ -264,10 +264,12 @@ def generate_fast(run, client, out):
                        else "SAM head crop")
             for key in ("image", "mask"):
                 view.pop(key, None)
+            # A content-policy refusal of the BT1 edit is recorded as one, with its request key.
+            refusal = {"refused": True, "key": getattr(exc, "request_key", None)} if content_refusal(exc) else {}
             view.update(accepted=False, attempts=[], error=contained_error(
                 exc, "standard recipe" if angle else "beauty off", request=request,
                 retried=bool(retries[angle]) and retries[angle][-1]["retry"] != "ok",
-                **({"image": trial["image"]} if trial is not None else {})))
+                **({"image": trial["image"]} if trial is not None else {}), **refusal))
         finally:
             if retries[angle]:
                 private["views"].setdefault(str(angle), {"accepted": False, "attempts": []})["retries"] = retries[angle]

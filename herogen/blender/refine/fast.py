@@ -563,6 +563,10 @@ def waves(client, prep, current, tex, cams, work, data, timeout, cover, head_fou
                     raise
             with state_lock:
                 job.collect(index)
+                from . import refusal_entries
+                if refused := refusal_entries(job.key, job.tasks[index][2]['attempts'], slot=index + 1):
+                    # A refused image request rejected this slot's sample; the stage record lists it.
+                    data.setdefault('contained_errors', []).extend(refused)
                 if index in job.errors:
                     # The stage continues on the view's other slots; the error stays on the record and log.
                     data.setdefault('contained_errors', []).append({'view': job.key, **job.errors[index]})
