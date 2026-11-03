@@ -189,6 +189,16 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertFalse((self.run.path / "drafts").exists(), "the stage clears its drafts when it ends")
         self.assertEqual(sorted(record["outputs"]), sorted(o for o in record["outputs"] if not o.startswith("drafts")))
 
+    def test_a_draft_that_cannot_be_made_or_written_never_fails_the_stage(self):
+        broken = mock.Mock(save=mock.Mock(side_effect=RuntimeError("encoder")))
+        stages.save_draft(self.run.path, "02-turnaround.png", broken)
+        (self.run.path / "drafts" / "views" / "front.png").mkdir(parents=True)
+        stages.clear_drafts(self.run.path, "views/front.png")
+        with mock.patch.object(stages.Image.Image, "putalpha", side_effect=ValueError("size")):
+            record = self.execute([self.bad, self.good])
+        self.assertTrue(record["ok"])
+        self.assertTrue(self.run.exists("views/front.png"))
+
     def test_a_failed_sheet_leaves_no_drafts(self):
         (self.run.path / "drafts").mkdir()
         (self.run.path / "drafts" / "02-turnaround.png").write_bytes(b"stale")

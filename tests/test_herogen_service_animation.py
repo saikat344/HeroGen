@@ -101,6 +101,17 @@ class TestBodyJoints(TempDirCase):
         write_body(other, glb=parts_glb()[:-10])
         self.assertIsNone(animation.body_joints(other), "a truncated GLB")
 
+    def test_odd_shapes_in_the_files_mean_no_buttons_not_an_error(self):
+        cases = {"sections not a list": {**sections_doc(), "sections": 7},
+                 "unhashable name": {**sections_doc(), "sections": [{**s, "name": ["Head"]} if s["name"] == "Head" else s
+                                                                    for s in sections_doc()["sections"]]}}
+        for label, doc in cases.items():
+            with self.subTest(label):
+                run = self.tmp / label.replace(" ", "-")
+                run.mkdir()
+                write_body(run, doc)
+                self.assertIsNone(animation.body_joints(run))
+
     def test_refuses_a_linked_body(self):
         real = self.tmp / "elsewhere"
         real.mkdir()

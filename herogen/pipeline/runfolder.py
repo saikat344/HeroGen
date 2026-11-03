@@ -90,16 +90,22 @@ def save_draft(run: Path | str, rel: str, img) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         img.save(part, format="PNG", compress_level=1)
         os.replace(part, p)
-    except (OSError, ValueError):
-        part.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001  (a draft is only for the page)
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def clear_drafts(run: Path | str, *rels: str) -> None:
-    """Remove the drafts named by ``rels``, or every draft."""
+    """Remove the drafts named by ``rels``, or every draft. Like `save_draft`, it never stops the stage."""
     import shutil
 
     base = Path(run) / DRAFTS
     if not rels:
         shutil.rmtree(base, ignore_errors=True)
     for rel in rels:
-        (base / rel).unlink(missing_ok=True)
+        try:
+            (base / rel).unlink(missing_ok=True)
+        except OSError:
+            pass

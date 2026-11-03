@@ -56,7 +56,10 @@ def body_joints(run_dir: Path) -> dict[str, Any] | None:
         if key in _CACHE:
             _CACHE.move_to_end(key)
             return _CACHE[key]
-    value = _read(glb, sections)
+    try:
+        value = _read(glb, sections)
+    except Exception:  # noqa: BLE001  (an odd body file means no buttons, never a broken job page)
+        value = None
     with _LOCK:
         _CACHE[key] = value
         while len(_CACHE) > _CACHE_SIZE:
