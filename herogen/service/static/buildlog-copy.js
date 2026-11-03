@@ -38,6 +38,7 @@ export const REASONS = {
   missing_features: 'parts of the character went missing',
   spend_cap: 'the spending cap was reached',
   model_error: 'the model call failed',
+  content_refused: 'the image model refused this view (content filter)',
   face_unavailable: 'no face was found to check against',
   head_not_found: 'no head found, skipped the face close-up',
   no_usable_views: 'no usable views could be cut from it',
@@ -66,7 +67,7 @@ export const CODES = {
   network: 'the connection to the model service dropped', unreadable: 'the answer could not be read',
   no_slot: 'no free slot opened in time', replay_miss: 'no saved result was found to reuse',
   remote_error: 'the GPU service returned an error', error: 'it stopped with an internal error',
-  model_unavailable: 'the model service is not available right now', gpu_unavailable: 'the GPU service did not answer',
+  model_unavailable: 'the model service is not available right now', model_refused: 'the image model refused one view (content filter)', gpu_unavailable: 'the GPU service did not answer',
   stage_error: 'the step stopped with an internal error', rejected: 'it did not pass its checks',
   model_missing: 'there is no 3D model to work from', not_available: 'it is not available for this target',
   input_missing: 'the input could not be found', restarts: 'the worker restarted too often',
@@ -106,9 +107,9 @@ export const CALLS = {
     cover_art: {start: 'checking whether this is a photo of a real person', done: 'photo check done'},
     prompt_sketch: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
     same_character: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
-    reword_brief: {start: 'rewording your description as an original character, without brand or character names',
+    reword_brief: {start: 'rewording your description without brand or character names, held items or pets',
       done: 'reworded description ready'},
-    precheck_brief: {start: 'checking your description for brand, logo, character or real-person names',
+    precheck_brief: {start: 'checking your description for brand, logo, character or real-person names, held items and pets',
       done: 'description checked'},
   },
   'sam-3d-objects': {'3d_shape': {start: 'building a textured 3D mesh from the front view and its outline', done: (e) => {
@@ -319,6 +320,8 @@ export function rewordNotice(job) {
   const r = job?.reword;
   if (!r || job.kind !== 'prompt') return null;
   const upfront = r.reason === 'precheck';
+  // Held items and pets left out up front, with no name reworded, are only a build log line.
+  if (upfront && r.names === false && r.status === 'used') return null;
   if (r.status === 'used' && r.text) return {tone: 'info', title: 'We reworded your description',
     text: upfront ? `Your description named a brand or character, so we reworded it to: ${quoted(r.text)}`
       : `The image model refused your description under its content policy, which usually means it named a brand, `
@@ -361,6 +364,10 @@ export function decisionLine(e, job = null) {
     case 'brief_reworded_upfront': return job?.reword?.text
       ? `Reworded your description up front, without brand or character names, to ${quoted(job.reword.text, 160)}. The sketch is drawn from it.`
       : 'Reworded your description up front, without brand or character names. The sketch is drawn from it.';
+    case 'brief_props_left_out': return job?.reword?.props?.length
+      ? `Left out held items and pets: ${job.reword.props.join(', ')}.`
+      : 'Left out held items and pets.';
+    case 'brief_props_upfront_failed': return 'Your description has held items or pets, but they could not be left out automatically. Continuing with it as written.';
     case 'brief_reword_upfront_failed': return 'Your description names a brand or character, but it could not be reworded automatically. Continuing with it as written.';
     case 'brief_precheck_failed': return `The brand and character check did not finish (${codeText(e.code)}). Continuing with your description as written.`;
     case 'view_result': {

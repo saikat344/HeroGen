@@ -127,7 +127,7 @@ class TestModalApp(TempDirCase):
     def test_function_configuration(self):
         mod, fake = self.load()
         f = fake.functions
-        self.assertEqual(set(f), {"StoreService", "sanitize_image", "web", "run_job", "model_stages", "blender_stages", "body_stages",
+        self.assertEqual(set(f), {"StoreService", "sanitize_image", "suggest_idea", "web", "run_job", "model_stages", "blender_stages", "body_stages",
                                   "export_stages", "sweep", "retention", "admin_command",
                                   "selfcheck_report"})
         for name, kw in f.items():
@@ -143,9 +143,12 @@ class TestModalApp(TempDirCase):
         self.assertEqual(secrets["model_stages"], ["herogen-service-model"])
 
         self.assertEqual(secrets["blender_stages"], ["herogen-service-model"])
+        self.assertEqual(secrets["body_stages"], ["herogen-service-model"], "for the Refine suggestions beside stage 4")
 
         self.assertEqual(secrets["admin_command"], ["herogen-service-web", "herogen-service-admin"])
         self.assertEqual(secrets["StoreService"], ["herogen-service-admin"])
+        self.assertEqual(secrets["suggest_idea"], ["herogen-service-model"], "ideas hold the model key, not the web")
+        self.assertNotIn("volumes", f["suggest_idea"])
         for n in ("export_stages", "run_job", "sweep", "retention"):
             self.assertEqual(secrets[n], [], f"{n} holds no secret")
         self.assertIn("herogen-service-admin", secrets["web"])

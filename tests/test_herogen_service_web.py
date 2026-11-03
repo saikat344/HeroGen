@@ -667,6 +667,29 @@ class TestAnimation(WebCase):
         other = self.signin("bob@example.com")
         self.assertEqual(other.get(anim["model"]).status_code, 404, "another user cannot read the body")
 
+    def test_the_detail_switch_gets_both_roblox_bodies_once_stage_4_passed(self):
+        from test_herogen_service_animation import parts_glb
+
+        b = self.signin()
+        job = self.make_job(b).json()
+        self.assertIsNone(job["roblox_bodies"], "nothing before the game body")
+        self.finish(job["id"])
+        bodies = b.get(f"/api/jobs/{job['id']}").json()["roblox_bodies"]
+        self.assertEqual(list(bodies), ["high"], "only the levels of detail that exist")
+        self.assertTrue(bodies["high"]["url"].startswith(f"/runs/r1/{job['id']}/04-body/high.glb?v="))
+        run = self.svc.storage.run_dir(self.store.users_list()[0]["id"], job["id"])
+        (run / "04-body/low.glb").write_bytes(b"glTF-cut-short")
+        self.assertNotIn("low", b.get(f"/api/jobs/{job['id']}").json()["roblox_bodies"], "an incomplete file is not offered")
+        (run / "04-body/low.glb").write_bytes(parts_glb())
+        low = b.get(f"/api/jobs/{job['id']}").json()["roblox_bodies"]["low"]
+        self.assertTrue(low["url"].startswith(f"/runs/r1/{job['id']}/04-body/low.glb?v="))
+        self.assertIs(low["animates"], True, "the 15 R15 parts, so the viewer animates it")
+        r = b.get(low["url"])
+        self.assertEqual((r.status_code, r.content[:4]), (200, b"glTF"))
+        self.assertEqual(self.signin("bob@example.com").get(low["url"]).status_code, 404, "another user cannot read it")
+        (run / "04-body/low.glb").write_bytes(parts_glb(names=("Head", "UpperTorso")))
+        self.assertIs(b.get(f"/api/jobs/{job['id']}").json()["roblox_bodies"]["low"]["animates"], False)
+
     def test_no_animation_without_the_roblox_rig(self):
         b = self.signin()
         job = self.make_job(b).json()

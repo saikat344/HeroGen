@@ -30,6 +30,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -363,6 +364,47 @@ def events_env(spec: StageSpec, ctx: StageContext) -> dict[str, str]:
     return env
 
 
+SUGGEST_FILE = "refine-suggestions.json"
+SUGGEST_WAIT_S = 240.0
+
+
+@dataclass
+class Suggestion:
+    """A running `herogen.pipeline.suggest`: exit 0 wrote model suggestions, 3 wrote the static ones after a model
+    error, 1 wrote nothing (the web keeps its own example text), 2 is a usage error."""
+    proc: subprocess.Popen
+    home: Path
+    run_dir: Path
+    started: float = field(default_factory=time.monotonic)
+
+    def finish(self, wait_s: float = SUGGEST_WAIT_S) -> float:
+        """Wait for it (it bounds itself to about 3 minutes; a stuck one is stopped), log how it ended and return
+        the model spend its file records."""
+        try:
+            self.proc.wait(timeout=max(0.0, wait_s - (time.monotonic() - self.started)))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                self.proc.kill()
+            self.proc.wait()
+            log.warning("refine suggestions for %s stopped after %.0f s", self.run_dir.name, wait_s)
+        try:
+            last = (self.home / "suggest.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1:]
+        except OSError:
+            last = []
+        finally:
+            shutil.rmtree(self.home, ignore_errors=True)
+        if self.proc.returncode:
+            log.warning("refine suggestions for %s exited %s: %s", self.run_dir.name, self.proc.returncode,
+                        last[0] if last else "")
+        try:
+            cost = json.loads((self.run_dir / SUGGEST_FILE).read_text()).get("cost_usd")
+        except (OSError, ValueError, AttributeError):
+            return 0.0
+        return float(cost) if isinstance(cost, (int, float)) and math.isfinite(cost) and cost > 0 else 0.0
+
+
 class CliRunner:
     """Runs each stage with its own CLI in a subprocess."""
 
@@ -370,6 +412,25 @@ class CliRunner:
         self._model_key = model_api_key
         self.python = python
         self._flags: dict[str, str] = {}
+
+    def start_suggest(self, ctx: StageContext) -> "Suggestion | None":
+        """Start the Refine box's suggestions for a refined hero (`herogen.pipeline.suggest`) in the background, or
+        None on a build without that module. It reads only 3f's outputs, so it runs beside stage 4."""
+        if importlib.util.find_spec("herogen.pipeline.suggest") is None:
+            return None
+        home = tempfile.mkdtemp(prefix="herogen-suggest-")
+        extra = dict(ctx.env)
+        if self._model_key:
+            extra["MODEL_API_KEY"] = self._model_key
+        # Its output goes to a file, not a pipe: Blender's log can fill a pipe nobody reads until the end, and a
+        # writer blocked on a full pipe never exits.
+        with open(Path(home) / "suggest.log", "wb") as out:
+            # Its own process group, so stopping it also stops the Blender render it starts.
+            proc = subprocess.Popen([self.python, "-m", "herogen.pipeline.suggest", str(ctx.run_dir),
+                                     "--cache", str(ctx.cache_dir)], stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=subprocess.STDOUT, env=base_env({"HOME": home, **extra}), cwd=home,
+                                    start_new_session=True)
+        return Suggestion(proc, Path(home), ctx.run_dir)
 
     def available(self, spec: StageSpec) -> str | None:
         if spec.key == "6" and not roblox_available():
@@ -580,6 +641,10 @@ class CliRunner:
         if spec.key in ('3f', '4', '6', '5') and rec and rec.get('error'):
             tail += "\nRecorded error: " + scrub(str(rec['error']))
             if spec.key == '3f' and str(rec['error']).startswith(('ApiError:', 'ReplayMiss:')):
+                # A content-filter refusal is an answer, not an outage: the hero keeps its unrefined texture either way.
+                if 'content_policy_violation' in str(rec['error']):
+                    return Outcome('failed', seconds, cost, 'The image model refused one view (content filter).',
+                                   'model_refused', detail=tail)
                 return Outcome('failed', seconds, cost, 'The image model did not answer.',
                                'model_unavailable', detail=tail)
         if rec is not None and rec.get("ok") is False and rec.get("error") and not timed_out:
@@ -674,14 +739,22 @@ def run_precheck(spec: StageSpec, ctx: StageContext, precheck: Callable[[], None
         log.warning("stage p of %s: the brand check failed (%s); drawing the brief as written", ctx.job_id,
                     data.get("error"))
         return data
+    props = data.get("props_found") if isinstance(data.get("props_found"), list) else []
     decision("brief_prechecked", True, n=len(names))
-    if names:
+    if names or props:
         if reword.brief(ctx.run_dir):
-            decision("brief_reworded_upfront", True)
-        else:
+            if names:
+                decision("brief_reworded_upfront", True)
+            if left := reword.shown_props(reword.read(ctx.run_dir)):
+                decision("brief_props_left_out", True, n=len(left))
+        elif names:
             decision("brief_reword_upfront_failed", False)
             log.warning("stage p of %s: the brief named %d brand or character names but could not be reworded; "
                         "drawing it as written", ctx.job_id, len(names))
+        else:
+            decision("brief_props_upfront_failed", False)
+            log.warning("stage p of %s: the brief named %d held items or pets but they could not be left out; "
+                        "drawing it as written", ctx.job_id, len(props))
     return data
 
 
@@ -725,12 +798,14 @@ def run_with_rewording(spec: StageSpec, ctx: StageContext, first_try: Callable[[
     extra = _usd(pre.get("cost_usd")) + _usd((pre.get("rewrite") or {}).get("cost_usd"))
     rec = read_record(ctx.run_dir, spec.record)
     if rec:
-        rec["precheck"] = {k: pre.get(k) for k in ("status", "names_found", "model", "prompt_version", "cost_usd",
+        rec["precheck"] = {k: pre.get(k) for k in ("status", "names_found", "props_found", "model",
+                                                    "prompt_version", "cost_usd",
                                                     "seconds", "error", "http_status", "error_code", "rewrite")
                            if pre.get(k) is not None}
         if rewrite_rec and "reword" not in rec:
             rec["reword"] = {k: rewrite_rec.get(k) for k in ("status", "reason", "original", "reworded",
-                                                             "removed_names", "names_found", "model",
+                                                             "removed_names", "names_found", "removed_props",
+                                                             "props_found", "model",
                                                              "prompt_version", "cost_usd") if rewrite_rec.get(k) is not None}
         rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + extra, 6)
         write_record(ctx.run_dir, rec)

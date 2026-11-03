@@ -54,6 +54,8 @@ FROZEN = {
     "brief-reword-v2": "f9d9f039d697bbe1ed881b92dacf2517e871364e9394fbed9babd5fc297f1441",
     "brief-precheck-v2": "4ae69d549c1c4889462b3202c4f2ac21d7cdb114cc2e60188dd15a81d33fa214",
     "refine-suggest-v1": "4127b8e75093239f47e635596b8349186ac8745e22682aca1e37cad59df1d24b",
+    "hero-idea-v1": "c570d02948da0418fde2696aab7a9bf934a92b344b37ed88ce00be64230059a6",
+    "hero-idea-v2": "1ec7fca5e35cceeedc973e4a8ea3235f8d393384c15999eab56f190a50ab98a8",
 }
 
 
@@ -213,6 +215,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(prompts.selected("cover_complete_figure").name, "cover-complete-figure-v1")
         self.assertEqual(prompts.selected("brief_precheck").name, "brief-precheck-v2")
         self.assertEqual(prompts.selected("brief_reword").name, "brief-reword-v2")
+        self.assertEqual(prompts.selected("hero_idea").name, "hero-idea-v2")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v2"}):
             self.assertEqual(prompts.selected("turnaround").name, "turnaround-v2")
         with mock.patch.dict(os.environ, {"HEROGEN_TURNAROUND_VERSION": "turnaround-v1",

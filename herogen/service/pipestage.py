@@ -133,14 +133,17 @@ def precheck_main(run, cache: Path, original: str) -> int:
         calls1 = len(client.log.calls)
         try:
             with events.step(None):
-                rw = reword.rewrite(client, original, reason=reword.PRECHECK, names=rec["names_found"])
+                rw = reword.rewrite(client, original, reason=reword.PRECHECK, names=rec["names_found"],
+                                    props=rec.get("props_found") or [])
         except Exception as e:  # noqa: BLE001  (recorded and shown; the brief is drawn as written)
             rec["rewrite"] = {"status": reword.FAILED, **failure(e, calls1)}
         else:
             rw["names_found"] = rec["names_found"]
+            rw["props_found"] = rec.get("props_found") or []
             rw["precheck_cost_usd"] = rec["cost_usd"]
             reword.write(run.path, rw)
-            rec["rewrite"] = {"status": reword.USED, "cost_usd": rw["cost_usd"]}
+            rec["rewrite"] = {"status": reword.USED, "cost_usd": rw["cost_usd"], "reworded": rw["reworded"],
+                              "removed_props": rw.get("removed_props") or []}
     reword.write(run.path, rec, reword.PRECHECK_FILE)
     print(f"precheck: {rec['status']}")
     return 0

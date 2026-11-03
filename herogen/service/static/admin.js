@@ -106,6 +106,13 @@ function svgBudgetMeter(limit, used, reserved) {
   return svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', class: 'budget-svg', 'aria-hidden': 'true' }, ...kids);
 }
 
+// Spend outside heroes (suggested ideas) is part of Spent; the card says how much of it.
+function sideSpendNote(b) {
+  return b && b.side_calls > 0
+    ? `incl. ${formatUsd(b.side_spend_usd || 0, { precise: true })} for ${b.side_calls} idea ${b.side_calls === 1 ? 'suggestion' : 'suggestions'}`
+    : '';
+}
+
 function kpiCard(label, value, sub = '') {
   return el('div', { cls: 'kpi-card' },
     el('span', { cls: 'kpi-label', text: label }),
@@ -198,7 +205,7 @@ function bootAdmin() {
     $('#budgetSentence').textContent = b.sentence;
     $('#quickPauseBtn').textContent = b.enabled ? 'Pause now' : 'Resume';
     $('#budgetKpis').replaceChildren(
-      kpiCard('Spent', formatUsd(b.spent_usd)),
+      kpiCard('Spent', formatUsd(b.spent_usd), sideSpendNote(b)),
       kpiCard('Running', formatUsd(b.running_usd), `${b.active} queued or running`),
       kpiCard('Remaining', formatUsd(b.remaining_usd)));
     $('#budgetBarWrap').hidden = !b.spend_limits_enabled;
@@ -371,7 +378,7 @@ function bootAdmin() {
     const b = rep.budget || {};
     $('#analyticsBudgetKpis').replaceChildren(
       kpiCard('Total limit', formatUsd(b.limit_usd)),
-      kpiCard('Spent', formatUsd(b.spent_usd || 0)),
+      kpiCard('Spent', formatUsd(b.spent_usd || 0), sideSpendNote(b)),
       kpiCard('Running', formatUsd(b.running_usd || 0), `${b.active ?? 0} queued or running`),
       kpiCard('Remaining', formatUsd(b.remaining_usd))
     );

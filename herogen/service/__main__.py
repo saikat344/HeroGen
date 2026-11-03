@@ -33,6 +33,7 @@ def _dev_key(data: Path) -> bytes:
 
 
 def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float = 0.0, echo: bool = True):
+    from herogen.service import ideas
     from herogen.service.auth import Signer
     from herogen.service.config import ENV, from_env
     from herogen.service.emailer import FileSender
@@ -74,7 +75,8 @@ def dev_services(data: Path, port: int, runner_kind: str = "fake", delay: float 
 
     svc = Services(settings=settings, store=store, signer=Signer(settings.signing_key), storage=storage,
                    sender=EchoSender(settings.outbox_path), sanitize=lambda b: sanitize(b, limits),
-                   submit=backend.submit, prewarm=prewarm_models if runner_kind == "local" else None)
+                   submit=backend.submit, prewarm=prewarm_models if runner_kind == "local" else None,
+                   ideas=ideas.live if runner_kind == "local" else ideas.Fake())
     return svc, backend
 
 

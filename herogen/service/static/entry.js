@@ -11,9 +11,14 @@ const MODES = {
   upload: { title: 'Drop your artwork here, or browse', hint: 'Coloured art, an illustration or a photo of one full-body character · PNG, JPEG or WebP' }
 };
 const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+// The one check a chosen image gets before it becomes the input: null when it can be used.
+export function imageProblem(file) {
+  return file && TYPES.includes(file.type) ? null : 'Choose a PNG, JPEG or WebP image.';
+}
 
 export function entryPage($, onChange) {
   let selected = null, preview = null, mode = 'prompt';
+  const watchers = [];   // told about every new input image (or its removal), whoever chose it
   const form = $('#jobForm');
 
   // One message line under the composer. Errors carry an icon and the danger colour; progress notes do not.
@@ -50,10 +55,12 @@ export function entryPage($, onChange) {
     // Choosing a file switches to an image mode; removing it keeps the current image mode so the drop zone returns.
     setMode(file ? (mode === 'prompt' ? 'upload' : mode) : (mode === 'prompt' ? 'prompt' : mode));
     onChange();
+    for (const watch of watchers) watch(selected);
   }
   function accept(file) {
     if (!file) return;
-    if (!TYPES.includes(file.type)) { say('Choose a PNG, JPEG or WebP image.'); return; }
+    const problem = imageProblem(file);
+    if (problem) { say(problem); return; }
     say(''); setFile(file); track('upload_selected');
   }
 
@@ -71,7 +78,7 @@ export function entryPage($, onChange) {
   });
   $('#sketch').addEventListener('change', () => {
     const f = $('#sketch').files[0];
-    if (f && !TYPES.includes(f.type)) { say('Choose a PNG, JPEG or WebP image.'); $('#sketch').value = ''; return; }
+    if (f && imageProblem(f)) { say(imageProblem(f)); $('#sketch').value = ''; return; }
     if (f) say('');
     setFile(f || null);
     if (f) track('upload_selected');
@@ -98,10 +105,11 @@ export function entryPage($, onChange) {
     b.setAttribute('aria-pressed', 'true'); $('#prompt').focus();
     track('suggestion_click', { id: b.dataset.idea });
   });
-  $('#prompt').addEventListener('input', () => {
+  $('#prompt').addEventListener('input', (event) => {
     for (const b of document.querySelectorAll('[data-idea]')) b.setAttribute('aria-pressed', 'false');
     if ($('#jobMsg').dataset.tone === 'error' && $('#prompt').getAttribute('aria-invalid') !== 'true') say('');
-    if (!$('#entry')?.hidden && $('#prompt').value.trim()) trackOnce('idea_typed', 'idea_typed');
+    // A suggested idea (`idea.js`) fills the box as replacement text: it is not the person typing.
+    if (event.inputType !== 'insertReplacementText' && !$('#entry')?.hidden && $('#prompt').value.trim()) trackOnce('idea_typed', 'idea_typed');
   });
   $('#profile').addEventListener('change', () => { $('#targetSummary').textContent = `· ${$('#profile').selectedOptions[0]?.textContent || ''}`; });
   $('#howButton').addEventListener('click', () => {
@@ -118,5 +126,6 @@ export function entryPage($, onChange) {
     if (closed) $('#generationSentence').textContent = state.sentence || 'Live generation is paused right now.';
     form.classList.toggle('is-closed', closed);
   }
-  return { setFile, setMode, say, generation, file: () => selected || $('#sketch').files[0] || null };
+  return { setFile, setMode, say, generation, mode: () => mode, onFile: (watch) => watchers.push(watch),
+    file: () => selected || $('#sketch').files[0] || null };
 }

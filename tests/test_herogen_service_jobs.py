@@ -588,6 +588,19 @@ class TestStageCommands(TempDirCase):
         self.assertNotIn("HEROGEN_EMAIL_API_KEY", env)
         self.assertNotIn("MODEL_API_KEY", env)
 
+    def test_a_refine_refusal_is_not_called_an_outage(self):
+        ctx = self.ctx()
+        ctx.run_dir.mkdir(parents=True)
+        spec = next(s for s in PLAN if s.key == "3f")
+        rec = {"ok": False, "status": "error", "cost_usd": 0.1,
+               "error": "ApiError: images/edits failed: HTTP 400 content_policy_violation (not retried)"}
+        (ctx.run_dir / "stage-3f.json").write_text(json.dumps(rec))
+        out = CliRunner.outcome(spec, ctx, 1.0, 1, "", "", False)
+        self.assertEqual((out.code, out.message), ("model_refused", "The image model refused one view (content filter)."))
+        (ctx.run_dir / "stage-3f.json").write_text(json.dumps({**rec, "error": "ApiError: images/edits failed: HTTP 503"}))
+        out = CliRunner.outcome(spec, ctx, 1.0, 1, "", "", False)
+        self.assertEqual((out.code, out.message), ("model_unavailable", "The image model did not answer."))
+
     def test_outcomes_from_records(self):
         ctx = self.ctx()
         ctx.run_dir.mkdir(parents=True)

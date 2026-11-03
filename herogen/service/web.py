@@ -44,7 +44,7 @@ from starlette.routing import Route
 from herogen.pipeline import events as buildlog
 from herogen.pipeline.runfolder import DRAFTS, SHAPE_DRAFT
 from herogen.service import bundle, labapi, pages
-from herogen.service.animation import body_joints
+from herogen.service.animation import body_joints, has_parts
 from herogen.service.analytics import (
     DEFAULT_DAYS,
     MAX_DAYS,
@@ -54,7 +54,7 @@ from herogen.service.analytics import (
 from herogen.service.auth import TOKEN_RE, Signer, mask_email, normalize_email
 from herogen.service.config import Settings
 from herogen.service.emailer import EmailError, EmailSender, signin_message
-from herogen.service.runner import STAGE_LABELS, plan_for
+from herogen.service.runner import STAGE_LABELS, SUGGEST_FILE, plan_for
 from herogen.service.progressive import read_progress, version_token
 from herogen.service.storage import SAFE_SEGMENT, ModalVolumeView, Storage
 from herogen.service.store import (
@@ -81,7 +81,7 @@ JSON_LIMIT = 16 * 1024
 EVENTS_LIMIT = 4 * 1024
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
-NON_PAGE_PREFIXES = ("/api/", "/assets/", "/static/", "/runs/", "/gallery-assets/")
+NON_PAGE_PREFIXES = ("/api/", "/assets/", "/static/", "/runs/", "/gallery-assets/", "/sketch-ideas/")
 DOWNLOADS = ("glb", "roblox")
 # What a hero card shows, best first: (source, stage that writes it, run-relative file). The uploaded sketch, kept
 # outside the run folder, is the last fallback for an upload whose stage 0 has not recorded yet.
@@ -105,6 +105,31 @@ EVENTS_ROUTE = re.compile(r"/api/jobs/[^/]+/events\Z")
 FINISHED_STATES = ("succeeded", "rejected", "failed", "canceled", "stopped")
 
 
+def roblox_triangle_counts(record: dict[str, Any] | None) -> dict[str, int] | None:
+    """The game body's triangle counts against Roblox's budgets, from a passed stage-4 record; None when it has none."""
+    lods = ((record or {}).get('body') or {}).get('lods') or {}
+    out = {}
+    for lod in ('high', 'low'):
+        tris, budget = (lods.get(lod) or {}).get('triangles'), (lods.get(lod) or {}).get('budget')
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (tris, budget)):
+            return None
+        out[lod], out[f'{lod}_budget'] = tris, budget
+    return out
+
+
+def refine_suggestions(data: Any) -> dict[str, str] | None:
+    """The Refine box's example text per step from refine-suggestions.json (herogen/pipeline/suggest.py): one short
+    line each, never the file's error or model details. None when no step has one; the page keeps its own."""
+    if not isinstance(data, dict):
+        return None
+    out = {}
+    for step in ('texture', 'turnaround'):
+        text = (data.get(step) or {}).get('text') if isinstance(data.get(step), dict) else None
+        if isinstance(text, str) and 0 < len(text := ' '.join(text.split())) <= 200:
+            out[step] = text
+    return out or None
+
+
 @dataclass
 class Services:
     settings: Settings
@@ -118,6 +143,9 @@ class Services:
     local_rates: RateLimiter = field(default_factory=lambda: RateLimiter(time.time))
     # Called when a hero that will reach stage 3 is accepted; the real servers pass `prewarm_models`.
     prewarm: Callable[[], None] | None = None
+    # One suggested hero idea (`herogen.service.ideas`: a record with status, idea or error, and cost_usd). None
+    # means this server offers no ideas.
+    ideas: Callable[[], dict[str, Any]] | None = None
 
 
 def page_csp(page_html: str) -> str:
@@ -179,6 +207,19 @@ class SecurityHeaders:
         finally:
             log.info(json.dumps({"event": "http", "method": scope.get("method"), "path": scope.get("path"),
                                  "status": status["code"], "ms": round((time.monotonic() - t0) * 1000, 1)}))
+
+
+# What the composer shows when no idea comes back. Never the model's own error text, which can echo a prompt.
+IDEA_ERRORS = {
+    "refused": (422, "idea_refused", "That idea didn't make it through. Try again for a new one."),
+    "model_error": (502, "idea_failed", "No idea came back this time. Try again in a moment."),
+    "unusable": (502, "idea_failed", "No idea came back this time. Try again in a moment."),
+    "unavailable": (503, "ideas_unavailable", "Idea suggestions are not available right now. Describe your own hero."),
+}
+GENERATION_CLOSED = {
+    "generation_paused": "Live generation is paused right now.",
+    "generation_budget_exhausted": "The live-generation budget is used up for now.",
+}
 
 
 def error(status: int, code: str, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
@@ -410,6 +451,26 @@ class App:
         cache = ("public, max-age=31536000, immutable" if request.query_params.get("v") == token
                  else "public, max-age=3600")
         return Response(body, media_type="image/webp", headers={"Cache-Control": cache})
+
+    async def sketch_ideas(self, request: Request) -> Response:
+        """`/api/sketch-ideas`: the proven sketches "Suggest a sketch" offers; empty when none are configured."""
+        from herogen.service.sketch_ideas import SketchIdeasUnavailable, catalog
+        try:
+            items = await self.call(catalog, self.s.sketch_ideas_dir)
+        except SketchIdeasUnavailable:
+            return error(503, "sketch_ideas_unavailable", "Suggested sketches are temporarily unavailable.")
+        return JSONResponse({"items": items}, headers={"Cache-Control": "no-store"})
+
+    async def sketch_idea_image(self, request: Request) -> Response:
+        """`/sketch-ideas/<id>`: one proven sketch's PNG, served only once it matches its catalog SHA-256."""
+        from herogen.service.sketch_ideas import SketchIdeasUnavailable, image
+        try:
+            path, sha = await self.call(image, self.s.sketch_ideas_dir, request.path_params["id"])
+        except (SketchIdeasUnavailable, OSError, ValueError, KeyError, TypeError):
+            return error(404, "not_found", "This suggested sketch is unavailable.")
+        cache = ("public, max-age=31536000, immutable" if request.query_params.get("v") == sha[:16]
+                 else "public, max-age=3600")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": cache})
 
     async def gallery_page(self, request: Request) -> Response:
         return self.page("gallery.html")
@@ -757,6 +818,43 @@ class App:
         view = await self.job_view(job["id"], u["id"])
         return JSONResponse(view, status_code=201 if created else 200)
 
+    async def idea_create(self, request: Request) -> Response:
+        """One suggested hero description from Muse Spark (`herogen.service.ideas`): ``{"idea"}``, or a short error
+        the composer shows. Needs a session (a guest workspace will do) and CSRF, counts against the user's idea
+        rate, is refused while live generation is paused or out of budget, and its cost joins the spend."""
+        u = await self.require_user(request)
+        if (r := await self.limit(f"ideas-user:{u['id']}", self.s.rate_ideas_user)) is not None:
+            return r
+        if self.svc.ideas is None:
+            return error(*IDEA_ERRORS["unavailable"])
+        generation = await self.call(self.svc.store.generation_get)
+        if not generation["accepting"]:
+            return error(503, generation["reason"], GENERATION_CLOSED[generation["reason"]])
+        t0 = time.monotonic()
+        try:
+            rec = await self.call(self.svc.ideas)
+        except Exception as e:  # noqa: BLE001  (the call may have reached the model: counted as unknown)
+            log.error("idea suggestion failed: %s", type(e).__name__)   # the class only; no model or prompt text
+            from herogen.service.ideas import unknown_cost_usd
+            rec = {"status": "failed", "error": "model_error", "outcome": "unknown", "cost_usd": unknown_cost_usd()}
+        ok = rec.get("status") == "ok" and isinstance(rec.get("idea"), str) and bool(rec["idea"])
+        outcome = "ok" if ok else rec.get("outcome") or (rec.get("error") if rec.get("error") in IDEA_ERRORS
+                                                         else "model_error")
+        cost = rec.get("cost_usd")
+        cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) \
+            and cost >= 0 else 0.0
+        if outcome != "unavailable":
+            try:
+                await self.call(self.svc.store.spend_record, u["id"], "idea", str(rec.get("model") or "muse-spark-1.3"),
+                                outcome, cost)
+            except Exception as e:  # noqa: BLE001  (the idea is still shown; the failure is logged)
+                log.error("idea spend not recorded: %s", type(e).__name__)
+        event("idea_suggested", user=u["id"], outcome=outcome, cost_usd=round(cost, 6),
+              seconds=round(time.monotonic() - t0, 2))
+        if not ok:
+            return error(*IDEA_ERRORS.get(outcome, IDEA_ERRORS["model_error"]))
+        return JSONResponse({"idea": rec["idea"], "prompt_version": rec.get("prompt_version")})
+
     def _prewarm(self) -> None:
         if self.svc.prewarm is not None:
             try:
@@ -812,7 +910,9 @@ class App:
                 "draft_models": files["draft_models"], "refinement": files["refinement"],
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
-                "animation": files["animation"], "reword": files["reword"], "viewer": f"/viewer#run={rid}"}
+                "animation": files["animation"], "roblox_bodies": files["bodies"], "reword": files["reword"],
+                "roblox_triangles": files["roblox_triangles"],
+                "refine_suggestions": files["refine_suggestions"], "viewer": f"/viewer#run={rid}"}
 
     def _view_thumbnail(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> str | None:
         with self.svc.storage.volume.reading():
@@ -871,10 +971,18 @@ class App:
                 # The brief rewritten after a content-policy refusal (herogen/pipeline/reword.py), for the card and
                 # the description box. Only its status, step and text: never the model's error.
                 if isinstance(data, dict) and data.get('status') in ('used', 'refused_again', 'rewrite_failed'):
-                    from herogen.pipeline.reword import shown
+                    from herogen.pipeline.reword import shown, shown_props
 
                     reworded = {'status': data['status'], 'stage': str(data.get('stage') or 'p'), 'text': shown(data),
-                                'reason': 'precheck' if data.get('reason') == 'precheck' else 'content_policy'}
+                                'reason': 'precheck' if data.get('reason') == 'precheck' else 'content_policy',
+                                'props': shown_props(data),
+                                'names': bool(data.get('names_found') or data.get('removed_names'))}
+            suggestions = None
+            if f := st.run_file(user_id, job['id'], SUGGEST_FILE):
+                try:
+                    suggestions = refine_suggestions(json.loads(f[0].read_text(encoding='utf-8')))
+                except (OSError, ValueError):
+                    suggestions = None
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
                     and bundle.complete_glb(run / '03-source.glb')):
@@ -925,16 +1033,28 @@ class App:
                     downloads["roblox"] = {"available": False, "reason": reason}
             else:
                 downloads["roblox"] = {"available": False, "reason": "The body is not finished yet."}
+            # The game body at both levels of detail for the viewer's detail switch, once stage 4 passed: the
+            # files the Roblox bundle ships. `animates` says the low body has the same 15 R15 parts as the high one
+            # (the joints come from the one sections.json both were cut from), so the viewer can animate either.
+            bodies = None
+            if rows.get('4', {}).get('state') == 'passed':
+                bodies = {lod: a for lod in ('high', 'low')
+                          if (p := bundle._inside(run, f'04-body/{lod}.glb')) is not None and bundle.complete_glb(p)
+                          and (a := asset(f'04-body/{lod}.glb'))} or None
+                if bodies and 'low' in bodies:
+                    bodies['low']['animates'] = has_parts(bundle._inside(run, '04-body/low.glb'))
             from herogen.pipeline.redo import _passed
 
             passed = {str(r.get('stage')) for r in records if _passed(r, r.get('stage'))}
+            roblox_triangles = roblox_triangle_counts(next((r for r in records if str(r.get('stage')) == '4'), None)) \
+                if '4' in passed else None
             can_texture = all(k in passed for k in ('0', '1', '2', '3')) and bool(asset('03-source.glb'))
             can_redo = {'cover': '0' in passed and bool(images.get('sketch')),
                         'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
                         'texture': can_texture}
         return {"images": images, "draft_images": drafts, "masks": masks, "downloads": downloads, "readme": readme,
-                "animation": animation, "models": models, "draft_models": draft_models, "refinement": progress,
-                "reword": reworded,
+                "animation": animation, "bodies": bodies, "models": models, "draft_models": draft_models, "refinement": progress,
+                "reword": reworded, "roblox_triangles": roblox_triangles, "refine_suggestions": suggestions,
                 "can_texture": can_texture, "can_redo": can_redo,
                 "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),
                 "recipe": {"profile": job['profile'], "note": job['note'], "from_stage": job['from_stage'],
@@ -1516,6 +1636,7 @@ def create_app(svc: Services) -> SecurityHeaders:
         Route("/gallery/{id}", a.gallery_page),
         Route("/api/gallery", a.public_gallery), Route("/api/gallery/{id}", a.public_gallery),
         Route("/gallery-assets/{id}/{kind}", a.gallery_asset),
+        Route("/api/sketch-ideas", a.sketch_ideas), Route("/sketch-ideas/{id}", a.sketch_idea_image),
         Route("/api/session", a.session),
         Route("/api/events", a.events, methods=["POST"], max_body_size=EVENTS_LIMIT),
         Route("/api/admin/analytics", a.admin_analytics, methods=["GET"]),
@@ -1530,6 +1651,7 @@ def create_app(svc: Services) -> SecurityHeaders:
 
         Route("/api/jobs", a.jobs_list, methods=["GET"]),
         Route("/api/jobs", a.job_create, methods=["POST"], max_body_size=upload_limit),
+        Route("/api/ideas", a.idea_create, methods=["POST"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}", a.job_get, methods=["GET"]),
         Route("/api/jobs/{job}", a.job_delete, methods=["DELETE"], max_body_size=JSON_LIMIT),
         Route("/api/jobs/{job}/redo", a.job_redo, methods=["POST"], max_body_size=JSON_LIMIT),

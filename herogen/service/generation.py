@@ -1,4 +1,9 @@
-"""Guest workspaces and the transactional live-generation spend guard."""
+"""Guest workspaces and the transactional live-generation spend guard.
+
+Spend is what finished jobs recorded plus the small model calls made outside any job (``model_spend``: the
+website's suggested ideas), so the guard, the admin budget and the analytics budget all count both.
+"""
+import math
 from decimal import Decimal, InvalidOperation
 
 SCHEMA = """
@@ -8,6 +13,19 @@ CREATE TABLE generation_settings (
  max_running INTEGER NOT NULL
 );
 """
+
+
+# Small model calls made outside any job, one row per request: who asked, what for, the model, how it ended and its
+# estimated cost. No prompt or model text is kept.
+MODEL_SPEND_SCHEMA = """
+CREATE TABLE IF NOT EXISTS model_spend (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, user_id TEXT NOT NULL, purpose TEXT NOT NULL,
+ model TEXT NOT NULL, outcome TEXT NOT NULL, cost_usd REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_spend_at ON model_spend(at);
+"""
+SPEND_PURPOSES = ('idea',)
+SPEND_OUTCOMES = ('ok', 'refused', 'model_error', 'unusable', 'unavailable', 'unknown')
 
 
 def amount(value):
@@ -49,13 +67,16 @@ class GenerationStore:
         row.pop('id')
         row['enabled'] = bool(row['enabled'])
         row['spend_limits_enabled'] = bool(row['spend_limits_enabled'])
-        spent = c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM jobs WHERE state NOT IN ('queued','running')").fetchone()[0]
+        jobs_spent = c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM jobs WHERE state NOT IN ('queued','running')").fetchone()[0]
+        side_calls, side_spent = c.execute("SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM model_spend").fetchone()
+        spent = jobs_spent + side_spent
         active = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
         running = round(active * row['running_estimate_usd'], 6)
         reason = ('generation_paused' if not row['enabled'] else 'generation_budget_exhausted'
                   if row['spend_limits_enabled'] and self._spend_exhausted(row, spent, running)
                   else 'available')
-        return {**row, 'spent_usd': round(spent, 6), 'running_usd': running, 'active': active,
+        return {**row, 'spent_usd': round(spent, 6), 'side_spend_usd': round(side_spent, 6), 'side_calls': side_calls,
+                'running_usd': running, 'active': active,
                 'remaining_usd': max(0, round(row['limit_usd'] - spent - running, 6)),
                 'accepting': reason == 'available', 'reason': reason,
                 'sentence': (f"Accepting heroes now: up to {row['max_running']} at a time"
@@ -75,6 +96,17 @@ class GenerationStore:
                     self._expire_leases(c)
                     return self._generation(c)
             return self._generation(self.db)
+
+    def spend_record(self, user_id, purpose, model, outcome, cost_usd):
+        """Count one small model request made outside any job (a suggested idea) in the spend."""
+        if purpose not in SPEND_PURPOSES or outcome not in SPEND_OUTCOMES:
+            raise ValueError('unknown spend purpose or outcome')
+        if (not isinstance(cost_usd, (int, float)) or isinstance(cost_usd, bool) or not math.isfinite(cost_usd)
+                or cost_usd < 0):
+            raise ValueError('the cost must be a finite, non-negative number')
+        with self._tx() as c:
+            c.execute('INSERT INTO model_spend(at,user_id,purpose,model,outcome,cost_usd) VALUES (?,?,?,?,?,?)',
+                      (self.clock(), str(user_id), purpose, str(model)[:64], outcome, round(float(cost_usd), 6)))
 
     def generation_update(self, *, actor, enabled=None, spend_limits_enabled=None, limit_usd=None, running_estimate_usd=None, max_running=None):
         changes = {}

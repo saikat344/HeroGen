@@ -79,7 +79,7 @@ class TestAnalyticsConfigMigrationAndRetention(TempDirCase):
         store = Store(db_path, clock=clock)
         try:
             ver = store.db.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(ver, 14)
+            self.assertEqual(ver, 15)
             self.assertEqual(store.db.execute("SELECT email FROM allowlist").fetchone()[0], "ops@example.com")
 
             store.analytics_record(VID_A, "desktop", [("page_view", "page", "landing")])

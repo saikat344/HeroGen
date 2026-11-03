@@ -10,6 +10,7 @@ const ELEVATION = 8 * Math.PI / 180;          // a slightly raised eye line for 
 const IDLE_MS = 4000;                          // idle time before the auto-orbit starts
 const ORBIT_RADIANS_PER_MS = 2 * Math.PI / 40000; // one idle revolution per 40 s
 const REVEAL_MS = 1200;
+const ENV_LIGHT = 0.35;                       // share of the studio room's light on the model's materials
 const SWAP_MS = 260;                           // cross-fade between the static model and the animated body
 const CLIP_NAMES = ['idle', 'walk', 'wave', 'jump'];
 const CONVERGE_MS = 1600;                      // the figure of dots gathering onto the first model
@@ -17,6 +18,9 @@ const FADE_MS = 400;                           // the same hand-off with reduced
 const DOT_SIZE = 0.0042;                       // a dot's world size, in figure heights
 const DOT_COLOUR = 0xf3efe8;                   // --stage-text: the stage is dark in both themes
 const FIGURE_ROOM = 1.3, FIGURE_LIFT = 0.1;   // the figure's framing: further out, and raised by part of its height
+const STAGE_LIFT = 0.1;                        // the stage framing sits this share of the height above the dock
+const SWEEP_MS = 4500;                         // one pass of the repaint light down the model while the texture refines
+const SWEEP_COLOUR = '1.0, 0.36, 0.12';        // --ember-300 in linear light
 const easeOut = t => 1 - Math.pow(1 - t, 4);
 const easeInOut = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const now = () => globalThis.performance?.now?.() ?? Date.now();
@@ -71,6 +75,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   let orbitWanted = true, presetListener = null, preset = null;
   // Animation: `anim` is the animated body (loaded once per body URL), `body` the in-flight load of it.
   let anim = null, body = null, animRequest = 0, animListener = null, animState = {clip: null, status: 'idle'};
+  let splitRequest = 0;
   function emitPreset(value) { if (preset !== value) { preset = value; presetListener?.(value); } }
   function emitAnim(clip, status) { animState = {clip, status}; animListener?.(clip, status); }
   function step(time) {
@@ -84,7 +89,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     }
     // The idle orbit turns the camera directly (not OrbitControls.autoRotate), so input stops it without any coast.
     // A playing animation holds the camera still so the hero keeps facing the way the person chose.
-    stepCloud(time);
+    stepCloud(time); stepSweep(time);
     const idle = stage && orbitWanted && (state.model || state.cloud) && !state.tween && !anim?.active && !reducedMotion() && time - state.lastInput >= IDLE_MS;
     if (idle && !state.orbiting) emitPreset(null);
     if (idle && state.orbiting) {
@@ -96,7 +101,146 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   function render() {
     if (!state) return;
     step(now());
-    state.controls.update(); state.renderer.render(state.scene, state.camera);
+    state.controls.update();
+    if (state.split) renderSplit(); else state.renderer.render(state.scene, state.camera);
+  }
+  // ---- the split stage: SAM 3D's raw shape (`state.split.model`) and the model on show, one camera for both ----
+  // The camera's aspect and lift for a viewport of w x h (the whole canvas, or one panel of it).
+  function frameCamera(w, h, lift = true) {
+    state.camera.aspect = w / h;
+    if (stage) state.camera.setViewOffset?.(w, h, 0, lift ? Math.round(h * STAGE_LIFT) : 0, w, h);
+    state.camera.updateProjectionMatrix();
+  }
+  // The two panels in canvas pixels from the top left: SAM 3D first. Stacked, only the lower panel sits over the dock.
+  function panes() {
+    const {w, h} = state.size, s = state.split;
+    if (s.axis === 'rows') {
+      // Stacked panels share the height above the dock, so neither model stands behind it.
+      const room = Math.max(2, h - s.inset), top = Math.max(1, Math.min(room - 1, Math.round(room * s.ratio)));
+      return [{x: 0, y: 0, w, h: top, lift: false, raw: true}, {x: 0, y: top, w, h: room - top, lift: false, raw: false}];
+    }
+    const left = Math.max(1, Math.min(w - 1, Math.round(w * s.ratio)));
+    return [{x: 0, y: 0, w: left, h, lift: true, raw: true}, {x: left, y: 0, w: w - left, h, lift: true, raw: false}];
+  }
+  function renderSplit() {
+    const r = state.renderer, {h} = state.size, raw = state.split.model, hero = state.model;
+    r.setScissorTest?.(false); r.setViewport?.(0, 0, state.size.w, h); r.clear?.();   // the strip under stacked panels
+    r.setScissorTest?.(true);
+    for (const p of panes()) {
+      const y = h - p.y - p.h;   // WebGL counts from the bottom
+      r.setViewport?.(p.x, y, p.w, p.h); r.setScissor?.(p.x, y, p.w, p.h);
+      frameCamera(p.w, p.h, p.lift);
+      if (raw) raw.visible = p.raw;
+      if (hero) hero.visible = !p.raw;
+      r.render(state.scene, state.camera);
+    }
+    r.setScissorTest?.(false);
+    if (hero) hero.visible = true;
+    if (raw) raw.visible = false;
+  }
+  // The aspect the framing is fitted to: a half panel while split, so the hero fits either panel at 50/50.
+  function viewAspect() {
+    const {w, h} = state.size || {w: 1, h: 1};
+    if (!state.split) return w / h;
+    return state.split.axis === 'rows' ? w / (Math.max(2, h - state.split.inset) / 2) : (w / 2) / h;
+  }
+  const frameDistance = radius => radius * (stage ? Math.max(2.35, 1.75 / viewAspect()) : Math.max(2.2, 1.5 / viewAspect()));
+  // A layout change (split on or off, stacked or side by side) keeps the angle and the person's zoom, refitted.
+  function refit() {
+    if (!state?.frame?.radius) return;
+    const was = state.frame.distance, next = frameDistance(state.frame.radius);
+    state.frame.distance = next;
+    if (!(was > 0) || state.cloud) return;
+    const o = orbitOf();
+    place(state.controls.target, o.azimuth, o.elevation, o.distance * next / was);
+  }
+  function layout() {
+    const {w, h} = state.size;
+    state.renderer.setSize(w, h, false);
+    frameCamera(w, h);
+    render();
+  }
+  // SAM 3D's shape stands where HeroGen's model stands: same height, same feet line, same centre.
+  function alignRaw() {
+    const raw = state?.split?.model, hero = state?.model;
+    if (!raw) return;
+    raw.position.set(0, 0, 0); raw.scale.setScalar(1); raw.updateMatrixWorld?.(true);
+    if (!hero) return;
+    const to = new THREE.Box3().setFromObject(hero), from = new THREE.Box3().setFromObject(raw);
+    const h = from.max.y - from.min.y;
+    if (to.isEmpty?.() || from.isEmpty?.() || !(h > 0)) return;
+    const k = (to.max.y - to.min.y) / h;
+    if (!(k > 0)) return;
+    raw.scale.setScalar(k);
+    raw.position.set((to.min.x + to.max.x) / 2 - k * (from.min.x + from.max.x) / 2, to.min.y - k * from.min.y,
+      (to.min.z + to.max.z) / 2 - k * (from.min.z + from.max.z) / 2);
+  }
+  function dropSplit() {
+    if (!state?.split) return;
+    ++splitRequest;
+    restore();   // while the raw shape is still listed, so its own materials come back before it is freed
+    const raw = state.split.model; state.split = null;
+    if (raw) { state.scene.remove(raw); release(raw); }
+    if (state.model) state.model.visible = true;
+    shading(mode);
+  }
+  /** Split the stage (`info` {left, waiting, ratio, axis}) or join it again (null). `left` is SAM 3D's raw shape;
+   *  the other panel shows the model from show(). `waiting`: the texture is still being repainted, so that panel
+   *  shows the shape in clay under a slow light sweep. Resolves true once the raw shape is on show. */
+  function split(canvas, info) {
+    if (!info) {
+      if (!state?.split || state.canvas !== canvas) return Promise.resolve(true);
+      dropSplit(); refit(); layout();
+      return Promise.resolve(true);
+    }
+    ensure(canvas);
+    paused = false; loop();
+    const was = state.split, axis = info.axis === 'rows' ? 'rows' : 'columns';
+    const ratio = Number.isFinite(info.ratio) ? Math.min(0.8, Math.max(0.2, info.ratio)) : 0.5, waiting = Boolean(info.waiting);
+    const inset = axis === 'rows' && info.inset > 0 ? info.inset : 0;
+    if (!was) { stopAnimation(true); state.split = {url: null, model: null, ratio, axis, waiting, inset}; }
+    const s = state.split, relaid = !was || was.axis !== axis || was.inset !== inset, repaint = !was || was.waiting !== waiting;
+    s.ratio = ratio; s.axis = axis; s.waiting = waiting; s.inset = inset;
+    if (relaid) { layout(); refit(); }
+    if (repaint) shading(mode);
+    render();
+    if (s.url === info.left) return Promise.resolve(Boolean(s.model));
+    const token = ++splitRequest, url = info.left;
+    s.url = url;
+    return new Promise(resolve => new GLTFLoader().load(url, gltf => {
+      if (token !== splitRequest || state?.split !== s) { release(gltf.scene); resolve(false); return; }
+      restore();
+      if (s.model) { state.scene.remove(s.model); release(s.model); }
+      gltf.scene.traverse(o => { for (const m of [].concat(o.material || [])) if ('envMapIntensity' in m) m.envMapIntensity = ENV_LIGHT; });
+      s.model = gltf.scene; s.model.visible = false; state.scene.add(s.model);
+      alignRaw(); shading(mode); render();
+      resolve(true);
+    }, undefined, () => { resolve(false); }));
+  }
+  // The repaint light: a warm line that runs down the model, leaving a faint glow where it has passed.
+  function sweepMaterial(material) {
+    const u = state.sweep;
+    material.customProgramCacheKey = () => 'hg-repaint-sweep';
+    material.onBeforeCompile = shader => {
+      Object.assign(shader.uniforms, {hgPhase: u.phase, hgLow: u.low, hgHigh: u.high});
+      shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nvarying float hgY;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nhgY = (modelMatrix * vec4(transformed, 1.0)).y;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float hgPhase, hgLow, hgHigh;\nvarying float hgY;')
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          float hgD = (hgY - hgLow) / max(1e-4, hgHigh - hgLow) - hgPhase;
+          float hgGlow = 1.5 * exp(-hgD * hgD * 700.0) + 0.22 * step(0.0, hgD) * exp(-hgD * 5.0);
+          totalEmissiveRadiance += vec3(${SWEEP_COLOUR}) * hgGlow;`);
+    };
+    return material;
+  }
+  function stepSweep(time) {
+    const u = state.sweep;
+    if (!state.split?.waiting) return;
+    if (reducedMotion()) { u.phase.value = -10; return; }
+    // A steady scan from above the head to below the feet over most of the cycle, then a short rest out of sight.
+    const t = (time % SWEEP_MS) / SWEEP_MS;
+    u.phase.value = t < 0.85 ? 1.08 - 1.16 * t / 0.85 : -10;
   }
   function loop() { state?.renderer.setAnimationLoop(paused ? null : render); }
   function theme() {
@@ -105,7 +249,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => { m.color.set(dark ? 0x50504b : 0xc7beb0); m.opacity = 0.32; m.transparent = true; });
     render();
   }
-  const shown = () => [state?.model, anim?.body].filter(Boolean);
+  const shown = () => [state?.model, anim?.body, state?.split?.model].filter(Boolean);
   function restore() {
     finishFade(); finishConverge();
     for (const model of shown()) model.traverse(node => {
@@ -117,11 +261,23 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   function shading(value) {
     if (!['textured', 'clay', 'wire'].includes(value)) return;
     mode = value; restore();
-    if (value !== 'textured') for (const model of shown()) model.traverse(node => {
-      if (!node.isMesh) return;
-      node.userData.previewOriginal = node.material;
-      node.material = new THREE.MeshStandardMaterial({color: value === 'clay' ? 0xb4aca1 : 0xe29a63, roughness: 0.85, wireframe: value === 'wire'});
-    });
+    // While the texture refines, HeroGen's panel shows the shape in clay (or wire) under the repaint light.
+    const swept = state?.split?.waiting ? state.model : null;
+    if (swept) {
+      const box = new THREE.Box3().setFromObject(swept);
+      state.sweep.low.value = box.min.y; state.sweep.high.value = box.max.y;
+    }
+    for (const model of shown()) {
+      if (value === 'textured' && model !== swept) continue;
+      model.traverse(node => {
+        if (!node.isMesh) return;
+        node.userData.previewOriginal = node.material;
+        // The swept clay is a shade darker, so the warm repaint light reads against it.
+        const clay = model === swept ? 0x8d867d : 0xb4aca1;
+        const material = new THREE.MeshStandardMaterial({color: value === 'wire' ? 0xe29a63 : clay, roughness: 0.85, wireframe: value === 'wire'});
+        node.material = model === swept ? sweepMaterial(material) : material;
+      });
+    }
     render();
   }
   // Camera position from an orbit around the target: azimuth 0 looks at the hero's front (+Z).
@@ -171,7 +327,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   function dispose() {
     ++request;
     if (!state) return;
-    state.renderer.setAnimationLoop(null); restore(); dropCloud(); dropAnimation(); release(state.model);
+    state.renderer.setAnimationLoop(null); dropSplit(); restore(); dropCloud(); dropAnimation(); release(state.model);
     for (const [type, fn] of state.inputs) state.canvas.removeEventListener?.(type, fn);
     state.observer.disconnect(); state.controls.dispose(); state.scene.environment?.dispose(); state.grid.geometry.dispose();
     (Array.isArray(state.grid.material) ? state.grid.material : [state.grid.material]).forEach(m => m.dispose());
@@ -187,7 +343,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       // Transparent clear colour: the stage backdrop is the CSS gradient behind the canvas.
       renderer.setClearColor?.(0x000000, 0);
       renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.0;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.1;
       const scene = new THREE.Scene();
       // Room lighting: a neutral studio room as image-based light, so every side of the model is lit evenly.
       const pmrem = new THREE.PMREMGenerator(renderer);
@@ -196,13 +352,16 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       // Warm key from the upper left and a cool rim from behind right, matching the stage backdrop.
       const sun = new THREE.DirectionalLight(0xffd2a8, 1.2); sun.position.set(-3, 6, 4); scene.add(sun);
       const rim = new THREE.DirectionalLight(0x9fc4ff, 0.6); rim.position.set(4, 3, -5); scene.add(rim);
+      // A white light from straight overhead, a little in front, so dark suits still read on the dark stage.
+      const top = new THREE.DirectionalLight(0xffffff, 2.2); top.position.set(0, 10, 4); scene.add(top);
       const grid = new THREE.GridHelper(8, 16, 0x8899aa, 0xccd5de); grid.visible = false; scene.add(grid);
       const shadow = stage ? contactShadow() : null; if (shadow) scene.add(shadow);
       const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
       const controls = new OrbitControls(camera, canvas); controls.enableDamping = damping;
       controls.minDistance = 0.1; controls.maxDistance = 100;
-      state = {canvas, renderer, scene, camera, controls, grid, shadow, sun, rim, model: null, tween: null,
-        lastInput: now(), lastFrame: now(), orbiting: false, frame: null, inputs: []};
+      state = {canvas, renderer, scene, camera, controls, grid, shadow, sun, rim, top, model: null, tween: null,
+        lastInput: now(), lastFrame: now(), orbiting: false, frame: null, inputs: [], split: null, size: {w: 1, h: 1},
+        sweep: {phase: {value: -10}, low: {value: 0}, high: {value: 1}}};
       controls.addEventListener?.('change', () => {
         if (!syncing) viewListener?.(view());
         // A drag that turns the camera away from a preset clears the dock selection; zooming keeps it.
@@ -217,13 +376,11 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
         const fn = () => markInput();
         canvas.addEventListener?.(type, fn, {passive: true}); state.inputs.push([type, fn]);
       }
+      // Lift the framing so the hero stands above the stage dock (frameCamera; each panel of a split has its own).
       const resize = () => {
         if (!state) return;
-        const w = Math.max(1, canvas.clientWidth), h = Math.max(1, canvas.clientHeight);
-        renderer.setSize(w, h, false); camera.aspect = w / h;
-        // Lift the framing so the hero stands above the stage dock.
-        if (stage) camera.setViewOffset?.(w, h, 0, Math.round(h * 0.1), w, h);
-        camera.updateProjectionMatrix(); render();
+        state.size = {w: Math.max(1, canvas.clientWidth), h: Math.max(1, canvas.clientHeight)};
+        layout();
       };
       state.observer = new ResizeObserver(resize); state.observer.observe(canvas); resize();
       document.addEventListener('hg:theme', theme); theme();
@@ -246,6 +403,9 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
       restore(); stopAnimation(true);
       const first = !state.model;
       if (state.model) { state.scene.remove(state.model); release(state.model); }
+      // The studio room lights every side evenly; at full strength it adds up with the lamps and bleaches light,
+      // pastel textures toward white under the tone mapping, so the model takes a third of it.
+      gltf.scene.traverse(o => { for (const m of [].concat(o.material || [])) if ('envMapIntensity' in m) m.envMapIntensity = ENV_LIGHT; });
       state.model = gltf.scene; state.url = url; state.grid.visible = floor && !stage; state.scene.add(gltf.scene);
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
@@ -257,6 +417,17 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
         t.set(centre.x + (t.x - was.centre.x) * k, centre.y + (t.y - was.centre.y) * k, centre.z + (t.z - was.centre.z) * k);
         place(t, before.azimuth, before.elevation, before.distance * k);
         state.lastInput = now();
+      } else if (keepModel && was?.radius) {
+        // Another mesh of the same hero in its own units (the Roblox body is in studs): the same view of it.
+        const k = radius / was.radius, t = state.controls.target, p = state.camera.position;
+        const moved = Math.hypot(centre.x - was.centre.x, centre.y - was.centre.y, centre.z - was.centre.z) > radius * 1e-3;
+        if (Math.abs(k - 1) > 1e-3 || moved) {
+          const off = [(p.x - t.x) * k, (p.y - t.y) * k, (p.z - t.z) * k];
+          t.set(centre.x + (t.x - was.centre.x) * k, centre.y + (t.y - was.centre.y) * k, centre.z + (t.z - was.centre.z) * k);
+          p.set(t.x + off[0], t.y + off[1], t.z + off[2]);
+          state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10;
+          state.tween = null;
+        }
       } else if (!preserveCamera) {
         state.controls.target.copy(centre);
         if (!stage) state.camera.position.set(centre.x + d * 0.45, centre.y + d * 0.15, centre.z + d);
@@ -268,7 +439,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
         state.shadow.visible = true; state.shadow.position.set(centre.x, box.min.y + radius * 0.002, centre.z);
         state.shadow.scale.set(Math.max(size.x, size.z) * 1.6, Math.max(size.x, size.z) * 1.1, 1);
       }
-      shading(mode);
+      alignRaw(); shading(mode);
       if (cloud) converge(cloud, gltf.scene);
       resolve(true);
     }, undefined, error => {
@@ -281,11 +452,11 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   // Near and far planes, zoom limits and the stage framing for an object of `size` at `centre`.
   function frameBox(size, centre, limits = true) {
     const radius = Math.max(size.x, size.y, size.z, 0.01);
-    const d = radius * (stage ? Math.max(2.35, 1.75 / state.camera.aspect) : Math.max(2.2, 1.5 / state.camera.aspect));
+    const d = frameDistance(radius);
     state.camera.near = radius / 1000; state.camera.far = radius * 100;
     state.camera.updateProjectionMatrix();
     if (limits) { state.controls.minDistance = radius * 0.35; state.controls.maxDistance = radius * 10; }
-    state.frame = {centre: {x: centre.x, y: centre.y, z: centre.z}, distance: d};
+    state.frame = {centre: {x: centre.x, y: centre.y, z: centre.z}, distance: d, radius};
     return {radius, d};
   }
   // ---- the figure of dots shown while the 3D shape is built (shape-build.js samples it) ---------------------------
@@ -322,11 +493,20 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     c.group.removeFromParent(); c.points.geometry.dispose(); c.material.dispose();
   }
   // An empty stage on `canvas` (no model, no figure) while the next figure is prepared, so the last hero never shows.
+  // Triangles in the model on screen (the still model, not the animated body).
+  function triangles() {
+    let n = 0;
+    state?.model?.traverse(o => {
+      const g = o.isMesh && o.geometry;
+      if (g) n += Math.floor((g.index ? g.index.count : g.attributes.position?.count || 0) / 3);
+    });
+    return n;
+  }
   function clear(canvas) {
     if (!state || state.canvas !== canvas) return;
-    ++request; dropCloud(); restore(); stopAnimation(true);
+    ++request; dropSplit(); dropCloud(); restore(); stopAnimation(true);
     if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; state.url = null; }
-    state.grid.visible = false; if (state.shadow) state.shadow.visible = false; render();
+    state.grid.visible = false; if (state.shadow) state.shadow.visible = false; layout();
   }
   /** Show `figure` ({key, positions, seeds} from shape-build.js) on `canvas` in place of any model: small dots that
    *  drift and twinkle, framed like a model and turning slowly until the person moves the view. */
@@ -336,7 +516,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     if (state.cloud?.key === figure?.key && state.cloud) return true;
     const count = figure?.positions?.length / 3;
     if (!(count >= 1) || figure.seeds?.length !== count) return false;
-    ++request; dropCloud(); restore(); stopAnimation(true);
+    ++request; if (state.split) { dropSplit(); layout(); } dropCloud(); restore(); stopAnimation(true);
     if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; state.url = null; }
     state.grid.visible = false; if (state.shadow) state.shadow.visible = false;
     const geometry = new THREE.BufferGeometry();
@@ -529,6 +709,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   async function playAnimation(name, info) {
     if (!state?.model) return false;
     if (!CLIP_NAMES.includes(name)) { stopAnimation(); return true; }
+    if (state.split) return false;   // the split stage shows two models; animation is a single-view tool
     const url = info?.model;
     if (typeof url !== 'string' || !Array.isArray(info.parts)) return false;
     const token = ++animRequest, model = state.model;
@@ -569,8 +750,8 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
   }
   function lighting(on) {
     if (!state) return;
-    state.sun.intensity = on ? 2.4 : 1.2; state.rim.intensity = on ? 1.1 : 0.6;
-    state.renderer.toneMappingExposure = on ? 1.2 : 1.0; render();
+    state.sun.intensity = on ? 2.4 : 1.2; state.rim.intensity = on ? 1.1 : 0.6; state.top.intensity = on ? 3.2 : 2.2;
+    state.renderer.toneMappingExposure = on ? 1.3 : 1.1; render();
   }
   // The dock's Orbit toggle: false stops the idle orbit for good, true allows it again after 4 s idle.
   function orbit(on) {
@@ -578,7 +759,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     orbitWanted = Boolean(on);
     if (state) { state.lastInput = now(); state.orbiting = false; render(); }
   }
-  return {show, building, clear, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
+  return {show, split, building, clear, triangles, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
     animate: playAnimation, prefetchAnimation,
     onAnimation(callback) { animListener = callback; callback?.(animState.clip, animState.status); },
     camera: name => moveTo(name), reset: () => moveTo('front', {reset: true}),
@@ -587,8 +768,10 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
 }
 const preview = createPreview({stage: true});
 export const show = (canvas, url, options) => preview.show(canvas, url, options);
+export const split = (canvas, info) => preview.split(canvas, info);
 export const building = (canvas, figure) => preview.building(canvas, figure);
 export const clear = canvas => preview.clear(canvas);
+export const triangles = () => preview.triangles();
 export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
 export const view = () => preview.view();

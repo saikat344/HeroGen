@@ -37,14 +37,16 @@ SCHEMA = LEGACY_SCHEMA + ';\n'.join(PHASE_MIGRATION) + ';\n'
 
 # Historical bootstrap and upgrade SQL is kept together, including the retirement migration.
 from herogen.service.generation import SCHEMA as GENERATION_SCHEMA
+from herogen.service.generation import MODEL_SPEND_SCHEMA
 from herogen.service.analytics import SCHEMA as ANALYTICS_SCHEMA
 
 ADMISSION_SCHEMA = SCHEMA
 LEGACY_ADMISSION_SCHEMA = LEGACY_SCHEMA
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 # Steps that bring an older database up to SCHEMA_VERSION, by the version they start from.
 MIGRATIONS = {
+    14: tuple(s.strip() for s in MODEL_SPEND_SCHEMA.split(';') if s.strip()),
     13: ("ALTER TABLE jobs ADD COLUMN build_all INTEGER NOT NULL DEFAULT 0",),
     12: ("ALTER TABLE jobs ADD COLUMN mesh_saved INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE jobs ADD COLUMN model_ready_at REAL",
@@ -137,4 +139,4 @@ CREATE INDEX audit_at ON audit(at);
 """
 
 
-SCHEMA += ADMISSION_SCHEMA + ANALYTICS_SCHEMA
+SCHEMA += ADMISSION_SCHEMA + ANALYTICS_SCHEMA + MODEL_SPEND_SCHEMA
