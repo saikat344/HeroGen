@@ -225,7 +225,7 @@
       </div>
       <div class="progress" role="group" aria-label="Generation progress">
         <p class="progress__label" id="progressCount" aria-live="polite"></p>
-        <div id="progressSegments" class="progress__segs" aria-hidden="true"></div>
+        <div id="progressSegments" class="progress__segs" role="group" aria-label="Stages"></div><span class="progress__tip" id="progressTip" aria-hidden="true" hidden></span>
         <button type="button" class="btn btn--ghost btn--s progress__toggle" id="viewSteps" aria-expanded="false" aria-controls="progressSteps"><span>View steps</span><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-chevron-down"></use></svg></button>
         <div class="progress__steps" id="progressSteps" inert><div class="progress__steps-inner"><ol id="stages" role="list" class="stages generation-stages" aria-label="Generation stages"></ol></div></div>
       </div>

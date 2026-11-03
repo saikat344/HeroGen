@@ -25,6 +25,12 @@
 .seg { transition: background-color var(--dur-slow) var(--ease-out); }
 .seg--done.is-new { animation: seg-fill var(--dur-slow) var(--ease-out); transform-origin: left; }
 .seg--run::after { background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-accent) 80%, transparent) 50%, transparent); }
+/* The current stage also stands taller than the rest, so it is found without telling the colours apart (and
+   without the shimmer, which reduced motion turns off). The negative margin keeps the bar's height. */
+#progressSegments .seg--run { height: 10px; margin-block: -2px; }
+.generation .progress { position: relative; }
+.progress__tip { position: absolute; z-index: var(--z-dropdown); transform: translate(-50%, var(--space-3)); padding: var(--space-2) var(--space-3); border-radius: var(--radius-s); background: var(--color-surface-inverse); color: var(--color-text-inverse); box-shadow: var(--shadow-2); font-size: var(--text-caption); line-height: var(--lh-caption); white-space: nowrap; pointer-events: none; }
+.progress__tip[hidden] { display: none; }
 .progress__toggle { margin-left: 0; gap: var(--space-2); }
 .progress__toggle .icon { transition: transform var(--dur-base) var(--ease-out); }
 .progress.is-open .progress__toggle .icon { transform: rotate(180deg); }
