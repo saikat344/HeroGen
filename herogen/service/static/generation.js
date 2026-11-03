@@ -171,7 +171,7 @@ export function generationView($, select3D, buildShape = () => {}) {
   let reveal = null, drafts = {}, sheetUrl = null, redrawUntil = 0;
   // `draftModels`: SAM 3D's shape while step 3 still runs (`draft_models`); `pinned`: the compare toggle's choice,
   // kept when a new version arrives; `shape`: the figure of dots on show, with the step's timing.
-  let draftModels = [], pinned = false, forceLoad = false, shape = null, shapeKey = null, shapeTimer = null, shapeClock = null, tipAt = 0;
+  let draftModels = [], pinned = false, forceLoad = false, shape = null, shapeKey = null, shapeFailed = null, shapeTimer = null, shapeClock = null, tipAt = 0;
   const reducedMotion = () => Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
   const finalModels = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
   const models = () => { const final = finalModels(); return final.length ? final : draftModels; };
@@ -245,12 +245,13 @@ export function generationView($, select3D, buildShape = () => {}) {
     if (!shapeTimer) { tipAt = Date.now(); shapeTimer = setInterval(shapeTick, 1000); }
     shapeTick();
   }
+  const canShape = () => Boolean(shape) && shapeFailed !== `${shape.front}|${shape.side}`;
   function revealLabel() {
     if (!reveal?.drawing) return 'Character views';
     return Date.now() < redrawUntil ? 'Redrawing — the views didn’t line up' : 'First draft · checking the views';
   }
   function pick(key, chosen = false, retry = false) {
-    const building = key === 'shape' && Boolean(shape);
+    const building = key === 'shape' && canShape();
     if (key === 'shape' && !building) key = null;
     selected = key; manual = chosen; model = key === 'model'; if (key && !model && !building && chosen) lastImage = key;
     $('#previewWrap').hidden = !model && !building;
@@ -271,7 +272,15 @@ export function generationView($, select3D, buildShape = () => {}) {
       text($('#artifactLabel'), 'Outline from your views');
       const info = {key: `${shape.front}|${shape.side}`, front: shape.front, side: shape.side,
         count: ($('#viewer').clientWidth || 800) < 560 ? 2400 : 4000};
-      if (shapeKey !== info.key) { shapeKey = info.key; ++modelRequest; loading = null; shownUrl = null; buildShape(info); }
+      if (shapeKey !== info.key) {
+        shapeKey = info.key; ++modelRequest; loading = null; shownUrl = null;
+        // No figure (the outline could not be read): show the images instead, with the "on the way" pill.
+        Promise.resolve(buildShape(info)).then(shown => {
+          if (shown !== false || shapeKey !== info.key || selected !== 'shape') return;
+          shapeFailed = info.key; shapeKey = null;
+          pick(reveal?.sheet ? 'draft' : defaultImage(job, imageChoices(job)));
+        });
+      }
     }
     else {
       const image = key === 'draft' ? [key, revealLabel()] : imageChoices(job).find(([k]) => k === key);
@@ -413,7 +422,7 @@ export function generationView($, select3D, buildShape = () => {}) {
       const changed = jobId !== next.id;
       if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
-        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; }
+        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; }
       job = next;
       // Step 3 clears SAM 3D's draft as it ends, a moment before it is reported passed: keep the last one till then.
       const step3 = (job.stages || []).find(s => s?.key === '3')?.state;
@@ -477,7 +486,7 @@ export function generationView($, select3D, buildShape = () => {}) {
       const has3D = Boolean(latest3D);
       $('#modelTab').hidden = !has3D && !shape; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
       const latest = defaultImage(job, available);
-      const auto = has3D ? 'model' : shape ? 'shape' : reveal?.sheet ? 'draft' : latest;
+      const auto = has3D ? 'model' : canShape() ? 'shape' : reveal?.sheet ? 'draft' : latest;
       if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !has3D)) {
         pick(auto);
       } else pick(selected, true);
@@ -492,6 +501,6 @@ export function generationView($, select3D, buildShape = () => {}) {
       return state;
     },
     reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null);
-      reveal = null; drafts = {}; draftModels = []; pinned = false; shape = null; renderShape(false); renderReveal(); }
+      reveal = null; drafts = {}; draftModels = []; pinned = false; shape = null; shapeFailed = null; renderShape(false); renderReveal(); }
   };
 }

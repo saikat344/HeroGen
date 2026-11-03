@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from herogen.pipeline import events
-from herogen.pipeline.runfolder import DRAFTS
+from herogen.pipeline.runfolder import DRAFTS, clear_drafts
 from herogen.service.config import Settings
 from herogen.service.runner import (
     GROUPS,
@@ -474,7 +474,12 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
             pump = getattr(workdir, "event_pump", None)
             try:
                 with pump() if pump else contextlib.nullcontext():
-                    out = runner.run(spec, ctx)
+                    try:
+                        out = runner.run(spec, ctx)
+                    finally:
+                        # A stage clears its own drafts when it ends; one killed before it could would otherwise
+                        # leave them for the pump's last copy and show them during a later attempt.
+                        clear_drafts(ctx.run_dir)
             except Exception as e:
                 from herogen.pipeline.client import ApiError, ReplayMiss
 

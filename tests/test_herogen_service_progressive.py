@@ -106,7 +106,10 @@ class ProgressiveFiles(WebCase):
 
         self.assertEqual(self.finish(jid, Crashing()), 'failed')
         run = self.svc.storage.run_dir(self.store.users_list()[0]['id'], jid)
-        self.assertTrue((run / 'drafts' / '02-turnaround.png').is_file(), 'left behind by the crash')
+        self.assertFalse((run / 'drafts').exists(), 'the worker clears what the crashed stage left')
+        # A worker killed with its stage would leave them: the job still never shows them.
+        (run / 'drafts').mkdir()
+        Image.new('RGB', (8, 8)).save(run / 'drafts' / '02-turnaround.png')
         view = owner.get(f'/api/jobs/{jid}').json()
         self.assertEqual(view['draft_images'], {})
         self.assertFalse({'turnaround', 'front', 'top', 'top_drawn'} & set(view['images']))
@@ -160,7 +163,9 @@ class ProgressiveFiles(WebCase):
 
         self.assertEqual(self.finish(jid, Crashing()), 'failed')
         run = self.svc.storage.run_dir(self.store.users_list()[0]['id'], jid)
-        self.assertTrue((run / 'drafts' / '03-source.glb').is_file(), 'left behind by the crash')
+        self.assertFalse((run / 'drafts').exists(), 'the worker clears what the crashed stage left')
+        (run / 'drafts').mkdir()
+        (run / 'drafts' / '03-source.glb').write_bytes(box_glb())
         view = owner.get(f'/api/jobs/{jid}').json()
         self.assertEqual((view['draft_models'], view['models']), ([], []))
         self.assertFalse(view['downloads']['glb']['available'])
