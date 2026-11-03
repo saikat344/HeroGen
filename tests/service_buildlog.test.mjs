@@ -663,3 +663,52 @@ test('the starter place reads in plain words: its line in the rig step and its c
   assert.equal(copy.checkLine({name: 'place_feet_on_baseplate', ok: true, gate: true, op: '<=', m: {value: 0, limit: 0.001}}),
     'place_feet_on_baseplate (the feet stand on the baseplate): passed · measured 0, needs at most 0.001');
 });
+
+test('a reworded description is named in the Build log, quoting the rewrite from the job', () => {
+  const reworded = 'An original armoured robot in red plating with a plain glowing chest light';
+  const withText = job({p: 'passed'}, {kind: 'prompt', prompt: 'A transformer style robot, Ironman inspired',
+    reword: {status: 'used', stage: 'p', text: reworded}});
+  const events = [ev(1, 'step_start', 'p', {i: 1, of: 9}),
+    ev(1.1, 'call_start', 'p', {id: 'a', who: 'muse-image', what: 'sketch_design'}),
+    ev(3, 'call_end', 'p', {id: 'a', who: 'muse-image', what: 'sketch_design', outcome: 'failed', code: 'http_4xx', s: 1.9, usd: 0.01}),
+    ev(3.1, 'call_start', 'p', {id: 'b', who: 'muse-spark', what: 'reword_brief'}),
+    ev(5, 'call_end', 'p', {id: 'b', who: 'muse-spark', what: 'reword_brief', outcome: 'ok', s: 1.9, usd: 0.0012}),
+    ev(5.1, 'decision', 'p', {what: 'brief_reworded', ok: true}),
+    ev(5.2, 'call_start', 'p', {id: 'c', who: 'muse-image', what: 'sketch_design'}),
+    ev(9, 'call_end', 'p', {id: 'c', who: 'muse-image', what: 'sketch_design', outcome: 'ok', s: 3.8, usd: 0.01})];
+  const rows = rowsOf(buildModel(withText, events, {now: START + 10000}), 'p');
+  assert.deepEqual(rows.map(r => [r.state, r.text]), [
+    ['failed', 'Drawing a character design from your idea failed: the model service refused the request'],
+    ['passed', 'Reworded description ready'],
+    ['passed', `The image model refused your description under its content policy (brand or character names usually cause this). Reworded it to “${reworded}” and trying this step once more.`],
+    ['passed', 'Design drawing ready']]);
+  assert.equal(copy.callStart({who: 'muse-spark', what: 'reword_brief'}),
+    'rewording your description as an original character, without brand or character names');
+  // Without the job's text the line still says what happened, never a raw id.
+  assert.equal(copy.decisionLine({what: 'brief_reworded', ok: true}),
+    'The image model refused your description under its content policy (brand or character names usually cause this). Reworded it and trying this step once more.');
+  assert.equal(copy.decisionLine({what: 'reworded_brief_refused', ok: false}), 'The image model refused the reworded description too. The run stops here.');
+  assert.match(copy.decisionLine({what: 'brief_reword_failed', ok: false}), /could not be reworded automatically/);
+});
+
+test('the hero card says the description was reworded, and the edit box gets the rewrite', () => {
+  const text = 'An original armoured robot in red plating with a plain glowing chest light';
+  const used = {kind: 'prompt', prompt: 'A robot, Ironman inspired', reword: {status: 'used', stage: 'p', text}};
+  assert.deepEqual(copy.rewordNotice(used), {tone: 'info', title: 'We reworded your description',
+    text: `The image model refused your description under its content policy, which usually means it named a brand, franchise or trademarked character. We reworded it to: “${text}”`});
+  const again = copy.rewordNotice({...used, reword: {status: 'refused_again', stage: 'p', text}});
+  assert.equal(again.tone, 'warning');
+  assert.equal(again.text, `We reworded it once to “${text}”, but the image model refused that as well. Edit it and try again.`);
+  const failed = copy.rewordNotice({...used, reword: {status: 'rewrite_failed', stage: 'p', text: null}});
+  assert.match(failed.text, /did not come back\. Edit the description to remove brand or character names/);
+  assert.match(copy.rewordNotice({...used, reword: {status: 'rewrite_failed', stage: '1', text: 'A robot like Ironman'}}).text,
+    /The automatic rewrite, “A robot like Ironman”, still named a brand or character/);
+  assert.equal(copy.rewordNotice({kind: 'prompt', prompt: 'a knight', reword: null}), null);
+  assert.equal(copy.rewordNotice({kind: 'sketch', reword: {status: 'used', text}}), null);
+  assert.equal(copy.rewordNotice({...used, reword: {status: 'something_else', text}}), null);
+  assert.equal(copy.descriptionDraft({...used, reword: {status: 'refused_again', text}}), text);
+  assert.equal(copy.descriptionDraft({kind: 'prompt', prompt: 'a knight', reword: null}), 'a knight');
+  assert.equal(copy.descriptionDraft({kind: 'sketch', prompt: ''}), '');
+  // A long rewrite is cut on whole characters with an ellipsis.
+  assert.equal(copy.quoted('ab😀cd', 3), '“ab😀…”');
+});

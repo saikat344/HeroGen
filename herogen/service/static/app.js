@@ -6,7 +6,7 @@ import { landingGallery } from '/assets/landing.js';
 let landing;
 import { buildLog } from '/assets/buildlog.js';
 import { generationView, generationState, TERMINAL } from '/assets/generation.js';
-import { usd } from '/assets/buildlog-copy.js';
+import { descriptionDraft, rewordNotice, usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
 import { renderDownloads } from '/assets/downloads.js';
 import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
@@ -45,7 +45,7 @@ const variations = variationsView($, { api, select: openJob, key: idemKey,
         file = new File([await response.blob()], 'character.png', {type: 'image/png'});
       }
       returnToEntry(); history.pushState(null, '', '/'); entry.setFile(file);
-      $('#prompt').value = j.prompt || ''; $('#prompt').dispatchEvent(new Event('input'));
+      $('#prompt').value = descriptionDraft(j); $('#prompt').dispatchEvent(new Event('input'));
       $('#name').value = j.name || ''; $('#profile').value = j.profile; $('#go').focus();
     } catch (e) { banner(e.message); }
   }
@@ -192,7 +192,7 @@ function renderJob(j) {
   if (TERMINAL.has(j.state) && Number.isFinite(j.cost_usd)) bits.push(`${j.cost_is_estimate === false ? 'recorded' : 'estimated'} cost ${usd(j.cost_usd)}`);
   $('#detailSub').textContent = bits.join(' · ') + (j.prompt ? ` · “${j.prompt}”` : '');
   S.job = j; S.shown = j.id;
-  jobBanner(j);
+  jobBanner(j); rewordBanner(j);
   generation.update(j); liveLog.update(j);
   variations.update(j);
   // The downloads lead once there is something to download; Retry and Refine then step down to secondary.
@@ -235,6 +235,19 @@ function jobBanner(j) {
   $('#detailErrText').hidden = !copy[1]; $('#detailErrSafe').hidden = !copy[2];
   $('#detailRetry').hidden = kind === 'warning';
 }
+
+// The description reworded after a content-policy refusal: what it now says, and, when the run stopped on it, a
+// button that opens the description box filled with the rewrite.
+function rewordBanner(j) {
+  const note = rewordNotice(j), box = $('#rewordNote');
+  box.hidden = !note;
+  if (!note) return;
+  box.className = `banner banner--${note.tone}`;
+  box.querySelector('use').setAttribute('href', `/assets/icons/sprite.svg#i-${note.tone === 'info' ? 'info' : 'triangle-alert'}`);
+  $('#rewordNoteTitle').textContent = note.title; $('#rewordNoteText').textContent = note.text;
+  $('#rewordEdit').hidden = note.tone === 'info' || !TERMINAL.has(j.state);
+}
+$('#rewordEdit').addEventListener('click', () => { if (S.job) $('#changeIdea').click(); });
 
 // ---- status bar ------------------------------------------------------------------------------------------
 

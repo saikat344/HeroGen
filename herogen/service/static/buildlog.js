@@ -179,7 +179,7 @@ export function buildModel(job, events, {typical = null, now = Date.now(), trunc
         }
         if (e.kind === 'local') { said = copy.localLine(e); text = copy.upper(said); }
         else if (e.kind === 'decision') {
-          text = copy.decisionLine(e); state = e.ok === false ? 'kept' : e.ok ? 'passed' : 'info';
+          text = copy.decisionLine(e, job); state = e.ok === false ? 'kept' : e.ok ? 'passed' : 'info';
           // Which tries of each view were accepted ("other" when a try was dropped because another one passed).
           const tries = e.view && (accepted.get(e.view) || accepted.set(e.view, new Set()).get(e.view));
           if (tries && ['view_result', 'view_selected'].includes(e.what) && e.ok === true) tries.add(e.try);
