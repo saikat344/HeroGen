@@ -109,7 +109,7 @@ def precheck_main(run, cache: Path, original: str) -> int:
     """Check the brief up front and, when it names a brand or character, reword it before stage p. Writes
     precheck.json always and reword.json only for a usable rewrite; a failure is recorded (error class and the
     API's status and code) and never stops the job: stage p then draws the brief as written."""
-    from herogen.pipeline import reword
+    from herogen.pipeline import events, reword
     from herogen.pipeline.client import ApiError, ModelClient
 
     client = ModelClient(cache, mode="live")
@@ -122,7 +122,9 @@ def precheck_main(run, cache: Path, original: str) -> int:
 
     calls0 = len(client.log.calls)
     try:
-        rec = reword.precheck(client, original)
+        # As for the rewrite: the check's call events belong to stage p, which the runner names in the environment.
+        with events.step(None):
+            rec = reword.precheck(client, original)
     except Exception as e:  # noqa: BLE001  (recorded and shown as a warning; the brief is drawn as written)
         reword.write(run.path, {"status": "failed", **failure(e, calls0)}, reword.PRECHECK_FILE)
         print("precheck: failed; continuing with the brief as written", file=sys.stderr)
@@ -130,7 +132,8 @@ def precheck_main(run, cache: Path, original: str) -> int:
     if rec["status"] == "found":
         calls1 = len(client.log.calls)
         try:
-            rw = reword.rewrite(client, original, reason=reword.PRECHECK, names=rec["names_found"])
+            with events.step(None):
+                rw = reword.rewrite(client, original, reason=reword.PRECHECK, names=rec["names_found"])
         except Exception as e:  # noqa: BLE001  (recorded and shown; the brief is drawn as written)
             rec["rewrite"] = {"status": reword.FAILED, **failure(e, calls1)}
         else:
