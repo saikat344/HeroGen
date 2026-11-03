@@ -82,6 +82,19 @@ class RetryHeaderTest(unittest.TestCase):
         for s in (400, 401, 403, 404, 405, 410, 413, 422, 501, 505):
             self.assertFalse(retry.retryable(s), s)
 
+    def test_transient_is_a_5xx_the_client_retries_or_no_answer(self):
+        # The fast lane's one resend (and stage 3f's beauty resend): status and transport state only.
+        for status in (500, 502, 503, 504, 599):
+            self.assertTrue(retry.transient(ApiError("x", http_status=status)), status)
+        for status in (400, 401, 403, 404, 408, 409, 425, 429, 501, 505):
+            self.assertFalse(retry.transient(ApiError("x", http_status=status)), status)
+        for network in ("TimeoutError", "ConnectionResetError", "RemoteDisconnected", "ConnectionRefusedError"):
+            self.assertTrue(retry.transient(ApiError("x", network_error=network)), network)
+        self.assertFalse(retry.transient(ApiError("x", error_code="content_policy_violation", http_status=400)))
+        # No status and no transport failure (an unreadable answer, no call slot), whatever the message says.
+        self.assertFalse(retry.transient(ApiError("HTTP 503: timed out")))
+        self.assertFalse(retry.transient(client_mod.ReplayMiss("HTTP 502")))
+
     def test_retry_after_seconds_or_http_date(self):
         now = 1_800_000_000.0
         self.assertEqual(retry.retry_after_s({"Retry-After": "7"}, now), 7.0)

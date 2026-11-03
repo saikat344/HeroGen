@@ -24,11 +24,18 @@ without an answer coming back (it timed out or was cut off on our side) is recor
 as outcome "unknown": it may be billed, so the cost estimate counts it. A Muse Spark call is priced by the
 token usage it reports, with a count it did not report at its bound (`answer_cost_usd`): so a failed answer
 that is retried is priced from its usage, and an attempt with no answer at its output-token cap.
+
+The fast lane makes one attempt per request, except that a Muse Image call that fails with a transient error
+(`retry.transient`: an HTTP 5xx except 501 and 505, or no HTTP answer) is resent once, identically, through the
+same hooks (`ModelClient._answered_post`). A replayed or cached call never reaches the network, so it never
+resends.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import hashlib
 import http.client
 import io
@@ -42,7 +49,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import numpy as np
 from PIL import Image
@@ -89,11 +96,14 @@ class ReplayMiss(ClientError):
 
 class ApiError(ClientError):
     """The Model API itself failed: an HTTP or network error after the retries, or a response that can't be
-    read. Never cached as a result, so a replay never repeats it. A stage stops on it, with two kinds of
-    caller that record it instead: the held-out face cue, which then sends the view to human review, and fast
-    stage 3f's beauty-only requests (beauty references and the enhanced first try of a view). Those resend a
-    request once after a timeout, a dropped connection or an HTTP 5xx, and when it still fails, the view falls
-    back to its plain requests (`herogen.blender.refine.fast`).
+    read. Never cached as a result, so a replay never repeats it. In the fast lane, a Muse Image call raises
+    it only after its one resend of a transient failure (`retry.transient`: an HTTP 5xx except 501 and 505, or
+    no HTTP answer) failed too, or at once for anything else (a 4xx such as a content-policy refusal, an
+    unreadable answer). A stage stops on it, with two kinds of caller that record it instead: the held-out face
+    cue, which then sends the view to human review, and fast stage 3f's beauty-only requests (beauty references
+    and the enhanced first try of a view). Their SAM queries are resent once after a transient failure there
+    (their image edits already were, by the client), and when one still fails, the view falls back to its plain
+    requests (`herogen.blender.refine.fast`).
 
     Classification attributes come from response fields and transport state, never from message text:
     ``http_status`` and ``error_code`` from the last answer, and ``network_error``, the class of the transport
@@ -106,6 +116,28 @@ class ApiError(ClientError):
         self.error_code = error_code
         self.transient = transient
         self.network_error = network_error
+
+
+# Told of the first failure when a fast Muse Image call is resent (`observe_resend`), within one thread's call.
+_resend_observer: contextvars.ContextVar[Callable[[ApiError], None] | None] = contextvars.ContextVar(
+    "herogen_resend_observer", default=None)
+
+
+@contextlib.contextmanager
+def observe_resend(callback: Callable[[ApiError], None]) -> Iterator[None]:
+    """Call ``callback`` with the first attempt's `ApiError` whenever a call made inside this block is resent
+    (`ModelClient.resends_transient`), just before the resend goes out."""
+    token = _resend_observer.set(callback)
+    try:
+        yield
+    finally:
+        _resend_observer.reset(token)
+
+
+def _failure(exc: ApiError) -> str:
+    """A short failure class for a message: the answer's HTTP status, else the transport failure."""
+    status = exc.http_status
+    return f"HTTP {status}" if type(status) is int else str(exc.network_error or "error")
 
 
 @dataclass
@@ -220,6 +252,9 @@ class ModelClient:
     """Muse Image generate/edit, SAM 3.1 text-prompt segmentation and Muse Spark image comparison, through one
     record/replay cache."""
 
+    # Set on the per-request copy while a fast Muse Image call is resent: the first attempt's failure class.
+    _resent_after: str | None = None
+
     def __init__(self, cache_dir: Path | str, mode: str = "replay", log: CallLog | None = None, *,
                  policy: retry.RetryPolicy | None = None, limiter: retry.SharedLimiter | None = None,
                  before_api_attempt: Callable[[str], None] | None = None, fast: bool = False) -> None:
@@ -239,6 +274,11 @@ class ModelClient:
         # Called with the billable estimate once an attempt has an explicit outcome. Unresolved attempts
         # never call this hook, so their caller-owned reservations remain charged.
         self.after_api_attempt: Callable[[float], None] | None = None
+
+    def resends_transient(self, model: str) -> bool:
+        """Whether a live call to ``model`` is resent once, identically, after a `retry.transient` failure: fast
+        Muse Image calls only. SAM 3.1 and Muse Spark keep the fast lane's single attempt."""
+        return self.fast and self.mode == "live" and model == IMAGE_MODEL
 
     # ---- public calls -------------------------------------------------------------------------------
 
@@ -440,15 +480,53 @@ class ModelClient:
         return img
 
     def _answered_post(self, endpoint, body, *, model, kind, key, **kwargs):
-        """Keep injected transports accountable too; the real transport counts before its bookkeeping."""
+        """Keep injected transports accountable too; the real transport counts before its bookkeeping.
+
+        A fast Muse Image call (`resends_transient`) that fails with a `retry.transient` error is resent once,
+        identically: another `_post`, so the resend passes the budget, reservation, limiter and ledger hooks like
+        the first attempt. It is a warning, a ``call_retry`` build-log event (attempt 1 of 2, the first failure's
+        ``code``) and call-log rows marked ``resend`` with attempt 2. Anything else raises at once."""
         start = len(self.log.calls)
-        resp = self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
+        resent = False
+        try:
+            resp = self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
+        except ApiError as first:
+            if not (self.resends_transient(model) and retry.transient(first)):
+                raise
+            start, resent = len(self.log.calls), True   # only the resend's own rows can count its answer
+            resp = self._resend(first, endpoint, body, model=model, kind=kind, key=key, **kwargs)
         if not any(c["key"] == key and not c["cached"] and c.get("outcome") != "unknown"
                    for c in self.log.calls[start:]):
             usage_cost = kwargs.get("usage_cost_usd")
             self.log.add(model, kind, key, cached=False,
                          cost_usd=usage_cost(resp.get("usage")) if usage_cost else None)
+            if resent:
+                self.log.calls[-1].update(attempt=2, resend=True)
         return resp
+
+    def _resend(self, first: ApiError, endpoint, body, *, model, kind, key, **kwargs):
+        """The one resend of a fast Muse Image call after ``first``, a transient failure (`_answered_post`)."""
+        failure = _failure(first)
+        log.warning("%s %s attempt 1/2 failed (%s); resending once", model, endpoint, failure)
+        ev = events.current_call()
+        if ev is not None:
+            status = first.http_status
+            ev.emit("call_retry", attempt=1, of=2, why="transient",
+                    code=ev.code or (events.code_for_status(status) if type(status) is int else
+                                     "timeout" if first.network_error == "TimeoutError" else "network"),
+                    m={"http_status": status} if type(status) is int else None)
+            ev.outcome = None
+        observer = _resend_observer.get()
+        if observer is not None:
+            observer(first)
+        mark = len(self.log.calls)
+        self._resent_after = failure
+        try:
+            return self._post(endpoint, body, model=model, kind=kind, key=key, **kwargs)
+        finally:
+            self._resent_after = None
+            for call in self.log.calls[mark:]:
+                call.update(attempt=2, resend=True)
 
     def _post(self, endpoint: str, body: dict[str, Any], *, model: str, kind: str, key: str,
               usage_cost_usd: Callable[[Any], float] | None = None) -> dict[str, Any]:
@@ -501,7 +579,8 @@ class ModelClient:
             price = (usage_cost_usd(None) + CONTEXT_TOKENS[model] * PRICE_PER_MTOK_USD[model][0] / 1e6
                      if usage_cost_usd else PRICE_PER_IMAGE_USD[model])
             receipt = ledger.sent(self.cache_dir, model=model, endpoint=endpoint, key=key,
-                                  timeout=max(0.0, deadline - policy.clock()), price_usd=price, attempt=attempt)
+                                  timeout=max(0.0, deadline - policy.clock()), price_usd=price,
+                                  attempt=attempt + (self._resent_after is not None))
             try:
                 req = urllib.request.Request(f"{API_BASE}/{endpoint}", data=data, method="POST", headers={
                     "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
@@ -566,8 +645,8 @@ class ModelClient:
                 if len(self.log.calls) == log_start:
                     self.log.add(model, kind, key, cached=False, outcome=outcome, cost_usd=attempt_cost)
                 for call in self.log.calls[log_start:]:
-                    call.update(started=began, wall_seconds=round(seconds, 6), attempt=attempt,
-                                cost_usd=round(attempt_cost, 6))
+                    call.update(started=began, wall_seconds=round(seconds, 6),
+                                attempt=attempt + (self._resent_after is not None), cost_usd=round(attempt_cost, 6))
                     call.setdefault("outcome", outcome)
             final = outcome in ("ok", "unreadable") or not retry.retryable(status, paid_edit=paid_edit) \
                 or attempt == policy.max_attempts
@@ -603,6 +682,10 @@ class ModelClient:
                 ev.outcome = None
             policy.sleep(wait)
         network_error = network_class if status is None else None   # no HTTP answer: the transport failed
+        if self._resent_after is not None:   # the fast lane's one resend failed too; never resent again
+            raise ApiError(f"{endpoint} failed on its resend: {last} (the first attempt failed with "
+                           f"{self._resent_after})", http_status=status, error_code=error_code,
+                           transient=not self.fast, network_error=network_error)
         if not retry.retryable(status, paid_edit=paid_edit):
             raise ApiError(f"{endpoint} failed: {last} (not retried)", http_status=status, error_code=error_code)
         if attempt == policy.max_attempts:
