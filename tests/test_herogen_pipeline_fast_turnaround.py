@@ -163,6 +163,40 @@ class FastTurnaroundTests(unittest.TestCase):
         self.assertEqual(record["details"]["attempts"][0]["split_source"], "sam-3.1:character")
         self.assertFalse(self.run.exists("views/front.png"))
 
+    def drafted(self, sheets):
+        """Run stage 2, noting each draft as it is written: (path, mode, files in drafts/ then)."""
+        seen, save = [], stages.save_draft
+        def spy(run, rel, img):
+            save(run, rel, img)
+            seen.append((rel, img.mode, sorted(p.relative_to(Path(run) / "drafts").as_posix()
+                                               for p in (Path(run) / "drafts").rglob("*.png"))))
+        with mock.patch.object(stages, "save_draft", spy):
+            try:
+                return self.execute(sheets), seen
+            except ValueError:
+                return None, seen
+
+    def test_drafts_show_each_sheet_and_its_cut_out_views_before_the_stage_ends(self):
+        record, seen = self.drafted([self.bad, self.good])
+        self.assertTrue(record["ok"])
+        rels = [rel for rel, _, _ in seen]
+        self.assertEqual(rels.count("02-turnaround.png"), 2, "the recovery sheet replaces the first draft")
+        self.assertIn("02-top-drawn.png", rels)
+        self.assertEqual([r for r in rels if r.startswith("views/")], [f"views/{n}.png" for n in stages.ALL_VIEWS])
+        self.assertLess(rels.index("02-turnaround.png"), rels.index("views/front.png"))
+        self.assertEqual({mode for rel, mode, _ in seen if rel.startswith("views/")}, {"RGBA"})
+        self.assertIn("views/front.png", seen[rels.index("views/left.png")][2], "drafts are on disk while it runs")
+        self.assertFalse((self.run.path / "drafts").exists(), "the stage clears its drafts when it ends")
+        self.assertEqual(sorted(record["outputs"]), sorted(o for o in record["outputs"] if not o.startswith("drafts")))
+
+    def test_a_failed_sheet_leaves_no_drafts(self):
+        (self.run.path / "drafts").mkdir()
+        (self.run.path / "drafts" / "02-turnaround.png").write_bytes(b"stale")
+        record, seen = self.drafted([self.bad, self.bad])
+        self.assertIsNone(record)
+        self.assertEqual([rel for rel, _, _ in seen if rel == "02-turnaround.png"], ["02-turnaround.png"] * 2)
+        self.assertFalse((self.run.path / "drafts").exists())
+
     def test_unusable_first_sheet_recovers_with_same_prompt_and_new_sample(self):
         record = self.execute([self.bad, self.good])
         self.assertTrue(record["ok"])

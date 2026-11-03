@@ -2568,7 +2568,8 @@ An event that does not fit is dropped; writing one never fails a stage.
   attempt wrote after a newer one began. `done` is true once the job and its export have finished and the file is
   read to its end (on Modal, after a short grace for the volume view to refresh). `.jsonl` is not a run-file type,
   so the raw file is never served.
-- The fake runner writes a representative event sequence for every stage, paced by its delay.
+- The fake runner writes a representative event sequence for every stage, paced by its delay. It also writes stage 2's drafts as a real
+  run does.
 
 ### Authentication and administration
 
@@ -3146,6 +3147,16 @@ These files use the existing owner-checked `/runs/r1/<job>/<path>` route. The GL
 works before job success, and supports an `artifact` query naming an offered model. Both routes validate
 supplied content-hash `v` tokens and retain private, no-store responses. Unlisted numbered GLBs and an
 unpassed final refinement are refused. Gallery routes continue to serve only configured public inputs.
+
+Stage 2 shows its images before it ends. As each call returns it writes drafts under `drafts/` in the run folder
+(`runfolder.save_draft`, atomically): the sheet, the drawn top view, and each view cut out on its mask once the sheet
+is split. A new sheet (recovery or retry) replaces the sheet and removes the views cut from the last one. The stage
+clears `drafts/` when it starts and when it ends, passed or not; drafts are never outputs, so records, redo copies
+and the replay cache are unchanged. On Modal `worker.EventPump` mirrors `drafts/` with the build log. The job API
+lists them as `draft_images` (key to versioned URL) only while stage 2's row is running; `images` keeps its meaning.
+The workbench shows the artwork under a light sweep with five view slots, then the draft sheet, then each cut-out
+view with its outline, then a Front-Right-Back-Left turntable until the first 3D shape fades in over it. A user's
+own pick is kept, finished jobs show no reveal, and reduced motion holds the front view without sweep or scan.
 
 The workbench labels the first model “First 3D shape” and explains that its texture is still being refined.
 An untouched viewer follows new versions; pointer, wheel or keyboard interaction keeps the chosen version

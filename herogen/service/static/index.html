@@ -248,8 +248,11 @@
             </div>
           </div>
           <div class="viewer" id="viewer" data-mode="empty">
-            <div class="viewer__media">
+            <div class="viewer__media" id="viewerMedia">
               <img id="artboardImage" class="viewer__image" alt="" hidden>
+              <span id="artSweep" class="viewer__sweep" aria-hidden="true" hidden></span>
+              <div id="turntable" class="viewer__turn" role="img" hidden><div class="viewer__turn-frames" id="turnFrames"></div></div>
+              <div id="viewSlots" class="view-slots" hidden><p id="viewSlotsNote" class="view-slots__note">Studying your hero from every side</p><ol class="view-slots__list" aria-label="Character views as they are drawn"><li class="view-slot" data-view="front"><span class="view-slot__img"></span>Front</li><li class="view-slot" data-view="right"><span class="view-slot__img"></span>Right</li><li class="view-slot" data-view="back"><span class="view-slot__img"></span>Back</li><li class="view-slot" data-view="left"><span class="view-slot__img"></span>Left</li><li class="view-slot" data-view="top"><span class="view-slot__img"></span>Top</li></ol></div>
               <div id="artboardEmpty" class="viewer__empty"><span class="viewer__silhouette" aria-hidden="true"><span class="skeleton viewer__silhouette-head"></span><span class="skeleton viewer__silhouette-body"></span></span><p id="artboardEmptyText" class="viewer__empty-title">Your first image appears here in about a minute.</p><p id="artboardIdea" class="viewer__idea" hidden></p></div>
             </div>
             <div id="previewWrap" class="viewer__canvas" hidden><canvas id="preview" aria-label="3D preview of the body. Drag to orbit, scroll to zoom, or use the Front, Side and Back buttons below."></canvas></div>
@@ -265,7 +268,7 @@
             </div>
             <div id="imageError" class="viewer__error" role="status" hidden><svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg><p>This image could not be loaded.</p><button type="button" id="retryImage" class="btn btn--secondary btn--s"><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-ccw"></use></svg>Try again</button></div>
             <div id="previewError" class="viewer__error" role="status" hidden><svg class="icon icon--l" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-triangle-alert"></use></svg><p>The 3D preview could not be loaded. You can still download the file or open the full viewer.</p></div>
-            <p id="modelPending" class="viewer__pending" role="status" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-loader-circle"></use></svg>3D shape on the way</p>
+            <p id="modelPending" class="viewer__pending" role="status" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-loader-circle"></use></svg><span id="modelPendingText">3D shape on the way</span></p>
             <p id="orbitHint" class="viewer__hint" hidden><svg class="icon icon--s" aria-hidden="true"><use href="/assets/icons/sprite.svg#i-rotate-3d"></use></svg>Drag to orbit · scroll to zoom</p>
             <div class="viewer__dock" id="viewerDock" role="group" aria-label="Views and shading" hidden>
               <div id="images" class="dock-group" role="group" aria-label="Available character images"></div>

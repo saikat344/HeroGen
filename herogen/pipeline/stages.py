@@ -22,7 +22,7 @@ from herogen.pipeline import events, imaging, inputs
 from herogen.pipeline.client import (
     COST_BASIS, IMAGE_MODEL, SAM_MODEL, ApiError, ClientError, ModelClient, SamInstance, call_cost,
 )
-from herogen.pipeline.runfolder import RunFolder, now_iso
+from herogen.pipeline.runfolder import RunFolder, clear_drafts, now_iso, save_draft
 from herogen.pipeline.fast import enabled, informational
 
 SAM_TEXTS = ("character", "person")  # tried in order; "person" misses armoured heroes on some sheets
@@ -878,6 +878,21 @@ class _TurnaroundRequests:
         self.close()
 
 
+def _draft_sheet(run: RunFolder, sheet: Image.Image) -> None:
+    """Show a new sheet at once; the views cut from an earlier sheet no longer belong to it."""
+    clear_drafts(run.path, *(f"views/{n}.png" for n in ALL_VIEWS))
+    save_draft(run.path, "02-turnaround.png", sheet)
+
+
+def _draft_views(run: RunFolder, sq: dict[str, Any], names=SIDE_VIEWS) -> None:
+    """Each view cut out on its own mask, so the page can trace the outline that was found."""
+    for name in names:
+        if (v := sq.get(name)) and v.get("image") is not None and v.get("mask") is not None:
+            img = v["image"].convert("RGBA")
+            img.putalpha(imaging.to_mask_image(v["mask"]))
+            save_draft(run.path, f"views/{name}.png", img)
+
+
 def stage2_turnaround(
     run: RunFolder, client: ModelClient, *, height_units: float = HEIGHT_UNITS, attempts: int = 4,
     concurrency: int = 1
@@ -902,7 +917,11 @@ def stage2_turnaround(
                                  prompt=prompt, size=version.step("sheet")["params"]["size"]) as requests:
             return _stage2(st, run, client, height_units, attempts, prompt, version, requests)
 
-    record = _stopping_on_client_error(execute, st)
+    clear_drafts(run.path)
+    try:
+        record = _stopping_on_client_error(execute, st)
+    finally:
+        clear_drafts(run.path)
     if st.fast and not record["ok"]:
         raise ValueError(record["error"])
     return record
@@ -1025,6 +1044,7 @@ def _fast_sheet_views(st: _Stage, client: ModelClient, cover: Image.Image, promp
         tried.append(entry)
         # Model errors propagate; only local extraction failures justify another sheet.
         sheet = client.edit_image(prompt, [cover], size=size_param, attempt=attempt)
+        _draft_sheet(st.run, sheet)
         bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
         thr = imaging.threshold_mask(sheet)
         instances, text = sam_instances(client, sheet)
@@ -1091,16 +1111,23 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             # The top depends only on the cover. Share receipts/cache, but give it its own purpose.
             top_client = copy.copy(client)
             top_client.purpose = "top view"
+            def draw_top():
+                drawn = top_client.edit_image(TOP_PROMPT, [cover], size="1024x1024")
+                save_draft(run.path, "02-top-drawn.png", drawn)
+                return drawn
+
             with ThreadPoolExecutor(max_workers=1) as pool:
-                top_request = pool.submit(top_client.edit_image, TOP_PROMPT, [cover], size="1024x1024")
+                top_request = pool.submit(draw_top)
                 extracted = _fast_sheet_views(st, client, cover, prompt, step["params"]["size"], tried)
             raw_top = top_request.result()
             attempt, sheet, bg, split, n_inst, size, sq, assignment = extracted
             if sq:
                 orient, orient_notes, assignment["side_fixes"] = fast_orient_sides(sq, assignment)
+                _draft_views(run, sq)
         else:
             sheet = (client.edit_image(prompt, [cover], size=step["params"]["size"], attempt=attempt)
                      if requests is None else requests.sheet(attempt))
+            _draft_sheet(run, sheet)
             bg = tuple(int(c) for c in imaging.background_colour(np.array(sheet)))
             thr = imaging.threshold_mask(sheet)
             fig, fig_method, n_inst = sam_figure_mask(client, sheet)
@@ -1112,6 +1139,7 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
                 named, assignment = assign_views(split["views"])
                 size, sq = square_views(named, bg)
                 orient, orient_notes, assignment["side_fixes"] = orient_sides(sq)
+                _draft_views(run, sq)
         side_checks = C.side_view_checks(
             {n: v["mask"] for n, v in sq.items()}, figures_found=len(split["runs"])
         ) + _coverage_checks(split)
@@ -1127,6 +1155,8 @@ def _stage2(st: _Stage, run: RunFolder, client: ModelClient, height_units: float
             args = (client, cover, sq, size, bg, height_units)
             top, top_raw, top_checks, top_details, top_notes = (
                 _sheet_top(*args, raw=raw_top) if st.fast else _sheet_top(*args, requests))
+            if top is not None:
+                _draft_views(run, {"top": top}, ("top",))
             # Replace the preliminary side-only carve with the carve of exactly the masks saved below.
             side_checks = [c for c in side_checks if c["name"] != CARVE_GATE] + top_checks
         attempt_details = {

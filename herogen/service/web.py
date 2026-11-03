@@ -42,6 +42,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from herogen.pipeline import events as buildlog
+from herogen.pipeline.runfolder import DRAFTS
 from herogen.service import bundle, labapi, pages
 from herogen.service.analytics import (
     DEFAULT_DAYS,
@@ -84,6 +85,10 @@ DOWNLOADS = ("glb", "roblox")
 # What a hero card shows, best first: (source, stage that writes it, run-relative file). The uploaded sketch, kept
 # outside the run folder, is the last fallback for an upload whose stage 0 has not recorded yet.
 THUMB_SOURCES = (("cover", "1", "01-cover.png"), ("sketch", "0", "00-sketch.png"))
+# The character views step's drafts (`herogen.pipeline.stages.stage2_turnaround`), by image key: the views are
+# cut out on their masks, and `top_drawn` is the drawn top view before it is fitted to the others.
+DRAFT_IMAGES = {"turnaround": "02-turnaround.png", "top_drawn": "02-top-drawn.png",
+                **{v: f"views/{v}.png" for v in ("front", "right", "back", "left", "top")}}
 THUMB_CACHE = "private, max-age=31536000, immutable"
 GALLERY_THUMBS = "gallery-thumbs"   # under the data folder: the published gallery itself is read-only
 _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
@@ -801,7 +806,7 @@ class App:
                 "roblox_message": files['downloads']['roblox'].get('reason', ''),
                 "export_message": job["export_message"],
                 "cost_detail": json.loads(job["cost_detail"]) if job["cost_detail"] else None,
-                "code_commit": job["code_commit"] or None, "images": files["images"],
+                "code_commit": job["code_commit"] or None, "images": files["images"], "draft_images": files["draft_images"],
                 "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
@@ -847,6 +852,11 @@ class App:
             for path in sorted((run / 'views').glob('*.png')):
                 if image_ready(path.stem) and (a := asset(f'views/{path.name}')):
                     images.setdefault(path.stem, a['url'])
+            # While the character views step runs, the images it has drawn so far (not yet checked); the step
+            # clears them when it ends, and a step that no longer runs never shows them.
+            drafts = {}
+            if rows.get('2', {}).get('state') == 'running':
+                drafts = {k: a['url'] for k, rel in DRAFT_IMAGES.items() if (a := asset(f'{DRAFTS}/{rel}'))}
             progress = read_progress(run)
             reworded = None
             if f := st.run_file(user_id, job['id'], 'reword.json'):
@@ -906,7 +916,7 @@ class App:
             can_redo = {'cover': '0' in passed and bool(images.get('sketch')),
                         'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
                         'texture': can_texture}
-        return {"images": images, "downloads": downloads, "readme": readme, "models": models, "refinement": progress,
+        return {"images": images, "draft_images": drafts, "downloads": downloads, "readme": readme, "models": models, "refinement": progress,
                 "reword": reworded,
                 "can_texture": can_texture, "can_redo": can_redo,
                 "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),
