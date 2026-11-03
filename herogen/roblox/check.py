@@ -406,3 +406,155 @@ def _check_rig(body: Path, rig_path: Path, glb_name: str) -> list[dict]:
     add("meshes_bound", meshes, None, True,
         "sections with a MeshId (0 until bind_meshes.luau runs in Studio)", gate=False)
     return checks
+
+
+# --- the starter place --------------------------------------------------------------------------------------
+# Restated, not imported from place.py, for the same reason as R15 above.
+PLACE_SERVICES = ("Workspace", "Lighting", "StarterPlayer")
+STARTER_MARKER = "HeroGenStarterPlace"
+
+
+def check_place(place_path: Path, rig_path: Path) -> list[dict]:
+    """Every check of the starter place at `place_path` against the rig file at `rig_path`: the place parses,
+    holds the services, a baseplate, a spawn, the marker and exactly that rig, moved rigidly (turned about the
+    vertical only) to stand on the baseplate clear of the spawn, facing it."""
+    try:
+        return _check_place(Path(place_path), Path(rig_path))
+    except OSError as exc:
+        raise RobloxExportError(f"cannot read {exc.filename or 'an input'}: {exc.strerror or exc}") from None
+
+
+def _check_place(place_path: Path, rig_path: Path) -> list[dict]:
+    checks: list[dict] = []
+
+    def add(name, value, threshold, passed, detail="", rule="=="):
+        checks.append({"name": "place_" + name, "value": value, "threshold": threshold,
+                       "rule": rule if threshold is not None else None, "pass": bool(passed), "gate": True,
+                       "detail": detail})
+
+    def tol(name, value, threshold, detail=""):
+        value = float(value)
+        add(name, round(value, 9), threshold, np.isfinite(value) and value <= threshold, detail, rule="<=")
+
+    def count(name, value, want, detail=""):
+        add(name, value, want, value == want, detail)
+
+    try:
+        root = ET.parse(place_path).getroot()
+    except ET.ParseError as exc:
+        add("xml_well_formed", 0, 1, False, str(exc))
+        return checks
+    add("xml_well_formed", 1, 1, root.tag == "roblox" and root.get("version") == "4",
+        f"root <{root.tag} version={root.get('version')!r}>")
+    tops = [Inst(el, None) for el in root.findall("Item")]
+    every = [i for t in tops for i in t.walk()]
+    bad = [f"{i.name or i.cls}.{k}" for i in every for k, v in i.props.items()
+           if isinstance(v, tuple) and v[:1] == ("malformed",)]
+    if bad:
+        add("xml_values_valid", len(bad), 0, False, f"unreadable property values: {', '.join(bad[:5])}")
+        return checks
+    by_ref = {i.ref: i for i in every if i.ref}
+    dangling = [f"{i.name}.{k}" for i in every for k, v in i.props.items()
+                if isinstance(v, tuple) and v[:1] == ("ref",) and v[1] not in by_ref]
+    count("referents_resolve", int(len(by_ref) == len(every) and not dangling), 1,
+          "; ".join(x for x in ("missing or repeated referent" if len(by_ref) != len(every) else "",
+                                f"dangling {dangling[:5]}" if dangling else "") if x))
+
+    services = {}
+    for t in tops:
+        services.setdefault(t.cls, []).append(t)
+    have = [s for s in PLACE_SERVICES if len(services.get(s, ())) == 1 and services[s][0].name == s]
+    count("services", len(have), len(PLACE_SERVICES),
+          ", ".join(s for s in PLACE_SERVICES if s not in have) or "Workspace, Lighting, StarterPlayer, once each")
+    ws = services["Workspace"][0] if "Workspace" in have else None
+    if ws is None:
+        return checks
+
+    base = ws.child("Baseplate", "Part")
+    base_ok = base is not None and base.props.get("Anchored") is True and base.size() is not None
+    count("baseplate", int(base_ok), 1, "an anchored Part named Baseplate in Workspace")
+    floor = (base.cframe()[1, 3] + _abs_extent(base.cframe(), base.size())[1] / 2) if base_ok else None
+
+    spawns = [c for c in ws.walk() if c.cls == "SpawnLocation"]
+    sp = spawns[0] if len(spawns) == 1 else None
+    sp_ok = sp is not None and sp.props.get("Anchored") is True and sp.size() is not None
+    count("spawn", int(sp_ok), 1, f"{len(spawns)} SpawnLocation; want one, anchored")
+    if sp_ok and floor is not None:
+        bottom = sp.cframe()[1, 3] - _abs_extent(sp.cframe(), sp.size())[1] / 2
+        tol("spawn_on_baseplate", abs(bottom - floor), POS_TOL, "studs between the spawn's bottom and the floor")
+
+    marker = [c for s in services.get("ServerStorage", ()) for c in s.children if c.name == STARTER_MARKER]
+    count("marker", int(len(marker) == 1 and marker[0].cls == "BoolValue" and marker[0].props.get("Value") is True),
+          1, f"ServerStorage.{STARTER_MARKER}: a BoolValue set to true")
+    sps = services.get("StarterPlayer", [])
+    count("starter_player_empty", sum(len(s.children) for s in sps), 0,
+          "StarterCharacter is installed by bind_meshes.luau after the meshes are bound, never by the file")
+
+    # the rig: the same instances as the .rbxmx, its parts moved by one rigid transform
+    try:
+        rig_root = ET.parse(rig_path).getroot().find("Item")
+    except ET.ParseError:
+        rig_root = None
+    if rig_root is None:
+        count("rig_present", 0, 1, f"{rig_path.name} holds no model")
+        return checks
+    want = Inst(rig_root, None)
+    rigs = [c for c in ws.children if c.cls == "Model" and c.name == want.name]
+    count("rig_present", len(rigs), 1, f"Model {want.name} directly in Workspace")
+    if len(rigs) != 1:
+        return checks
+    rig = rigs[0]
+    got_all, want_all = list(rig.walk()), list(want.walk())
+    same_tree = [i.cls + ":" + i.name for i in got_all] == [i.cls + ":" + i.name for i in want_all]
+    if not same_tree:
+        count("rig_matches_file", 0, 1, f"the place's {rig.name} differs from {rig_path.name} in its instances")
+        return checks
+    # a Ref matches when it points at the same position in the two trees (referent numbers differ)
+    g_ref = {i.ref: n for n, i in enumerate(got_all)}
+    w_ref = {i.ref: n for n, i in enumerate(want_all)}
+    g_hrp, w_hrp = rig.child("HumanoidRootPart"), want.child("HumanoidRootPart")
+    if g_hrp is None or w_hrp is None:
+        count("rig_matches_file", 0, 1, "no HumanoidRootPart")
+        return checks
+    t = g_hrp.cframe() @ _inv(w_hrp.cframe())
+    worst_pos, worst_rot, differ = 0.0, 0.0, []
+    for g, w in zip(got_all, want_all):
+        for k in set(g.props) | set(w.props):
+            gv, wv = g.props.get(k), w.props.get(k)
+            if g.parent is rig and k == "CFrame" and g.cls in BASEPARTS:
+                d, r = _cf_err(g.cframe(), t @ w.cframe())
+                worst_pos, worst_rot = max(worst_pos, d), max(worst_rot, r)
+            elif isinstance(gv, tuple) and gv[:1] == ("ref",) or isinstance(wv, tuple) and wv[:1] == ("ref",):
+                gt = g_ref.get(gv[1]) if isinstance(gv, tuple) else None
+                wt = w_ref.get(wv[1]) if isinstance(wv, tuple) else None
+                if gt is None or wt is None or gt != wt:
+                    differ.append(f"{g.name}.{k}")
+            elif gv != wv:
+                differ.append(f"{g.name}.{k}")
+    count("rig_matches_file", int(not differ), 1,
+          f"every value as in {rig_path.name} except the parts' CFrames" + (f"; differ: {differ[:5]}" if differ else ""))
+    tol("rig_rigid_move_position", worst_pos, REST_TOL, "studs, each part against one transform of the file's rig")
+    tol("rig_rigid_move_rotation", worst_rot, ROT_TOL)
+    up = t[:3, :3] @ np.array([0.0, 1.0, 0.0])
+    tol("rig_upright", float(np.abs(up - [0.0, 1.0, 0.0]).max()), ROT_TOL, "the move turns about the vertical only")
+
+    parts = [c for c in rig.children if c.cls in BASEPARTS and c.size() is not None]
+    feet = [c for c in parts if c.name in ("LeftFoot", "RightFoot")]
+    if floor is not None and len(feet) == 2:
+        lowest = min(f.cframe()[1, 3] - _abs_extent(f.cframe(), f.size())[1] / 2 for f in feet)
+        tol("feet_on_baseplate", abs(lowest - floor), POS_TOL, "studs between the lowest foot and the floor")
+    else:
+        add("feet_on_baseplate", None, POS_TOL, False, "needs the baseplate and both feet", rule="<=")
+    if sp_ok and parts:
+        lo = np.min([p.cframe()[:3, 3] - _abs_extent(p.cframe(), p.size()) / 2 for p in parts], axis=0)
+        hi = np.max([p.cframe()[:3, 3] + _abs_extent(p.cframe(), p.size()) / 2 for p in parts], axis=0)
+        s_c, s_h = sp.cframe()[:3, 3], _abs_extent(sp.cframe(), sp.size()) / 2
+        gap = max(float(s_c[0] - s_h[0] - hi[0]), float(lo[0] - s_c[0] - s_h[0]),
+                  float(s_c[2] - s_h[2] - hi[2]), float(lo[2] - s_c[2] - s_h[2]))
+        add("rig_clear_of_spawn", round(gap, 6), 0.0, gap > 0.0, "studs between the rig's and the spawn's footprints",
+            rule=">")
+        fwd = t[:3, :3] @ np.array([0.0, 0.0, -1.0])  # the rig faces -Z in its own file
+        to_spawn = np.array([s_c[0] - g_hrp.cframe()[0, 3], 0.0, s_c[2] - g_hrp.cframe()[2, 3]])
+        cos = float(fwd @ to_spawn / max(np.linalg.norm(to_spawn), 1e-9))
+        add("rig_faces_spawn", round(cos, 4), 0.9, cos > 0.9, "cos(the rig's forward, the way to the spawn)", rule=">")
+    return checks

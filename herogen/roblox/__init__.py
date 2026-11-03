@@ -10,7 +10,8 @@ Frames (all in studs):
 
 A MeshPart in a model file can only reference an uploaded mesh asset; it cannot carry the geometry. The rig
 is therefore written with every MeshId empty, and `bind_meshes.luau` binds the meshes Studio's importer makes
-from `high.glb` onto it. See docs/ARCHITECTURE.md, "Roblox export".
+from `high.glb` onto it. The same rig also ships inside a starter place (`HeroGen-Starter.rbxlx`), where the bind
+script also makes it the player's character. See docs/ARCHITECTURE.md, "Roblox export".
 """
 from __future__ import annotations
 
@@ -44,11 +45,14 @@ HRP_SIZE = (2.0, 2.0, 1.0)
 
 RIG_NAME = "HeroGen-R15"
 RIG_FILE = RIG_NAME + ".rbxmx"
+PLACE_FILE = "HeroGen-Starter.rbxlx"
+# A BoolValue in the starter place's ServerStorage; bind_meshes.luau installs the StarterCharacter only where it is.
+STARTER_MARKER = "HeroGenStarterPlace"
 BIND_FILE = "bind_meshes.luau"
 RIG_TEST_FILE = "rig_test.server.luau"
 README_FILE = "README.txt"
 RECORD_FILE = "stage-6.json"
-OUTPUT_FILES = (RIG_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE, RECORD_FILE)
+OUTPUT_FILES = (RIG_FILE, PLACE_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE, RECORD_FILE)
 
 
 class RobloxExportError(Exception):

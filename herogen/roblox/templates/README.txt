@@ -1,9 +1,37 @@
 HeroGen R15 character for Roblox Studio
 =======================================
 
+Note: these steps have not yet been verified in a Roblox Studio session.
+
+
+Quick start (starter place)
+---------------------------
+  1. Open {{PLACE_FILE}} from this folder in Roblox Studio (File > Open from File...). It holds a
+     baseplate, a spawn and the rig, "{{RIG_NAME}}", standing in front of the spawn; the rig stays invisible
+     until step 3.
+  2. Choose File > Import 3D and pick {{GLB_FILE}}:
+       {{GLB_PATH}}
+     In the importer, set Scale Unit: Stud; World Forward: Front, World Up: Top; Rig Type: No Rig. Click
+     Import. A model named "{{IMPORTED_NAME}}" appears in Workspace.
+  3. Open {{BIND_FILE}} in a text editor and copy all of it. In Studio, open View > Command Bar, paste, and
+     press Enter. The Output window should end with:
+       Starter place: press Play to walk around as your hero.
+     The script puts the meshes onto the rig, deletes "{{IMPORTED_NAME}}", and copies the rig into
+     StarterPlayer as StarterCharacter. If it prints an error instead, see step 3 of the guide below.
+  4. Press Play. You spawn as the hero, facing the rig, and walk, run and jump with Roblox's stock R15
+     animations and controls. If the hero moves without animating, see step 5.4 of the guide below.
+
+The importer uploads the meshes and texture to your Roblox account (see below). To keep the finished place,
+use File > Save to File As...
+
+
+Add the hero to your own game
+=============================
+
 This folder holds your hero as a Roblox R15 rig:
 
   - {{RIG_FILE}}: the rig, with 15 body parts, the joints and attachments, and HipHeight {{HIP_HEIGHT}}
+  - {{PLACE_FILE}}: a starter place holding the same rig (the quick start above)
   - {{BIND_FILE}}: a Studio script that puts the hero's meshes onto the rig
   - {{RIG_TEST_FILE}}: an optional Studio script that plays stock animations on the rig
   - {{RECORD_PATH}}: the checks HeroGen ran on the rig
@@ -15,8 +43,6 @@ hero's body file:
 
 Studio's 3D Importer uploads the meshes and the texture to your Roblox account as new assets. Nothing else in
 these steps uploads or publishes anything.
-
-Note: these steps have not yet been verified in a Roblox Studio session.
 
 
 1. Import the meshes

@@ -15,8 +15,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
-from herogen.roblox import (BIND_FILE, MESH_TRIANGLE_LIMIT, OUTPUT_FILES, README_FILE, RECORD_FILE, RIG_FILE,
-                            RIG_NAME, RIG_TEST_FILE)
+from herogen.roblox import (BIND_FILE, MESH_TRIANGLE_LIMIT, OUTPUT_FILES, PLACE_FILE, README_FILE, RECORD_FILE,
+                            RIG_FILE, RIG_NAME, RIG_TEST_FILE, STARTER_MARKER)
 from herogen.roblox.__main__ import main
 from herogen.roblox.check import Inst
 from herogen.roblox.export import template
@@ -55,7 +55,7 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.out.iterdir()),
                          sorted(n for n in OUTPUT_FILES if n != RECORD_FILE))
         self.assertEqual(self.record["outputs"],
-                         [f"06-roblox/{n}" for n in (RIG_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE)])
+                         [f"06-roblox/{n}" for n in (RIG_FILE, PLACE_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE)])
 
     def test_record(self):
         r = self.record
@@ -70,6 +70,28 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(r["rig"]["joints"], "Motor6D")
         self.assertEqual(len(r["rig"]["parts"]), 15)
         self.assertAlmostEqual(r["rig"]["hip_height"], 1.7, places=6)
+        self.assertEqual(r["place"]["file"], PLACE_FILE)
+        self.assertEqual(r["place"]["marker"], f"ServerStorage.{STARTER_MARKER}")
+        self.assertEqual(r["place"]["rig_root_part"], [0.0, 2.7, -16.0])  # synthetic feet are at the floor already
+        self.assertTrue(any(c["name"] == "place_marker" and c["pass"] for c in r["checks"]))
+
+    def test_starter_place_holds_the_rig(self):
+        root = ET.parse(self.out / PLACE_FILE).getroot()
+        self.assertEqual((root.tag, root.get("version")), ("roblox", "4"))
+        services = {i.get("class"): Inst(i, None) for i in root.findall("Item")}
+        self.assertLessEqual({"Workspace", "Lighting", "StarterPlayer", "ServerStorage"}, set(services))
+        ws = services["Workspace"]
+        self.assertEqual(ws.child("Baseplate", "Part").props["Anchored"], True)
+        self.assertIsNotNone(ws.child("SpawnLocation", "SpawnLocation"))
+        self.assertIsNotNone(services["ServerStorage"].child(STARTER_MARKER, "BoolValue"))
+        rig = ws.child(RIG_NAME, "Model")
+        self.assertEqual(sorted(i.cls for i in rig.walk()),
+                         sorted(i.cls for i in Inst(ET.parse(self.out / RIG_FILE).getroot().find("Item"), None).walk()))
+        refs = [i.get("referent") for i in root.iter("Item")]
+        self.assertEqual(len(refs), len(set(refs)))
+        for el in root.iter("Ref"):
+            self.assertIn(el.text, refs)
+        self.assertNotIn("MeshId", (self.out / PLACE_FILE).read_text())
 
     def test_xml_is_well_formed_with_resolving_referents(self):
         root = ET.parse(self.out / RIG_FILE).getroot()
@@ -92,7 +114,7 @@ class ExportTest(unittest.TestCase):
         shutil.copytree(self.body, again.parent / "04-body")
         code, _, _ = run_cli("export", "--body", str(again.parent / "04-body"), "--out", str(again))
         self.assertEqual(code, 0)
-        for name in (RIG_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE):
+        for name in (RIG_FILE, PLACE_FILE, BIND_FILE, RIG_TEST_FILE, README_FILE):
             self.assertEqual((again / name).read_bytes(), (self.out / name).read_bytes(), name)
 
     def test_scripts_and_readme_are_filled_in(self):
@@ -103,8 +125,39 @@ class ExportTest(unittest.TestCase):
         self.assertEqual((self.out / RIG_TEST_FILE).read_text(), template(RIG_TEST_FILE))
         readme = (self.out / README_FILE).read_text()
         for want in ("../04-body/high.glb", "../stage-6.json", RIG_FILE, BIND_FILE, RIG_TEST_FILE, "Scale Unit: Stud",
-                     "Rig Type: No Rig", "HipHeight is about 1.700", "StarterCharacter"):
+                     "Rig Type: No Rig", "HipHeight is about 1.700", "StarterCharacter", PLACE_FILE,
+                     "not yet been verified"):
             self.assertIn(want, readme)
+        # the starter place's quick start comes first, the steps for the user's own game after it
+        quick, own = readme.index("Quick start (starter place)"), readme.index("Add the hero to your own game")
+        self.assertLess(quick, own)
+        self.assertLess(readme.index("not yet been verified"), quick)
+        steps = readme[quick:own]
+        for want in (f"Open {PLACE_FILE}", "File > Import 3D", "Scale Unit: Stud", "Rig Type: No Rig", BIND_FILE,
+                     "Command Bar", "Press Play", "Starter place: press Play to walk around as your hero."):
+            self.assertIn(want, steps)
+        self.assertLess(steps.index("File > Import 3D"), steps.index("Command Bar"))
+        self.assertLess(steps.index("Command Bar"), steps.index("Press Play"))
+
+    def test_bind_script_installs_the_starter_character_only_in_the_starter_place(self):
+        bind = (self.out / BIND_FILE).read_text()
+        marker = f'game:GetService("ServerStorage"):FindFirstChild("{STARTER_MARKER}")'
+        self.assertIn(marker, bind)
+        # Without the marker the script prints today's last line and returns before touching StarterPlayer.
+        guard = bind.index(marker)
+        early = bind.index("\treturn\nend", guard)
+        self.assertIn("You can delete '%s' now.", bind[guard:early])
+        code_before = "\n".join(line for line in bind[:guard].splitlines() if not line.lstrip().startswith("--"))
+        self.assertNotIn("StarterPlayer", code_before)
+        tail = bind[early:]
+        for want in ('game:GetService("StarterPlayer")', 'character.Name = "StarterCharacter"',
+                     "character.PrimaryPart = root", "FindFirstChildOfClass(\"Humanoid\")",
+                     "character.Parent = StarterPlayer", "LoadCharacterAppearance = false", "src:Destroy()",
+                     'print("Starter place: press Play to walk around as your hero.")'):
+            self.assertIn(want, tail)
+        # the bind and its gates come first: nothing is installed unless every mesh was bound
+        self.assertLess(bind.index("bestErr < 0.01"), guard)
+        self.assertLess(bind.index("part:ApplyMesh(from)"), guard)
         for name in (BIND_FILE, RIG_TEST_FILE, README_FILE):
             self.assertNotIn("{{", (self.out / name).read_text(), name)
 
@@ -112,6 +165,17 @@ class ExportTest(unittest.TestCase):
         code, stdout, _ = run_cli("check", "--body", str(self.body), "--rig", str(self.out / RIG_FILE))
         self.assertEqual(code, 0)
         self.assertIn("PASS", stdout.splitlines()[-1])
+        self.assertNotIn("place_", stdout)
+        code, stdout, _ = run_cli("check", "--body", str(self.body), "--rig", str(self.out / RIG_FILE),
+                                  "--place", str(self.out / PLACE_FILE))
+        self.assertEqual(code, 0)
+        self.assertIn("PASS  place_marker", stdout)
+        bad_place = self.out.parent / "bad.rbxlx"
+        bad_place.write_text((self.out / PLACE_FILE).read_text().replace(STARTER_MARKER, "SomethingElse"))
+        code, stdout, _ = run_cli("check", "--body", str(self.body), "--rig", str(self.out / RIG_FILE),
+                                  "--place", str(bad_place))
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  place_marker", stdout)
         bad = self.out.parent / "bad.rbxmx"
         bad.write_text((self.out / RIG_FILE).read_text().replace(">LeftHip<", ">LeftHipJoint<"))
         code, stdout, _ = run_cli("check", "--body", str(self.body), "--rig", str(bad))
@@ -198,6 +262,11 @@ RIG_CHECKS = ("xml_well_formed", "one_root_model", "humanoid_r15", "humanoid_sca
               "joints_inside_parts", "joint_chain_reachable", "section_extents_match_glb", "section_centres_match_glb",
               "rotations_proper", "triangles_per_mesh", "hip_height", "feet_lowest", "faces_minus_z", "not_mirrored",
               "face_front_on_front", "accessory_attachments", "avatar_part_scale_type", "meshes_bound")
+# Then the 16 checks of the starter place (all hard limits).
+PLACE_CHECKS = ("place_xml_well_formed", "place_referents_resolve", "place_services", "place_baseplate", "place_spawn",
+                "place_spawn_on_baseplate", "place_marker", "place_starter_player_empty", "place_rig_present",
+                "place_rig_matches_file", "place_rig_rigid_move_position", "place_rig_rigid_move_rotation",
+                "place_rig_upright", "place_feet_on_baseplate", "place_rig_clear_of_spawn", "place_rig_faces_spawn")
 INFORMATIONAL = {"meshes_bound"}
 
 
@@ -229,15 +298,17 @@ class BuildLogEventsTest(unittest.TestCase):
         for e in got:
             self.assertEqual(events.validate(e), e)
             self.assertEqual((e["step"], e["who"]), ("6", "herogen"))
-        self.assertEqual([e["kind"] for e in got], ["local", "local"] + ["check"] * 27 + ["checks"])
-        write, scripts = got[0], got[1]
+        n = len(RIG_CHECKS) + len(PLACE_CHECKS)
+        self.assertEqual([e["kind"] for e in got], ["local"] * 3 + ["check"] * n + ["checks"])
+        write, place, scripts = got[0], got[1], got[2]
         self.assertEqual(write["what"], "rig_write")
         self.assertEqual(write["m"], {"parts": 15, "motors": 15, "attachments": 19, "hip_height": 1.7})
+        self.assertEqual(place["what"], "place_write")
         self.assertEqual((scripts["what"], scripts["m"]), ("studio_scripts", {"files": 3}))
-        checks = got[2:-1]
-        self.assertEqual(tuple(e["name"] for e in checks), RIG_CHECKS)
+        checks = got[3:-1]
+        self.assertEqual(tuple(e["name"] for e in checks), RIG_CHECKS + PLACE_CHECKS)
         self.assertEqual({e["name"] for e in checks if not e["gate"]}, INFORMATIONAL)
-        self.assertEqual(sum(e["gate"] for e in checks), 26)
+        self.assertEqual(sum(e["gate"] for e in checks), n - 1)
         self.assertTrue(all(e["ok"] for e in checks))
         by = {e["name"]: e for e in checks}
         for c in rec["checks"]:
@@ -256,7 +327,7 @@ class BuildLogEventsTest(unittest.TestCase):
         self.assertNotIn("op", by["meshes_bound"])
         summary = got[-1]
         self.assertEqual((summary["n"], summary["passed"], summary["gated"], summary["failed"], summary["advisory"]),
-                         (27, 27, 26, [], []))
+                         (n, n, n - 1, [], []))
         self.assertGreaterEqual(summary["s"], 0)
 
     def test_a_failed_hard_check_is_named_and_the_rig_is_withheld(self):
@@ -343,6 +414,13 @@ class LuauSyntaxTest(unittest.TestCase):
                 path.write_text(template(name))
                 p = subprocess.run(["luau-compile", "--binary", str(path)], capture_output=True, timeout=60)
                 self.assertEqual(p.returncode, 0, f"{name}: {p.stderr.decode(errors='replace')}")
+            # and the scripts as the export fills them in
+            out = Path(tmp) / "run" / "06-roblox"
+            self.assertEqual(run_cli("export", "--body", str(write_body(out.parent / "04-body")), "--out",
+                                     str(out))[0], 0)
+            for name in (BIND_FILE, RIG_TEST_FILE):
+                p = subprocess.run(["luau-compile", "--binary", str(out / name)], capture_output=True, timeout=60)
+                self.assertEqual(p.returncode, 0, f"{name}: {p.stderr.decode(errors='replace')}")
 
 
 LUNE_READBACK = """
@@ -404,6 +482,80 @@ class RbxDomReadbackTest(unittest.TestCase):
             elif inst.cls == "Attachment":
                 key = f"{inst.parent.name}/{inst.name}"
                 self.assertLess(_worst(got["attachments"][key], inst.props["CFrame"]), tol, key)
+
+
+def _rojo_works() -> bool:
+    exe = shutil.which("rojo")
+    if not exe:
+        return False
+    try:
+        return subprocess.run([exe, "--version"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _xml_values(path: Path) -> dict[tuple[str, ...], dict]:
+    """Every instance of a `<roblox version="4">` file by its class:name path, with its property values (Refs as
+    the target's path), so two files can be compared whatever their referent numbers and item order."""
+    root = ET.parse(path).getroot()
+    paths, items = {}, {}
+
+    def walk(el, pre):
+        props = el.find("Properties")
+        name = next((p.text or "" for p in props if p.get("name") == "Name"), "")
+        key = pre + (f"{el.get('class')}:{name}",)
+        paths[el.get("referent")], items[key] = key, el
+        for c in el.findall("Item"):
+            walk(c, key)
+
+    for el in root.findall("Item"):
+        walk(el, ())
+    out = {}
+    for key, el in items.items():
+        d = {}
+        for p in el.find("Properties"):
+            if p.tag == "Ref":
+                d[(p.tag, p.get("name"))] = paths.get((p.text or "").strip())
+            elif len(p):
+                d[(p.tag, p.get("name"))] = tuple(float(c.text) for c in p)
+            else:
+                d[(p.tag, p.get("name"))] = (p.text or "").strip()
+        out[key] = d
+    return out
+
+
+@unittest.skipUnless(_rojo_works(), "Rojo is not on PATH (optional rbx-dom cross-check of the starter place)")
+class RbxDomPlaceReadbackTest(unittest.TestCase):
+    """rbx-dom (through Rojo, which takes model files only) reads each of the place's services and writes them back
+    as a place with the same instances and values."""
+
+    def test_rbx_dom_reads_the_same_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            out = tmp / "run" / "06-roblox"
+            self.assertEqual(run_cli("export", "--body", str(write_body(out.parent / "04-body")), "--out",
+                                     str(out))[0], 0)
+            tree = {"$className": "DataModel"}
+            for el in ET.parse(out / PLACE_FILE).getroot().findall("Item"):
+                doc = ET.Element("roblox", version="4")
+                doc.append(el)
+                ET.ElementTree(doc).write(tmp / f"{el.get('class')}.rbxmx", encoding="unicode")
+                tree[el.get("class")] = {"$path": f"{el.get('class')}.rbxmx"}
+            (tmp / "default.project.json").write_text(json.dumps({"name": "starter", "tree": tree}))
+            p = subprocess.run([shutil.which("rojo"), "build", "-o", str(tmp / "back.rbxlx"),
+                                str(tmp / "default.project.json")], capture_output=True, text=True, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            ours, back = _xml_values(out / PLACE_FILE), _xml_values(tmp / "back.rbxlx")
+        self.assertEqual(set(ours), set(back))
+        for key, props in ours.items():
+            for prop, v in props.items():
+                w = back[key].get(prop)
+                if isinstance(v, tuple) and v and isinstance(v[0], float):
+                    self.assertLess(_worst(v, w), 1e-6, (key, prop))
+                elif prop[0] in ("float", "double", "int", "token"):
+                    self.assertEqual(float(v), float(w), (key, prop))
+                else:
+                    self.assertEqual(v, w, (key, prop))
 
 
 def _worst(a, b) -> float:

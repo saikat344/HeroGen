@@ -4,7 +4,11 @@
 --
 -- Before running, Workspace holds:
 --   {{RIG_NAME}}  the rig: in the Explorer, right-click Workspace > Insert from File... > {{RIG_FILE}}
+--                 (already there in the starter place, {{PLACE_FILE}})
 --   {{IMPORTED_NAME}}  the imported meshes: File > Import 3D > {{GLB_FILE}} (Scale Unit: Stud, Rig Type: No Rig)
+-- In the starter place only (ServerStorage holds the BoolValue {{STARTER_MARKER}}), the script then also
+-- deletes the imported model and installs a copy of the bound rig as StarterPlayer.StarterCharacter, so Play
+-- spawns the player as the hero. Anywhere else it never touches StarterPlayer.
 -- Every section keeps its rig instance (attachments, Motor6D, scale value); ApplyMesh copies the mesh, texture
 -- and collision geometry from the imported MeshPart (create.roblox.com/docs/reference/engine/classes/MeshPart).
 -- The imported layout is fitted to the rig with one of the 24 axis-aligned rotations plus a translation, so it
@@ -116,4 +120,29 @@ for _, m in rig:GetDescendants() do
 		worst = math.max(worst, ((m.Part0.CFrame * m.C0 * m.C1:Inverse()).Position - m.Part1.Position).Magnitude)
 	end
 end
-print(string.format("bound 15 meshes; rest-pose joint error %.6f studs. You can delete '%s' now.", worst, IMPORTED_NAME))
+local marker = game:GetService("ServerStorage"):FindFirstChild("{{STARTER_MARKER}}")
+if not (marker and marker:IsA("BoolValue") and marker.Value) then
+	print(string.format("bound 15 meshes; rest-pose joint error %.6f studs. You can delete '%s' now.", worst, IMPORTED_NAME))
+	return
+end
+
+-- The starter place: the bound rig, copied, becomes the player's character.
+print(string.format("bound 15 meshes; rest-pose joint error %.6f studs", worst))
+local StarterPlayer = game:GetService("StarterPlayer")
+local character = rig:Clone()
+assert(character, "the rig could not be copied (is its Archivable turned off?)")
+character.Name = "StarterCharacter"
+local root = character:FindFirstChild("HumanoidRootPart")
+assert(character:FindFirstChildOfClass("Humanoid") and root and root:IsA("BasePart"),
+	"the rig copy has no Humanoid or HumanoidRootPart")
+character.PrimaryPart = root
+character:PivotTo(CFrame.new(root.Position)) -- upright, facing -Z like the spawn; the spawn sets where it starts
+local old = StarterPlayer:FindFirstChild("StarterCharacter")
+if old then
+	old:Destroy() -- an earlier run of this script in this place
+end
+character.Parent = StarterPlayer
+StarterPlayer.LoadCharacterAppearance = false -- keep the hero's own look, not the player's avatar
+src:Destroy()
+print("Starter place: StarterPlayer.StarterCharacter is your hero; deleted '" .. IMPORTED_NAME .. "'.")
+print("Starter place: press Play to walk around as your hero.")

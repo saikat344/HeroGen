@@ -9,10 +9,12 @@ from unittest import mock
 
 import numpy as np
 
-from herogen.roblox import R15, b_to_r, g_to_r
+from herogen.roblox import R15, STARTER_MARKER, b_to_r, g_to_r
 from herogen.roblox import check as checker
+from herogen.roblox import place as place_module
 from herogen.roblox import rig as rig_module
-from herogen.roblox.check import check_rig
+from herogen.roblox.check import check_place, check_rig
+from herogen.roblox.place import write_rbxlx
 from herogen.roblox.rbxmx import write_rbxmx
 from herogen.roblox.rig import build_rig
 from herogen.roblox.synth import edit_glb_json, write_body
@@ -54,6 +56,9 @@ class IndependenceTest(unittest.TestCase):
 
     def test_same_r15_tree(self):
         self.assertEqual(checker.R15, {part: (parent, joint) for part, parent, joint in R15})
+
+    def test_same_starter_marker(self):
+        self.assertEqual(checker.STARTER_MARKER, STARTER_MARKER)
 
     def test_same_frame_conversion(self):
         for p in ((1, 2, 3), (-0.5, 0.25, 4.0)):
@@ -232,6 +237,165 @@ class CheckerTest(unittest.TestCase):
         edit_glb_json(body / "high.glb", drop)
         failed = self.run_check(self.good, body)
         self.assertIn("feet_lowest", failed)
+
+
+def _child(item: ET.Element, name: str, cls: str | None = None) -> ET.Element:
+    return next(c for c in item.findall("Item") if c.find("Properties/string[@name='Name']").text == name
+                and (cls is None or c.get("class") == cls))
+
+
+def _service(root: ET.Element, cls: str) -> ET.Element:
+    return next(c for c in root.findall("Item") if c.get("class") == cls)
+
+
+PLACE_CHECKS = ("place_xml_well_formed", "place_referents_resolve", "place_services", "place_baseplate",
+                "place_spawn", "place_spawn_on_baseplate", "place_marker", "place_starter_player_empty",
+                "place_rig_present", "place_rig_matches_file", "place_rig_rigid_move_position",
+                "place_rig_rigid_move_rotation", "place_rig_upright", "place_feet_on_baseplate",
+                "place_rig_clear_of_spawn", "place_rig_faces_spawn")
+
+
+class PlaceCheckerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.body = write_body(cls.root / "04-body")
+        cls.spec = build_rig(cls.body)
+        cls.rig = cls.root / "rig.rbxmx"
+        cls.rig.write_text(write_rbxmx(cls.spec))
+        cls.good = write_rbxlx(cls.spec)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def run_check(self, text: str) -> list[dict]:
+        path = self.root / "place.rbxlx"
+        path.write_text(text)
+        return check_place(path, self.rig)
+
+    def mutate(self, change) -> set[str]:
+        tree = ET.fromstring(self.good)
+        change(tree)
+        return _failed(self.run_check(ET.tostring(tree, encoding="unicode")))
+
+    def test_good_place_passes_every_check(self):
+        checks = self.run_check(self.good)
+        self.assertEqual(tuple(c["name"] for c in checks), PLACE_CHECKS)
+        self.assertEqual(_failed(checks), set())
+        for c in checks:
+            passes = {"<": c["value"] < c["threshold"], "<=": c["value"] <= c["threshold"],
+                      "==": c["value"] == c["threshold"], ">": c["value"] > c["threshold"]}[c["rule"]]
+            self.assertEqual(passes, c["pass"], c["name"])
+
+    def test_place_layout(self):
+        root = ET.fromstring(self.good)
+        self.assertEqual((root.tag, root.get("version")), ("roblox", "4"))
+        self.assertEqual([c.get("class") for c in root.findall("Item")],
+                         ["Workspace", "Lighting", "StarterPlayer", "ServerScriptService", "ServerStorage"])
+        ws = _service(root, "Workspace")
+        self.assertEqual([(c.get("class"), c.find("Properties/string").text) for c in ws.findall("Item")],
+                         [("Part", "Baseplate"), ("SpawnLocation", "SpawnLocation"), ("Model", "HeroGen-R15")])
+        self.assertEqual(_service(root, "StarterPlayer").findall("Item"), [])
+        marker = _child(_service(root, "ServerStorage"), STARTER_MARKER, "BoolValue")
+        self.assertEqual(marker.find("Properties/bool[@name='Value']").text, "true")
+        # BasePart.Color is written as rbx-dom writes it: Color3uint8, one 0xRRGGBB integer
+        base = _child(ws, "Baseplate")
+        self.assertEqual(int(base.find("Properties/Color3uint8[@name='Color3uint8']").text),
+                         (91 << 16) | (93 << 8) | 105)
+        self.assertEqual(_child(ws, "SpawnLocation").find("Properties/int[@name='Duration']").text, "0")
+
+    def test_rig_stands_on_the_floor_facing_the_spawn(self):
+        model = checker.Inst(_child(_service(ET.fromstring(self.good), "Workspace"), "HeroGen-R15"), None)
+        hrp = model.child("HumanoidRootPart").cframe()
+        np.testing.assert_allclose(hrp[:3, :3], np.diag([-1.0, 1.0, -1.0]), atol=1e-7)  # 180 degrees about Y
+        self.assertEqual((hrp[0, 3], hrp[2, 3]), place_module.RIG_SPOT[::2])
+        feet = [model.child(f) for f in ("LeftFoot", "RightFoot")]
+        self.assertAlmostEqual(min(f.cframe()[1, 3] - f.size()[1] / 2 for f in feet), 0.0, places=5)
+        # the part-relative values are the rig file's own, so HipHeight still puts the feet on that floor
+        self.assertAlmostEqual(float(model.child("Humanoid").props["HipHeight"]), 1.7, places=5)
+
+    def test_deterministic(self):
+        self.assertEqual(write_rbxlx(build_rig(self.body)), self.good)
+
+    # Corrupted places: each must fail the checks named.
+
+    def test_not_xml(self):
+        self.assertEqual(_failed(self.run_check(self.good[:-30])), {"place_xml_well_formed"})
+
+    def test_missing_marker(self):
+        self.assertEqual(self.mutate(lambda t: _service(t, "ServerStorage").remove(
+            _child(_service(t, "ServerStorage"), STARTER_MARKER))), {"place_marker"})
+
+    def test_marker_set_false(self):
+        def change(t):
+            _child(_service(t, "ServerStorage"), STARTER_MARKER).find("Properties/bool[@name='Value']").text = "false"
+        self.assertEqual(self.mutate(change), {"place_marker"})
+
+    def test_starter_character_in_the_file(self):
+        def change(t):
+            sp = _service(t, "StarterPlayer")
+            sp.append(ET.fromstring('<Item class="Model" referent="sc"><Properties>'
+                                    '<string name="Name">StarterCharacter</string></Properties></Item>'))
+        self.assertEqual(self.mutate(change), {"place_starter_player_empty"})
+
+    def test_missing_lighting_service(self):
+        def change(t):
+            t.remove(_service(t, "Lighting"))
+        self.assertEqual(self.mutate(change), {"place_services"})
+
+    def test_missing_spawn_and_unanchored_baseplate(self):
+        def change(t):
+            ws = _service(t, "Workspace")
+            ws.remove(_child(ws, "SpawnLocation"))
+            _child(ws, "Baseplate").find("Properties/bool[@name='Anchored']").text = "false"
+        failed = self.mutate(change)
+        self.assertTrue({"place_spawn", "place_baseplate", "place_feet_on_baseplate"} <= failed, failed)
+
+    def test_rig_missing(self):
+        def change(t):
+            ws = _service(t, "Workspace")
+            ws.remove(_child(ws, "HeroGen-R15"))
+        self.assertEqual(self.mutate(change), {"place_rig_present"})
+
+    def test_one_part_moved_on_its_own(self):
+        def change(t):
+            hand = _child(_child(_service(t, "Workspace"), "HeroGen-R15"), "LeftHand")
+            cf = _get_cf(hand)
+            cf[1] += 0.01
+            _set_cf(hand, cf)
+        self.assertEqual(self.mutate(change), {"place_rig_rigid_move_position"})
+
+    def test_attachment_changed(self):
+        def change(t):
+            head = _child(_child(_service(t, "Workspace"), "HeroGen-R15"), "Head")
+            att = _child(head, "HatAttachment")
+            cf = _get_cf(att)
+            cf[1] += 0.1
+            _set_cf(att, cf)
+        self.assertEqual(self.mutate(change), {"place_rig_matches_file"})
+
+    def test_rig_floating_and_tilted(self):
+        with mock.patch.object(place_module, "RIG_SPOT", (0.0, 0.5, -16.0)):
+            self.assertEqual(_failed(self.run_check(write_rbxlx(self.spec))), {"place_feet_on_baseplate"})
+        with mock.patch.object(place_module, "angles", lambda deg: checker._cf(
+                (0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0))[:3, :3]):  # 90 degrees about X: lying down
+            failed = _failed(self.run_check(write_rbxlx(self.spec)))
+        self.assertIn("place_rig_upright", failed)
+
+    def test_rig_on_the_spawn_or_facing_away(self):
+        with mock.patch.object(place_module, "RIG_SPOT", (0.0, 0.0, -3.0)):
+            self.assertEqual(_failed(self.run_check(write_rbxlx(self.spec))), {"place_rig_clear_of_spawn"})
+        with mock.patch.object(place_module, "RIG_YAW_DEG", 0.0):
+            self.assertEqual(_failed(self.run_check(write_rbxlx(self.spec))), {"place_rig_faces_spawn"})
+
+    def test_wrong_rig_file(self):
+        other = write_body(self.root / "other", facing_back=True)
+        path = self.root / "place.rbxlx"
+        path.write_text(write_rbxlx(build_rig(other)))
+        failed = _failed(check_place(path, self.rig))
+        self.assertIn("place_rig_matches_file", failed)
 
 
 if __name__ == "__main__":

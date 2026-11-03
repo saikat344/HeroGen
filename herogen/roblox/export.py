@@ -13,10 +13,11 @@ from datetime import datetime
 from importlib import resources
 from pathlib import Path
 
-from . import (BIND_FILE, OUTPUT_FILES, README_FILE, RECORD_FILE, RIG_FILE, RIG_NAME, RIG_TEST_FILE,
-               RobloxExportError)
+from . import (BIND_FILE, OUTPUT_FILES, PLACE_FILE, README_FILE, RECORD_FILE, RIG_FILE, RIG_NAME, RIG_TEST_FILE,
+               STARTER_MARKER, RobloxExportError)
 from ..pipeline import events
-from .check import check_rig
+from .check import check_place, check_rig
+from .place import place_summary, write_rbxlx
 from .rbxmx import write_rbxmx
 from .record import code_version, emit_checks, file_hash, measures, write_atomic
 from .rig import build_rig
@@ -83,18 +84,21 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
         events.emit("local", who="herogen", what="rig_write", s=round(time.monotonic() - t0, 3), m=measures({
             "parts": len(spec["parts"]), "motors": sum(1 for p in spec["parts"] if p.get("parent")),
             "attachments": len(spec["extra_attachments"]), "hip_height": round(spec["hip_height"], 3)}))
+        write_atomic(out / PLACE_FILE, write_rbxlx(spec))
+        events.emit("local", who="herogen", what="place_write")
         values = {
             "RIG_NAME": RIG_NAME, "RIG_FILE": RIG_FILE, "BIND_FILE": BIND_FILE,
-            "RIG_TEST_FILE": RIG_TEST_FILE, "RECORD_PATH": _rel(rec_path, out),
+            "RIG_TEST_FILE": RIG_TEST_FILE, "RECORD_PATH": _rel(rec_path, out), "PLACE_FILE": PLACE_FILE,
+            "STARTER_MARKER": STARTER_MARKER,
             "GLB_FILE": glb_name, "GLB_PATH": _rel(body / glb_name, out),
             "IMPORTED_NAME": Path(glb_name).stem, "HIP_HEIGHT": f"{spec['hip_height']:.3f}",
         }
         for name in TEMPLATE_FILES:
             write_atomic(out / name, render(template(name), values))
         events.emit("local", who="herogen", what="studio_scripts", m={"files": len(TEMPLATE_FILES)})
-        record["outputs"] = [_rel(out / n, base) for n in (RIG_FILE, *TEMPLATE_FILES)]
+        record["outputs"] = [_rel(out / n, base) for n in (RIG_FILE, PLACE_FILE, *TEMPLATE_FILES)]
         t1 = time.monotonic()
-        record["checks"] = check_rig(body, out / RIG_FILE, glb_name)
+        record["checks"] = check_rig(body, out / RIG_FILE, glb_name) + check_place(out / PLACE_FILE, out / RIG_FILE)
         emit_checks(record["checks"], seconds=time.monotonic() - t1)
         record["ok"] = all(c["pass"] for c in record["checks"] if c.get("gate", True))
         record["notes"] = "; ".join(spec["notes"])
@@ -107,6 +111,7 @@ def run_export(body: Path, out: Path, glb_name: str = "high.glb") -> dict:
                                   "triangles": p["triangles"], "pivot_fit_studs": p["pivot_fit_studs"]}
                       for p in spec["parts"]},
         }
+        record["place"] = {"file": PLACE_FILE, **place_summary(spec)}
     except RobloxExportError as exc:
         for name in OUTPUT_FILES:
             (out / name).unlink(missing_ok=True)
