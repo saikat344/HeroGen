@@ -378,6 +378,7 @@ async function buildShape(info) {
   previewUrl = null; show('#previewError', false);
   try {
     [previewModule, shapeModule] = await Promise.all([previewModule || import('/assets/preview.js'), shapeModule || import('/assets/shape-build.js')]);
+    if (token === previewRequest) previewModule.clear($('#preview'));
     const figure = await shapeModule.figurePoints(info);
     if (token !== previewRequest) return false;
     const shown = previewModule.building($('#preview'), figure);

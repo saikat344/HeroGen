@@ -316,8 +316,17 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     }`;
   function dropCloud() {
     if (!state?.cloud) return;
-    const c = state.cloud; state.cloud = null; state.converge = null;
+    const c = state.cloud, g = state.converge; state.cloud = null; state.converge = null;
+    // A hand-off cut short (another tab, another hero) leaves the model as it would have ended: fully shown.
+    for (const [m, opacity, transparent] of g?.saved || []) { m.opacity = opacity; m.transparent = transparent; m.needsUpdate = true; }
     c.group.removeFromParent(); c.points.geometry.dispose(); c.material.dispose();
+  }
+  // An empty stage on `canvas` (no model, no figure) while the next figure is prepared, so the last hero never shows.
+  function clear(canvas) {
+    if (!state || state.canvas !== canvas) return;
+    ++request; dropCloud(); restore(); stopAnimation(true);
+    if (state.model) { state.scene.remove(state.model); release(state.model); state.model = null; state.url = null; }
+    state.grid.visible = false; if (state.shadow) state.shadow.visible = false; render();
   }
   /** Show `figure` ({key, positions, seeds} from shape-build.js) on `canvas` in place of any model: small dots that
    *  drift and twinkle, framed like a model and turning slowly until the person moves the view. */
@@ -569,7 +578,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
     orbitWanted = Boolean(on);
     if (state) { state.lastInput = now(); state.orbiting = false; render(); }
   }
-  return {show, building, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
+  return {show, building, clear, pause, resume, dispose, shading, lighting, snapshot, view, setView, orbit,
     animate: playAnimation, prefetchAnimation,
     onAnimation(callback) { animListener = callback; callback?.(animState.clip, animState.status); },
     camera: name => moveTo(name), reset: () => moveTo('front', {reset: true}),
@@ -579,6 +588,7 @@ export function createPreview({damping = true, floor = true, stage = false} = {}
 const preview = createPreview({stage: true});
 export const show = (canvas, url, options) => preview.show(canvas, url, options);
 export const building = (canvas, figure) => preview.building(canvas, figure);
+export const clear = canvas => preview.clear(canvas);
 export const hide = () => preview.pause();
 export const dispose = () => preview.dispose();
 export const view = () => preview.view();
