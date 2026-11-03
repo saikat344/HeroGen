@@ -1,4 +1,5 @@
 // Presentation follows reported model and export stage states.
+import { kindName } from './heroes.js';
 import { stageSource } from './workbench.js';
 import { track, trackOnce } from './analytics.js';
 import { thumbButton, viewerDock } from './viewer-dock.js';
@@ -319,7 +320,7 @@ export function generationView($, select3D) {
       }
       renderSegments(state.steps, changed, state.terminal);
       $('#detail').dataset.jobState = job.state;
-      text($('#workbenchName'), job.name || (job.kind === 'prompt' ? 'Your imagined hero' : 'Your uploaded character'));
+      text($('#workbenchName'), job.name || kindName(job));
       const stageSignature = JSON.stringify(state.steps);
       if ($('#stages').dataset.signature !== stageSignature) {
         $('#stages').dataset.signature = stageSignature;

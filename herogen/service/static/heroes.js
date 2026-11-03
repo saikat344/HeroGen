@@ -10,11 +10,14 @@ export const DETAIL_LIMIT = 12;      // cards beyond this fall back to the monog
 
 // ---- pure helpers (unit-tested in tests/service_heroes.test.mjs) ----------------------------------------
 
+// The one name for an unnamed hero of each kind: cards, the breadcrumb and the workbench heading all use it.
+export const kindName = (job) => job?.kind === 'prompt' ? 'Described hero' : 'Sketched hero';
+
 export function defaultName(job, detail) {
   if (job.name) return job.name;
   const prompt = typeof detail?.prompt === 'string' ? detail.prompt.trim() : '';
   if (prompt) return prompt;
-  return job.kind === 'prompt' ? 'Described hero' : 'Sketched hero';
+  return kindName(job);
 }
 
 // Root heroes, newest first. A variation (Retry or Refine) points at its parent; walk up to the root and count

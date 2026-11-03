@@ -8,7 +8,7 @@ import { buildLog } from '/assets/buildlog.js';
 import { generationView, generationState, TERMINAL } from '/assets/generation.js';
 import { usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
-import { finishedNote, heroesView } from '/assets/heroes.js';
+import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
 
 const $ = (s) => document.querySelector(s);
@@ -187,7 +187,7 @@ async function refreshList() {
 function renderJob(j) {
   developer.update(j);
   show('#detail', screen === 'generation');
-  $('#detailH').textContent = j.name || (j.kind === 'prompt' ? 'Described hero' : 'Sketched hero');
+  $('#detailH').textContent = j.name || kindName(j);
   $('#state').textContent = j.state;
   const bits = [`started ${fmtTime(j.created_at)}`, `profile ${j.profile}`];
   if (Number.isFinite(j.seconds)) bits.push(`recorded duration ${fmtSecs(j.seconds)}`);

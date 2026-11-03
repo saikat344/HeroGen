@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultName, finishedNote, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, stillWorking, summaryLine, thumbnailOf}
+import {defaultName, finishedNote, kindName, heroStatus, needsDetail, relativeTime, rootHeroes, stageProgress, stillWorking, summaryLine, thumbnailOf}
   from '../herogen/service/static/heroes.js';
 
 const job = (id, extra = {}) => ({id, kind: 'prompt', name: id, state: 'succeeded', created_at: 100, started_at: 100, finished_at: 160, parent_job: null, ...extra});
@@ -95,6 +95,9 @@ test('names fall back to the prompt, then a plain label', () => {
   assert.equal(defaultName(job('a', {name: ''}), {prompt: ' A mage '}), 'A mage');
   assert.equal(defaultName(job('a', {name: ''}), null), 'Described hero');
   assert.equal(defaultName(job('a', {name: '', kind: 'sketch'}), null), 'Sketched hero');
+  // The workbench breadcrumb and heading use the same label as the cards.
+  assert.equal(kindName({kind: 'prompt'}), 'Described hero');
+  assert.equal(kindName({kind: 'sketch'}), 'Sketched hero');
 });
 
 test('only the cards that need more than the summary cost a request', () => {
