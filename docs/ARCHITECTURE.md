@@ -2948,10 +2948,26 @@ second enhanced sample or a weakened paint gate. Apart from a face-rejected head
 passes the gates keeps its slot, so a view whose ordinary attempt zero failed then has no ordinary
 attempt one in the nested atlas.
 
+Content-policy refusals (every profile). An image edit the model refuses under its content policy (HTTP 400
+with the answer's error code `content_policy_violation`, read by `client.content_refusal` from the parsed
+answer, never from message text) is a rejected sample, exactly as a failed gate: the try records
+`accepted` false, `refused` true, reason `image model refused (content filter)` and the refusal with its
+request key and error text. This covers every 3f image edit: main and default-head wave repaints, best
+views, close-ups and the face close-up; a refused beauty reference yaw is recorded with `refused` true
+and is not selected. The view then continues as after any rejection: its next slot, the conditional slot
+and every fallback apply, and a run whose refusals leave no accepted view ends as an all-rejected run.
+Each refusal is listed in the stage's `contained_errors` (view, slot, try, prompt, key, error) and the build
+log shows a rejected try (`why` `content_refused`). A refusal is sent once: the client remembers refused
+requests for the stage (`ModelClient.refusals`), so a slot that replays the default-head run's refused
+attempt reuses that refusal (`reused` true) at no cost instead of sending it again. Refusals cost $0 as
+recorded; the estimate and spend accounting are unchanged. Every other model error, including any other
+400, a 5xx, `ReplayMiss` and a budget stop, stays loud as before.
+
 Contained beauty-only model errors (fast profile only). Both enhancement passes, the beauty recipe and
 SideBeautyPass, roughly double a fast run's model requests, so an `ApiError` (any status: a timeout or
-dropped connection, HTTP 5xx, or HTTP 4xx including `content_policy_violation`) on a request only they
-make does not fail stage 3f. These requests are:
+dropped connection, HTTP 5xx, or another HTTP 4xx) on a request only they make does not fail stage 3f.
+A content-policy refusal of a repaint edit is a rejected sample on any slot (above); a refused reference
+yaw is still recorded here. These requests are:
 - beauty reference generation (`beauty.generate_fast`): each yaw's `BT1` image edit, its SAM character
   outline query and its SAM head-crop query. The failed yaw has no reference, exactly as for a rejected
   sample: its views use the standard recipe, and when yaw 0 fails the beauty arm is off for the run;

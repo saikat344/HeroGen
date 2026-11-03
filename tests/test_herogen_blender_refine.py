@@ -880,6 +880,49 @@ class FakeClient(ModelClient):
 
 @unittest.skipUnless(HAVE_REFINE, "texture-refine dependencies are required")
 class StageTests(unittest.TestCase):
+    def test_best_profile_content_refusal_rejects_only_the_refused_views(self):
+        self.maxDiff = None
+        from herogen.blender.refine import prompts
+        from herogen.pipeline.client import ApiError
+        refused = prompts.prompt("RF2R", 90)
+        policy = ApiError("images/edits failed: HTTP 400: filtered (not retried)", http_status=400,
+                          error_code="content_policy_violation")
+        original = FakeClient.edit_image
+
+        def edit(client, prompt, images, **kwargs):
+            if prompt == refused:
+                client.inputs.append((prompt, images, kwargs))
+                raise policy
+            return original(client, prompt, images, **kwargs)
+
+        plain = {k: (v["accepted"], v["reason"]) for k, v in stage.run_stage3f(self.run, self.client)["views"].items()}
+        (self.run / "stage-3f.json").unlink()
+        with mock.patch.object(FakeClient, "edit_image", edit):
+            rec = stage.run_stage3f(self.run, self.client)
+        self.assertEqual(rec["status"], "complete")
+        views = {k for k, v in rec["views"].items()
+                 if v.get("prompt") and prompts.prompt(v["prompt"], v["camera"]["angle"]) == refused}
+        self.assertTrue({"head+90", "body+90"} <= views)
+        for key in views:
+            self.assertEqual((rec["views"][key]["accepted"], rec["views"][key]["reason"]), (False, stage.REFUSED))
+            self.assertTrue(all(a["refused"] for a in rec["views"][key]["attempts"]))
+        # Every other view ends exactly as without the refusal.
+        self.assertEqual({k: (v["accepted"], v["reason"]) for k, v in rec["views"].items() if k not in views},
+                         {k: v for k, v in plain.items() if k not in views})
+        self.assertTrue(any(plain[k][0] for k in views))
+        self.assertEqual(sorted({e["view"] for e in rec["contained_errors"]}), sorted(views))
+        self.assertTrue(all(e["error_code"] == "content_policy_violation" and e["fallback"] == "rejected sample"
+                            for e in rec["contained_errors"]))
+        self.assertTrue((self.run / "03-refined.glb").is_file())
+
+    def test_best_profile_other_bad_request_stays_loud(self):
+        from herogen.pipeline.client import ApiError
+        self.client.error = ApiError("images/edits failed: HTTP 400: invalid size (not retried)", http_status=400,
+                                     error_code="invalid_request_error")
+        with self.assertRaises(ApiError):
+            stage.run_stage3f(self.run, self.client)
+        self.assertEqual(json.loads((self.run / "stage-3f.json").read_text())["status"], "error")
+
     def test_palette_flag_off_preserves_export_bytes_and_request_sequence(self):
         with mock.patch.dict(os.environ, {"HEROGEN_REFINE_REGION_PALETTE": ""}), \
                 mock.patch("herogen.blender.refine.region_palette.export_texture") as grade:

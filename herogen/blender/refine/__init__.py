@@ -16,7 +16,8 @@ from PIL import Image
 
 from herogen.blender.record import StageRecord, check
 from herogen.blender.stage3 import error_text
-from herogen.pipeline.client import COST_BASIS, IMAGE_MODEL, SAM_MODEL, PRICE_PER_IMAGE_USD, ModelClient
+from herogen.pipeline.client import (COST_BASIS, IMAGE_MODEL, SAM_MODEL, PRICE_PER_IMAGE_USD, ApiError, ModelClient,
+                                     content_refusal)
 from herogen.pipeline.redo import clean_note
 from herogen.refine_budget import BudgetStop, update as update_budget
 
@@ -26,6 +27,16 @@ REFINE_PROFILES = frozenset(("best", "roblox-ingame", "roblox-avatar"))
 REFINE_ORDER = ("head+0", "head+40", "head-40", "head+90", "head-90", "head+180",
                 "body+0", "body+45", "body-45", "body+90", "body-90", "body+180")
 # Negative angles -90/-135 are 270/225 degrees, with the same orientation and projection.
+# An image request the model refused under its content policy is a rejected sample, like a gate rejection.
+REFUSED = "image model refused (content filter)"
+
+
+def refusal_entries(view, trials, slot=None):
+    """The refused image requests among a view's trials, as recorded in the stage's ``contained_errors``."""
+    return [{"view": view, **({"slot": slot} if slot is not None else {}), "try": t.get("try"), **t["refusal"]}
+            for t in trials if t.get("refused")]
+
+
 HAIR_ORDER = ("head+90", "head+135", "head+180", "head-135", "head-90",
               "upper+135", "upper+180", "upper-135")
 _attempt_cancelled = ContextVar("refine_attempt_cancelled", default=None)
@@ -267,8 +278,21 @@ def _view(client, prep, current, tex, cam, hair, folder, record, timeout, cover,
         art_images = [image for _, image in art]
         references = ([inp, *art_images, cover] if closeup_reference is None
                       else [inp, closeup_reference, *art_images, cover])
-        edit = client.edit_image(prompt(recipe, cam["angle"], user_note), references,
-                                 size=f"{cam['res'][0]}x{cam['res'][1]}", attempt=attempt)
+        try:
+            edit = client.edit_image(prompt(recipe, cam["angle"], user_note), references,
+                                     size=f"{cam['res'][0]}x{cam['res'][1]}", attempt=attempt)
+        except ApiError as exc:
+            if not content_refusal(exc):
+                raise
+            # A content-policy refusal rejects this sample, exactly as a failed gate does; every other model
+            # error stays loud. The refusal is recorded on the try, in the stage record and in the build log.
+            from .fast import contained_error
+            trial.update(accepted=False, reason=REFUSED, refused=True, refusal=contained_error(
+                exc, "rejected sample", prompt=recipe, request="image edit", key=getattr(exc, "request_key", None),
+                **({"reused": True} if getattr(exc, "reused", False) else {})))
+            record["reason"] = REFUSED
+            buildlog.try_result(buildlog.view_key(cam, hair), trial, False, REFUSED, number=slot)
+            continue
         edit = edit.convert("RGB")
         edit.save(folder / f"edit-{attempt}.png")
         mapx, mapy, warped, reg = I.register(render_rgb, alpha, np.asarray(edit, dtype=np.float32) / 255)
@@ -534,6 +558,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
     if budget is not None:
         client.before_api_attempt = guard
         client.after_api_attempt = settle
+    # One refusal per identical image request: a slot that replays another run's refused request reuses it.
+    previous_refusals = client.__dict__.get("refusals", None)
+    had_refusals = "refusals" in client.__dict__
+    client.refusals = {}
     current_record = None
     generation = None
     face_control = None
@@ -774,6 +802,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                     current = _view(client, prep, current, tex, cams[name], hair, work / key,
                                     current_record, timeout, view_cover, face_exclusion=head_found,
                                     body_cam=cams["body+0"], repaint=recipe, user_note=user_note, art=art, art_masks=art_masks, **beauty_args)
+                    if refused := refusal_entries(key, current_record["attempts"]):
+                        rec.data.setdefault("contained_errors", []).extend(refused)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)
@@ -804,6 +834,8 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
                     current = _view(client, prep, current, tex, cam, False, folder, current_record,
                                     timeout, cover, face_exclusion=head_found, closeup_reference=crop,
                                     user_note=user_note, art=close_art)
+                    if refused := refusal_entries(key, current_record["attempts"]):
+                        rec.data.setdefault("contained_errors", []).extend(refused)
                 except BudgetStop as exc:
                     current_record.update(accepted=False, reason=str(exc))
                     rec.data["stop_reason"] = str(exc)
@@ -854,6 +886,10 @@ def run_stage3f(run: Path, client: ModelClient, *, profile="best", cap_usd=DEFAU
         raise
     finally:
         drain()
+        if had_refusals:
+            client.refusals = previous_refusals
+        else:
+            del client.refusals
         if budget is not None:
             client.before_api_attempt = previous_guard
             client.after_api_attempt = previous_settle
