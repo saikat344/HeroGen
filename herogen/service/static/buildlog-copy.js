@@ -108,6 +108,8 @@ export const CALLS = {
     same_character: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
     reword_brief: {start: 'rewording your description as an original character, without brand or character names',
       done: 'reworded description ready'},
+    precheck_brief: {start: 'checking your description for brand, logo, character or real-person names',
+      done: 'description checked'},
   },
   'sam-3d-objects': {'3d_shape': {start: 'building a textured 3D mesh from the front view and its outline', done: (e) => {
     const m = e.m || {}, bits = [Number.isFinite(m.vertices) && `${n(m.vertices)} vertices`, Number.isFinite(m.faces) && `${n(m.faces)} faces`,
@@ -316,20 +318,25 @@ export function quoted(text, max = 300) {
 export function rewordNotice(job) {
   const r = job?.reword;
   if (!r || job.kind !== 'prompt') return null;
+  const upfront = r.reason === 'precheck';
   if (r.status === 'used' && r.text) return {tone: 'info', title: 'We reworded your description',
-    text: `The image model refused your description under its content policy, which usually means it named a brand, `
+    text: upfront ? `Your description named a brand or character, so we reworded it to: ${quoted(r.text)}`
+      : `The image model refused your description under its content policy, which usually means it named a brand, `
       + `franchise or trademarked character. We reworded it to: ${quoted(r.text)}`};
   if (r.status === 'refused_again' && r.text) return {tone: 'warning', title: 'The reworded description was refused too',
-    text: `We reworded it once to ${quoted(r.text)}, but the image model refused that as well. Edit it and try again.`};
+    text: upfront ? `Your description named a brand or character, so we reworded it to ${quoted(r.text)}, but the image `
+      + 'model refused that as well. Your own description is ready to edit; try again without brand or character names.'
+      : `We reworded it once to ${quoted(r.text)}, but the image model refused that as well. Edit it and try again.`};
   if (r.status === 'rewrite_failed') return {tone: 'warning', title: 'Your description could not be reworded',
     text: 'HeroGen could not reword it automatically. Brand, franchise or character names usually cause this. '
       + 'Edit the description to remove them and try again.'};
   return null;
 }
 // What the description box is filled with when the user edits a stopped hero: a rewrite that was used (the server
-// sends only one that passed the description's rules), else the user's own description.
+// sends only one that passed the description's rules), else the user's own description. A rewrite made up front
+// that was still refused gives the box the user's own description back.
 export const descriptionDraft = (job) => (job?.kind === 'prompt' && ['used', 'refused_again'].includes(job?.reword?.status)
-  && job.reword.text) || job?.prompt || '';
+  && !(job.reword.status === 'refused_again' && job.reword.reason === 'precheck') && job.reword.text) || job?.prompt || '';
 
 export function decisionLine(e, job = null) {
   const m = e.m || {};
@@ -341,6 +348,14 @@ export function decisionLine(e, job = null) {
     case 'reworded_brief_refused': return 'The image model refused the reworded description too. The run stops here.';
     case 'sketch_redrawn': return 'Redrew the sketch from the reworded description, so the artwork no longer follows the original look.';
     case 'sketch_redraw_failed': return 'The sketch could not be redrawn from the reworded description. The run stops here.';
+    case 'brief_prechecked': return Number.isInteger(e.n) && e.n > 0
+      ? `Checked your description: it names ${e.n === 1 ? 'a brand or character' : `${n(e.n)} brands or characters`}, so it is reworded before anything is drawn.`
+      : 'Checked your description for brand, logo, character or real-person names: none found.';
+    case 'brief_reworded_upfront': return job?.reword?.text
+      ? `Reworded your description up front, without brand or character names, to ${quoted(job.reword.text, 160)}. The sketch is drawn from it.`
+      : 'Reworded your description up front, without brand or character names. The sketch is drawn from it.';
+    case 'brief_reword_upfront_failed': return 'Your description names a brand or character, but it could not be reworded automatically. Continuing with it as written.';
+    case 'brief_precheck_failed': return `The brand and character check did not finish (${codeText(e.code)}). Continuing with your description as written.`;
     case 'view_result': {
       const name = `${regionName(e.view)}${tryText(e)}`;
       // A plain verdict first, then the numbers behind it. Accepted: the headline measures. Not used: the
