@@ -857,9 +857,9 @@ class App:
                 # The brief rewritten after a content-policy refusal (herogen/pipeline/reword.py), for the card and
                 # the description box. Only its status, step and text: never the model's error.
                 if isinstance(data, dict) and data.get('status') in ('used', 'refused_again', 'rewrite_failed'):
-                    text = data.get('reworded')
-                    reworded = {'status': data['status'], 'stage': str(data.get('stage') or ''),
-                                'text': text if isinstance(text, str) and text else None}
+                    from herogen.pipeline.reword import shown
+
+                    reworded = {'status': data['status'], 'stage': str(data.get('stage') or ''), 'text': shown(data)}
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
                     and bundle.complete_glb(run / '03-source.glb')):

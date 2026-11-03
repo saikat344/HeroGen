@@ -13,7 +13,7 @@ requested image stage runs and writes its record.
 
 `reword` (fast lane, after a content-policy refusal; `herogen.pipeline.reword`) reads the refused brief on stdin,
 asks Muse Spark once for a rewrite and writes `reword.json` in the run folder: status "used" with the rewrite, or
-"rewrite_failed" with the cost and the error class (and the unusable rewrite, when there was one). Exit 0 when the
+"rewrite_failed" with the cost and the error class (an unusable rewrite is not kept). Exit 0 when the
 rewrite can be used, 1 otherwise; it prints no user or model text either.
 Stages 1/2 use the same exit codes as stage p except that gate failures use 2; the runner requires a matching
 gate-failed record to distinguish them from usage errors. Argparse help exits 0 without running the pipeline.
@@ -92,8 +92,6 @@ def reword_main(run, cache: Path, original: str) -> int:
                   "error": type(e).__name__, "cost_usd": client.log.cost_usd(calls0)}
         if isinstance(e, ApiError):
             failed.update(http_status=e.http_status, error_code=e.error_code)
-        if isinstance(e, reword.RewordRejected) and e.candidate:
-            failed["reworded"] = e.candidate
         reword.write(run.path, failed)
         print("reword: failed; stopping", file=sys.stderr)
         return 1
