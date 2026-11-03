@@ -1,22 +1,187 @@
 # HeroGen
 
-HeroGen turns one hand-drawn character sketch into a game-ready hero body for Roblox, and checks every stage
-with measurements. Without a sketch, it can draw one from a short text description of the character.
+One sketch or one sentence becomes a finished, game-ready 3D hero.
+
+## The problem
+
+An indie game developer needs 3D characters that match what they imagined, and that ship at a polygon budget a
+game can play. HeroGen goes from the idea to a textured, rigged Roblox R15 body within that budget, and records a
+measured check at every step.
+
+## Try it in 2 minutes
+
+Live product (link coming):
+
+<!-- LIVE_LINK -->
+
+3-minute demo video (link coming):
+
+<!-- VIDEO_LINK -->
+
+1. Open the live link. The gallery of earlier heroes loads with no sign-in.
+2. Open a gallery hero: orbit its 3D model, switch between textured, clay and wireframe, and compare it with its
+   starting sketch.
+3. To make your own, type a one-sentence character idea (up to 300 characters) or upload a sketch, then press
+   Create. A guest workspace opens in your browser: no email, no account.
+4. Watch the build log: each model call, each check with its measured value and limit, time and estimated cost.
+5. When it is done, play the Idle, Walk, Wave and Jump previews and download the GLB or the Roblox bundle.
+
+The demo stays up through judging, Nov 5–8, and the finals on Nov 9.
+
+## Built during the hackathon, and what came before
+
+| | When | What it is here |
+| --- | --- | --- |
+| HeroGen (this repository) | Built during the event, Oct 26 – Nov 4, 2026 | The whole product: pipeline, checks, website, Roblox export |
+| Z/BURST, its game and its FloodYard environment | Existed before the event | Only a stage to show finished heroes in. Its hero contract supplies the targets HeroGen aims at: 15 rigid R15 parts, 24,000 / 6,000 triangles, 1024 / 512 px maps and its pose set |
+
+## Public access, no secrets
+
+- **Public gallery.** Earlier heroes are served read-only from a published gallery, with no sign-in, under the
+  label "Previously generated with HeroGen" (`herogen/service/gallery.py`, `/api/gallery`).
+- **Guest workspace.** Opening one needs no email or code. Opening it alone never starts compute
+  (`GenerationStore.guest_open` in `herogen/service/generation.py`).
+
+Live generation is limited in code (`herogen/service/store.py`, `generation.py`, `web.py`, `config.py`):
+
+- **Checked before any model or GPU work.** The spend guard runs inside the transaction that creates the job,
+  before it is queued (`Store.job_create`, `_guard_generation`). When the operator turns spend limits on
+  (`HEROGEN_SERVICE_SPEND_LIMITS`), a job is refused unless
+  `spent + (queued and running jobs + 1) x running estimate <= limit`; the texture refine is then also capped
+  per hero (`HEROGEN_SERVICE_REFINE_CAP_USD`, default $0.80).
+- **A global pause switch** refuses new heroes with "Live generation is paused right now."
+- **Global concurrency.** At most `max_running` heroes run at once across all workspaces (default 5, admin range
+  1 to 32; `Store.jobs_to_dispatch`). The deployed SAM 3D apps are fixed at 5 containers each
+  (`herogen/blender/remote/deploy.py`).
+- **Explicit states, no silent wait.** A paused service or a spent budget answers HTTP 503 with
+  `generation_paused` or `generation_budget_exhausted` and a plain sentence. A hero waiting for a free worker
+  shows its place in line ("2 heroes ahead of you"), from `queue_position` and `queued_ahead`.
+- **Per-workspace limits.** 20 new heroes per hour per workspace and 2 GB of saved heroes. Uploads are at most
+  12 MB and are resized to 2048 px on the long side.
+
+## Meta models used at runtime
+
+| Model | What it does | Stages | Where it runs |
+| --- | --- | --- | --- |
+| Muse Image (`muse-image-1.0`) | Draws the sketch from an idea, the colour cover, the four-view turnaround sheet, face close-ups, held-out turned views, and the texture repaints | p, 1, 2, 2f, 2h, 3f | Meta Model API |
+| SAM 3.1 (`sam-3.1`) | Cuts out the figure in every image; finds the head, face, hair and feet for the outline and face checks and the texture work | p, 1, 2, 2f, 2h, 3f | Meta Model API |
+| Muse Spark (`muse-spark-1.3`) | Text and image questions only: the brief pre-check and the content-policy reword (website), the same-character check of a drawn sketch, the real-person photo check on uploads, the Refine suggestions after 3f, and the body usability question in stage 3 (command line; the website skips it) | p, 1, 3, after 3f | Meta Model API |
+| SAM 3D Objects | The 3D shape and its texture, from the front view and its mask | 3 | Modal GPU, A100-40GB |
+| SAM 3D Body | The skeleton: named joints and a body mesh, from the front view | 3 | Modal GPU, A10G |
+| Sapiens 2 (`sapiens2-pose-1b`) | Pose keypoints that measure the yaw of the held-out views | 2h (command line only; the website does not run 2h) | Modal GPU, L4 |
+
+The model ids are constants in `herogen/pipeline/client.py` (`IMAGE_MODEL`, `SAM_MODEL`, `TEXT_MODEL`) and in the
+frozen prompts in `herogen/prompts/versions/`. The Muse Spark calls are in `herogen/pipeline/reword.py`,
+`suggest.py`, `prompt_sketch.py`, `inputs.py` and `herogen/blender/body_quality.py`.
+
+- Every model HeroGen itself calls is a Meta model. (The SAM 3D pipelines' own sub-models, as their upstream
+  repositories ship them, are listed under [Third-party models and libraries](#third-party-models-and-libraries).)
+- Plain code is not a model call: OpenCV, NumPy, SciPy and Blender geometry do the splitting, cutting,
+  decimation, texture baking, scoring and Roblox export.
+- Browser features are not model calls: the website's 3D viewer and its animation previews run three.js on the
+  pivots stage 4 wrote.
+- No model is fine-tuned. Every weight is the upstream release, downloaded at a pinned revision.
+
+## Open-weight models
+
+SAM 3D Objects and SAM 3D Body are open-weight models (SAM License, gated on Hugging Face). HeroGen runs them on
+Modal GPUs as persistent deployed apps (`python -m herogen.blender.remote.deploy`): SAM 3D Objects on an
+A100-40GB, SAM 3D Body on an A10G. Each app scales to zero after 300 idle seconds and runs at most 5 containers.
+
+| Model | Code commit | Weight revision (Hugging Face) | Runner |
+| --- | --- | --- | --- |
+| SAM 3D Objects | `f91db411c50efee93d8db7aeb323885650f6f722` | `facebook/sam-3d-objects` `2e73555018d2741ccd486e56c24fac41155a1dc6` | `herogen/blender/remote/objects.py` |
+| SAM 3D Body | `b5c765a0d89d789985e186d396315e7590887b94` | `facebook/sam-3d-body-dinov3` `11aaa346c7204874a1cbafe3d39a979080b2c55a` | `herogen/blender/remote/body.py` |
+
+How the pipeline uses them in stage 3: SAM 3D Objects turns the front turnaround view and its SAM 3.1 mask into a
+textured mesh. SAM 3D Body reads the same view, inside the front mask's bounding box, and returns the joints.
+HeroGen fits the mesh to the turnaround views, places the joints in it, and stage 4 cuts the mesh at those
+joints into the 15 R15 parts. Every call is cached by its inputs, runner source and pinned revisions, so a
+replay returns exactly what the live call returned. Sapiens 2 is open-weight too (`facebook/sapiens2-pose-1b`,
+revision `f5fed8b97b99698d5eea1d14ff0855d0b4c3f000`, `herogen/pipeline/sapiens_app.py`).
+
+## Game-ready evidence: one real run
+
+Job `j_2brhf76zy375t3gy4rt5tjx7dn`, "Crimson Samurai", profile `roblox-ingame`. It is a turnaround redo of an
+uploaded sketch, with the note "Make the armour lacquered crimson red and black, with a red silk sash." The
+sketch and cover were reused from the earlier version; stages 2 to 6 ran in this job. Every number below is read
+from its stage records.
+
+| Measure | Value | Record |
+| --- | --- | --- |
+| Source mesh (SAM 3D Objects, stage 3) | 211,112 triangles, 0 open edges, 0 non-manifold edges | `stage-3.json` |
+| Texture refine | 6 of 6 repainted views accepted, 4096 px atlas | `stage-3f.json` |
+| R15 cut | 15 of 15 parts, high and low | `stage-4.json` |
+| Roblox high LOD | 23,798 triangles (budget 24,000), 1024 px body atlas | `stage-4.json` |
+| Roblox low LOD | 5,714 triangles (budget 6,000), 512 px body atlas | `stage-4.json` |
+| Face detail | The Head has its own texture, 1024 px on high and 512 px on low, separate from the body atlas, taking the refined colour | `stage-4.json`, `HEAD_TEXTURE` in `herogen/blender/stage4.py` |
+| Stage 4 checks | 8 of 8 gates passed; 33 of 53 checks passed in all | `stage-4.json` |
+| Pose test | 20 gate poses (rest included) plus 8 held-out poses. Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.534 studs (high) and 0.493 (low) on the gate poses, 0.516 / 0.502 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.53 studs at the widest. | `stage-4.json` |
+| Roblox rig checks | 42 of 42 gates passed (43 of 43 checks): R15 names, Motor6D joints, attachments at the pivots, rest pose, a starter place | `stage-6.json` |
+| Time | 803 s (13 min 23 s), turnaround to Roblox files | `events.jsonl` |
+| Model and GPU cost | est. $0.494: stage 2 $0.0175, stage 3 $0.1458 (Modal GPU time), stage 3f $0.3275, Refine suggestions $0.0032 | stage records, `refine-suggestions.json` |
+
+No held-out 30° / 60° view score was recorded for this run, so none is given.
+
+## Originality
+
+On the website, a brief is checked before anything is drawn (`herogen/pipeline/reword.py`, prompts
+`brief-precheck-v2` and `brief-reword-v2`). One Muse Spark call lists any brand, logo, franchise, trademarked
+character or real-person names, and any held items, pets or companions. When there are any, the brief is
+rewritten once: names become a plain archetype, and held items, pets and companions are left out. Worn clothing
+stays. A rewrite that still contains a removed name or item is refused, never repaired. The same rewrite runs
+once if Muse Image refuses a brief under its content policy. The sketch prompts also ask for empty hands and no
+pet or companion, and stage 1 rejects uploads that are photographs of real people.
+
+## Run it locally
+
+A local run uses this machine for the website, the pipeline and Blender, and calls SAM 3D on Modal. The details
+of each step are under [Requirements](#requirements).
+
+1. Python 3.11 or newer. Install the extras and the local server:
+   ```bash
+   pip install ".[live,remote,refine]"
+   pip install -r herogen/service/requirements-dev.txt
+   ```
+2. Blender 4.5 LTS (4.5.1 used locally), run headless. Set `HEROGEN_BLENDER` to its executable if it isn't at the
+   default macOS path or on `PATH`.
+3. A Modal account: `modal setup`. Request access to the gated `facebook/sam-3d-objects` and
+   `facebook/sam-3d-body-dinov3` models on Hugging Face, and store your token as a Modal secret named
+   `huggingface`.
+4. One time, build the SAM 3D Objects image and download its checkpoints:
+   ```bash
+   modal run herogen/blender/remote/objects.py::build
+   modal run herogen/blender/remote/objects.py::download
+   ```
+5. Deploy both GPU runners as persistent apps, and point local runs at them:
+   ```bash
+   python -m herogen.blender.remote.deploy
+   export HEROGEN_REMOTE_DEPLOYED=1
+   ```
+   Without `HEROGEN_REMOTE_DEPLOYED=1`, each call starts an ephemeral `modal run` app instead. Either way the
+   client needs the Modal CLI: on `PATH`, or named by `HEROGEN_MODAL`.
+6. Put your Meta Model API key in the `MODEL_API_KEY` environment variable (see `.env.example`).
+7. Start the local site, then open `http://127.0.0.1:8793/`:
+   ```bash
+   python -m herogen.service dev --port 8793 --data <dir> --runner local
+   ```
+   `--runner local` runs the real stages; the default `--runner fake` writes instant stand-ins with no model calls.
+8. Or make one hero from the command line:
+   ```bash
+   python3 -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-hero --live
+   python3 -m herogen.blender run --run runs/my-hero --stages 3,4 --remote live --refine live --profile roblox-ingame
+   python3 -m herogen.roblox export --body runs/my-hero/04-body --out runs/my-hero/06-roblox
+   ```
+9. Run the tests: see [Tests](#tests). They use synthetic inputs and never call a model.
+
+## How it works
 
 ```
 (text prompt → full-body sketch) → sketch → cover art → turnaround (front, back, left, right) → 3D mesh + joints
 → 15-section rigid R15 body → results
 ```
 
-## How this was built
-
-HeroGen was developed during the Meta hackathon period (October 26 – November 4, 2026). Most of the code was
-written by AI coding agents working within safeguards I defined: automated tests that must pass before any merge,
-independent AI code review of every change, and pre-publication checks for secrets, personal data and commit
-identity. I set the direction and quality bar, made the design decisions, and reviewed a small number of pull
-requests myself. The code is provided as-is under the [licence](LICENSE); use it at your own discretion.
-
-## Stages
+### Stages
 
 | Stage | What it does | Models and tools |
 | --- | --- | --- |
@@ -180,14 +345,13 @@ The signed-in service exposes backend version APIs (the UI is separate):
 - `POST /api/jobs/<id>/redo` with JSON `{"stage":"cover","note":"green coat"}` (or `"turnaround"`) and an
   `Idempotency-Key` creates a new owned job with `parent_job`. It stops after the requested stage.
 - `POST /api/jobs/<id>/continue` continues a stopped version through the remaining stages, using the same
-  job and quota slot. Repeated requests while it is active return that job.
+  job. Repeated requests while it is active return that job.
 - `GET /api/jobs/<id>/versions` returns `versions`: the owned parent family, including siblings and
   descendants, with stage, note, status and `cover_thumbnail_url` (the existing cover image URL, or null).
 
-Unsafe requests need the normal same-origin CSRF token. Daily, lifetime, storage and rate limits apply to
-redos; continuation checks storage and rate limits. Each workspace may have only one queued or running
-generation. Earlier versions must have stopped before branching; deleted versions are omitted from lists.
-
+Unsafe requests need the normal same-origin CSRF token. Storage and rate limits apply to redos and
+continuations, and so does the spend guard when spend limits are on. Earlier versions must have stopped before
+branching; deleted versions are omitted from lists.
 
 ## Lab
 
@@ -321,5 +485,5 @@ The other libraries the images install keep their own licences.
 
 ## Licence
 
-HeroGen's code is licensed under the [Apache License 2.0](LICENSE). The models and libraries it calls keep their
-own licences.
+Licensed under Apache 2.0 — see [LICENSE](LICENSE). The models and libraries HeroGen calls keep their own
+licences, listed under [Third-party models and libraries](#third-party-models-and-libraries).
