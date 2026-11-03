@@ -1,11 +1,14 @@
 """Owner-only progressive files, tolerant publication reads and measured stage timing."""
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import unittest
+
+from PIL import Image
 
 from test_herogen_service_support import web_test
 from test_herogen_service_web import Browser, WebCase
@@ -59,6 +62,54 @@ class ProgressiveFiles(WebCase):
         self.assertNotEqual(seen[1]['models'][-1]['url'], seen[2]['models'][-1]['url'])
         self.assertEqual(owner.get(seen[0]['models'][0]['url']).status_code, 200)
         self.assertEqual(owner.get(final['downloads']['glb']['url']).headers['content-type'], 'model/gltf-binary')
+
+    def test_character_views_show_as_drafts_while_they_are_drawn(self):
+        owner = self.signin()
+        other = self.signin('bob@example.com')
+        jid = self.make_job(owner).json()['id']
+        seen, case = [], self
+
+        class Watching(FakeRunner):
+            def _stage_2(self, ctx, run):
+                view = owner.get(f'/api/jobs/{jid}').json()
+                for url in view['draft_images'].values():
+                    case.assertIn('/drafts/', url)
+                    response = owner.get(url)
+                    case.assertEqual((response.status_code, response.headers['content-type']), (200, 'image/png'))
+                    case.assertEqual(other.get(url).status_code, 404)
+                with Image.open(io.BytesIO(owner.get(view['draft_images']['front']).content)) as front:
+                    case.assertEqual(front.mode, 'RGBA', 'a draft view is cut out on its mask')
+                seen.append(view)
+                super()._stage_2(ctx, run)
+
+            def _stage_3(self, ctx, run):
+                seen.append(owner.get(f'/api/jobs/{jid}').json())
+                super()._stage_3(ctx, run)
+
+        self.assertEqual(self.finish(jid, Watching()), 'succeeded')
+        drawing, shaping = seen
+        self.assertEqual(set(drawing['draft_images']), {'turnaround', 'top_drawn', 'front', 'right', 'back', 'left', 'top'})
+        self.assertFalse({'turnaround', 'front', 'top'} & set(drawing['images']), 'nothing unchecked looks final')
+        self.assertEqual(owner.get(drawing['draft_images']['front']).status_code, 404, 'cleared when the step ended')
+        self.assertEqual(shaping['draft_images'], {})
+        self.assertTrue({'turnaround', 'front', 'right', 'back', 'left', 'top'} <= set(shaping['images']))
+        self.assertNotIn('/drafts/', ''.join(shaping['images'].values()))
+        self.assertEqual(owner.get(f'/api/jobs/{jid}').json()['draft_images'], {})
+
+    def test_drafts_of_a_failed_step_are_never_shown(self):
+        owner = self.signin()
+        jid = self.make_job(owner).json()['id']
+
+        class Crashing(FakeRunner):
+            def _stage_2(self, ctx, run):
+                raise RuntimeError('fake crash after the drafts')
+
+        self.assertEqual(self.finish(jid, Crashing()), 'failed')
+        run = self.svc.storage.run_dir(self.store.users_list()[0]['id'], jid)
+        self.assertTrue((run / 'drafts' / '02-turnaround.png').is_file(), 'left behind by the crash')
+        view = owner.get(f'/api/jobs/{jid}').json()
+        self.assertEqual(view['draft_images'], {})
+        self.assertFalse({'turnaround', 'front', 'top', 'top_drawn'} & set(view['images']))
 
     def check_private(self, owner, other, view):
         for url in [*view['images'].values(), *(m['url'] for m in view['models']), view['downloads']['glb']['url']]:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -177,6 +178,30 @@ class TestEventPump(BuildLogCase):
         events.emit("local", file=src, step="4", what="late")
         self.assertFalse(pump.pump(), "nothing is written after the block")
         self.assertNotIn(b"late", dst.read_bytes())
+
+    def test_mirrors_the_drafts_folder_as_it_changes(self):
+        local, remote = self.tmp / "local", self.tmp / "remote"
+        local.mkdir()
+        remote.mkdir()
+        vol = CountingVolume()
+        pump = EventPump(local / events.FILE, remote / events.FILE, vol, lambda: True,
+                         drafts=(local / "drafts", remote / "drafts"))
+        self.assertFalse(pump.pump(), "no log and no drafts yet")
+        (local / "drafts" / "views").mkdir(parents=True)
+        (local / "drafts" / "02-turnaround.png").write_bytes(b"sheet")
+        (local / "drafts" / "views" / "front.png.part").write_bytes(b"half")
+        self.assertTrue(pump.pump())
+        self.assertEqual((remote / "drafts" / "02-turnaround.png").read_bytes(), b"sheet")
+        self.assertFalse((remote / "drafts" / "views" / "front.png.part").exists(), "a draft being written waits")
+        self.assertFalse((remote / events.FILE).exists())
+        self.assertFalse(pump.pump(), "unchanged")
+        (local / "drafts" / "views" / "front.png.part").rename(local / "drafts" / "views" / "front.png")
+        self.assertTrue(pump.pump())
+        self.assertTrue((remote / "drafts" / "views" / "front.png").is_file())
+        shutil.rmtree(local / "drafts")
+        self.assertTrue(pump.pump())
+        self.assertFalse((remote / "drafts").exists(), "cleared drafts are cleared on the volume too")
+        self.assertEqual(vol.commits, 3)
 
     def test_never_creates_a_missing_run_folder(self):
         src, dst = self.tmp / "local" / events.FILE, self.tmp / "gone" / events.FILE

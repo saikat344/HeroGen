@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from herogen.pipeline import events
+from herogen.pipeline.runfolder import DRAFTS
 from herogen.service.config import Settings
 from herogen.service.runner import (
     GROUPS,
@@ -102,12 +103,14 @@ class EventPump:
     It never creates the run folder. With `still_wanted`, a write whose job or account was deleted while it ran is
     removed again after its commit, as `CopyWorkdir` does for a copy back (up to `stop`, not including it). The
     copy back after the stage still copies everything, so a missed beat loses nothing. Leaving the block waits
-    for a write in progress, so nothing is written after it."""
+    for a write in progress, so nothing is written after it. With `drafts` (a local folder and its volume copy), the
+    stage's draft images (`herogen.pipeline.runfolder.save_draft`) are mirrored the same way."""
 
     def __init__(self, src: Path, dst: Path, volume, still_current: Callable[[], bool],
                  every_s: float | None = None, still_wanted: Callable[[], bool] | None = None,
-                 stop: Path | None = None) -> None:
+                 stop: Path | None = None, drafts: tuple[Path, Path] | None = None) -> None:
         self.src, self.dst, self.volume, self.still_current = Path(src), Path(dst), volume, still_current
+        self.drafts = tuple(Path(p) for p in drafts) if drafts else None
         self.still_wanted, self.stop = still_wanted, Path(stop) if stop is not None else self.dst.parent
         self.every_s = PUMP_EVERY_S if every_s is None else every_s
         self.last: tuple[int, int] | None = None
@@ -123,26 +126,37 @@ class EventPump:
                 return False
             try:
                 st = self.src.stat()
+                log_stamp = (st.st_size, st.st_mtime_ns)
             except FileNotFoundError:
-                return False
-            stamp = (st.st_size, st.st_mtime_ns)
-            if stamp == self.last:
+                log_stamp = None
+            stamp = (log_stamp, _tree_stamp(self.drafts[0]) if self.drafts else None)
+            last = self.last or (None, None)
+            if stamp == last:
                 return False
             if not self.still_current():
                 self.stopped = True
                 return False
             if not self.dst.parent.is_dir():
                 return False
-            part = self.dst.with_name(self.dst.name + ".part")
-            shutil.copy2(self.src, part)
-            os.replace(part, self.dst)
+            written: list[Path] = []
+            if log_stamp is not None and log_stamp != last[0]:
+                part = self.dst.with_name(self.dst.name + ".part")
+                shutil.copy2(self.src, part)
+                os.replace(part, self.dst)
+                written.append(self.dst)
+            if stamp[1] != last[1]:
+                local, remote = self.drafts
+                if local.is_dir():
+                    written += _mirror(local, remote, delete=True)
+                else:
+                    shutil.rmtree(remote, ignore_errors=True)
             self.volume.commit()
             self.last = stamp
             if self.still_wanted is not None and not self.still_wanted():
                 # Deleted while this write ran: take it back out, so a deleted hero's log never reappears.
                 self.stopped = True
                 self.volume.reload()
-                _undo([self.dst], self.stop)
+                _undo(written, self.stop)
                 self.volume.commit()
                 event("event_pump_undone", file=self.dst.name)
                 return False
@@ -250,6 +264,15 @@ def _mirror(src: Path, dst: Path, delete: bool) -> list[Path]:
     return written
 
 
+def _tree_stamp(folder: Path) -> tuple | None:
+    """(path, size, mtime) of each finished file under `folder`, or None when it holds none."""
+    try:
+        return tuple(sorted((str(p), s.st_size, s.st_mtime_ns) for p in folder.rglob("*")
+                            if not p.name.endswith(".part") and p.is_file() and (s := p.stat()))) or None
+    except OSError:
+        return None
+
+
 def _undo(written: list[Path], stop: Path) -> None:
     """Remove files a copy back wrote, then the folders it left empty, up to (not including) `stop`."""
     for p in written:
@@ -333,7 +356,8 @@ class CopyWorkdir:
     def event_pump(self) -> EventPump:
         assert self.local is not None
         return EventPump(self.local.run_dir / events.FILE, self.remote.run_dir / events.FILE, self.volume,
-                         self.still_current, still_wanted=self.still_wanted, stop=self.remote.run_dir.parents[2])
+                         self.still_current, still_wanted=self.still_wanted, stop=self.remote.run_dir.parents[2],
+                         drafts=(self.local.run_dir / DRAFTS, self.remote.run_dir / DRAFTS))
 
 
 def make_context(settings: Settings, storage: Storage, job: dict[str, Any], *, spend_limits_enabled=False) -> StageContext:

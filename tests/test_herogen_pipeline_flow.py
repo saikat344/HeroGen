@@ -646,6 +646,21 @@ class KeepBestSheetTest(_RunsTest):
         self.assertTrue((run / "views/meta.json").exists())
         self.assertTrue((run / "masks/parts.json").exists())
 
+    def test_each_retried_sheet_replaces_the_draft_and_its_views(self):
+        good, _ = sheet()
+        seen, save = [], stages.save_draft
+        def spy(run, rel, img):
+            save(run, rel, img)
+            seen.append((rel, sorted(p.name for p in (Path(run) / "drafts" / "views").glob("*.png"))))
+        with mock.patch.object(stages, "save_draft", spy):
+            code, s2, _ = self._sheets([_one_legged_back_sheet(), good])
+        self.assertEqual((code, s2["details"]["kept_attempt"]), (0, 1))
+        sheets = [i for i, (rel, _) in enumerate(seen) if rel == "02-turnaround.png"]
+        self.assertEqual(len(sheets), 2)
+        self.assertIn("views/front.png", [rel for rel, _ in seen[:sheets[1]]])
+        self.assertEqual(seen[sheets[1]][1], [], "a new sheet clears the views cut from the last one")
+        self.assertFalse((self.root / "k" / "drafts").exists())
+
     def test_a_tie_keeps_the_earlier_sheet(self):
         one = _one_legged_back_sheet()
         code, s2, _ = self._sheets([one, one, one, one])

@@ -67,7 +67,7 @@ export function generationState(job) {
   const eyebrow = { queued: 'Queued · your hero is saved', running: left ? `${phase} · ${left}` : phase,
     succeeded: issues.length ? 'Hero ready · see the notes' : exporting ? 'Hero ready · preparing Roblox files' : robloxReady(job) ? 'Hero ready · Roblox R15' : 'Hero ready',
     stopped: 'Saved at this step', failed: 'Needs attention', rejected: 'Input needs attention', canceled: 'Cancelled' }[job.state] || 'Following the pipeline';
-  return { title, subtitle, eyebrow, main, focus, issues, terminal, passed, steps, label: progressLabel(job, steps, passed, current, exporting) };
+  return { title, subtitle, eyebrow, left, main, focus, issues, terminal, passed, steps, label: progressLabel(job, steps, passed, current, exporting) };
 }
 // The progress label as plain text pieces: `lead` then the emphasised `strong` part (never both empty).
 function progressLabel(job, steps, passed, current, exporting) {
@@ -92,6 +92,21 @@ const DOCK_LABEL = {sketch: 'Sketch', turnaround: 'All views'};
 const defaultImage = (job, available) => (job?.images?.front ? 'front' : available.at(-1)?.[0]) || null;
 const imageChoices = job => [...IMAGES.filter(([k]) => job?.images?.[k]),
   ...Object.keys(job?.images || {}).filter(k => !IMAGES.some(([known]) => known === k)).map(k => [k, k.replaceAll('_', ' ')])];
+// While the character views are drawn and the 3D shape is built: the views so far, final or still a draft
+// (`draft_images`, shown only while step 2 runs). `turn` once all four sides exist; null when there is nothing to stage.
+const SIDES = ['front', 'right', 'back', 'left'];
+export function viewsReveal(job, drafts = job?.draft_images || {}) {
+  if (!job || TERMINAL.has(job.state) || job.downloads?.glb?.available) return null;
+  const state = Object.fromEntries((job.stages || []).filter(s => s && typeof s === 'object').map(s => [s.key, s.state]));
+  const drawing = state['2'] === 'running';
+  if (!drawing && !(state['2'] === 'passed' && ['pending', 'running'].includes(state['3']))) return null;
+  const images = job.images || {}, own = drawing ? drafts : {};
+  const views = Object.fromEntries([...SIDES, 'top'].map(k => [k, images[k] || own[k] || (k === 'top' && own.top_drawn) || null]));
+  // A draft view is cut out on its mask, so its outline is the one that was found.
+  const cut = Object.fromEntries([...SIDES, 'top'].map(k => [k, !images[k] && !!own[k]]));
+  return { drawing, sheet: drawing && !images.turnaround ? own.turnaround || null : null, views, cut,
+    turn: SIDES.every(k => views[k]), sculpting: !drawing && state['3'] === 'running' };
+}
 export function stageTiming(s) {
   const parts = [];
   if (s.state === 'running' && Number.isFinite(s.elapsed_seconds)) parts.push(`${Math.floor(s.elapsed_seconds)} s elapsed`);
@@ -135,6 +150,8 @@ export function generationView($, select3D) {
   const dock = viewerDock($);
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
   let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null, lastImage = null;
+  let reveal = null, drafts = {}, sheetUrl = null, redrawUntil = 0, turnTimer = null, turnSignature = '', handoff = null;
+  const reducedMotion = () => Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
   const models = () => job?.models?.length ? job.models : job?.downloads?.glb?.available ? [job.downloads.glb] : [];
   const latestModel = () => models().at(-1);
   function modelCopy() {
@@ -156,6 +173,7 @@ export function generationView($, select3D) {
     loading = candidate.url;
     Promise.resolve(select3D(candidate.url, {preserveCamera: shownUrl !== null, canReplace: () => forced || !touched})).then(loaded => {
       if (token !== modelRequest || id !== jobId || !model) return;
+      endHandoff();
       if (loaded === false) {
         if (shownModel) { chosenModel = shownModel; modelCopy(); }
         return;
@@ -173,12 +191,47 @@ export function generationView($, select3D) {
     if (latest.n) track('update_clicked', {n: String(latest.n)});
     chosenModel = latest; modelCopy(); loadModel(true);
   });
+  // The turntable cycles Front, Right, Back, Left; with reduced motion it holds the front view.
+  function turntable(on) {
+    const box = $('#turntable'), frames = $('#turnFrames');
+    if (on) {
+      const urls = SIDES.map(k => reveal.views[k]), signature = urls.join();
+      if (signature !== turnSignature) {
+        const at = Math.max(0, [...frames.children].findIndex(f => f.classList.contains('is-on')));
+        turnSignature = signature;
+        frames.replaceChildren(...urls.map((url, i) => { const f = node('img', null, i === at ? 'is-on' : ''); f.src = url; f.alt = ''; return f; }));
+        frames.classList.remove('reveal'); void frames.offsetWidth; frames.classList.add('reveal');
+      }
+      box.setAttribute('aria-label', `Front, right, back and left views of ${job?.name || 'your hero'}`);
+      if (!turnTimer && !reducedMotion()) turnTimer = setInterval(() => {
+        const all = [...frames.children], at = all.findIndex(f => f.classList.contains('is-on'));
+        all.forEach((f, i) => f.classList.toggle('is-on', i === (at + 1) % all.length));
+      }, 600);
+    } else if (!handoff) { clearInterval(turnTimer); turnTimer = null; }
+    box.hidden = !on && !handoff;
+  }
+  // Leaving the turntable for the first 3D shape: the turntable stays under the canvas until the model has loaded,
+  // then the canvas fades in over it.
+  function endHandoff() {
+    if (!handoff) return;
+    clearTimeout(handoff); handoff = null;
+    $('#viewer').classList.remove('is-handoff');
+    setTimeout(() => { if (!handoff && selected !== 'turntable') turntable(false); }, 700);
+  }
+  function revealLabel() {
+    if (!reveal?.drawing) return 'Character views';
+    return Date.now() < redrawUntil ? 'Redrawing — the views didn’t line up' : 'First draft · checking the views';
+  }
   function pick(key, chosen = false, retry = false) {
+    if (key === 'model' && selected === 'turntable' && !model && !handoff) {
+      handoff = setTimeout(endHandoff, 8000); $('#viewer').classList.add('is-handoff');
+    }
     selected = key; manual = chosen; model = key === 'model'; if (key && !model && chosen) lastImage = key;
     $('#previewWrap').hidden = !model;
     $('#viewer').dataset.mode = model ? 'model' : key ? 'image' : 'empty';
     dock.mode(model);
-    $('#artboardImage').hidden = model || !key;
+    $('#artboardImage').hidden = model || !key || key === 'turntable';
+    turntable(key === 'turntable');
     $('#artboardEmpty').hidden = model || !!key;
     $('#modelTab').setAttribute('aria-pressed', String(model));
     $('#artTab').setAttribute('aria-pressed', String(!model));
@@ -186,10 +239,15 @@ export function generationView($, select3D) {
       $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
       modelCopy(); loadModel();
     }
+    else if (key === 'turntable') {
+      $('#imageError').hidden = true; $('#artboardImage').removeAttribute('src');
+      text($('#artifactLabel'), revealLabel());
+      ++modelRequest; loading = null; shownUrl = null; select3D(null);
+    }
     else {
-      const image = imageChoices(job).find(([k]) => k === key);
+      const image = key === 'draft' ? [key, revealLabel()] : imageChoices(job).find(([k]) => k === key);
       if (image) {
-        const url = job.images[key];
+        const url = key === 'draft' ? reveal?.sheet : job.images[key];
         if (retry || $('#artboardImage').getAttribute('src') !== url) {
           $('#imageError').hidden = true; $('#artboardImage').src = url;
           $('#artboardImage').classList.remove('reveal'); void $('#artboardImage').offsetWidth; $('#artboardImage').classList.add('reveal');
@@ -209,6 +267,7 @@ export function generationView($, select3D) {
   });
   $('#modelTab').addEventListener('click', () => { if (latestModel()) pick('model', true); });
   $('#artboardImage').addEventListener('error', () => {
+    if (selected === 'draft') { $('#artboardImage').hidden = true; return; }   // replaced since; the next poll has it
     if (model || !selected || $('#artboardImage').getAttribute('src') !== job?.images?.[selected]) return;
     $('#artboardImage').hidden = true; $('#imageError').hidden = false;
   });
@@ -294,6 +353,27 @@ export function generationView($, select3D) {
       const li = node('li'); li.append(node('b', x.title), document.createTextNode(` ${x.message || `${x.title} ${fallback[x.state] || 'did not finish.'}`}`)); return li;
     }));
   }
+  function renderReveal() {
+    const viewer = $('#viewer');
+    if (reveal) viewer.dataset.reveal = reveal.drawing ? 'drawing' : 'sculpting'; else delete viewer.dataset.reveal;
+    $('#viewSlots').hidden = !reveal?.drawing;
+    for (const slot of $('#viewSlots').querySelectorAll('.view-slot')) {
+      const key = slot.dataset.view, url = reveal?.drawing ? reveal.views[key] : null, frame = slot.firstElementChild;
+      let img = frame.querySelector('img');
+      if (url && img?.getAttribute('src') === url) continue;
+      if (!url) { slot.className = 'view-slot'; img?.remove(); continue; }
+      if (!img) {
+        img = node('img'); img.alt = ''; frame.append(img);
+        img.addEventListener('error', () => { slot.classList.remove('is-filled', 'is-new'); });
+      }
+      const fresh = !slot.classList.contains('is-filled');
+      img.src = url;
+      slot.className = `view-slot is-filled${fresh ? ' is-new' : ''}${reveal.cut[key] ? ' is-cut' : ''}`;
+    }
+    const sweep = $('#artSweep'), art = reveal?.drawing && !reveal.sheet && !model && ['cover', 'sketch'].includes(selected) && job.images[selected];
+    sweep.hidden = !art || reducedMotion();
+    if (art) sweep.style.setProperty('--sweep-mask', `url("${art}")`);
+  }
   const toggle = $('#viewSteps'), stepsPanel = $('#progressSteps');
   const open = (on) => { toggle.setAttribute('aria-expanded', String(on)); stepsPanel.inert = !on; $('.progress').classList.toggle('is-open', on); };
   toggle.addEventListener('click', () => open(toggle.getAttribute('aria-expanded') !== 'true'));
@@ -302,8 +382,15 @@ export function generationView($, select3D) {
     update(next) {
       const changed = jobId !== next.id;
       if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
-        chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest; }
+        chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
+        drafts = {}; sheetUrl = null; redrawUntil = 0; turnSignature = ''; if (handoff) endHandoff(); }
       job = next;
+      // The step clears its drafts as it ends, a moment before it is reported passed: keep the last ones till then.
+      const step2 = (job.stages || []).find(s => s?.key === '2')?.state;
+      drafts = step2 !== 'running' ? {} : Object.keys(job.draft_images || {}).length ? job.draft_images : drafts;
+      reveal = viewsReveal(job, drafts);
+      if (reveal?.sheet && sheetUrl && reveal.sheet !== sheetUrl) redrawUntil = Date.now() + 5000;
+      if (reveal?.sheet) sheetUrl = reveal.sheet;
       const latest3D = latestModel();
       if (!chosenModel || !touched && latest3D && (latest3D.n == null || latest3D.n > (chosenModel.n ?? -1))) chosenModel = latest3D;
       const state = generationState(job);
@@ -349,17 +436,21 @@ export function generationView($, select3D) {
       dock.cameras(job.images);
       $('#modelTab').hidden = !job.downloads?.glb?.available; $('#modelTab').parentElement.hidden = $('#modelTab').hidden;
       const latest = defaultImage(job, available);
+      const auto = job.downloads?.glb?.available ? 'model' : reveal?.turn ? 'turntable' : reveal?.sheet ? 'draft' : latest;
       if (!manual || (selected !== 'model' && !job.images?.[selected]) || (selected === 'model' && !job.downloads?.glb?.available)) {
-        pick(job.downloads?.glb?.available ? 'model' : latest);
+        pick(auto);
       } else pick(selected, true);
+      renderReveal();
       if (changed) $('#imageError').hidden = true;
       text($('#artboardEmptyText'), state.terminal ? 'No images were saved for this job.' :
         job.state === 'queued' ? 'Starts when a worker is free.' : 'Your first image appears here in about a minute.');
       const idea = !state.terminal && job.kind === 'prompt' && job.prompt ? `“${job.prompt}”` : '';
       text($('#artboardIdea'), idea); $('#artboardIdea').hidden = !idea;
       $('#modelPending').hidden = state.terminal || !!job.downloads?.glb?.available || model || state.focus?.key !== '3' || !available.length;
+      text($('#modelPendingText'), state.left && state.focus?.key === '3' ? `3D shape on the way · ${state.left}` : '3D shape on the way');
       return state;
     },
-    reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null); }
+    reset() { jobId = null; job = null; selected = null; signature = ''; chosenModel = null; shownModel = null; shownUrl = null; loading = null; ++modelRequest; select3D(null);
+      reveal = null; drafts = {}; if (handoff) endHandoff(); turntable(false); renderReveal(); }
   };
 }

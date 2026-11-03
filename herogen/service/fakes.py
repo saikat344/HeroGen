@@ -80,6 +80,28 @@ def _figure(size: int, colour: tuple[int, int, int], width: float = 1.0):
     return img
 
 
+def _fake_views():
+    """The fake turnaround sheet and its five views."""
+    from PIL import Image
+
+    views = {v: _figure(256, (40, 90, 200), 1.0 if v in ("front", "back") else 0.5)
+             for v in ("front", "right", "back", "left", "top")}
+    sheet = Image.new("RGB", (1024, 256), (255, 255, 255))
+    for i, v in enumerate(("front", "right", "back", "left")):
+        sheet.paste(views[v], (i * 256, 0))
+    return sheet, views
+
+
+def _mask(img):
+    return img.convert("L").point(lambda p: 255 if p < 250 else 0)
+
+
+def _cut_out(img):
+    out = img.convert("RGBA")
+    out.putalpha(_mask(img))
+    return out
+
+
 def _record(stage, name, outputs, ok=True, cost=0.0, checks=None, details=None):
     return {"stage": stage, "name": name, "ok": ok, "started": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
                                                                             time.gmtime()),
@@ -312,20 +334,33 @@ class FakeRunner:
         log.wait(0.3)
 
     def _log_2(self, ctx: StageContext, log: FakeLog) -> None:
+        # The drafts a real run shows as each call returns (`stages.stage2_turnaround`).
+        from herogen.pipeline.runfolder import clear_drafts, save_draft
+
+        sheet_img, views = _fake_views()
+        first = sheet_img.copy()
+        first.paste((255, 255, 255), (first.width * 3 // 4, 0, first.width, first.height))   # a figure short
         sheet, top = log.start(MUSE, "turnaround"), log.start(MUSE, "top_view")
         log.wait(0.2)
         log.end(sheet, MUSE_USD)
+        save_draft(ctx.run_dir, "02-turnaround.png", first)
         log.calls([(SAM, "turnaround", {"target": "character"})], 0.05, SAM_USD)
         # The first sheet's figures overlap: the fast lane asks for one more sheet, once.
         log.emit("decision", what="recovery_sheet", why="too_few_figures", m={"figures": 3})
         again = log.start(MUSE, "turnaround")
         log.wait(0.1)
         log.end(top, MUSE_USD)
+        save_draft(ctx.run_dir, "02-top-drawn.png", views["top"])
         log.wait(0.1)
         log.end(again, MUSE_USD)
+        clear_drafts(ctx.run_dir, *(f"views/{v}.png" for v in views))
+        save_draft(ctx.run_dir, "02-turnaround.png", sheet_img)
         log.calls([(SAM, "turnaround", {"target": "character"})], 0.05, SAM_USD)
         log.emit("local", what="sheet_split", m={"figures": 4, "height_agreement": 0.99})
+        for v in ("front", "right", "back", "left"):
+            save_draft(ctx.run_dir, f"views/{v}.png", _cut_out(views[v]))
         log.calls([(SAM, "top_view", {"target": "character"})], 0.05, SAM_USD)
+        save_draft(ctx.run_dir, "views/top.png", _cut_out(views["top"]))
         log.calls([(SAM, "turnaround", {"target": "face"}), (SAM, "turnaround", {"target": "head"})], 0.05, SAM_USD)
         for view in ("turnaround", "front", "right", "back", "left", "top"):
             log.emit("image", what=view)
@@ -439,21 +474,19 @@ class FakeRunner:
         write_record(run, _record(1, "cover_art", ["01-cover.png"], cost=0.0125))
 
     def _stage_2(self, ctx: StageContext, run: Path) -> None:
-        from PIL import Image
+        from herogen.pipeline.runfolder import clear_drafts
 
         (run / "views").mkdir(exist_ok=True)
         (run / "masks").mkdir(exist_ok=True)
-        sheet = Image.new("RGB", (1024, 256), (255, 255, 255))
-        for i, v in enumerate(("front", "right", "back", "left", "top")):
-            img = _figure(256, (40, 90, 200), 1.0 if v in ("front", "back") else 0.5)
+        sheet, views = _fake_views()
+        for v, img in views.items():
             img.save(run / "views" / f"{v}.png", format="PNG")
-            img.convert("L").point(lambda p: 255 if p < 250 else 0).save(run / "masks" / f"{v}.png")
-            if i < 4:
-                sheet.paste(img, (i * 256, 0))
+            _mask(img).save(run / "masks" / f"{v}.png")
         sheet.save(run / "02-turnaround.png", format="PNG")
         (run / "views" / "meta.json").write_text(json.dumps({"pixels_per_unit": 40.0, "height_units": 5.5,
                                                              "image_size": 256}))
         write_record(run, _record(2, "turnaround", ["02-turnaround.png"], cost=0.025))
+        clear_drafts(run)
 
 
     def _stage_3(self, ctx: StageContext, run: Path) -> None:

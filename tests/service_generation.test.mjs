@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { SourceTextModule } from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generationState, segmentLabels, stageTiming } from '../herogen/service/static/generation.js';
+import { generationState, segmentLabels, stageTiming, viewsReveal } from '../herogen/service/static/generation.js';
 const stage = (key, state, side=false) => ({key, state, side, label:`Stage ${key}`});
 test('prompt and uploaded inputs use only the supplied pipeline, in its real order', () => {
   const stages=[stage('p','passed'),stage('0','passed'),stage('1','running'),stage('6','pending'),stage('5','pending')];
@@ -69,4 +69,23 @@ test('a hero whose Roblox files are ready is not called "preparing" while the ex
   const stages = [stage('4','passed'),stage('6','passed'),stage('5','running')];
   assert.equal(generationState({state:'succeeded',export_state:'running',stages}).eyebrow,'Hero ready · preparing Roblox files');
   assert.equal(generationState({state:'succeeded',export_state:'running',roblox_state:'ready',stages}).eyebrow,'Hero ready · Roblox R15');
+});
+
+test('the character views show as drafts while drawn, then as the turntable until the first 3D shape', () => {
+  const at = (two, three) => [stage('1','passed'), stage('2',two), stage('3',three)];
+  const sides = {front:'f', right:'r', back:'b', left:'l'};
+  assert.equal(viewsReveal({state:'running', stages:at('passed','passed'), images:{}}), null);
+  const start = viewsReveal({state:'running', stages:at('running','pending'), images:{cover:'c'}, draft_images:{}});
+  assert.equal(start.drawing, true); assert.equal(start.sheet, null); assert.equal(start.turn, false);
+  const sheet = viewsReveal({state:'running', stages:at('running','pending'), images:{cover:'c'},
+    draft_images:{turnaround:'t', top_drawn:'td', front:'df'}});
+  assert.equal(sheet.sheet, 't'); assert.equal(sheet.views.top, 'td'); assert.equal(sheet.cut.top, false);
+  assert.equal(sheet.cut.front, true); assert.equal(sheet.turn, false);
+  const cut = viewsReveal({state:'running', stages:at('running','pending'), images:{}, draft_images:{...sides, top:'dt', top_drawn:'td'}});
+  assert.equal(cut.turn, true); assert.equal(cut.views.top, 'dt'); assert.equal(cut.cut.top, true);
+  const shaping = viewsReveal({state:'running', stages:at('passed','running'), images:{...sides, turnaround:'t'}, draft_images:{front:'stale'}});
+  assert.deepEqual([shaping.drawing, shaping.sculpting, shaping.turn, shaping.views.front, shaping.cut.front], [false, true, true, 'f', false]);
+  assert.equal(viewsReveal({state:'running', stages:at('passed','running'), images:sides, downloads:{glb:{available:true}}}), null);
+  for (const state of ['failed', 'succeeded', 'canceled'])
+    assert.equal(viewsReveal({state, stages:at('running','pending'), images:{}, draft_images:sides}), null, state);
 });

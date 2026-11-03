@@ -74,3 +74,32 @@ class RunFolder:
     def read_stage(self, n: int | str) -> dict[str, Any] | None:
         p = self.path / f"stage-{n}.json"
         return json.loads(p.read_text()) if p.exists() else None
+
+
+# Images a running stage shows before it ends (`save_draft`): the website publishes them as drafts only while
+# their stage runs. They are never outputs, and the stage clears them when it starts and ends.
+DRAFTS = "drafts"
+
+
+def save_draft(run: Path | str, rel: str, img) -> None:
+    """Write ``img`` as ``drafts/<rel>`` atomically (a reader sees the old file or the new one), quickly
+    compressed. A draft that cannot be written is skipped: it never stops the stage."""
+    p = Path(run) / DRAFTS / rel
+    part = p.with_name(p.name + ".part")   # `.part` files are never copied off a local copy
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        img.save(part, format="PNG", compress_level=1)
+        os.replace(part, p)
+    except (OSError, ValueError):
+        part.unlink(missing_ok=True)
+
+
+def clear_drafts(run: Path | str, *rels: str) -> None:
+    """Remove the drafts named by ``rels``, or every draft."""
+    import shutil
+
+    base = Path(run) / DRAFTS
+    if not rels:
+        shutil.rmtree(base, ignore_errors=True)
+    for rel in rels:
+        (base / rel).unlink(missing_ok=True)

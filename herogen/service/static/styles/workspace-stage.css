@@ -32,6 +32,44 @@
 .viewer__image { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; min-height: 0; object-fit: contain; border-radius: var(--radius-l); box-shadow: var(--shadow-3); }
 .viewer .viewer__image.reveal { animation: reveal var(--dur-reveal) var(--ease-out) both; }
 
+/* While the character views are drawn: the artwork under a slow light sweep, five slots that fill as each view is
+   cut out (a cut-out draft traces its own outline), then a turntable of the four views until the 3D shape shows. */
+.viewer__media { grid-template-rows: minmax(0, 1fr) auto; }
+.viewer__media > :not(.view-slots) { grid-area: 1 / 1; }
+.viewer__sweep { width: 100%; height: 100%; pointer-events: none; -webkit-mask: var(--sweep-mask) center / contain no-repeat; mask: var(--sweep-mask) center / contain no-repeat;
+  background: linear-gradient(105deg, transparent 42%, color-mix(in srgb, var(--ember-300) 24%, transparent) 50%, transparent 58%) 0 0 / 300% 100% no-repeat; background-position: 150% 0; }
+.viewer__turn { width: 100%; height: 100%; min-height: 0; container-type: size; display: grid; place-items: center; }
+.viewer__turn-frames { position: relative; width: min(100cqw, 100cqh); aspect-ratio: 1; overflow: hidden; border-radius: var(--radius-l); }
+.viewer__turn-frames.reveal { animation: fade var(--dur-reveal) var(--ease-out) both; }
+.viewer__turn-frames img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity calc(var(--dur-base) * 0.8) var(--ease-standard); }
+.viewer__turn-frames img.is-on { opacity: 1; }
+.viewer[data-reveal="sculpting"] .viewer__turn-frames::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 18%; pointer-events: none; opacity: 0;
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--color-accent) 22%, transparent) 82%, var(--stage-accent-text) 100%); }
+.viewer[data-reveal] .viewer__status .viewer__label { height: auto; min-height: var(--control-h-s); padding-block: var(--space-1); white-space: normal; }
+.viewer.is-handoff .viewer__canvas { opacity: 0; }
+.viewer__canvas { transition: opacity var(--dur-reveal) var(--ease-out); }
+.view-slots { grid-row: 2; display: grid; justify-items: center; gap: var(--space-3); width: 100%; margin-top: var(--space-4); }
+.viewer .view-slots__note { margin: 0; font-size: var(--text-caption); font-weight: var(--weight-semibold); color: var(--stage-text-muted); }
+.view-slots__list { display: flex; justify-content: center; gap: var(--space-3); margin: 0; padding: 0; list-style: none; width: 100%; }
+.view-slot { flex: 0 1 var(--thumb-w); min-width: 0; display: grid; justify-items: center; gap: var(--space-2); font-size: var(--text-caption); color: var(--stage-text-muted); }
+.view-slot__img { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 1; overflow: hidden; border-radius: var(--radius-s); border: var(--border-w) solid var(--stage-glass-border); background: var(--stage-thumb-bg); }
+.view-slot:not(.is-filled) .view-slot__img::after { content: ""; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 30%, var(--stage-shimmer) 50%, transparent 70%); animation: shimmer var(--dur-ambient) var(--ease-linear) infinite; }
+.view-slot__img img { width: 100%; height: 100%; object-fit: contain; }
+.view-slot:not(.is-filled) .view-slot__img img { display: none; }
+.view-slot.is-filled { color: var(--stage-text); }
+.view-slot.is-new .view-slot__img img { animation: pop var(--dur-slow) var(--ease-spring) both; }
+.view-slot.is-cut .view-slot__img { overflow: visible; background: transparent; }
+.view-slot.is-cut .view-slot__img img { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 5px var(--color-accent-glow)); }
+@media (prefers-reduced-motion: no-preference) {
+  .viewer[data-reveal="drawing"] .viewer__sweep { animation: art-sweep calc(var(--dur-ambient) * 2) var(--ease-standard) infinite; }
+  .viewer[data-reveal="sculpting"] .viewer__turn-frames::after { animation: scan calc(var(--dur-ambient) * 1.5) var(--ease-linear) infinite; }
+  .view-slot.is-cut .view-slot__img img { animation: pop var(--dur-slow) var(--ease-spring) both, outline-glow var(--dur-ambient) var(--ease-standard) var(--dur-slow) infinite; }
+}
+@keyframes art-sweep { 0% { background-position: 150% 0; } 60%, 100% { background-position: -50% 0; } }
+@keyframes scan { 0% { transform: translateY(-100%); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateY(560%); opacity: 0; } }
+@keyframes outline-glow { 0%, 100% { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 5px var(--color-accent-glow)); }
+  50% { filter: drop-shadow(0 0 1px var(--stage-accent-text)) drop-shadow(0 0 10px var(--color-accent-glow)); } }
+
 /* Before the first image: a silhouette skeleton and one line of copy. */
 .viewer__empty { display: grid; justify-items: center; gap: var(--space-5); max-width: 44ch; text-align: center; }
 .viewer__silhouette { display: grid; justify-items: center; gap: var(--space-3); }
@@ -162,11 +200,14 @@ body.has-expanded-viewer { overflow: hidden; }
   .result-section__actions, .result-section .downloads { flex-direction: column; align-items: stretch; width: 100%; }
   .actions__error { padding: 0 var(--space-4) var(--space-4); }
   .viewer__silhouette-head { width: 44px; height: 44px; }
+  .view-slots { margin-top: var(--space-3); gap: var(--space-2); }
+  .view-slots__list { gap: var(--space-2); }
   .viewer .viewer__silhouette-body { width: 88px; height: 112px; }
 }
 
 /* ---------- Reduced motion: durations collapse in tokens.css; also stop the spinner and the reveal blur. ---------- */
 @media (prefers-reduced-motion: reduce) {
-  .viewer__pending .icon, .viewer__notice { animation: none; }
+  .viewer__pending .icon, .viewer__notice, .view-slot:not(.is-filled) .view-slot__img::after { animation: none; }
+  .view-slot.is-new .view-slot__img img { animation: fade var(--dur-reveal) var(--ease-out) both; }
   .viewer .viewer__image.reveal, .viewer canvas#preview.reveal { animation-name: fade; }
 }
