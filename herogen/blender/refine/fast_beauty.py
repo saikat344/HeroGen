@@ -140,6 +140,7 @@ class FaceControl:
         self.default_tex = self.default_data = self.default_context = None
         self.default_passes = []
         self.extensions = {}
+        self.extension_children = {}   # per view: the attempt-one client whose calls are not yet published
         self.extension_calls = {}   # per view: the requests that paid its conditional slot (build log)
         self.root_client = self.persistence_lock = None
         # SideBeautyPass turnaround art turns side and rear beauty requests into RF16B.
@@ -196,12 +197,14 @@ class FaceControl:
                  'body+180': 180, 'upper+180': 180}[job.name]
         yaw = beauty.selected_yaw(self.references, angle)
         if yaw is None:
-            job.record['note'] = f'no face-free beauty reference at {angle:+g} yaw; standard recipe'
+            with self.state_lock:   # the stage record, which other threads serialise while they save
+                job.record['note'] = f'no face-free beauty reference at {angle:+g} yaw; standard recipe'
             return cover, options
         if self.side_art and angle == 180 and beauty.style_only(self.references, yaw):
             # A style-only rear reference has another outline. Its costume and drape reach RF16B's
             # rear and hair paints; slot 1 uses the art-conditioned standard recipe instead.
-            job.record['note'] = f'style-only beauty reference at {yaw:+g} yaw; standard recipe'
+            with self.state_lock:
+                job.record['note'] = f'style-only beauty reference at {yaw:+g} yaw; standard recipe'
             return cover, options
         reference, record = beauty.reference(self.folder, self.references, angle, head=job.name.startswith('head'))
         if job.name == 'body+0':
@@ -496,7 +499,7 @@ class FaceControl:
         It runs on the main conditional slot's worker before that slot's identical request,
         which then replays this cache entry. Both runs therefore pay one shared sample.
         """
-        from .fast import publish, publish_files
+        from .fast import publish_files
 
         self.await_settled(key)
         job = self.default_jobs.get(key) or next(p for p in self.default_passes if p.key == key)
@@ -513,13 +516,26 @@ class FaceControl:
             try:
                 run()
             finally:
-                # Publish this family before the main slot's request reads the root cache.
+                # Publish this family before the main slot's request reads the root cache. Its call
+                # rows join the stage record later, in a fixed view order (`publish_extensions`).
                 with self.persistence_lock:
-                    publish(self.default_context['client'], child)
                     publish_files(self.root_client, child)
+                    self.extension_children[key] = child
         with self.state_lock:
             self.extensions[key] = (private, folder)
             self.extension_calls[key] = list(child.log.calls)
+
+    def publish_extensions(self):
+        """Publish every attempt-one call slice to the root log in the waves' view order.
+
+        Conditional slots finish in any order, so their rows follow the main slots' rows in a fixed
+        order instead of their finishing order. Their cache families are already published.
+        """
+        from .fast import WAVES, publish
+        order = [('hair-' if hair else '') + name for sequence in WAVES for name, hair in sequence]
+        with self.persistence_lock:
+            for key in sorted(self.extension_children, key=order.index):
+                publish(self.root_client, self.extension_children.pop(key))
 
     def paid_for(self, key):
         """The requests that paid this view's conditional slot in the default-head run, if any."""
@@ -567,7 +583,8 @@ class FaceControl:
                     raise stop
                 return
         default = self.default_tex
-        reproject(default, self.default_work, records, self.default_context['cams']['body+0'], recovery)
+        reproject(default, self.default_work, records, self.default_context['cams']['body+0'], recovery,
+                  lock=self.state_lock)
         default.save(self.default_work / 'texture.png')
         with Image.open(self.default_work / 'texture.png') as image:
             fallback = np.asarray(image.convert('RGB'), dtype=np.float32) / 255

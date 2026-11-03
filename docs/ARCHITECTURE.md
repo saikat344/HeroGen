@@ -2807,8 +2807,18 @@ touches them. The main waves wait only where they use one of its results:
 Its record fields stay staged until the main record reaches the waves, so `stage-3f.json` keeps the
 same fields and key order as before. A model error in either run stops the other from submitting more
 views, every submitted request drains, and the default-head run's own error is raised first. A main
-slot whose default-head attempt failed raises `DefaultRunFailed` instead of sending that request again;
-a default-head budget stop stops the main run as before. If generation leaves no usable front
+slot whose default-head attempt failed raises `DefaultRunFailed` instead of sending that request again.
+A model error from the default-head run is raised even when a budget stop happens at the same time
+(for example in reference generation): the stop is recorded as `stop_reason`, then the model error is
+raised. When another error fails the stage, a concurrent default-head error is kept in
+`concurrent_errors`. Under a spend cap, the runs share one budget, so which requests get budget before
+the cap depends on timing: a cap that stopped only the default-head run before can now stop it after
+main slots were sent, and the reverse; a default-head budget stop still stops the main run from
+submitting further views. Every write into the stage record holds the record lock that saves
+serialise under, since both runs and every request's budget hooks save it from their own threads.
+`calls` lists setup and reference rows, the default-head run's rows (published once, when the main waves
+join it), the main slots' rows in pass and slot order, every attempt-one slice in the waves' view order
+(not their finishing order), then the remaining face requests. If generation leaves no usable front
 reference, the run continues as ordinary fast: the default-head run submits nothing more, its submitted
 calls drain and stay in the record and cost, and its files are removed. That is the only case in which it
 pays for requests that a run starting it after generation would not send.
