@@ -2676,7 +2676,10 @@ The GPU runners initialize their pinned models in `Model.load`, a Modal containe
 container handles one request at a time and retains the loaded Objects pipeline or Body estimator/FOV model
 between calls. `HEROGEN_OBJECTS_MIN_CONTAINERS` and `HEROGEN_BODY_MIN_CONTAINERS` default to zero;
 the matching `MAX_CONTAINERS` settings also default to one. The idle scale-down window is 300 seconds,
-and platform retries are disabled. Deploy both updated runners before the updated bridge. The bridge
+and platform retries are disabled. Deploy the runners with `python -m herogen.blender.remote.deploy`, which sets
+their capacity from `deploy.CAPACITY` and ignores the caller's capacity, GPU and app settings: the deployed
+Objects app runs up to five containers at once (a fixed choice, pinned by its test), Body up to five, and neither
+keeps a container warm unless `prewarm` asks. Deploy both updated runners before the updated bridge. The bridge
 checks the deployed runner source hash and configured GPU against the requested runner before inference;
 a mismatch fails loudly. `HEROGEN_OBJECTS_APP` and `HEROGEN_BODY_APP` can name isolated deployments.
 For local calls, `HEROGEN_REMOTE_DEPLOYED=1` selects the same bridge; ordinary `modal run` calls remain
