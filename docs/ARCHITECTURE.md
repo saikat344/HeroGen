@@ -2143,10 +2143,12 @@ prompt was refused.
 
 On the website's fast lane (`HEROGEN_FAST_LANE=1`, through the service runner), a refusal of a request that
 carried the brief (stage p, or stage 1 when its colour-brief slot was used) is followed, at most once per job, by
-one Muse Spark call (`brief-reword-v1`, `herogen/pipeline/reword.py`) that rewrites the brief as an original
+one Muse Spark call (`brief-reword-v2`, `herogen/pipeline/reword.py`) that rewrites the brief as an original
 character: no brand, franchise, trademarked-character, real-person or logo references and no signature trademark
-costume details, keeping the archetype, colours, materials, gear and silhouette. A rewrite that is empty, too
-long, unchanged, or still holds a name the model listed as removed is not used. With a usable rewrite the refused
+costume details, and no held items, pets or companions (see the up-front check below), keeping the archetype,
+colours, materials, clothing, worn accessories and silhouette. A rewrite that is empty, too long, unchanged, or
+still holds a name or item the model listed as removed is not used. (`brief-reword-v1`, frozen, kept props and
+gear.) With a usable rewrite the refused
 step runs once more (a refused cover of a job's first version first has stage p redraw its sketch from the
 rewrite, and stage 0 take it, so the cover does not inherit the original look; a redo keeps its parent's sketch); `reword.json` in the run folder and a `reword` block in that step's record keep the original
 brief, the rewrite, the reason, the cost and the refused try, and while the rewrite is used it is the job's brief
@@ -2157,15 +2159,28 @@ opens filled with the rewrite. Stage 2's turnaround prompt holds no brief, so it
 other error is never reworded or retried, and the full lane is unchanged.
 
 Before stage p on the same fast lane, a described hero's brief is also checked up front, once per job
-(`brief-precheck-v1`, one Muse Spark call): it lists the brand, logo, franchise, trademarked-character and
-real-person names in the brief. With none, nothing changes beyond a "checked, none found" build-log line. With
-some, the same rewrite runs (reason `precheck`, the names found must be absent from it too) and stage p draws from
-it; the hero page says the description named a brand or character and quotes the rewrite. `precheck.json` records
-the check and `reword.json` the rewrite, so an up-front rewrite also means no second rewrite after a refusal: a
-refusal then stops the job with the refused-again message and the description box holds the user's own
-description. A check or an up-front rewrite that fails is a warning in the build log and on the stage p record;
-the brief is then drawn as written, and the refusal path keeps its one rewrite. Retried attempts, continued jobs
-and redo versions are not checked again.
+(`brief-precheck-v2`, one Muse Spark call): it lists the brand, logo, franchise, trademarked-character and
+real-person names in the brief, and the props: every item the hero holds or carries in the hands (a staff, wand,
+lantern, cup or mug, book, tool, or a sword, bow, gun, axe or shield not said to be worn) and every pet, animal
+companion or mount (a parrot, say). Worn things are not props: clothing, armour, helmets, hats, goggles, belts, bags
+and backpacks worn on the body, jewellery and scarves; nor is the character itself (a dragon hero). Props are left
+out because single-character 3D heroes drew them badly. With nothing found, nothing changes beyond a "checked,
+none found" build-log line: the brief goes to stage p byte for byte and no rewrite is asked for. With names or
+props, the same rewrite runs (reason `precheck`) and stage p draws from it. The rewrite leaves props out and keeps
+everything else as written ("A pirate captain with a green parrot on his shoulder and a cutlass" becomes "A pirate
+captain"); the names and props found, and those the rewrite lists as removed, must be absent from it (props as whole
+words, so "rainbow" does not hold "bow"), and a rewrite with no name involved may add no words the brief lacks beyond
+small grammatical ones, so it can only leave things out. `precheck.json` records the check (`status`,
+`names_found`, `props_found`, `model`, `prompt_version`, `cost_usd`, `seconds`, and `rewrite` with its status and
+cost) and `reword.json` the rewrite (`original`, `reworded`, `removed_names`, `removed_props`, `names_found`,
+`prompt_version`, `cost_usd`); `reword.shown_props` is the short list a person may see ("Left out held items and
+pets: parrot, cutlass"). The check stays one Spark call, plus one rewrite call when anything is found, both counted
+in stage p's cost. An up-front rewrite also means no second rewrite after a refusal: a refusal then stops the job
+with the refused-again message and the description box holds the user's own description. A check or an up-front
+rewrite that fails is recorded in `precheck.json` and on the stage p record, and a failed check or a failed
+rewrite of named brands is a warning in the build log; the brief is then drawn as written, and the refusal path
+keeps its one rewrite. Retried attempts, continued jobs and redo versions are not checked again. The full lane
+never runs the check. Uploaded sketches that draw a prop are not changed.
 
 ### Attempts and checks
 

@@ -32,7 +32,8 @@ def answer(reworded=REWORDED, removed=REMOVED):
     return {"status": "completed", "usage": {"input_tokens": 400, "output_tokens": 120},
             "output": [{"type": "message", "content": [{"type": "output_text",
                                                          "text": json.dumps({"reworded": reworded,
-                                                                             "removed_names": removed})}]}]}
+                                                                             "removed_names": removed,
+                                                                             "removed_props": []})}]}]}
 
 
 def read_events(run: Path) -> list[dict]:
@@ -41,7 +42,7 @@ def read_events(run: Path) -> list[dict]:
 
 class RewriteRules(unittest.TestCase):
     def test_guidance_asks_for_an_original_character_without_names_or_logos(self):
-        version = prompts.selected("brief_reword")
+        version = prompts.load("brief-reword-v1")   # the frozen v1 text; v2 (the default) is in the props tests
         self.assertEqual((version.name, version.step("reword")["model"]), ("brief-reword-v1", "muse-spark-1.3"))
         text = reword.request_prompt(version, BRIEF)
         self.assertEqual(text.count(BRIEF), 1)
@@ -160,7 +161,8 @@ class RewordJobTest(prompt_base.PromptJobTest):
                 raise self.precheck_error
             return {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 40},
                     "output": [{"type": "message", "content": [{"type": "output_text",
-                                                                 "text": json.dumps({"names": self.precheck_names})}]}]}
+                                                                 "text": json.dumps({"names": self.precheck_names,
+                                                                                     "props": []})}]}]}
         if endpoint == "responses" and body.get("text", {}).get("format", {}).get("name") == "brief_reword":
             self.reword_prompts.append(body["input"][0]["content"][0]["text"])
             got = self.reword_answers[min(len(self.reword_prompts), len(self.reword_answers)) - 1]
