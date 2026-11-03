@@ -50,6 +50,7 @@ FROZEN = {
     "turnaround-redo-v2": "206e3774dc4535016939d49e97cd28ca722011b7c88b5fc83d4dc18746bbd4dc",
     "brief-reword-v1": "9c4c3f92c726afbbac6b4c0008f8fa4d6771e000db35c159d7a1f11096366bac",
     "brief-precheck-v1": "af82e7835fd4c9217fa6b47f89e23978b4b19db54dfbf992f44ec64805ce554a",
+    "refine-suggest-v1": "4127b8e75093239f47e635596b8349186ac8745e22682aca1e37cad59df1d24b",
 }
 
 
