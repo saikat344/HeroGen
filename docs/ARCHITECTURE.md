@@ -2182,6 +2182,13 @@ rewrite of named brands is a warning in the build log; the brief is then drawn a
 keeps its one rewrite. Retried attempts, continued jobs and redo versions are not checked again. The full lane
 never runs the check. Uploaded sketches that draw a prop are not changed.
 
+Leaving props out of the brief does not stop the image model adding its own: measured on four prop-heavy briefs
+(Nov 3), the rewritten brief kept the parrot, cutlass, longsword and shield out of the pirate and knight covers, but
+the wizard still held a staff and the barista robot a coffee cup. `hero-sketch-v3` (an experiment, not a default;
+`HEROGEN_PROMPT_SKETCH_VERSION=hero-sketch-v3`) is `hero-sketch-v2` asking for both hands empty and no pet or
+animal in the design and the full-body edit; on the same four rewritten briefs all four covers and full-body
+views came out with empty hands.
+
 ### Attempts and checks
 
 An attempt is one design and one full-body edit. The image API takes no seed, so a new attempt asks for a new
