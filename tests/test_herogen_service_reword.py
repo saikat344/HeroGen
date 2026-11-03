@@ -156,6 +156,17 @@ class RewordJobTest(prompt_base.PromptJobTest):
             raise policy(f"refused: {body['prompt']}")
         return super().post(client, endpoint, body, **kw)
 
+    def subprocess(self, argv, **kw):
+        """Route each model call by the stage command running it, so a sketch redrawn inside stage 1's retry
+        is answered as stage p."""
+        before = self.active_stage
+        if argv[2] == "herogen.service.pipestage" and argv[3] in ("p", "1", "2"):
+            self.active_stage = argv[3]
+        try:
+            return super().subprocess(argv, **kw)
+        finally:
+            self.active_stage = before
+
     def run_dir(self, job):
         return self.storage.run_dir(self.user["id"], job["id"])
 
@@ -276,16 +287,80 @@ class RewordJobTest(prompt_base.PromptJobTest):
         with self.assertLogs("herogen.service", "INFO"):
             self.go(job)
         self.assertEqual(len(self.reword_prompts), 1)
-        self.assertGreaterEqual(len(self.edit_prompts), 2)
-        self.assertIn(f"«{BRIEF}»", self.edit_prompts[0])
-        self.assertIn(f"«{REWORDED}»", self.edit_prompts[1])
-        self.assertNotIn("Ironman", self.edit_prompts[1])
-        self.assertEqual(self.record(job, "p")["details"]["user_text"], BRIEF)
+        covers = [p for p in self.edit_prompts if "The brief between « and »" in p]
+        self.assertEqual(len(covers), 2)
+        self.assertIn(f"«{BRIEF}»", covers[0])
+        self.assertIn(f"«{REWORDED}»", covers[1])
+        self.assertNotIn("Ironman", covers[1])
+        # The sketch is drawn again from the rewrite (stage p, then stage 0) before the cover is retried.
+        stages = [c[3] if c[2] == "herogen.service.pipestage" else c[c.index("--stages") + 1] for c in self.commands]
+        self.assertEqual(stages, ["p", "0", "1", "reword", "p", "0", "1"])
+        self.assertEqual(len(self.generation_prompts), 2)
+        self.assertIn("Ironman", self.generation_prompts[0])
+        for name in REMOVED:
+            self.assertNotIn(name.casefold(), self.generation_prompts[1].casefold())
+        self.assertIn(REWORDED, self.generation_prompts[1])
+        self.assertEqual(self.record(job, "p")["details"]["user_text"], REWORDED)
+        data = reword.read(self.run_dir(job))
+        self.assertEqual((data["stage"], data["redraw"]["status"], data["redraw"]["stages"]), ("1", "passed", ["p", "0"]))
+        self.assertGreater(data["redraw"]["cost_usd"], 0)
         cover = self.record(job, "1")
         self.assertTrue(cover["details"]["brief_reworded"])
+        self.assertTrue(cover["details"]["input"]["generated_sketch"])
         self.assertEqual(cover["reword"]["reworded"], REWORDED)
-        self.assertEqual(reword.read(self.run_dir(job))["stage"], "1")
+        self.assertEqual(cover["reword"]["redraw"]["status"], "passed")
+        whats = [e.get("what") for e in read_events(self.run_dir(job)) if e["kind"] == "decision"]
+        self.assertEqual([w for w in whats if w in ("brief_reworded", "sketch_redrawn")],
+                         ["brief_reworded", "sketch_redrawn"])
         self.assertEqual(self.stages(job)["1"]["state"], "passed")
+        self.assertEqual(self.store.job_get(job["id"])["state"], "succeeded")
+
+
+class RedrawRules(unittest.TestCase):
+    """`reword_and_retry`'s sketch redraw, with the steps stubbed."""
+
+    def run_case(self, spec_key, redraw_result=None, redo=False):
+        import tempfile
+
+        from herogen.service.runner import reword_and_retry
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name)
+        if redo:
+            (run / "redo.json").write_text("{}")
+        ctx = RewordDue().ctx(tmp.name)
+        spec = next(s for s in PLAN if s.key == spec_key)
+        calls = []
+
+        def rewrite():
+            reword.write(run, {"status": "used", "reworded": REWORDED, "removed_names": REMOVED, "cost_usd": 0.004})
+
+        def redraw():
+            calls.append("redraw")
+            return redraw_result or (Outcome("passed", 1.0, 0.02), 0)
+
+        def retry():
+            calls.append("retry")
+            return Outcome("passed", 1.0, 0.01), 0
+
+        out = reword_and_retry(spec, ctx, Outcome("rejected", 1.0, 0.005), rewrite, retry, redraw)
+        return out, calls, reword.read(run)
+
+    def test_only_a_first_version_cover_refusal_redraws(self):
+        out, calls, data = self.run_case("1")
+        self.assertEqual((out.state, calls, data["redraw"]["status"]), ("passed", ["redraw", "retry"], "passed"))
+        self.assertAlmostEqual(out.cost_usd, 0.005 + 0.004 + 0.02 + 0.01)
+        self.assertEqual(self.run_case("p")[1], ["retry"])
+        self.assertEqual(self.run_case("1", redo=True)[1], ["retry"], "a redo keeps its parent's sketch")
+
+    def test_a_refused_or_failed_redraw_stops_without_the_retry(self):
+        out, calls, data = self.run_case("1", (Outcome("rejected", 1.0, 0.0, code="rejected"), 4))
+        self.assertEqual((out.state, calls, data["status"]), ("rejected", ["redraw"], "refused_again"))
+        self.assertIn("even after HeroGen reworded it once", out.message)
+        out, calls, data = self.run_case("1", (Outcome("failed", 1.0, 0.0, "busy", "model_unavailable", True), 5))
+        self.assertEqual((out.state, out.code, out.transient, calls, data["status"]),
+                         ("failed", "model_unavailable", True, ["redraw"], "used"))
 
 
 # Only this file's own tests run on RewordJobTest, not the inherited prompt-job tests.
@@ -336,7 +411,7 @@ class FakeRunnerScenarios(jobs_base.JobCase):
     def test_marker_words_pick_each_scenario_with_no_spend(self):
         for word, state, status, decisions in (
                 ("fakerefuse", "succeeded", "used", ["brief_reworded"]),
-                ("fakerefusecover", "succeeded", "used", ["brief_reworded"]),
+                ("fakerefusecover", "succeeded", "used", ["brief_reworded", "sketch_redrawn"]),
                 ("fakerefusetwice", "rejected", "refused_again", ["brief_reworded", "reworded_brief_refused"]),
                 ("fakerewordfail", "rejected", "rewrite_failed", ["brief_reword_failed"]),
                 ("plain", "succeeded", None, [])):
@@ -348,13 +423,22 @@ class FakeRunnerScenarios(jobs_base.JobCase):
                 self.assertEqual(data and data["status"], status)
                 evs = read_events(run)
                 self.assertEqual([e["what"] for e in evs if e["kind"] == "decision"
-                                  and e["what"].startswith(("brief", "reworded"))], decisions)
+                                  and e["what"].startswith(("brief", "reworded", "sketch"))], decisions)
                 if status == "used":
                     self.assertEqual((data["reworded"], data["stage"]), (FAKE_REWORD, "1" if "cover" in word else "p"))
                     self.assertEqual(json.loads((run / "stage-p.json").read_text())["details"]["user_text"],
-                                     job["prompt"] if "cover" in word else FAKE_REWORD)
+                                     FAKE_REWORD)
                 if word == "plain":
                     self.assertFalse(any(e.get("who") == "muse-spark" for e in evs))
+
+    def test_a_refused_cover_reruns_p_and_0_before_the_cover(self):
+        self.runner = FakeRunner(fail={"1": "policy"})
+        job = self.job("A red armoured robot")
+        self.assertEqual(self.go(job), "succeeded")
+        self.assertEqual(self.runner.calls[:6], ["p", "0", "1", "p", "0", "2"])
+        run = self.storage.run_dir(self.user["id"], job["id"])
+        self.assertEqual(json.loads((run / "stage-p.json").read_text())["details"]["user_text"], FAKE_REWORD)
+        self.assertEqual(reword.read(run)["redraw"]["status"], "passed")
 
     def test_fail_modes_and_the_full_lane(self):
         self.runner = FakeRunner(fail={"p": "policy"})

@@ -2092,7 +2092,8 @@ one Muse Spark call (`brief-reword-v1`, `herogen/pipeline/reword.py`) that rewri
 character: no brand, franchise, trademarked-character, real-person or logo references and no signature trademark
 costume details, keeping the archetype, colours, materials, gear and silhouette. A rewrite that is empty, too
 long, unchanged, or still holds a name the model listed as removed is not used. With a usable rewrite the refused
-step runs once more; `reword.json` in the run folder and a `reword` block in that step's record keep the original
+step runs once more (a refused cover of a job's first version first has stage p redraw its sketch from the
+rewrite, and stage 0 take it, so the cover does not inherit the original look; a redo keeps its parent's sketch); `reword.json` in the run folder and a `reword` block in that step's record keep the original
 brief, the rewrite, the reason, the cost and the refused try, and while the rewrite is used it is the job's brief
 (stage p's text, stage 1's colour brief, and cover redos, which copy the file). The build log shows the Muse Spark
 call and a `brief_reworded` decision, and the hero page shows the rewrite. A second refusal, or no usable rewrite,

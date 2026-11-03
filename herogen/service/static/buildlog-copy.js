@@ -337,6 +337,8 @@ export function decisionLine(e, job = null) {
       : 'The image model refused your description under its content policy (brand or character names usually cause this). Reworded it and trying this step once more.';
     case 'brief_reword_failed': return 'The image model refused your description under its content policy, and it could not be reworded automatically. The run stops here.';
     case 'reworded_brief_refused': return 'The image model refused the reworded description too. The run stops here.';
+    case 'sketch_redrawn': return 'Redrew the sketch from the reworded description, so the artwork no longer follows the original look.';
+    case 'sketch_redraw_failed': return 'The sketch could not be redrawn from the reworded description. The run stops here.';
     case 'view_result': {
       const name = `${regionName(e.view)}${tryText(e)}`;
       // A plain verdict first, then the numbers behind it. Accepted: the headline measures. Not used: the

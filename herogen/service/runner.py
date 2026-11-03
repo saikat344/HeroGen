@@ -11,7 +11,8 @@ of a stage CLI have (`--profile`, `--remote-cache`)
 are passed only when that CLI's `--help` lists them, so the service follows whichever pipeline it is deployed with.
 
 On the fast lane, a content-policy refusal of a step that sent the user's brief is followed once per job by a
-rewrite of the brief and one more run of that step (`reword_and_retry`, `herogen.pipeline.reword`).
+rewrite of the brief and one more run of that step (`reword_and_retry`, `herogen.pipeline.reword`); a refused
+cover first has its sketch drawn again from the rewrite.
 
 The Roblox rig (stage 6) runs only when the deployed code has a `herogen.roblox` command; until then the stage is
 skipped with that reason and the job still delivers its GLB.
@@ -448,7 +449,8 @@ class CliRunner:
         first, code = self.attempt(spec, ctx)
         if not reword_due(spec, ctx, first, code):
             return first
-        return reword_and_retry(spec, ctx, first, lambda: self.reword(spec, ctx), lambda: self.attempt(spec, ctx))
+        return reword_and_retry(spec, ctx, first, lambda: self.reword(spec, ctx), lambda: self.attempt(spec, ctx),
+                                lambda: redraw_sketch(lambda s: self.attempt(s, ctx)))
 
     def attempt(self, spec: StageSpec, ctx: StageContext) -> tuple[Outcome, int]:
         """One run of a stage's command: (its outcome, the exit code)."""
@@ -627,11 +629,29 @@ def _usd(v: Any) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else 0.0
 
 
+def redraw_sketch(run_step: Callable[[StageSpec], tuple[Outcome, int]]) -> tuple[Outcome, int]:
+    """Stage p again (from the reworded brief) and stage 0 (which copies its sketch), stopping at the first that
+    does not pass: (their combined outcome, the last exit code)."""
+    seconds = cost = 0.0
+    out, code = Outcome("passed"), 0
+    for key in ("p", "0"):
+        out, code = run_step(next(s for s in PLAN if s.key == key))
+        seconds, cost = seconds + out.seconds, cost + out.cost_usd
+        if out.state != "passed":
+            break
+    return Outcome(out.state, round(seconds, 2), cost, out.message, out.code, out.transient, out.detail), code
+
+
 def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite: Callable[[], None],
-                     retry: Callable[[], tuple[Outcome, int]]) -> Outcome:
+                     retry: Callable[[], tuple[Outcome, int]],
+                     redraw: Callable[[], tuple[Outcome, int]] | None = None) -> Outcome:
     """After `reword_due`: one rewrite of the brief (`rewrite` writes reword.json), then one more run of the
     refused step (`retry`) with it. The stage record and the build log say what happened; a second refusal or
-    an unusable rewrite stops the job as a refusal, with a message that says why."""
+    an unusable rewrite stops the job as a refusal, with a message that says why.
+
+    When the refused step is stage 1 of a job's first version, its sketch was drawn from the original brief and
+    can carry the look the rewrite removed, so `redraw` (`redraw_sketch`) first draws it again from the rewrite.
+    A version made by a redo keeps its parent's sketch and cover, so it is not redrawn."""
     from herogen.pipeline import events, reword
 
     file = ctx.run_dir / events.FILE
@@ -653,10 +673,12 @@ def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite
     rw_cost = _usd(data.get("cost_usd"))
 
     def annotate(rec: dict[str, Any] | None) -> None:
-        if rec is None:
+        if not rec:
             return
+        # A redraw's cost stays in the stage p and 0 records; here it is noted, not added.
         rec["reword"] = {k: data.get(k) for k in ("status", "reason", "original", "reworded", "removed_names",
-                                                  "model", "prompt_version", "cost_usd", "seconds", "error")
+                                                  "model", "prompt_version", "cost_usd", "seconds", "error",
+                                                  "redraw")
                          if data.get(k) is not None}
         rec["reword"]["refused_try"] = refused_try
         rec["cost_usd"] = round(_usd(rec.get("cost_usd")) + rw_cost + (first.cost_usd if rec is not refused else 0),
@@ -671,6 +693,27 @@ def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite
                        reword_refused_message(True), "rejected", detail=first.detail)
     reword.write(ctx.run_dir, data)
     decision("brief_reworded", True)
+    redrawn = Outcome("passed")
+    if spec.key == "1" and redraw is not None and not (ctx.run_dir / "redo.json").exists():
+        redrawn, r_code = redraw()
+        data["redraw"] = {"stages": ["p", "0"], "status": redrawn.state, "cost_usd": round(redrawn.cost_usd, 6),
+                          "seconds": redrawn.seconds}
+        if redrawn.state != "passed":
+            refused_again = redrawn.state == "rejected" and r_code == 4
+            if refused_again:
+                data["status"] = reword.REFUSED_AGAIN
+            reword.write(ctx.run_dir, data)
+            decision("sketch_redraw_failed", False)
+            annotate(refused)
+            seconds = round(first.seconds + rw_seconds + redrawn.seconds, 2)
+            cost = first.cost_usd + rw_cost + redrawn.cost_usd
+            if refused_again:
+                return Outcome("rejected", seconds, cost, reword_refused_message(False), "rejected",
+                               detail=redrawn.detail)
+            return Outcome(redrawn.state, seconds, cost, redrawn.message, redrawn.code, redrawn.transient,
+                           redrawn.detail)
+        reword.write(ctx.run_dir, data)
+        decision("sketch_redrawn", True)
     out, code = retry()
     again = out.state == "rejected" and code == 4
     if again:
@@ -678,8 +721,8 @@ def reword_and_retry(spec: StageSpec, ctx: StageContext, first: Outcome, rewrite
         reword.write(ctx.run_dir, data)
         decision("reworded_brief_refused", False)
     annotate(read_record(ctx.run_dir, spec.record))
-    seconds = round(first.seconds + rw_seconds + out.seconds, 2)
-    cost = first.cost_usd + rw_cost + out.cost_usd
+    seconds = round(first.seconds + rw_seconds + redrawn.seconds + out.seconds, 2)
+    cost = first.cost_usd + rw_cost + redrawn.cost_usd + out.cost_usd
     if again:
         return Outcome("rejected", seconds, cost, reword_refused_message(False), "rejected", detail=out.detail)
     return Outcome(out.state, seconds, cost, out.message, out.code, out.transient, out.detail)

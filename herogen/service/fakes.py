@@ -14,7 +14,7 @@ Content-policy refusals (fast lane only, as in `herogen.service.runner.reword_an
 refuses the step once, the fake rewrite succeeds and the retry passes; "policy_twice" refuses the retry too;
 "policy_reword_fails" makes the rewrite fail. Without ``fail``, a description holding a marker word picks the same
 scenario on stage p, so the website can be checked with no spend: ``fakerefuse``, ``fakerefusetwice``,
-``fakerewordfail``, and ``fakerefusecover`` (stage 1 refuses once).
+``fakerewordfail``, and ``fakerefusecover`` (stage 1 refuses once; the sketch is redrawn before the retry).
 """
 
 from __future__ import annotations
@@ -160,8 +160,15 @@ class FakeRunner:
             return first
         retry = ((lambda: (self._refuse(spec, ctx), 4)) if mode == "policy_twice"
                  else (lambda: (self._run(spec, ctx, None), 0)))
+        from herogen.service.runner import redraw_sketch
+
         return reword_and_retry(spec, ctx, first, lambda: self._reword(spec, ctx, mode != "policy_reword_fails"),
-                                retry)
+                                retry, lambda: redraw_sketch(lambda s: self._step_again(s, ctx)))
+
+    def _step_again(self, spec: StageSpec, ctx: StageContext) -> tuple[Outcome, int]:
+        """An earlier step run again inside a retry (the sketch redrawn from a reworded brief)."""
+        self.calls.append(spec.key)
+        return self._run(spec, ctx, None), 0
 
     @staticmethod
     def _marker(spec: StageSpec, ctx: StageContext) -> str | None:
