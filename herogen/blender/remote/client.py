@@ -74,7 +74,7 @@ def runner_fingerprint(runner: str) -> dict:
 
 FINGERPRINT_KEYS = ("rev", "weights", "runner_sha", "moge", "dinov3")
 # Modal list prices per second (USD), for estimates only; billed actuals come from `modal billing report`.
-PRICE_PER_SECOND = {"A100-40GB": 2.10 / 3600, "L4": 0.80 / 3600, "A10G": 1.10 / 3600, "T4": 0.59 / 3600,
+PRICE_PER_SECOND = {"A100-40GB": 2.10 / 3600, "H100": 3.95 / 3600, "L4": 0.80 / 3600, "A10G": 1.10 / 3600, "T4": 0.59 / 3600,
                     "none": 8 * 0.047 / 3600 + 32 * 0.008 / 3600}
 COST_BASIS = "estimate: wall seconds of the Modal call x list price of its GPU (or 8 CPU + 32 GB)"
 COST_UNKNOWN = "unknown: no list price recorded for this GPU"

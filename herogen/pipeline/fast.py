@@ -82,6 +82,7 @@ def _tracked(fn, model, kind, isolate, self, args, kwargs):
         if error:
             rows[-1]["outcome"] = error
         if (ev := events.current_call()) is not None:   # this request's own receipts price its build-log line
-            ev.usd = sum(row["cost_usd"] for row in rows if not row.get("cached"))
+            # A GPU with no list price records its cost as None (unknown); the line then shows the known part.
+            ev.usd = sum(row["cost_usd"] or 0.0 for row in rows if not row.get("cached"))
         if isolate:
             caller_log.calls.extend(rows)
