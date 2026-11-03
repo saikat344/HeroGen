@@ -469,7 +469,7 @@ export function jobLine(e, job) {
     case 'queue': return Number.isFinite(e.s) ? `Worker started after ${seconds(e.s)} in the queue` : 'Worker started';
     case 'requeue': return `This step stopped (${codeText(e.code)}). Starting attempt ${n(e.next) || 2}${Number.isFinite(e.of) ? ` of ${n(e.of)}` : ''}; finished work is kept.`;
     case 'cancel': return 'Cancelled. Everything finished so far stays saved.';
-    case 'model_ready': return 'Your website model is ready. Roblox files continue in the background.';
+    case 'model_ready': return 'Your 3D model is ready. Roblox files continue in the background.';
     case 'truncated': return 'The log reached its size limit. From here it shows only step changes, versions and errors.';
     case 'job_end': {
       const totals = [Number.isFinite(e.s) && `Total ${elapsed(e.s * 1000)}`, Number.isFinite(e.usd) && `${usd(e.usd)} (estimate)`].filter(Boolean).join(', ');
