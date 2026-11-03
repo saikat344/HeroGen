@@ -2086,6 +2086,20 @@ full-colour photorealistic 3D render." both still came back as graphite pencil h
 image model refuses come back as an HTTP 400 with `content_policy_violation`; the stage stops and says the
 prompt was refused.
 
+On the website's fast lane (`HEROGEN_FAST_LANE=1`, through the service runner), a refusal of a request that
+carried the brief (stage p, or stage 1 when its colour-brief slot was used) is followed, at most once per job, by
+one Muse Spark call (`brief-reword-v1`, `herogen/pipeline/reword.py`) that rewrites the brief as an original
+character: no brand, franchise, trademarked-character, real-person or logo references and no signature trademark
+costume details, keeping the archetype, colours, materials, gear and silhouette. A rewrite that is empty, too
+long, unchanged, or still holds a name the model listed as removed is not used. With a usable rewrite the refused
+step runs once more; `reword.json` in the run folder and a `reword` block in that step's record keep the original
+brief, the rewrite, the reason, the cost and the refused try, and while the rewrite is used it is the job's brief
+(stage p's text, stage 1's colour brief, and cover redos, which copy the file). The build log shows the Muse Spark
+call and a `brief_reworded` decision, and the hero page shows the rewrite. A second refusal, or no usable rewrite,
+stops the job as a refusal whose message says brand or character names usually cause it, and the description box
+opens filled with the rewrite. Stage 2's turnaround prompt holds no brief, so its refusals are not reworded; any
+other error is never reworded or retried, and the full lane is unchanged.
+
 ### Attempts and checks
 
 An attempt is one design and one full-body edit. The image API takes no seed, so a new attempt asks for a new

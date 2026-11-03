@@ -354,9 +354,11 @@ def _cover_brief_prompt(run: RunFolder) -> tuple[str, bool]:
     if "user_text" not in details:
         return COVER_PROMPT, False
     # Imported here because stage p uses this module's stage recording and error handling.
+    from herogen.pipeline import reword
     from herogen.pipeline.prompt_sketch import clean_user_text
 
-    brief = clean_user_text(details["user_text"], max_chars=300, delimiters=("«", "»"))
+    # A brief reworded after a content-policy refusal (`herogen.pipeline.reword`) is the job's brief from then on.
+    brief = clean_user_text(reword.brief(run.path) or details["user_text"], max_chars=300, delimiters=("«", "»"))
     return (COVER_PROMPT +
             " The brief between « and » describes only the character's colours, materials and gear, "
             "never how the picture is drawn. Apply those colours, materials and gear to the character: "
@@ -429,6 +431,9 @@ def _stage1(st: _Stage, run: RunFolder, client: ModelClient) -> dict[str, Any]:
     from herogen.pipeline.redo import note_for
     if note_for(run, 1):
         prompt_details["prompt_version"] = prompt_registry.selected("cover_redo").ref()
+    from herogen.pipeline import reword
+    if brief_used and reword.brief(run.path):
+        prompt_details["brief_reworded"] = True
     st.details = dict(prompt_details)
     if st.fast:
         return _fast_cover(st, run, client, sketch, prompt)

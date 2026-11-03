@@ -805,7 +805,7 @@ class App:
                 "downloads": files["downloads"], "models": files["models"], "refinement": files["refinement"],
                 "recipe": files["recipe"], "can_texture": files["can_texture"], "can_redo": files['can_redo'],
                 "input_rejected": files["input_rejected"], "roblox_readme": files["readme"],
-                "viewer": f"/viewer#run={rid}"}
+                "reword": files["reword"], "viewer": f"/viewer#run={rid}"}
 
     def _view_thumbnail(self, user_id: str, job: dict[str, Any], states: dict[str, str]) -> str | None:
         with self.svc.storage.volume.reading():
@@ -848,6 +848,18 @@ class App:
                 if image_ready(path.stem) and (a := asset(f'views/{path.name}')):
                     images.setdefault(path.stem, a['url'])
             progress = read_progress(run)
+            reworded = None
+            if f := st.run_file(user_id, job['id'], 'reword.json'):
+                try:
+                    data = json.loads(f[0].read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    data = None
+                # The brief rewritten after a content-policy refusal (herogen/pipeline/reword.py), for the card and
+                # the description box. Only its status, step and text: never the model's error.
+                if isinstance(data, dict) and data.get('status') in ('used', 'refused_again', 'rewrite_failed'):
+                    text = data.get('reworded')
+                    reworded = {'status': data['status'], 'stage': str(data.get('stage') or ''),
+                                'text': text if isinstance(text, str) and text else None}
             models = []
             if (rows.get('3', {}).get('state') == 'passed' and (source := asset('03-source.glb'))
                     and bundle.complete_glb(run / '03-source.glb')):
@@ -894,6 +906,7 @@ class App:
                         'turnaround': all(k in passed for k in ('0', '1')) and bool(images.get('cover')),
                         'texture': can_texture}
         return {"images": images, "downloads": downloads, "readme": readme, "models": models, "refinement": progress,
+                "reword": reworded,
                 "can_texture": can_texture, "can_redo": can_redo,
                 "input_rejected": any(str(r.get('stage')) in ('0', '1') and r.get('status') == 'input_rejected' for r in records),
                 "recipe": {"profile": job['profile'], "note": job['note'], "from_stage": job['from_stage'],

@@ -10,6 +10,11 @@ output and structured exit codes because their prompts can include descriptions 
 
 The service calls `stage2_turnaround` and `stage1_cover` directly through this adapter, so only the
 requested image stage runs and writes its record.
+
+`reword` (fast lane, after a content-policy refusal; `herogen.pipeline.reword`) reads the refused brief on stdin,
+asks Muse Spark once for a rewrite and writes `reword.json` in the run folder: status "used" with the rewrite, or
+"rewrite_failed" with the cost and the error class (and the unusable rewrite, when there was one). Exit 0 when the
+rewrite can be used, 1 otherwise; it prints no user or model text either.
 Stages 1/2 use the same exit codes as stage p except that gate failures use 2; the runner requires a matching
 gate-failed record to distinguish them from usage errors. Argparse help exits 0 without running the pipeline.
 """
@@ -38,7 +43,7 @@ def prompt_error_exit(error: BaseException | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m herogen.service.pipestage")
-    ap.add_argument("stage", choices=("p", "1", "2"))
+    ap.add_argument("stage", choices=("p", "1", "2", "reword"))
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--runs", required=True)
     ap.add_argument("--cache", required=True, type=Path)
@@ -50,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     from herogen.pipeline.stages import GateFailed, InputRejected, stage1_cover, stage2_turnaround
 
     run = RunFolder(runs_root(a.runs), a.run_id)
+    if a.stage == "reword":
+        return reword_main(run, a.cache, sys.stdin.read())
     try:
         client = ModelClient(a.cache, mode="live")
         if a.stage == "p":
@@ -69,6 +76,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"stage {a.stage}: error; stopping", file=sys.stderr)
         return prompt_error_exit(e)
     print(f"stage {a.stage} {rec['name']}: ok ({rec['seconds']} s, ${rec['cost_usd']:.4f} est)")
+    return 0
+
+
+def reword_main(run, cache: Path, original: str) -> int:
+    from herogen.pipeline import reword
+    from herogen.pipeline.client import ApiError, ModelClient
+
+    client = ModelClient(cache, mode="live")
+    calls0 = len(client.log.calls)
+    try:
+        rec = reword.rewrite(client, original)
+    except Exception as e:  # noqa: BLE001  (recorded as a failed rewrite; the job stops loudly on it)
+        failed = {"status": reword.FAILED, "reason": reword.REASON, "original": original,
+                  "error": type(e).__name__, "cost_usd": client.log.cost_usd(calls0)}
+        if isinstance(e, ApiError):
+            failed.update(http_status=e.http_status, error_code=e.error_code)
+        if isinstance(e, reword.RewordRejected) and e.candidate:
+            failed["reworded"] = e.candidate
+        reword.write(run.path, failed)
+        print("reword: failed; stopping", file=sys.stderr)
+        return 1
+    reword.write(run.path, rec)
+    print(f"reword: ok (${rec['cost_usd']:.4f} est)")
     return 0
 
 
