@@ -106,6 +106,8 @@ export const CALLS = {
     cover_art: {start: 'checking whether this is a photo of a real person', done: 'photo check done'},
     prompt_sketch: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
     same_character: {start: 'checking the sketch shows the same character as the design', done: 'same-character check done'},
+    reword_brief: {start: 'rewording your description as an original character, without brand or character names',
+      done: 'reworded description ready'},
   },
   'sam-3d-objects': {'3d_shape': {start: 'building a textured 3D mesh from the front view and its outline', done: (e) => {
     const m = e.m || {}, bits = [Number.isFinite(m.vertices) && `${n(m.vertices)} vertices`, Number.isFinite(m.faces) && `${n(m.faces)} faces`,
@@ -304,9 +306,37 @@ export function localLine(e) {
   return Number.isFinite(e.s) && e.s >= 0.05 ? `${said} · ${seconds(e.s)}` : said;
 }
 
-export function decisionLine(e) {
+// A description quoted in the log and on the card: whole characters, cut at `max` with an ellipsis.
+export function quoted(text, max = 300) {
+  const chars = Array.from(String(text || ''));
+  return `“${chars.length > max ? `${chars.slice(0, max).join('')}…` : chars.join('')}”`;
+}
+// The brief reworded after a content-policy refusal (job.reword: status, stage, text), for the hero card. Null when
+// the description was never reworded.
+export function rewordNotice(job) {
+  const r = job?.reword;
+  if (!r || job.kind !== 'prompt') return null;
+  if (r.status === 'used' && r.text) return {tone: 'info', title: 'We reworded your description',
+    text: `The image model refused your description under its content policy, which usually means it named a brand, `
+      + `franchise or trademarked character. We reworded it to: ${quoted(r.text)}`};
+  if (r.status === 'refused_again' && r.text) return {tone: 'warning', title: 'The reworded description was refused too',
+    text: `We reworded it once to ${quoted(r.text)}, but the image model refused that as well. Edit it and try again.`};
+  if (r.status === 'rewrite_failed') return {tone: 'warning', title: 'Your description could not be reworded',
+    text: r.text ? `The automatic rewrite, ${quoted(r.text)}, still named a brand or character. Edit it and try again.`
+      : 'The automatic rewrite did not come back. Edit the description to remove brand or character names and try again.'};
+  return null;
+}
+// What the description box is filled with when the user edits a stopped hero: the rewrite when there is one.
+export const descriptionDraft = (job) => (job?.kind === 'prompt' && job?.reword?.text) || job?.prompt || '';
+
+export function decisionLine(e, job = null) {
   const m = e.m || {};
   switch (e.what) {
+    case 'brief_reworded': return job?.reword?.text
+      ? `The image model refused your description under its content policy (brand or character names usually cause this). Reworded it to ${quoted(job.reword.text, 160)} and trying this step once more.`
+      : 'The image model refused your description under its content policy (brand or character names usually cause this). Reworded it and trying this step once more.';
+    case 'brief_reword_failed': return 'The image model refused your description under its content policy, and it could not be reworded automatically. The run stops here.';
+    case 'reworded_brief_refused': return 'The image model refused the reworded description too. The run stops here.';
     case 'view_result': {
       const name = `${regionName(e.view)}${tryText(e)}`;
       // A plain verdict first, then the numbers behind it. Accepted: the headline measures. Not used: the
