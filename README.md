@@ -26,9 +26,7 @@ at their pivots, not a skinned avatar), and records a measured check at every st
 
 ## Try it in 2 minutes
 
-Live product (link coming):
-
-<!-- LIVE_LINK -->
+Live product: <https://saikat344--herogen-service-web.us-east.modal.run>
 
 3-minute demo video (link coming):
 
