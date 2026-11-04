@@ -134,6 +134,28 @@ this job. Stage 4 used the `roblox-ingame` profile (high and low bodies, 24,000 
 website runs with its fast settings, so the triangle budgets and closed parts were measured and met but recorded
 as information rather than gates. Every number below is read from its stage records.
 
+The same run in pictures, from its own files (no image from another hero or run):
+
+<table>
+<tr>
+<td width="25%"><img src="docs/readme/1-sketch.jpg" alt="Pencil sketch of a samurai in A-pose, full body, on cream paper"></td>
+<td width="25%"><img src="docs/readme/2-cover.jpg" alt="Colour cover art of the same samurai in navy lacquered armour"></td>
+<td width="25%"><img src="docs/readme/4-clay-high.jpg" alt="Flat-shaded grey clay render of the Roblox high body, three-quarter view, showing its triangle facets"></td>
+<td width="25%"><img src="docs/readme/5-textured-high.jpg" alt="The same Roblox high body with its refined crimson and black texture, three-quarter view"></td>
+</tr>
+<tr>
+<td>Stage 0: the uploaded sketch, reused from the hero's first version</td>
+<td>Stage 1: Muse Image cover art from that first version (navy armour, before the crimson note)</td>
+<td>Stage 4, Roblox high body: 22,842 triangles in 15 parts, flat-shaded clay. Blender render</td>
+<td>Stage 4, the same body with its refined texture. Blender render, not an in-game shot</td>
+</tr>
+</table>
+
+<img src="docs/readme/3-turnaround.jpg" alt="Four-view turnaround sheet of the samurai in crimson and black armour: front, side, back and other side">
+
+Stage 2: the four-view turnaround, redrawn in this run with the crimson note (Muse Image; split and masked with
+SAM 3.1). SAM 3D Objects builds the shape from its front view.
+
 | Measure | Value | Record |
 | --- | --- | --- |
 | Shape (stage 3) | SAM 3D Objects returned 9,682 triangles; HeroGen's internal watertight remesh of it has 205,280 triangles, 0 open edges and 0 non-manifold edges, and is what stage 4 cuts and decimates. The Roblox bodies are rebuilt from this remesh, not reduced from SAM 3D's own mesh | `stage-3.json` (`mesh.source.remote.source_triangles`, `mesh.triangles`) |
