@@ -163,9 +163,11 @@ data_vol = modal.Volume.from_name(f"{APP_NAME}-data", create_if_missing=True)
 meta_vol = modal.Volume.from_name(f"{APP_NAME}-meta", create_if_missing=True)
 legal_vol = modal.Volume.from_name(f"{APP_NAME}-legal", create_if_missing=True)
 web_secret = modal.Secret.from_name(WEB_SECRET)
-# A deploying shell can supply private admin addresses without baking them into any image.
+# A deploying shell can supply private admin addresses without baking them into any image. The runtime secret puts
+# the same variable in the web and admin containers, so they rebuild this list identically: Modal matches a
+# function's secrets by position and refuses to start a container whose list differs from the deployed one.
 web_secrets = [web_secret]
-if modal.is_local() and "HEROGEN_SERVICE_ADMIN_EMAILS" in os.environ:
+if "HEROGEN_SERVICE_ADMIN_EMAILS" in os.environ:
     web_secrets.append(modal.Secret.from_dict({
         "HEROGEN_SERVICE_ADMIN_EMAILS": os.environ["HEROGEN_SERVICE_ADMIN_EMAILS"],
     }))

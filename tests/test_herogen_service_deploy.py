@@ -182,6 +182,31 @@ class TestModalApp(TempDirCase):
                                                                         if name == "env" and a]
         self.assertFalse(any("s" * 40 in json.dumps(e) or "e" * 40 in json.dumps(e) for e in envs))
 
+    def test_a_container_rebuilds_the_same_web_secrets_as_the_deploy(self):
+        # Modal starts a container only when its function's secrets match the deployed list position by position.
+        private = {"HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
+        deployed, fake = self.load({**PROD, **private})
+        real = sys.modules.get("modal")
+        remote = fake_modal()
+        remote.is_local = lambda: False
+        sys.modules["modal"] = remote
+        saved = dict(os.environ)
+        os.environ.update({**PROD, **private})
+        try:
+            sys.modules.pop("herogen.service.modal_app", None)
+            importlib.import_module("herogen.service.modal_app")
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+            sys.modules.pop("herogen.service.modal_app", None)
+            if real is None:
+                sys.modules.pop("modal", None)
+            else:
+                sys.modules["modal"] = real
+        for name in ("web", "admin_command"):
+            self.assertEqual([(s.name, s.kw.get("values")) for s in remote.functions[name]["secrets"]],
+                             [(s.name, s.kw.get("values")) for s in fake.functions[name]["secrets"]])
+
     def test_admin_allowlist_is_runtime_only_and_retention_reaches_image(self):
         private = {"HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
         mod, fake = self.load({**PROD, **private, "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS": "14"})
