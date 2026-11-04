@@ -38,8 +38,8 @@ Live product: <https://saikat344--herogen-service-web.us-east.modal.run>
 3. To make your own, type a one-sentence character idea (up to 300 characters) or upload a sketch, then press
    Create. A guest workspace opens in your browser: no email, no account.
 4. Watch the build log: each model call, each check with its measured value and limit, time and estimated cost.
-   A hero takes about 15 minutes when the demo is idle and longer when it is busy (one measured on the hosted
-   demo took 34 minutes).
+   On the hosted demo, measured on Nov 4: the first image in under a minute, the textured 3D hero in about
+   14 minutes, and the Roblox body about 14 minutes after that. A busy demo takes longer.
 5. When it is done, play the Idle, Walk, Wave and Jump previews and download the GLB. The Roblox bundle is offered
    only when every Roblox check passes; otherwise the build log shows which check failed.
 
