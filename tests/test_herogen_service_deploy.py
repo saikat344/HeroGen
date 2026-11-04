@@ -138,6 +138,12 @@ class TestModalApp(TempDirCase):
         for name, kw in f.items():
             self.assertNotIn("retries", kw, f"{name}: retries are the store's job, never Modal's")
         self.assertEqual((f["StoreService"]["max_containers"], f["StoreService"]["min_containers"]), (1, 1))
+        # A new hero starts in booted containers, and the web gets whole cores for busy pages.
+        self.assertEqual(f["run_job"]["min_containers"], 1)
+        self.assertEqual(f["model_stages"]["min_containers"], 1)
+        self.assertEqual((f["web"]["cpu"], f["web"]["memory"]), (2.0, 4096))
+        for n in ("blender_stages", "body_stages", "export_stages"):
+            self.assertNotIn("min_containers", f[n], f"{n}: large containers stay cold until a hero needs them")
         san = f["sanitize_image"]
         self.assertTrue(san["block_network"])
         self.assertTrue(san["restrict_modal_access"])

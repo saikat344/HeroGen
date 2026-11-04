@@ -406,6 +406,17 @@ def degradation_note(spec, out):
     return 'The results page was skipped. Your model is available in this workbench.'
 
 
+def prewarm_before_shape(plan, spec) -> None:
+    """In a Modal container, start the SAM 3D containers loading when the turnaround stage starts, so their cold
+    start overlaps it and stage 3 finds them warm (they scale to zero a few minutes after the warmup at Create).
+    Non-blocking and best effort; HEROGEN_PREWARM=0 turns it off (`herogen.blender.remote.prewarm`)."""
+    if spec.key != "2" or os.environ.get("MODAL_IS_REMOTE") != "1" or not any(s.key == "3" for s in plan):
+        return
+    from herogen.blender.remote import prewarm
+
+    threading.Thread(target=prewarm, name="herogen-prewarm", daemon=True).start()
+
+
 def skip_stage(store, jid, attempt, spec, ctx, message, detail=""):
     record = read_record(ctx.run_dir, spec.record)
     if detail and record is not None:
@@ -479,6 +490,7 @@ def run_group(store, settings: Settings, job: dict[str, Any], attempt: int, grou
                 return GroupResult("stale", spec.key)
             event("stage_started", job=jid, attempt=attempt, stage=spec.key)
             step_event("step_start", spec)
+            prewarm_before_shape(plan, spec)
             stage_t0 = time.monotonic()
             pump = getattr(workdir, "event_pump", None)
             try:
