@@ -75,6 +75,7 @@ def fake_modal():
     m.Cron = lambda s: ("cron", s)
     m.enter = m.method = m.concurrent = m.asgi_app = passthrough
     m.is_local = lambda: True
+    m.__version__ = "1.6.3"
     m.current_function_call_id = lambda: "fc-test"
     m.Error = type("Error", (Exception,), {})
     return m
@@ -123,6 +124,8 @@ class TestModalApp(TempDirCase):
         _, fake = self.load()
         packages = [p for name, args, _ in fake.image_log if name == "pip_install" for p in args]
         self.assertIn("scipy==1.18.1", packages)
+        # The SAM 3D bridge runs in a stage subprocess, which needs its own Modal client.
+        self.assertTrue(any(str(p).startswith("modal==") for p in packages))
 
     def test_function_configuration(self):
         mod, fake = self.load()
