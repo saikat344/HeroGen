@@ -142,7 +142,8 @@ heroes and uses paid services.
 
 ### 1. Get the code and a Python environment
 
-Python 3.11 or newer.
+Git and Python 3.11 or newer. Run every command below from the cloned `HeroGen` folder, with the virtual environment
+active.
 
 ```bash
 git clone https://github.com/saikat344/HeroGen.git
@@ -153,7 +154,8 @@ pip install ".[live,remote,refine]"
 pip install -r herogen/service/requirements-dev.txt
 ```
 
-The commands below use `python`, the virtual environment's interpreter. On Linux, also run
+With the virtual environment active, `python` and `python3` are the same interpreter; the rest of this README uses
+either. On Linux, also run
 `pip install "opencv-python-headless==4.11.0.86"`: the Linux builds of OpenCV 5 cannot read the EXR renders texture
 refine uses, while the macOS build can.
 
@@ -174,32 +176,33 @@ A real hero runs the pipeline and Blender on your computer and calls two paid se
 Expect about **$0.50 of model and GPU calls per hero** (est.; see [Game-ready evidence](#game-ready-evidence-one-real-run)),
 and about 10–15 minutes.
 
-1. **Blender 4.5 LTS** (4.5.1 used here), run headless. HeroGen looks for
+1. **Blender 4.5 LTS** (4.5.1 used here; <https://www.blender.org/download/lts/>), run headless. HeroGen looks for
    `/Applications/Blender.app/Contents/MacOS/Blender` on macOS, then `blender` on `PATH`. Otherwise set
    `HEROGEN_BLENDER` to the executable, for example `export HEROGEN_BLENDER=/opt/blender/blender` on Linux.
-2. **Meta Model API key.** Export it in the shell that runs HeroGen: `export MODEL_API_KEY=<your key>`. HeroGen reads
+2. **Meta Model API key** from your Meta Model API account (calls are billed to it). Export it in the shell that runs
+   HeroGen: `export MODEL_API_KEY=<your key>`. HeroGen reads
    environment variables only; it does not load a `.env` file. `.env.example` lists the variables it reads.
 3. **Hugging Face access.** Create a read token at <https://huggingface.co/settings/tokens>, and request access to the
    gated models `facebook/sam-3d-objects` and `facebook/sam-3d-body-dinov3` on their model pages. Approval is
    granted by the model owners and may not be immediate; the next steps need it.
-4. **Modal.** Create an account, then sign in and store your Hugging Face token as a Modal secret:
+4. **Modal.** Create an account at <https://modal.com> (GPU and CPU time are billed to it), then sign in and store your Hugging Face token as a Modal secret:
    ```bash
    modal setup
    modal secret create huggingface HF_TOKEN=<your Hugging Face token>
    ```
 5. **One time: build the SAM 3D Objects image, then download its checkpoints** (in this order; the build compiles
-   CUDA extensions and takes 15 minutes or more):
+   CUDA extensions on a Modal CPU: about 13 minutes measured with cached layers, longer from scratch):
    ```bash
    modal run herogen/blender/remote/objects.py::build
    modal run herogen/blender/remote/objects.py::download
    ```
-6. **Deploy both GPU runners** as persistent Modal apps and point local runs at them:
+6. **Deploy both GPU runners** as persistent Modal apps and point local runs at them (recommended; optional):
    ```bash
    python -m herogen.blender.remote.deploy
    export HEROGEN_REMOTE_DEPLOYED=1
    ```
-   Without `HEROGEN_REMOTE_DEPLOYED=1`, each call starts a temporary `modal run` app instead, which pays the GPU
-   start-up every time. Either way the `modal` command must be on `PATH` (it is, inside the virtual environment), or
+   Without `HEROGEN_REMOTE_DEPLOYED=1`, everything still works: each SAM 3D call starts a temporary `modal run` app
+   instead, which pays about a minute of GPU start-up every time. This applies to the website and the command line. Either way the `modal` command must be on `PATH` (it is, inside the virtual environment), or
    named by `HEROGEN_MODAL`.
 7. **Start the site with the real stages** and open `http://127.0.0.1:8793/`:
    ```bash
@@ -209,7 +212,7 @@ and about 10–15 minutes.
    estimated cost. A finished hero has a textured 3D model, Idle/Walk/Wave/Jump previews and, when every Roblox
    check passes, a Roblox download.
 
-**Or one hero from the command line**, without the website (same requirements as above):
+**Or one hero from the command line**, without the website. It needs steps 1–5 (step 6 optional):
 
 ```bash
 python -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-hero --live
@@ -348,7 +351,7 @@ made it.
 With no `--body` it scores every stage 4 body in the run. It applies no triangle budget by default; add
 `--profile roblox-ingame` or `--profile roblox-avatar` to check a Roblox profile's limits.
 
-The hosted service (public saved-result inspection, optional capped public live access, email/invite access,
+The hosted service (public saved-result inspection, optional capped public live access, email sign-in for administrators,
 private workspaces, GLB and Roblox downloads) is `herogen/service`; `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
 
 Starting from a text prompt instead of a sketch:
