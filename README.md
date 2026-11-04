@@ -2,11 +2,25 @@
 
 One sketch or one sentence becomes a finished, game-ready 3D hero.
 
+Meta Global AI Developer Hackathon: Indie Developer track, "Build for Your World" theme.
+
+**At a glance** (example run `j_2p5xx3spajwtkxg35nummalgg7`, details in
+[Game-ready evidence](#game-ready-evidence-one-real-run)): one sentence in, a textured hero cut into 15 Roblox R15
+parts out, 23,408 triangles on the high body (budget 24,000) and 5,674 on the low one (budget 6,000), 26 of 26
+Roblox checks passed, about 15 minutes and est. $0.54 of model and GPU calls. Every model HeroGen calls is a Meta
+model: Muse Image, SAM 3.1, Muse Spark, SAM 3D Objects, SAM 3D Body and Sapiens 2.
+
+**Contents:** [Try it](#try-it-in-2-minutes) · [Built during the hackathon](#built-during-the-hackathon-and-what-came-before) ·
+[Public access](#public-access-no-secrets) · [Meta models](#meta-models-used-at-runtime) ·
+[Open-weight models](#open-weight-models) · [Evidence](#game-ready-evidence-one-real-run) ·
+[Originality](#originality) · [Run it locally](#run-it-locally) · [How it works](#how-it-works) ·
+[Third-party models and libraries](#third-party-models-and-libraries) · [Licence](#licence)
+
 ## The problem
 
 An indie game developer needs 3D characters that match what they imagined, and that ship at a polygon budget a
-game can play. HeroGen goes from the idea to a textured, rigged Roblox R15 body within that budget, and records a
-measured check at every step.
+game can play. HeroGen goes from the idea to a textured Roblox R15 body within that budget (15 rigid parts joined
+at their pivots, not a skinned avatar), and records a measured check at every step.
 
 ## Try it in 2 minutes
 
@@ -24,9 +38,13 @@ Live product (link coming):
 3. To make your own, type a one-sentence character idea (up to 300 characters) or upload a sketch, then press
    Create. A guest workspace opens in your browser: no email, no account.
 4. Watch the build log: each model call, each check with its measured value and limit, time and estimated cost.
-5. When it is done, play the Idle, Walk, Wave and Jump previews and download the GLB or the Roblox bundle.
+   A hero takes about 15 minutes when the demo is idle and longer when it is busy (one measured on the hosted
+   demo took 34 minutes).
+5. When it is done, play the Idle, Walk, Wave and Jump previews and download the GLB. The Roblox bundle is offered
+   only when every Roblox check passes; otherwise the build log shows which check failed.
 
-The demo stays up through judging, Nov 5–8, and the finals on Nov 9.
+No sign-in is needed for any of this; only administrators sign in, by email. The hosted demo runs at most 3
+heroes at once, with spend limits on. The demo stays up through judging, Nov 5–8, and the finals on Nov 9.
 
 ## Built during the hackathon, and what came before
 
@@ -74,8 +92,14 @@ The model ids are constants in `herogen/pipeline/client.py` (`IMAGE_MODEL`, `SAM
 frozen prompts in `herogen/prompts/versions/`. The Muse Spark calls are in `herogen/pipeline/reword.py`,
 `suggest.py`, `prompt_sketch.py`, `inputs.py` and `herogen/blender/body_quality.py`.
 
-- Every model HeroGen itself calls is a Meta model. (The SAM 3D pipelines' own sub-models, as their upstream
-  repositories ship them, are listed under [Third-party models and libraries](#third-party-models-and-libraries).)
+- Every model HeroGen itself calls is a Meta model.
+- One non-Meta model runs inside Meta's SAM 3D releases: **MoGe** (Microsoft, MIT licence). SAM 3D Objects'
+  own pipeline runs it for depth, and SAM 3D Body's estimator takes it as its field-of-view estimator, which
+  HeroGen's runner loads with the upstream repository's own helper (`tools/build_fov_estimator.py`), as the
+  upstream demo does. HeroGen never calls MoGe on its own; it uses only what SAM 3D returns (the mesh and the
+  joints). Both run in the Modal containers (`herogen/blender/remote/objects.py`, `body.py`), with
+  MoGe's code and weights pinned. SAM 3D Body's optional person detector (ViTDet) is off by default and never
+  downloaded.
 - Plain code is not a model call: OpenCV, NumPy, SciPy and Blender geometry do the splitting, cutting,
   decimation, texture baking, scoring and Roblox export.
 - Browser features are not model calls: the website's 3D viewer and its animation previews run three.js on the
@@ -102,26 +126,31 @@ revision `f5fed8b97b99698d5eea1d14ff0855d0b4c3f000`, `herogen/pipeline/sapiens_a
 
 ## Game-ready evidence: one real run
 
-Job `j_2brhf76zy375t3gy4rt5tjx7dn`, "Crimson Samurai", profile `roblox-ingame`. It is a turnaround redo of an
-uploaded sketch, with the note "Make the armour lacquered crimson red and black, with a red silk sash." The
-sketch and cover were reused from the earlier version; stages 2 to 6 ran in this job. Every number below is read
-from its stage records.
+Job `j_2p5xx3spajwtkxg35nummalgg7`, "Crimson Samurai", the hero in the demo video. It was made on the website
+from one sentence, "A samurai warrior in black and red lacquered armour with a katana", and every stage ran in
+this job, from the sketch to the Roblox files. Stage 4 used the `roblox-ingame` profile (high and low bodies,
+24,000 / 6,000 triangle budgets). The website runs with its fast settings, so in this run the triangle budgets
+and closed parts were measured and met but recorded as information rather than gates, and stage p's
+one-figure and same-character checks were skipped. Every number below is read from its stage records.
 
 | Measure | Value | Record |
 | --- | --- | --- |
-| Shape (stage 3) | SAM 3D Objects returned 9,466 triangles; HeroGen's internal watertight remesh of it has 211,112 triangles, 0 open edges and 0 non-manifold edges, and is what stage 4 cuts and decimates | `stage-3.json` (`mesh.source.remote.source_triangles`, `mesh.triangles`) |
+| Shape (stage 3) | SAM 3D Objects returned 9,753 triangles; HeroGen's internal watertight remesh of it has 208,988 triangles, 0 open edges and 0 non-manifold edges, and is what stage 4 cuts and decimates. The Roblox bodies are rebuilt from this remesh, not reduced from SAM 3D's own mesh | `stage-3.json` (`mesh.source.remote.source_triangles`, `mesh.triangles`) |
 | Texture refine | 6 of 6 repainted views accepted, 4096 px atlas | `stage-3f.json` |
 | R15 cut | 15 of 15 parts, high and low | `stage-4.json` |
-| Roblox high LOD | 23,798 triangles (budget 24,000), 1024 px body atlas | `stage-4.json` |
-| Roblox low LOD | 5,714 triangles (budget 6,000), 512 px body atlas | `stage-4.json` |
+| Roblox high LOD | 23,408 triangles (budget 24,000), 1024 px body atlas | `stage-4.json` |
+| Roblox low LOD | 5,674 triangles (budget 6,000), 512 px body atlas | `stage-4.json` |
 | Face detail | The Head has its own texture, 1024 px on high and 512 px on low, separate from the body atlas, taking the refined colour | `stage-4.json`, `HEAD_TEXTURE` in `herogen/blender/stage4.py` |
-| Stage 4 checks | 8 of 8 gates passed; 33 of 53 checks passed in all | `stage-4.json` |
-| Pose test | 20 gate poses (rest included) plus 8 held-out poses. Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.534 studs (high) and 0.493 (low) on the gate poses, 0.516 / 0.502 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.53 studs at the widest. | `stage-4.json` |
-| Roblox rig checks | 42 of 42 gates passed (43 of 43 checks): R15 names, Motor6D joints, attachments at the pivots, rest pose, a starter place | `stage-6.json` |
-| Time | 803 s (13 min 23 s), turnaround to Roblox files | `events.jsonl` |
-| Model and GPU cost | est. $0.494: stage 2 $0.0175, stage 3 $0.1458 (Modal GPU time), stage 3f $0.3275, Refine suggestions $0.0032 | stage records, `refine-suggestions.json` |
+| Stage 4 checks | 8 of 8 gates passed; 28 of 49 checks passed in all | `stage-4.json` |
+| Pose test | 20 gate poses (rest included: Z/BURST's intake set and 13 more) plus 9 held-out poses. Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.377 studs (high) and 0.364 (low) on the gate poses, 0.367 / 0.275 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.38 studs at the widest. | `stage-4.json` |
+| Roblox rig checks | 26 of 26 gates passed (27 of 27 checks): R15 humanoid and part names, joints linked through attachments at the pivots, rest pose, scale, hip height and facing | `stage-6.json` |
+| Time | 874 s (14 min 34 s), sentence to Roblox files | `results.json` |
+| Model and GPU cost | est. $0.537: stage p $0.02, stage 1 $0.015, stage 2 $0.03, stage 3 $0.144 (Modal GPU time), stage 3f $0.328 | stage records, `results.json` |
 
-No held-out 30° / 60° view score was recorded for this run, so none is given.
+This run was made on Nov 2 before the website's brief pre-check was added the same night, so it made no Muse
+Spark call and its sketch was drawn from the sentence as typed, katana included; the website now leaves held
+items out (see [Originality](#originality)). No held-out 30° / 60° view score was recorded for it, so none is
+given.
 
 ## Originality
 
@@ -259,7 +288,7 @@ Chrome for the browser tests) skip when it is missing; [Tests](#tests) lists the
 | scores (after 4) | Scores every body, ours or another tool's GLB, on the turnaround views and every held-out view: silhouette IoU, colour error, SSIM, mesh sanity, and optionally a platform's limits | numpy (`herogen.blender.score`) |
 | 5 results | A static results page with every stage's images, checks, scores, time and cost | code |
 | versions | `python3 -m herogen.versions` freezes a run's body and its records as a write-once, hashed version, then lists, verifies and compares versions (per-view scores on seen and held-out views, triangles, gates, joint gaps) | code |
-| 6 Roblox export | An R15 rig model for Roblox Studio, the scripts that put the hero's meshes on it, and step-by-step import instructions (`python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`) | code |
+| 6 Roblox export | A Roblox Studio model of the 15 R15 parts joined by Motor6D joints at their pivots (rigid parts, not a skinned bone rig), the scripts that put the hero's meshes on it, and step-by-step import instructions (`python3 -m herogen.roblox export --body <run>/04-body --out <run>/06-roblox`) | code |
 
 Every stage writes `stage-<n>.json` with its measured checks and stops the run when a gate fails. Stages 3 and 4
 refuse to start unless the previous stage passed (`--force` overrides). The file formats, cameras and checks are
@@ -354,8 +383,9 @@ made it.
 With no `--body` it scores every stage 4 body in the run. It applies no triangle budget by default; add
 `--profile roblox-ingame` or `--profile roblox-avatar` to check a Roblox profile's limits.
 
-The hosted service (public saved-result inspection, optional capped public live access, email sign-in for administrators,
-private workspaces, GLB and Roblox downloads) is `herogen/service`; `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
+The hosted service is `herogen/service`: anyone can browse the gallery and make heroes in a guest workspace with
+no sign-in, within the live limits in [Public access](#public-access-no-secrets); only administrators sign in, by
+email. Each workspace's heroes are private to it, with GLB and Roblox downloads. `python3 -m herogen.service dev` runs it locally (docs/ARCHITECTURE.md, "Service").
 
 Starting from a text prompt instead of a sketch:
 
@@ -440,7 +470,7 @@ when unset). Runs are named `<root>/<run>`, the root being `r1`, `r2`, ... in th
   with no tone mapping, so the two views separate studio presentation from the paint itself. Clay, wireframe and
   per-section colours keep working under both. A refined or SAM-source body is one mesh with no R15 sections: it
   answers every one of these controls too (one neutral colour for the per-section view, nothing to pose or
-  isolate) and its triangles are counted. The seven test poses of `herogen/blender/pose.py`, each section turned
+  isolate) and its triangles are counted. Seven of the pose test's poses (rest, two walk steps, arms forward, arms up, crouch, twist; all among the 20 gate poses in `herogen/blender/pose.py`), each section turned
   about its pivot; click a section, or pick it from the list or the legend, to isolate it and see its triangles,
   pivot and joint; front, 3/4, side and back cameras, orbit, and an axis gizmo. "Side by side" puts the body
   beside a turnaround view through that view's own orthographic camera (its pixels per stud from
