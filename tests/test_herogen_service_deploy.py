@@ -249,7 +249,7 @@ class TestModalApp(TempDirCase):
         self.assertEqual(len(calls), 3)
         with self.assertRaisesRegex(RuntimeError, "refused 3 model containers"):
             mod.run_in_accepted_container(lambda *a: {mod.REFUSED: True}, job, 1, 0, "model")
-        self.assertEqual(mod.MODEL_GROUPS, ("model", "blender", "body"))
+        self.assertEqual(mod.MODEL_GROUPS, ("model", "blender"))   # stage 4 never calls the Model API
 
     def test_admin_allowlist_is_runtime_only_and_retention_reaches_image(self):
         private = {"HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}

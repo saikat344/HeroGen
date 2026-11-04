@@ -14,7 +14,7 @@ What runs where:
   It also holds `<app>-admin` (HEROGEN_ADMIN_KEY) to update settings after admin authentication.
   Stage workers hold no admin key.
 - `sanitize_image`: opens uploads, with no network, no secrets and no volumes.
-- Model API workers (`model_stages`, `blender_stages`, `body_stages`) first send one tiny Muse Spark request: the
+- Model API workers (`model_stages`, `blender_stages`) first send one tiny Muse Spark request: the
   Model API answers some Modal egress addresses with HTTP 404 model_not_found for every model, so a refused
   container hands its group back and `run_job` runs it again in a fresh one, up to `CONTAINER_TRIES` times.
 - `suggest_idea`: one suggested hero idea from Muse Spark for `POST /api/ideas` (`herogen.service.ideas`); holds
@@ -354,7 +354,9 @@ def run_job(job_id: str) -> str | None:
 # The Meta Model API answers some Modal egress addresses with HTTP 404 model_not_found for every model, while the
 # same key works from others; the refusal sticks to the container. A group that calls the Model API checks first
 # (`model_access_refused`), and a refused container hands the group back so it runs again in a fresh one.
-MODEL_GROUPS = ("model", "blender", "body")
+# The body group is not checked: stage 4 never calls the Model API, and the Refine suggestions beside it already
+# end without blocking anything when the Model API fails.
+MODEL_GROUPS = ("model", "blender")
 REFUSED = "refused_container"
 CONTAINER_TRIES = 3
 
