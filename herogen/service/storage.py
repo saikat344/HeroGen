@@ -59,13 +59,19 @@ class ModalVolumeView(VolumeView):
         self.cond = threading.Condition()
         self.readers = 0
         self.writer = False
+        self.waiting = 0          # writers waiting for the readers to finish; new readers wait behind them
+        self.refreshing = False   # a throttled refresh is under way; others read the current view meanwhile
         self.last = 0.0
 
     @contextmanager
     def _exclusive(self) -> Iterator[None]:
         with self.cond:
-            while self.writer or self.readers:
-                self.cond.wait()
+            self.waiting += 1
+            try:
+                while self.writer or self.readers:
+                    self.cond.wait()
+            finally:
+                self.waiting -= 1
             self.writer = True
         try:
             yield
@@ -75,11 +81,24 @@ class ModalVolumeView(VolumeView):
                 self.cond.notify_all()
 
     def refresh(self, max_age_s: float | None = None) -> None:
+        """Reload the volume when the view is older than `max_age_s` (default `min_interval_s`). A throttled
+        refresh (no `max_age_s`) never queues behind another one: while one is under way, the others read the
+        current view, so busy pages do not line up one reload each."""
         if time.monotonic() - self.last < (self.min_interval_s if max_age_s is None else max_age_s):
             return
-        with self._exclusive():
-            self.volume.reload()
-            self.last = time.monotonic()
+        if max_age_s is None:
+            with self.cond:
+                if self.refreshing:
+                    return
+                self.refreshing = True
+        try:
+            with self._exclusive():
+                self.volume.reload()
+                self.last = time.monotonic()
+        finally:
+            if max_age_s is None:
+                with self.cond:
+                    self.refreshing = False
 
     def commit(self) -> None:
         with self._exclusive():
@@ -88,7 +107,7 @@ class ModalVolumeView(VolumeView):
     @contextmanager
     def reading(self) -> Iterator[None]:
         with self.cond:
-            while self.writer:
+            while self.writer or self.waiting:
                 self.cond.wait()
             self.readers += 1
         try:

@@ -66,6 +66,12 @@ BLENDER_APT = ["xz-utils", "curl", "libx11-6", "libxi6", "libxxf86vm1", "libxfix
 CPU_CORE_USD_S = 0.047 / 3600
 MEM_GIB_USD_S = 0.008 / 3600
 WORKERS = {"model": (2.0, 4096), "blender": (8.0, 32768), "export": (2.0, 4096)}
+# The web container serves every page and file from the data volume; Modal's default share of a core makes busy
+# pages wait seconds on CPU.
+WEB_CPU, WEB_MEMORY_MB = 2.0, 4096
+# One booted container each for a new hero's orchestrator and its image stages, so a hero starts without waiting
+# for two cold starts. Both are small CPU containers; each serves one hero and is then replaced.
+WARM_CONTAINERS = 1
 HOUR = 3600
 CUSTOM_DOMAINS = [d.strip() for d in os.environ.get("HEROGEN_SERVICE_DOMAIN", "").split(",") if d.strip()]
 
@@ -301,7 +307,7 @@ def _submit(job_id: str) -> str:
 
 
 @app.function(image=web_image, secrets=[*web_secrets, admin_secret], volumes={DATA: data_vol, LEGAL: legal_vol}, min_containers=1,
-              timeout=600)
+              cpu=WEB_CPU, memory=WEB_MEMORY_MB, timeout=600)
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app(custom_domains=CUSTOM_DOMAINS or None)
 def web():
@@ -332,7 +338,7 @@ def web():
 
 
 @app.function(image=web_image, volumes={DATA: data_vol}, timeout=JOB_TIMEOUT, nonpreemptible=True,
-              single_use_containers=True, max_containers=50)
+              single_use_containers=True, max_containers=50, min_containers=WARM_CONTAINERS)
 def run_job(job_id: str) -> str | None:
     import logging
 
@@ -435,7 +441,7 @@ def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
 
 @app.function(image=web_image, secrets=[model_secret], volumes={DATA: data_vol}, cpu=WORKERS["model"][0],
               memory=WORKERS["model"][1], timeout=TIMEOUTS["model"], nonpreemptible=True, single_use_containers=True,
-              max_containers=20)
+              max_containers=20, min_containers=WARM_CONTAINERS)
 def model_stages(job: dict, attempt: int, resume: int) -> dict:
     return _group(job, attempt, resume, "model")
 
