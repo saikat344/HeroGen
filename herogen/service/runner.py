@@ -343,6 +343,11 @@ def base_env(extra: dict[str, str] | None = None) -> dict[str, str]:
             "HEROGEN_REMOTE_FUNCTION_TIMEOUT",
             "HEROGEN_PROMPT_SKETCH_VERSION", "HEROGEN_SAME_CHARACTER_VERSION", *FAST_LANE_ENV)
     env = {k: os.environ[k] for k in keep if k in os.environ}
+    if os.environ.get("MODAL_IS_REMOTE") == "1":
+        # Inside a Modal container the stage's SAM 3D bridge (`herogen.service.modal_bridge`) calls the deployed GPU
+        # apps with this container's own short-lived identity (MODAL_IDENTITY_TOKEN, MODAL_SERVER_URL and the rest);
+        # without it the Modal client has no credentials. Never forwarded outside a Modal container.
+        env.update({k: v for k, v in os.environ.items() if k.startswith("MODAL_")})
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = root
     env["PYTHONDONTWRITEBYTECODE"] = "1"

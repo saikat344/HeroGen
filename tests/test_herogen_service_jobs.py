@@ -575,6 +575,22 @@ class TestStageCommands(TempDirCase):
                    for m in (IMAGE_MODEL, SAM_MODEL, TEXT_MODEL)}
         self.assertEqual({n for n in FAST_LANE_ENV if n.startswith("HEROGEN_RPM_")}, derived)
 
+    def test_stage_env_carries_the_modal_identity_only_inside_modal(self):
+        from unittest import mock
+        from herogen.service.runner import base_env
+
+        modal_env = {"MODAL_IDENTITY_TOKEN": "t" * 20, "MODAL_SERVER_URL": "https://api.modal.example",
+                     "MODAL_TASK_ID": "ta-1"}
+        with mock.patch.dict(os.environ, {**modal_env, "MODAL_IS_REMOTE": "1", "MODEL_API_KEY": "m"}, clear=True):
+            env = base_env({"HOME": "/tmp"})
+        for k, v in modal_env.items():
+            self.assertEqual(env[k], v)   # the SAM 3D bridge authenticates as this container
+        self.assertNotIn("MODEL_API_KEY", env)
+        with mock.patch.dict(os.environ, {**modal_env, "MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"},
+                             clear=True):
+            env = base_env({"HOME": "/tmp"})
+        self.assertFalse(any(k.startswith("MODAL_") for k in env), "a local stage never gets Modal credentials")
+
     def test_stage_env_holds_no_secrets(self):
         from herogen.service.runner import base_env
 
