@@ -1,6 +1,6 @@
 # HeroGen
 
-**[Watch the 3-minute demo](https://youtu.be/FpryYeY_hsw) · [Try it live](https://saikat344--herogen-service-web.us-east.modal.run)**
+**[Watch the 3-minute demo](https://youtu.be/OSKhpbi4I7g) · [Try it live](https://saikat344--herogen-service-web.us-east.modal.run)**
 
 One sketch or one sentence becomes a finished, game-ready 3D hero.
 
@@ -30,7 +30,7 @@ at their pivots, not a skinned avatar), and records a measured check at every st
 
 Live product: <https://saikat344--herogen-service-web.us-east.modal.run>
 
-3-minute demo video: <https://youtu.be/FpryYeY_hsw>
+3-minute demo video: <https://youtu.be/OSKhpbi4I7g>
 
 1. Open the live link. The gallery of earlier heroes loads with no sign-in.
 2. Open a gallery hero: orbit its 3D model, switch between textured, clay and wireframe, and compare it with its
