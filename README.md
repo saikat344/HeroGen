@@ -7,7 +7,8 @@ Meta Global AI Developer Hackathon: Indie Developer track, "Build for Your World
 **At a glance** (example run `j_2p5xx3spajwtkxg35nummalgg7`, details in
 [Game-ready evidence](#game-ready-evidence-one-real-run)): one sentence in, a textured hero cut into 15 Roblox R15
 parts out, 23,408 triangles on the high body (budget 24,000) and 5,674 on the low one (budget 6,000), 26 of 26
-Roblox checks passed, about 15 minutes and est. $0.54 of model and GPU calls. Every model HeroGen calls is a Meta
+Roblox rig checks passed, about 15 minutes and est. $0.54 of model and GPU calls. The joint-gap pose test does
+**not** pass: the worst seam opens 0.38 studs against a 0.15 limit, recorded but not a gate on the website. Every model HeroGen calls is a Meta
 model: Muse Image, SAM 3.1, Muse Spark, SAM 3D Objects, SAM 3D Body and Sapiens 2.
 
 **Contents:** [Try it](#try-it-in-2-minutes) · [Built during the hackathon](#built-during-the-hackathon-and-what-came-before) ·
@@ -69,7 +70,7 @@ Live generation is limited in code (`herogen/service/store.py`, `generation.py`,
   per hero (`HEROGEN_SERVICE_REFINE_CAP_USD`, default $0.80).
 - **A global pause switch** refuses new heroes with "Live generation is paused right now."
 - **Global concurrency.** At most `max_running` heroes run at once across all workspaces (default 5, admin range
-  1 to 32; `Store.jobs_to_dispatch`). The deployed SAM 3D apps are fixed at 5 containers each
+  1 to 32; `Store.jobs_to_dispatch`); the hosted demo is set to 3. The deployed SAM 3D apps are fixed at 5 containers each
   (`herogen/blender/remote/deploy.py`).
 - **Explicit states, no silent wait.** A paused service or a spent budget answers HTTP 503 with
   `generation_paused` or `generation_budget_exhausted` and a plain sentence. A hero waiting for a free worker
@@ -141,8 +142,8 @@ one-figure and same-character checks were skipped. Every number below is read fr
 | Roblox high LOD | 23,408 triangles (budget 24,000), 1024 px body atlas | `stage-4.json` |
 | Roblox low LOD | 5,674 triangles (budget 6,000), 512 px body atlas | `stage-4.json` |
 | Face detail | The Head has its own texture, 1024 px on high and 512 px on low, separate from the body atlas, taking the refined colour | `stage-4.json`, `HEAD_TEXTURE` in `herogen/blender/stage4.py` |
-| Stage 4 checks | 8 of 8 gates passed; 28 of 49 checks passed in all | `stage-4.json` |
-| Pose test | 20 gate poses (rest included: Z/BURST's intake set and 13 more) plus 9 held-out poses. Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.377 studs (high) and 0.364 (low) on the gate poses, 0.367 / 0.275 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.38 studs at the widest. | `stage-4.json` |
+| Stage 4 checks | 8 of 8 gates passed; 28 of 49 checks passed in all. The 21 that did not are measurements, not gates: 8 joint-gap figures (the pose test below and its comparison variants), 8 texture checks against the turnaround drawing (the body takes the refined colours instead, which pass their own 8 checks), 4 silhouette fits against the back, side and top views (the shape is built from the front view only) and 1 count of 34 cap points poking through a neighbouring part at rest | `stage-4.json` |
+| Pose test | 20 gate poses (rest included: Z/BURST's intake set and 13 more) plus 8 held-out poses (bow, climb, jog, kneel, look up, punch, wide squat, wave; the held-out record measures rest again). Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.377 studs (high) and 0.364 (low) on the gate poses, 0.367 / 0.275 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.38 studs at the widest. | `stage-4.json` |
 | Roblox rig checks | 26 of 26 gates passed (27 of 27 checks): R15 humanoid and part names, joints linked through attachments at the pivots, rest pose, scale, hip height and facing | `stage-6.json` |
 | Time | 874 s (14 min 34 s), sentence to Roblox files | `results.json` |
 | Model and GPU cost | est. $0.537: stage p $0.02, stage 1 $0.015, stage 2 $0.03, stage 3 $0.144 (Modal GPU time), stage 3f $0.328 | stage records, `results.json` |
