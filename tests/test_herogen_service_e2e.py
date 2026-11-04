@@ -373,15 +373,24 @@ class TestServicePage(ServiceBrowserCase):
             })()""")
             self.make_hero('A hero taking shape')
             self.assertTrue(waiting.wait(15))
-            t.wait("!document.querySelector('#modelTab').hidden && document.querySelector('#artifactLabel').textContent === 'SAM 3D raw shape'")
+            # While the texture refines, the stage splits: SAM 3D's raw shape beside HeroGen's panel, which says it
+            # is repainting until the first refined version lands.
+            t.wait("!document.querySelector('#modelTab').hidden && document.querySelector('#viewer').dataset.split === 'waiting'")
             t.wait("!document.querySelector('#orbitHint').hidden", timeout=45)
-            self.assertEqual(t.eval("document.querySelector('#modelNote').textContent"), 'Straight from SAM 3D Objects · HeroGen is repainting the texture from every side')
+            self.assertEqual(t.eval("document.querySelector('#artifactLabel').textContent"), 'SAM 3D raw')
+            self.assertEqual(t.eval("document.querySelector('#splitHeroLabel').textContent"), 'HeroGen · refining…')
+            self.assertEqual(t.eval("document.querySelector('#splitWorking').textContent"), 'Repainting the texture from every side…')
+            self.assertFalse(t.eval("document.querySelector('#splitView').hidden"))
             self.assertTrue(t.eval("document.querySelector('#modelUpdate').hidden"))
             self.assertIn('elapsed', t.eval("document.querySelector('[data-stage=\"3f\"] .step-duration').textContent"))
             self.screenshot('progressive-first-shape.png')
             shape.set()
-            t.wait("document.querySelector('#artifactLabel').textContent === 'HeroGen refined · version 1' && !document.querySelector('#orbitHint').hidden")
+            # The first refined version takes HeroGen's panel without leaving the split.
+            t.wait("document.querySelector('#splitHeroLabel').textContent === 'HeroGen · version 1' && document.querySelector('#viewer').dataset.split === 'on'")
             t.wait("window.modelReads.some(u=>u.includes('03-refined-v1.glb'))")
+            # "HeroGen" on the compare switch shows that model alone, where a newer version waits for "Show it".
+            t.eval("document.querySelector('#modelCompare [data-compare=\"herogen\"]').click()")
+            t.wait("document.querySelector('#artifactLabel').textContent === 'HeroGen refined · version 1' && !document.querySelector('#viewer').dataset.split && !document.querySelector('#orbitHint').hidden")
             self.screenshot('progressive-version-1.png')
             t.eval("document.querySelector('#preview').scrollIntoView({block:'center',behavior:'instant'})")
             box = t.eval("(() => {const b=document.querySelector('#preview').getBoundingClientRect();return {x:b.x+b.width/2,y:b.y+b.height/2};})()")
