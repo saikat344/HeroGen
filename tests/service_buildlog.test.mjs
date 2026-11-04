@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { buildModel, copyText, orderEvents, rowMeta, stepMeta, typicalFor, buildLog, POLL_MS, IDLE_MS, MAX_MS, PAUSED }
   from '../herogen/service/static/buildlog.js';
 import * as copy from '../herogen/service/static/buildlog-copy.js';
+import { POLL_TIMEOUT_MS } from '../herogen/service/static/poll.js';
 import { sampleEvents, SAMPLE_STAGES } from './buildlog_fixture.mjs';
 
 const TYPICAL = JSON.parse(readFileSync(new URL('../herogen/service/static/typical-calls.json', import.meta.url)));
@@ -234,10 +235,10 @@ function harness({responses, motion = false}) {
   for (const e of Object.values(els)) e.root = true;
   document.activeElement = null;
   els['#followLive'].checked = true;
-  const calls = [], pending = [];
+  const calls = [], options = [], pending = [];
   let clock = START;
-  const api = async (path) => {
-    calls.push(path);
+  const api = async (path, opt) => {
+    calls.push(path); options.push(opt);
     const next = responses.shift();
     if (typeof next === 'function') return next(path);
     if (next instanceof Error) throw next;
@@ -247,7 +248,7 @@ function harness({responses, motion = false}) {
     clearTimeout: (t) => { const i = pending.indexOf(t); if (i >= 0) pending.splice(i, 1); }};
   const log = buildLog((s) => els[s], api, {typical: TYPICAL, timers, now: () => clock, motion: {matches: motion}});
   const settle = () => new Promise(r => setImmediate(r));
-  return {els, calls, pending, log, settle, advance(ms) { clock += ms; },
+  return {els, calls, options, pending, log, settle, advance(ms) { clock += ms; },
     async runNext(match = () => true) { const i = pending.findIndex(t => match(t)); const [t] = pending.splice(i, 1); clock += t.ms || 0; t.f(); await settle(); return t; }};
 }
 const notFound = () => Object.assign(new Error('Not found.'), {status: 404});
@@ -295,6 +296,21 @@ test('a finished job reads once and stops; a busy server slows the loop instead 
   details.open = true; details.fire('toggle');
   h.log.update(job({p: 'passed'}, {state: 'succeeded'}));
   assert.equal(details.open, true);
+});
+
+test('each read has a deadline, and a read that ran out of time pauses the log and tries again', async () => {
+  const late = Object.assign(new Error('HeroGen took too long to answer.'), {status: 0, code: 'timeout'});
+  const h = harness({responses: [late, {events: sampleEvents(START, 130), cursor: 'o:1'}]});
+  h.log.update(job({p: 'passed', 0: 'passed', 1: 'running'}));
+  await h.settle();
+  assert.equal(h.options[0].timeout, POLL_TIMEOUT_MS);
+  assert.equal(h.els['#logStatus'].textContent, PAUSED);
+  const retry = h.pending.find(t => t.f.name === 'poll');
+  assert.ok(retry, 'the loop keeps going');
+  await h.runNext(t => t === retry);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.els['#logStatus'].textContent, 'Following live');
+  assert.ok(h.pending.some(t => t.f.name === 'poll'), 'and keeps following the running job');
 });
 
 test('polling keeps the row in focus and the steps the reader opened or closed', async () => {

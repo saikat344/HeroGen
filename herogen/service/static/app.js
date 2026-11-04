@@ -11,6 +11,7 @@ import { generationView, generationState, TERMINAL, trianglesText } from '/asset
 import { descriptionDraft, rewordLabel, rewordNotice, usd } from '/assets/buildlog-copy.js';
 import { variationsView } from '/assets/variations.js';
 import { acceptPlaceholderOnTab } from '/assets/placeholder-tab.js';
+import { POLL_TIMEOUT_MS, retryable, retryDelay, within } from '/assets/poll.js';
 import { renderDownloads } from '/assets/downloads.js';
 import { finishedNote, heroesView, kindName } from '/assets/heroes.js';
 import { bindOrbitDrag, knownCreateResult, setCsrf, track, trackOnce } from './analytics.js';
@@ -109,14 +110,14 @@ function fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; }
 function fmtSecs(v) { return typeof v === 'number' ? (v < 90 ? `${v.toFixed(1)} s` : `${(v / 60).toFixed(1)} min`) : ''; }
 function idemKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, (x) => x.toString(16).padStart(2, '0')).join(''); }
 
-async function api(path, { method = 'GET', json, form, headers = {} } = {}) {
+// timeout (ms) bounds the whole read, reply body included; a read past it fails like a lost connection.
+async function api(path, { method = 'GET', json, form, headers = {}, timeout = 0 } = {}) {
   const opt = { method, headers: { ...headers }, credentials: 'same-origin', cache: 'no-store' };
   if (method !== 'GET') opt.headers['X-CSRF-Token'] = S.csrf || '';
   if (json !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(json); }
   if (form) opt.body = form;
-  const r = await fetch(path, opt);
-  let data = null;
-  try { data = await r.json(); } catch { data = null; }
+  const [r, data] = await within(timeout, signal => fetch(path, { ...opt, signal })
+    .then(async (r) => [r, await r.json().catch(() => null)]));
   if (!r.ok) {
     if (r.status === 401 && S.session?.signed_in) expireAccess();
     const msg = (data && data.error && data.error.message) || `Request failed (${r.status}).`;
@@ -437,15 +438,16 @@ async function openJob(id, reveal = false) {
   S.current = id;
   if (reveal) show('#jobLoading');
   try {
-    const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
+    const j = await api(`/api/jobs/${encodeURIComponent(id)}`, { timeout: POLL_TIMEOUT_MS });
     if (S.current !== id || revision !== S.revision) return;
     banner(''); connection(true); followJob(j, reveal);
   } catch (e) {
     if (revision !== S.revision) return;
-    // A hero already on screen that cannot be reached right now is kept as it is, and the page keeps trying.
-    if (S.shown === id && !reveal && (!e.status || e.status >= 500)) {
+    // A hero already on screen that cannot be reached right now (no answer in time, a server error, a busy or
+    // rate-limited reply) is kept as it is, and the page keeps trying, no sooner than the server asked.
+    if (S.shown === id && !reveal && retryable(e)) {
       connection(false);
-      if (!document.hidden) S.timer = setTimeout(() => openJob(id), 3000);
+      if (!document.hidden) S.timer = setTimeout(() => openJob(id), retryDelay(e, 3000));
     } else if (e.status === 404) {
       banner('This hero is not in your workspace. It may have been deleted.', { title: 'Hero not found', kind: 'warning',
         action: { label: 'Go to your heroes', run: () => { banner(''); $('#heroesNav').click(); } } });

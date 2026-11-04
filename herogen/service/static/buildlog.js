@@ -2,6 +2,7 @@
 // from running to done. Events are read with a cursor while the job runs; a run without events (older runs) keeps
 // the recorded stage times from the stage records instead.
 import * as copy from './buildlog-copy.js';
+import { POLL_TIMEOUT_MS } from './poll.js';
 import { recordLog } from './workbench.js';
 
 export const POLL_MS = 1500, IDLE_MS = 3000, MAX_MS = 15000;
@@ -518,7 +519,7 @@ export function buildLog($, api, {typical = null, timers = globalThis, now = () 
     busy = true;
     try {
       const query = cursor == null ? '' : `?after=${encodeURIComponent(cursor)}`;
-      const res = await api(`/api/jobs/${encodeURIComponent(id)}/events${query}`);
+      const res = await api(`/api/jobs/${encodeURIComponent(id)}/events${query}`, { timeout: POLL_TIMEOUT_MS });
       if (token !== request) return;
       const fresh = Array.isArray(res?.events) ? res.events.filter(e => e && typeof e === 'object') : [];
       if (Number.isFinite(res?.now)) { offset = res.now - now(); serverClock = true; }

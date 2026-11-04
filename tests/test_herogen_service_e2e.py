@@ -623,6 +623,28 @@ class TestServicePage(ServiceBrowserCase):
         self.assertEqual(self.tab.eval("window.__polls"), settled, "the page kept polling a finished job")
         self.assertEqual(self.tab.errors, [])
 
+    def test_a_rate_limited_or_failed_read_mid_run_keeps_the_page_following(self):
+        self.signin()
+        self.make_hero("Sir Patience")
+        self.assertTrue(self.runner.waiting.wait(20), "stage 1 never started")
+        self.tab.wait("document.querySelector('#state').textContent === 'running'")
+        # The next job reads answer as a busy hosted container might: rate-limited, then a lost connection.
+        self.tab.eval("""(() => {
+            const replies = [() => new Response(JSON.stringify({error: {code: 'rate_limited', message: 'Too many requests.'}}),
+                                                {status: 429, headers: {'Retry-After': '1', 'Content-Type': 'application/json'}}),
+                             () => Promise.reject(new TypeError('Failed to fetch'))];
+            window.__failed = 0;
+            const f = window.fetch;
+            window.fetch = (u, o) => {
+                if (/^\\/api\\/jobs\\/[^/]+$/.test(String(u)) && replies.length) { window.__failed++; return replies.shift()(); }
+                return f(u, o);
+            };
+        })()""")
+        self.tab.wait("window.__failed === 2", timeout=POLL_S * 4)
+        self.runner.gate.set()
+        self.tab.wait("document.querySelector('#state').textContent === 'succeeded'", timeout=60)
+        self.assertEqual(self.tab.errors, [])
+
 
 @unittest.skipUnless(HAVE_WEB and uvicorn is not None and CDP_PORT, "set E2E_CDP_PORT and install requirements-dev.txt")
 class TestPublicLivePage(ServiceBrowserCase):
