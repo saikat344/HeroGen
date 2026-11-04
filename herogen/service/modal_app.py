@@ -144,8 +144,11 @@ if DEPLOY.sketch_ideas_dir is not None:
         for sketch in sketch_catalog(DEPLOY.sketch_ideas_dir):
             sketch_image(DEPLOY.sketch_ideas_dir, sketch['id'])
     web_image = web_image.add_local_dir(str(DEPLOY.sketch_ideas_dir), "/sketch-ideas")
+# Stage 3's SAM 3D bridge (`herogen.service.modal_bridge`) runs as a stage subprocess, which cannot import the Modal
+# client the platform mounts for the container's own entrypoint: the image installs it, at the deploying version.
 blender_image = (
-    base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93")  # BSD-3-Clause; Apache-2.0
+    base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93",  # BSD-3-Clause; Apache-2.0
+                     f"modal=={modal.__version__}")  # Apache-2.0
     .apt_install(*BLENDER_APT)
     .run_commands(
         f"curl -fsSL -o /tmp/blender.tar.xz {BLENDER_URL}",
