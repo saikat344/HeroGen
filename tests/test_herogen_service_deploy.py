@@ -207,6 +207,50 @@ class TestModalApp(TempDirCase):
             self.assertEqual([(s.name, s.kw.get("values")) for s in remote.functions[name]["secrets"]],
                              [(s.name, s.kw.get("values")) for s in fake.functions[name]["secrets"]])
 
+    def test_a_container_the_model_api_refuses_is_detected_by_its_answer(self):
+        import io
+        import urllib.error
+        from unittest import mock
+
+        mod, _ = self.load()
+
+        def answer(code, body):
+            def urlopen(req, timeout):
+                if code == 200:
+                    return io.BytesIO(b"{}")
+                raise urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(body))
+            return urlopen
+
+        refused = b'{"error":{"code":"model_not_found","message":"The requested model was not found."}}'
+        cases = [(404, refused, True), (404, b'{"error":{"code":"other"}}', False), (404, b"not json", False),
+                 (401, refused, False), (500, b"{}", False), (200, b"{}", False)]
+        for code, body, want in cases:
+            with self.subTest(code=code, body=body), mock.patch.dict(os.environ, {"MODEL_API_KEY": "k"}), \
+                    mock.patch("urllib.request.urlopen", side_effect=answer(code, body)):
+                self.assertEqual(mod.model_access_refused(), want)
+        with mock.patch.dict(os.environ, {"MODEL_API_KEY": "k"}), \
+                mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
+            self.assertFalse(mod.model_access_refused())   # a network error is the stages' to report
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch("urllib.request.urlopen") as urlopen:
+            self.assertFalse(mod.model_access_refused())
+        urlopen.assert_not_called()
+
+    def test_a_refused_container_hands_the_group_to_a_fresh_one(self):
+        mod, _ = self.load()
+        job = {"id": "j_x"}
+        answers = iter([{mod.REFUSED: True}, {mod.REFUSED: True}, {"status": "ok"}])
+        calls = []
+
+        def call(*args):
+            calls.append(args)
+            return next(answers)
+
+        self.assertEqual(mod.run_in_accepted_container(call, job, 1, 0, "model"), {"status": "ok"})
+        self.assertEqual(len(calls), 3)
+        with self.assertRaisesRegex(RuntimeError, "refused 3 model containers"):
+            mod.run_in_accepted_container(lambda *a: {mod.REFUSED: True}, job, 1, 0, "model")
+        self.assertEqual(mod.MODEL_GROUPS, ("model", "blender", "body"))
+
     def test_admin_allowlist_is_runtime_only_and_retention_reaches_image(self):
         private = {"HEROGEN_SERVICE_ADMIN_EMAILS": "ops@example.com"}
         mod, fake = self.load({**PROD, **private, "HEROGEN_SERVICE_ANALYTICS_RETENTION_DAYS": "14"})

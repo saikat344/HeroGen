@@ -14,6 +14,9 @@ What runs where:
   It also holds `<app>-admin` (HEROGEN_ADMIN_KEY) to update settings after admin authentication.
   Stage workers hold no admin key.
 - `sanitize_image`: opens uploads, with no network, no secrets and no volumes.
+- Model API workers (`model_stages`, `blender_stages`, `body_stages`) first send one tiny Muse Spark request: the
+  Model API answers some Modal egress addresses with HTTP 404 model_not_found for every model, so a refused
+  container hands its group back and `run_job` runs it again in a fresh one, up to `CONTAINER_TRIES` times.
 - `suggest_idea`: one suggested hero idea from Muse Spark for `POST /api/ideas` (`herogen.service.ideas`); holds
   only `<app>-model`, so the web container never holds the model key, and no volumes.
 - `run_job`: one orchestrator per job attempt; `model_stages` (holds `<app>-model`: MODEL_API_KEY),
@@ -335,7 +338,7 @@ def run_job(job_id: str) -> str | None:
     groups = {"model": model_stages, "blender": blender_stages, "body": body_stages, "export": export_stages}
 
     def execute(job, attempt, group, resume):
-        return GroupResult(**groups[group].remote(job, attempt, resume))
+        return GroupResult(**run_in_accepted_container(groups[group].remote, job, attempt, resume, group))
 
     def redispatch(jid: str) -> None:
         from herogen.service.worker import dispatch_queued
@@ -348,8 +351,63 @@ def run_job(job_id: str) -> str | None:
     return result
 
 
+# The Meta Model API answers some Modal egress addresses with HTTP 404 model_not_found for every model, while the
+# same key works from others; the refusal sticks to the container. A group that calls the Model API checks first
+# (`model_access_refused`), and a refused container hands the group back so it runs again in a fresh one.
+MODEL_GROUPS = ("model", "blender", "body")
+REFUSED = "refused_container"
+CONTAINER_TRIES = 3
+
+
+def model_access_refused(timeout: float = 30.0) -> bool:
+    """Whether the Model API refuses this container: one tiny Muse Spark request answered HTTP 404
+    model_not_found. Any other answer, an error included, is not a refusal: the stages then run and report it."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    from herogen.pipeline.client import API_BASE, ENV_KEY, TEXT_MODEL
+
+    key = os.environ.get(ENV_KEY, "").strip()
+    if not key:
+        return False
+    body = json.dumps({"model": TEXT_MODEL, "input": "ok", "max_output_tokens": 16}).encode("utf-8")
+    req = urllib.request.Request(f"{API_BASE}/responses", data=body, method="POST", headers={
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return False
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return False
+        try:
+            return (json.loads(e.read().decode("utf-8", "replace")).get("error") or {}).get("code") == "model_not_found"
+        except (ValueError, AttributeError):
+            return False
+    except OSError:
+        return False
+
+
+def run_in_accepted_container(call, job: dict, attempt: int, resume: int, group: str, tries: int = CONTAINER_TRIES):
+    """``call`` (a group function's ``.remote``) until it runs in a container the Model API accepts; each call is a
+    fresh single-use container. After ``tries`` refused containers the group fails with that reason."""
+    import logging
+
+    for n in range(1, tries + 1):
+        out = call(job, attempt, resume)
+        if not out.get(REFUSED):
+            return out
+        logging.getLogger("herogen.service").warning(
+            "group %s of %s: the Model API refused container %d of %d (HTTP 404 model_not_found); moving",
+            group, job["id"], n, tries)
+    raise RuntimeError(f"the Model API refused {tries} {group} containers in a row (HTTP 404 model_not_found)")
+
+
 def _group(job: dict, attempt: int, resume: int, group: str) -> dict:
     import logging
+
+    if group in MODEL_GROUPS and model_access_refused():
+        return {REFUSED: True}
 
     from herogen.service.runner import CliRunner
     from herogen.service.storage import Storage
