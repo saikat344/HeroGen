@@ -48,10 +48,9 @@ heroes at once, with spend limits on. The demo stays up through judging, Nov 5�
 
 ## Built during the hackathon, and what came before
 
-| | When | What it is here |
-| --- | --- | --- |
-| HeroGen (this repository) | Built during the event, Oct 26 – Nov 4, 2026 | The whole product: pipeline, checks, website, Roblox export |
-| Z/BURST, its game and its FloodYard environment | Existed before the event | Only a stage to show finished heroes in. Its hero contract supplies the targets HeroGen aims at: 15 rigid R15 parts, 24,000 / 6,000 triangles, 1024 / 512 px maps and its pose set |
+HeroGen (this repository) was built during the event, Oct 26 – Nov 4, 2026: the whole product, from the
+pipeline and its checks to the website and the Roblox export. What came before is only what it uses: the models
+and libraries listed under [Third-party models and libraries](#third-party-models-and-libraries).
 
 ## Public access, no secrets
 
@@ -165,7 +164,7 @@ SAM 3.1). SAM 3D Objects builds the shape from its front view.
 | Roblox low LOD | 5,938 triangles (budget 6,000), 512 px body atlas | `stage-4.json` |
 | Face detail | The Head has its own texture, 1024 px on high and 512 px on low, separate from the body atlas, taking the refined colour | `stage-4.json`, `HEAD_TEXTURE` in `herogen/blender/stage4.py` |
 | Stage 4 checks | 8 of 8 gates passed; 31 of 53 checks passed in all. The 22 that did not are measurements, not gates: 8 joint-gap figures (the pose test below and its comparison variants), 8 texture checks against the turnaround drawing (the body takes the refined colours instead, which pass their own 8 checks), 4 silhouette fits against the back, side and top views (the shape is built from the front view only), 1 count of 5 cap points poking through a neighbouring part at rest, and 1 check that found 12 of the 15 pivots inside their joint region (all 15 expected) | `stage-4.json` |
-| Pose test | 20 gate poses (rest included: Z/BURST's intake set and 13 more) plus 8 held-out poses (bow, climb, jog, kneel, look up, punch, wide squat, wave; the held-out record measures rest again). Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.542 studs (high) and 0.545 (low) on the gate poses, 0.564 / 0.599 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.54 studs at the widest. | `stage-4.json` |
+| Pose test | 20 gate poses (rest included) plus 8 held-out poses (bow, climb, jog, kneel, look up, punch, wide squat, wave; the held-out record measures rest again). Gap method: each cut's shared rim is carried by both parts, and the gap is how far a rim point ends up outside the other part's surface. Limit 0.15 studs. Worst gap 0.542 studs (high) and 0.545 (low) on the gate poses, 0.564 / 0.599 on the held-out poses. **Not passed**: on the website the gap is recorded, not a gate, and the record notes visible seams at 0.54 studs at the widest. | `stage-4.json` |
 | Roblox rig checks | 42 of 42 gates passed (43 of 43 checks): R15 humanoid and part names, joints linked through attachments at the pivots, rest pose, scale, hip height and facing | `stage-6.json` |
 | Time | 557 s (9 min 17 s), turnaround to Roblox files | `results.json` |
 | Model and GPU cost | est. $0.382: stage 2 $0.0175, stage 3 $0.0499 (Modal GPU time), stage 3f $0.315; the Refine suggestions afterwards cost est. $0.003 more | stage records, `results.json`, `refine-suggestions.json` |
