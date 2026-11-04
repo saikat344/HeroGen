@@ -28,9 +28,7 @@ at their pivots, not a skinned avatar), and records a measured check at every st
 
 Live product: <https://saikat344--herogen-service-web.us-east.modal.run>
 
-3-minute demo video (link coming):
-
-<!-- VIDEO_LINK -->
+3-minute demo video: <https://youtu.be/cklskyK0f18>
 
 1. Open the live link. The gallery of earlier heroes loads with no sign-in.
 2. Open a gallery hero: orbit its 3D model, switch between textured, clay and wireframe, and compare it with its
