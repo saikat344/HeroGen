@@ -135,44 +135,102 @@ pet or companion, and stage 1 rejects uploads that are photographs of real peopl
 
 ## Run it locally
 
-A local run uses this machine for the website, the pipeline and Blender, and calls SAM 3D on Modal. The details
-of each step are under [Requirements](#requirements).
+Two ways to run HeroGen on your own computer. The first needs no accounts and costs nothing; the second makes real
+heroes and uses paid services.
 
-1. Python 3.11 or newer. Install the extras and the local server:
+**Supported systems.** macOS (Apple silicon, used for development) and Linux. Windows is untested.
+
+### 1. Get the code and a Python environment
+
+Python 3.11 or newer.
+
+```bash
+git clone https://github.com/saikat344/HeroGen.git
+cd HeroGen
+python3 -m venv .venv
+source .venv/bin/activate
+pip install ".[live,remote,refine]"
+pip install -r herogen/service/requirements-dev.txt
+```
+
+The commands below use `python`, the virtual environment's interpreter. On Linux, also run
+`pip install "opencv-python-headless==4.11.0.86"`: the Linux builds of OpenCV 5 cannot read the EXR renders texture
+refine uses, while the macOS build can.
+
+### 2. Try the website with no accounts (free)
+
+```bash
+python -m herogen.service dev --port 8793 --data service-data
+```
+
+Open `http://127.0.0.1:8793/`. This uses the default `--runner fake`: every step finishes instantly with stand-in
+results and no model is called, so you can click through the whole site. `--data` is the folder the site keeps its
+heroes and database in; it is created if it does not exist (default `service-data`).
+
+### 3. Make real heroes (paid)
+
+A real hero runs the pipeline and Blender on your computer and calls two paid services: the **Meta Model API**
+(Muse Image, SAM 3.1, Muse Spark) and **Modal** GPUs for SAM 3D Objects (an A100-40GB) and SAM 3D Body (an A10G).
+Expect about **$0.50 of model and GPU calls per hero** (est.; see [Game-ready evidence](#game-ready-evidence-one-real-run)),
+and about 10–15 minutes.
+
+1. **Blender 4.5 LTS** (4.5.1 used here), run headless. HeroGen looks for
+   `/Applications/Blender.app/Contents/MacOS/Blender` on macOS, then `blender` on `PATH`. Otherwise set
+   `HEROGEN_BLENDER` to the executable, for example `export HEROGEN_BLENDER=/opt/blender/blender` on Linux.
+2. **Meta Model API key.** Export it in the shell that runs HeroGen: `export MODEL_API_KEY=<your key>`. HeroGen reads
+   environment variables only; it does not load a `.env` file. `.env.example` lists the variables it reads.
+3. **Hugging Face access.** Create a read token at <https://huggingface.co/settings/tokens>, and request access to the
+   gated models `facebook/sam-3d-objects` and `facebook/sam-3d-body-dinov3` on their model pages. Approval is
+   granted by the model owners and may not be immediate; the next steps need it.
+4. **Modal.** Create an account, then sign in and store your Hugging Face token as a Modal secret:
    ```bash
-   pip install ".[live,remote,refine]"
-   pip install -r herogen/service/requirements-dev.txt
+   modal setup
+   modal secret create huggingface HF_TOKEN=<your Hugging Face token>
    ```
-2. Blender 4.5 LTS (4.5.1 used locally), run headless. Set `HEROGEN_BLENDER` to its executable if it isn't at the
-   default macOS path or on `PATH`.
-3. A Modal account: `modal setup`. Request access to the gated `facebook/sam-3d-objects` and
-   `facebook/sam-3d-body-dinov3` models on Hugging Face, and store your token as a Modal secret named
-   `huggingface`.
-4. One time, build the SAM 3D Objects image and download its checkpoints:
+5. **One time: build the SAM 3D Objects image, then download its checkpoints** (in this order; the build compiles
+   CUDA extensions and takes 15 minutes or more):
    ```bash
    modal run herogen/blender/remote/objects.py::build
    modal run herogen/blender/remote/objects.py::download
    ```
-5. Deploy both GPU runners as persistent apps, and point local runs at them:
+6. **Deploy both GPU runners** as persistent Modal apps and point local runs at them:
    ```bash
    python -m herogen.blender.remote.deploy
    export HEROGEN_REMOTE_DEPLOYED=1
    ```
-   Without `HEROGEN_REMOTE_DEPLOYED=1`, each call starts an ephemeral `modal run` app instead. Either way the
-   client needs the Modal CLI: on `PATH`, or named by `HEROGEN_MODAL`.
-6. Put your Meta Model API key in the `MODEL_API_KEY` environment variable (see `.env.example`).
-7. Start the local site, then open `http://127.0.0.1:8793/`:
+   Without `HEROGEN_REMOTE_DEPLOYED=1`, each call starts a temporary `modal run` app instead, which pays the GPU
+   start-up every time. Either way the `modal` command must be on `PATH` (it is, inside the virtual environment), or
+   named by `HEROGEN_MODAL`.
+7. **Start the site with the real stages** and open `http://127.0.0.1:8793/`:
    ```bash
-   python -m herogen.service dev --port 8793 --data <dir> --runner local
+   python -m herogen.service dev --port 8793 --data service-data --runner local
    ```
-   `--runner local` runs the real stages; the default `--runner fake` writes instant stand-ins with no model calls.
-8. Or make one hero from the command line:
-   ```bash
-   python3 -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-hero --live
-   python3 -m herogen.blender run --run runs/my-hero --stages 3,4 --remote live --refine live --profile roblox-ingame
-   python3 -m herogen.roblox export --body runs/my-hero/04-body --out runs/my-hero/06-roblox
-   ```
-9. Run the tests: see [Tests](#tests). They use synthetic inputs and never call a model.
+   Describe a hero or upload a sketch, then press Create. The build log shows each model call, its time and its
+   estimated cost. A finished hero has a textured 3D model, Idle/Walk/Wave/Jump previews and, when every Roblox
+   check passes, a Roblox download.
+
+**Or one hero from the command line**, without the website (same requirements as above):
+
+```bash
+python -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-hero --live
+python -m herogen.blender run --run runs/my-hero --stages 3,4 --remote live --refine live --profile roblox-ingame
+python -m herogen.roblox export --body runs/my-hero/04-body --out runs/my-hero/06-roblox
+```
+
+The first command writes the sketch, cover and turnaround views to `runs/my-hero/`; the second builds the 3D shape,
+refines its texture and cuts the Roblox body into `runs/my-hero/04-body/`; the third writes the Roblox files to
+`runs/my-hero/06-roblox/`. [Running](#running) has every option.
+
+### 4. Run the tests
+
+```bash
+pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
+python tools/guard/guard.py tree
+```
+
+They use synthetic inputs and never call a model. Tests that need an optional tool (Blender, Node, a headless
+Chrome for the browser tests) skip when it is missing; [Tests](#tests) lists them.
 
 ## How it works
 
