@@ -581,11 +581,14 @@ class TestStageCommands(TempDirCase):
 
         modal_env = {"MODAL_IDENTITY_TOKEN": "t" * 20, "MODAL_SERVER_URL": "https://api.modal.example",
                      "MODAL_TASK_ID": "ta-1"}
-        with mock.patch.dict(os.environ, {**modal_env, "MODAL_IS_REMOTE": "1", "MODEL_API_KEY": "m"}, clear=True):
+        with mock.patch.dict(os.environ, {**modal_env, "MODAL_IS_REMOTE": "1", "MODEL_API_KEY": "m",
+                                          "MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"}, clear=True):
             env = base_env({"HOME": "/tmp"})
         for k, v in modal_env.items():
             self.assertEqual(env[k], v)   # the SAM 3D bridge authenticates as this container
         self.assertNotIn("MODEL_API_KEY", env)
+        self.assertNotIn("MODAL_TOKEN_ID", env)
+        self.assertNotIn("MODAL_TOKEN_SECRET", env)
         with mock.patch.dict(os.environ, {**modal_env, "MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"},
                              clear=True):
             env = base_env({"HOME": "/tmp"})
