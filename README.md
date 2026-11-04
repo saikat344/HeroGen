@@ -1,5 +1,7 @@
 # HeroGen
 
+**[Watch the 3-minute demo](https://youtu.be/cklskyK0f18) · [Try it live](https://saikat344--herogen-service-web.us-east.modal.run)**
+
 One sketch or one sentence becomes a finished, game-ready 3D hero.
 
 Meta Global AI Developer Hackathon: Indie Developer track, "Build for Your World" theme.
