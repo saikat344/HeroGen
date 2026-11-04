@@ -169,6 +169,11 @@ SAM 3.1). SAM 3D Objects builds the shape from its front view.
 
 No held-out 30° / 60° view score was recorded for this run, so none is given.
 
+Where the $0.38 goes, from the run's call log: $0.17 for 24 Muse Image calls, $0.16 for 92 SAM 3.1 calls and
+$0.05 of rented Modal GPU time for SAM 3D. The demo video's lower figure, about $0.17, is an estimate of the same
+run with SAM 3D and SAM 3.1 both running on your own GPU, leaving only the Muse Image calls. HeroGen does not set
+that up today: SAM 3D runs on Modal and SAM 3.1 through Meta's Model API.
+
 ## Originality
 
 On the website, a brief is checked before anything is drawn (`herogen/pipeline/reword.py`, prompts
