@@ -176,10 +176,13 @@ A real hero runs the pipeline and Blender on your computer and calls two paid se
 Expect about **$0.50 of model and GPU calls per hero** (est.; see [Game-ready evidence](#game-ready-evidence-one-real-run)),
 and about 10–15 minutes.
 
+Do these in one terminal with the virtual environment active. The `export` lines last only for that terminal: in
+a new one, activate the environment and export `MODEL_API_KEY` (and `HEROGEN_REMOTE_DEPLOYED`) again.
+
 1. **Blender 4.5 LTS** (4.5.1 used here; <https://www.blender.org/download/lts/>), run headless. HeroGen looks for
    `/Applications/Blender.app/Contents/MacOS/Blender` on macOS, then `blender` on `PATH`. Otherwise set
    `HEROGEN_BLENDER` to the executable, for example `export HEROGEN_BLENDER=/opt/blender/blender` on Linux.
-2. **Meta Model API key** from your Meta Model API account (calls are billed to it). Export it in the shell that runs
+2. **Meta Model API key** for `https://api.meta.ai/v1`, from your Meta Model API account (calls are billed to it). Export it in the shell that runs
    HeroGen: `export MODEL_API_KEY=<your key>`. HeroGen reads
    environment variables only; it does not load a `.env` file. `.env.example` lists the variables it reads.
 3. **Hugging Face access.** Create a read token at <https://huggingface.co/settings/tokens>, and request access to the
@@ -212,7 +215,7 @@ and about 10–15 minutes.
    estimated cost. A finished hero has a textured 3D model, Idle/Walk/Wave/Jump previews and, when every Roblox
    check passes, a Roblox download.
 
-**Or one hero from the command line**, without the website. It needs steps 1–5 (step 6 optional):
+**Or one hero from the command line**, without the website. It needs items 1–5 of the list above (item 6 optional):
 
 ```bash
 python -m herogen.pipeline run --prompt "a knight in battered plate armour" --run-id my-hero --live
