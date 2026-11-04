@@ -147,7 +147,10 @@ if DEPLOY.sketch_ideas_dir is not None:
 # Stage 3's SAM 3D bridge (`herogen.service.modal_bridge`) runs as a stage subprocess, which cannot import the Modal
 # client the platform mounts for the container's own entrypoint: the image installs it, at the deploying version.
 blender_image = (
-    base.pip_install("scipy==1.18.1", "opencv-python-headless==5.0.0.93",  # BSD-3-Clause; Apache-2.0
+    # OpenCV 4.11: the Linux wheels of 5.0.0.93 are built without OpenEXR, so texture refine could not read the
+    # position and normal renders Blender writes as EXR (`herogen.blender.refine.cameras.read_exr`). 4.11 reads them
+    # once OPENCV_IO_ENABLE_OPENEXR is set, which `cameras` does before the first read.
+    base.pip_install("scipy==1.18.1", "opencv-python-headless==4.11.0.86",  # BSD-3-Clause; Apache-2.0
                      f"modal=={modal.__version__}")  # Apache-2.0
     .apt_install(*BLENDER_APT)
     .run_commands(

@@ -126,6 +126,8 @@ class TestModalApp(TempDirCase):
         self.assertIn("scipy==1.18.1", packages)
         # The SAM 3D bridge runs in a stage subprocess, which needs its own Modal client.
         self.assertTrue(any(str(p).startswith("modal==") for p in packages))
+        # Texture refine reads EXR renders: the image's OpenCV must be a Linux build with OpenEXR (not 5.0.0.93).
+        self.assertIn("opencv-python-headless==4.11.0.86", packages)
 
     def test_function_configuration(self):
         mod, fake = self.load()
