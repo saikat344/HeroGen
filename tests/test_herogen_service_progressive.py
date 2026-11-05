@@ -96,6 +96,45 @@ class ProgressiveFiles(WebCase):
         self.assertNotIn('/drafts/', ''.join(shaping['images'].values()))
         self.assertEqual(owner.get(f'/api/jobs/{jid}').json()['draft_images'], {})
 
+    def test_the_sketch_shows_as_soon_as_each_drawing_lands(self):
+        from herogen.pipeline.runfolder import save_draft
+
+        owner = self.signin()
+        other = self.signin('bob@example.com')
+        jid = owner.post('/api/jobs', data={'kind': 'prompt', 'prompt': 'a knight in violet armour'},
+                         files={'x': ('a', b'a')}, headers={'Idempotency-Key': 'key-sketch-draft'}).json()['id']
+        seen, case = [], self
+
+        def look():
+            seen.append(owner.get(f'/api/jobs/{jid}').json())
+
+        class Drawing(FakeRunner):
+            def _stage_p(self, ctx, run):
+                look()
+                save_draft(run, 'p-design.png', Image.new('RGB', (8, 8), 'red'))
+                look()
+                save_draft(run, 'p-full-body.png', Image.new('RGB', (8, 8), 'blue'))
+                look()
+                super()._stage_p(ctx, run)
+
+            def _stage_0(self, ctx, run):
+                look()
+                super()._stage_0(ctx, run)
+
+        self.assertEqual(self.finish(jid, Drawing()), 'succeeded')
+        before, design, full, passed = seen
+        self.assertNotIn('sketch', before['draft_images'])
+        self.assertIn('/drafts/p-design.png', design['draft_images']['sketch'])
+        self.assertIn('/drafts/p-full-body.png', full['draft_images']['sketch'])
+        self.assertEqual(owner.get(full['draft_images']['sketch']).status_code, 404, 'cleared when the step ended')
+        self.assertEqual(other.get(passed['draft_images']['sketch']).status_code, 404)
+        self.assertEqual(owner.get(passed['draft_images']['sketch']).status_code, 200)
+        self.assertNotIn('/drafts/', passed['draft_images']['sketch'], 'the passed sketch bridges until stage 0')
+        self.assertFalse({'sketch'} & set(design['images']), 'a draft never looks final')
+        final = owner.get(f'/api/jobs/{jid}').json()
+        self.assertIn('sketch', final['images'])
+        self.assertNotIn('sketch', final['draft_images'])
+
     def test_drafts_of_a_failed_step_are_never_shown(self):
         owner = self.signin()
         jid = self.make_job(owner).json()['id']

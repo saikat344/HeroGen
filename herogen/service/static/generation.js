@@ -547,7 +547,9 @@ export function generationView($, select3D, buildShape = () => {}, split3D = () 
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
         drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; layout = null;
         detail = 'refined'; detailNote = ''; tris = 0; bodyModels.clear(); }
-      job = next;
+      // The sketch step's drawing as it lands (`draft_images.sketch`), shown as the starting image until the real one exists.
+      job = !next.images?.sketch && next.draft_images?.sketch
+        ? { ...next, images: { sketch: next.draft_images.sketch, ...(next.images || {}) } } : next;
       // Step 3 clears SAM 3D's draft as it ends, a moment before it is reported passed: keep the last one till then.
       const step3 = (job.stages || []).find(s => s?.key === '3')?.state;
       draftModels = step3 !== 'running' ? [] : job.draft_models?.length ? job.draft_models : draftModels;

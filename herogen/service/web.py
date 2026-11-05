@@ -90,6 +90,8 @@ THUMB_SOURCES = (("cover", "1", "01-cover.png"), ("sketch", "0", "00-sketch.png"
 # cut out on their masks, and `top_drawn` is the drawn top view before it is fitted to the others.
 DRAFT_IMAGES = {"turnaround": "02-turnaround.png", "top_drawn": "02-top-drawn.png",
                 **{v: f"views/{v}.png" for v in ("front", "right", "back", "left", "top")}}
+# The sketch step's drawings, best first (`herogen.pipeline.prompt_sketch`: SKETCH, DESIGN).
+SKETCH_DRAFTS = ("p-full-body.png", "p-design.png")
 THUMB_CACHE = "private, max-age=31536000, immutable"
 GALLERY_THUMBS = "gallery-thumbs"   # under the data folder: the published gallery itself is read-only
 _IMPORTMAP = re.compile(r"<script type=\"importmap\">(.*?)</script>", re.DOTALL)
@@ -959,6 +961,16 @@ class App:
             drafts = {}
             if rows.get('2', {}).get('state') == 'running':
                 drafts = {k: a['url'] for k, rel in DRAFT_IMAGES.items() if (a := asset(f'{DRAFTS}/{rel}'))}
+            # The sketch step's drawings as they land (`herogen.pipeline.prompt_sketch`): the full-body sketch, or
+            # the design before it, while the step runs; then the passed sketch until stage 0 publishes its copy.
+            if 'sketch' not in images:
+                p_state = rows.get('p', {}).get('state')
+                if p_state == 'running':
+                    found = next((a for rel in SKETCH_DRAFTS if (a := asset(f'{DRAFTS}/{rel}'))), None)
+                else:
+                    found = asset(SKETCH_DRAFTS[0]) if p_state == 'passed' else None
+                if found:
+                    drafts['sketch'] = found['url']
             # The stage-2 masks each view was cut out on, for the page's figure of dots while the 3D shape is built.
             masks = {v: a['url'] for v in ('front', 'left') if image_ready(v) and (a := asset(f'masks/{v}.png'))}
             progress = read_progress(run)
