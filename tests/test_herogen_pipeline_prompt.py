@@ -470,6 +470,21 @@ class StageTest(_Base):
         self.assertFalse((self.root / "r" / P.SKETCH).exists())
         self.assertFalse((self.root / "r" / P.DESIGN).exists())
 
+    def test_each_drawing_shows_as_a_draft_while_the_stage_runs(self):
+        seen = []
+        real_edit = ModelClient.edit_image
+
+        def spy(c, *a, **k):
+            seen.append(sorted(p.name for p in (self.root / "r" / "drafts").glob("*.png")))
+            return real_edit(c, *a, **k)
+
+        with mock.patch.object(ModelClient, "edit_image", spy):
+            run, rec = self.stage(FakeAPI())
+        self.assertTrue(rec["ok"])
+        self.assertEqual(seen[0], ["p-design.png"], "the design is shown before the full-body edit")
+        self.assertFalse((run.path / "drafts").exists(), "the stage clears its drafts when it ends")
+        self.assertTrue((run.path / P.SKETCH).is_file())
+
     def test_a_record_says_running_while_the_stage_runs(self):
         seen = []
 

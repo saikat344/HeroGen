@@ -32,7 +32,7 @@ from herogen import prompts
 from herogen.pipeline import checks as C
 from herogen.pipeline import imaging
 from herogen.pipeline.client import IMAGE_MODEL, ClientError, ModelClient
-from herogen.pipeline.runfolder import RunFolder
+from herogen.pipeline.runfolder import RunFolder, clear_drafts, save_draft
 from herogen.pipeline.stages import GateFailed, InputRejected, _Stage
 
 STAGE = "p"
@@ -232,6 +232,7 @@ def stagep_prompt(
     shutil.rmtree(run.path / ATTEMPTS_DIR, ignore_errors=True)
     st.details = {"attempts": []}
     st.fail("stage p started and has not finished", status="running")
+    clear_drafts(run.path)
     try:
         return _stagep(st, run, client, user_text, version, same_version)
     except (GateFailed, InputRejected, PromptStageError):
@@ -242,6 +243,8 @@ def stagep_prompt(
             attempts[-1]["error"] = f"{type(e).__name__}: {e}"
         st.fail(f"{type(e).__name__}: {e}")
         raise
+    finally:
+        clear_drafts(run.path)
 
 
 def _stagep(
@@ -283,11 +286,15 @@ def _stagep(
                     text, size=version.step("design")["params"]["size"], attempt=d_sample)
             design = designs[d_sample]
             st.save_image(f"{ATTEMPTS_DIR}/{k}-design.png", design)
+            # The website shows each drawing as it lands (`herogen.pipeline.runfolder.save_draft`), not only when
+            # the stage ends: the design first, then the full-body sketch.
+            save_draft(run.path, DESIGN, design)
             step = "full-body edit"
             client.purpose = "full-body sketch"
             full = client.edit_image(full_text, [design], size=version.step("full_body")["params"]["size"],
                                      attempt=f_sample)
             st.save_image(f"{ATTEMPTS_DIR}/{k}-full-body.png", full)
+            save_draft(run.path, SKETCH, full)
             if st.fast:
                 rec.update(checks=[], figure={"skipped": "fast lane"}, identity={"skipped": "fast lane"},
                            **{"pass": True}, seconds=round(time.monotonic() - t0, 2))
