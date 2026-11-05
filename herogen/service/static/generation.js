@@ -192,6 +192,7 @@ export function splitCopy(shown, refining) {
 export function generationView($, select3D, buildShape = () => {}, split3D = () => {}) {
   const dock = viewerDock($);
   let jobId = null, selected = null, manual = false, model = false, job = null, signature = '', activeKey = null;
+  let sketchDraft = null;
   let chosenModel = null, shownModel = null, touched = false, modelRequest = 0, loading = null, shownUrl = null, lastImage = null;
   let reveal = null, drafts = {}, sheetUrl = null, redrawUntil = 0;
   // `draftModels`: SAM 3D's shape while step 3 still runs (`draft_models`); `pinned`: the compare toggle's choice,
@@ -545,11 +546,12 @@ export function generationView($, select3D, buildShape = () => {}, split3D = () 
       const changed = jobId !== next.id;
       if (changed) { $('#imageError').hidden = true; selected = null; lastImage = null; manual = false; model = false; signature = ''; activeKey = null; jobId = next.id;
         chosenModel = null; shownModel = null; touched = false; shownUrl = null; loading = null; ++modelRequest;
-        drafts = {}; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; layout = null;
+        drafts = {}; sketchDraft = null; sheetUrl = null; redrawUntil = 0; draftModels = []; pinned = false; forceLoad = false; shapeKey = null; shapeFailed = null; layout = null;
         detail = 'refined'; detailNote = ''; tris = 0; bodyModels.clear(); }
-      // The sketch step's drawing as it lands (`draft_images.sketch`), shown as the starting image until the real one exists.
-      job = !next.images?.sketch && next.draft_images?.sketch
-        ? { ...next, images: { sketch: next.draft_images.sketch, ...(next.images || {}) } } : next;
+      // The sketch step's drawing as it lands (`draft_images.sketch`), shown as the starting image until the real one
+      // exists. The step clears its drafts as it ends, a few seconds before the sketch is published: keep the last one.
+      sketchDraft = next.images?.sketch || TERMINAL.has(next.state) ? null : next.draft_images?.sketch || sketchDraft;
+      job = sketchDraft ? { ...next, images: { sketch: sketchDraft, ...(next.images || {}) } } : next;
       // Step 3 clears SAM 3D's draft as it ends, a moment before it is reported passed: keep the last one till then.
       const step3 = (job.stages || []).find(s => s?.key === '3')?.state;
       draftModels = step3 !== 'running' ? [] : job.draft_models?.length ? job.draft_models : draftModels;
